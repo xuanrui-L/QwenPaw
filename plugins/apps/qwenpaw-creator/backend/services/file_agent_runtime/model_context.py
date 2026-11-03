@@ -447,23 +447,33 @@ def collect_inline_media(
     Shares ``_data_url_charge`` with the accounting path on purpose: an
     explanation that disagreed with what was being billed would be worse than
     no explanation at all.
+
+    The walk has to reach the payloads that live inside a string rather than
+    under a ``url`` key, because that is the shape a JSON tool answer takes and
+    ``_demote_in_node`` strips those too. A census that skipped them would
+    report fewer blocks than really left, and would tell the entry gate nothing
+    is media-shaped while megabytes of Base64 sit in plain text the ladder is
+    allowed to retire.
     """
     found: list[dict[str, Any]] = []
 
+    def from_text(node: str) -> None:
+        for match in _DATA_URL_PATTERN.finditer(node):
+            mime, encoded = _split_data_url(match.group(0))
+            found.append(
+                {
+                    "mime": mime,
+                    "decoded_bytes": _decoded_size(encoded),
+                    "charge": _data_url_charge(
+                        match.group(0),
+                        budget_bytes=budget_bytes,
+                    ),
+                },
+            )
+
     def walk(node: Any) -> None:
         if isinstance(node, str):
-            for match in _DATA_URL_PATTERN.finditer(node):
-                mime, encoded = _split_data_url(match.group(0))
-                found.append(
-                    {
-                        "mime": mime,
-                        "decoded_bytes": _decoded_size(encoded),
-                        "charge": _data_url_charge(
-                            match.group(0),
-                            budget_bytes=budget_bytes,
-                        ),
-                    },
-                )
+            from_text(node)
             return
         if isinstance(node, Mapping):
             for key, child in node.items():
@@ -483,6 +493,8 @@ def collect_inline_media(
                             ),
                         },
                     )
+                elif isinstance(child, str):
+                    from_text(child)
                 elif isinstance(child, (Mapping, list, tuple)):
                     walk(child)
         elif isinstance(node, (list, tuple)):
@@ -838,8 +850,9 @@ def media_could_bridge_the_gap(diagnostics: Mapping[str, Any]) -> bool:
     being moved: an attachment cannot shrink text by a byte, so demoting the
     whole batch spends the uploads on the way to the same failure.
 
-    A refusal carrying no diagnostics answers ``True``, so the ladder runs
-    exactly as it did before this gate existed.
+    A refusal carrying no diagnostics answers ``True``, which is no licence to
+    demote on a guess: the caller is expected to measure the shape it is about
+    to trade first, since an unread gap is more often contract text than media.
     """
     if not diagnostics:
         return True
