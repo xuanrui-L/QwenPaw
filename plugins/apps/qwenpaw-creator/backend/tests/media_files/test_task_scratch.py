@@ -930,15 +930,21 @@ def test_profile_splits_scratch_and_transactions_at_the_baseline(
     assert entry["baselineAt"] == T0.isoformat()
     assert entry["taskWorkLegacyBytes"] == _tree_bytes(legacy)
     assert entry["taskWorkBytes"] == _tree_bytes(fresh)
-    # A finished Task whose scratch outlived the grace window is reclaimable,
-    # counted as the media a release would take rather than the kept docs.
-    assert entry["taskWorkReclaimableBytes"] == _media_bytes(fresh)
-    assert entry["taskWorkReclaimableBytes"] < _tree_bytes(fresh)
+    # Reclaimable follows the sweep's rule, not the legacy label: a finished
+    # Task past the grace window is reclaimable whether or not it predates the
+    # baseline, counted as the media a release would take rather than the kept
+    # docs.  The legacy split stays a display category only.
+    assert entry["taskWorkReclaimableBytes"] == (
+        _media_bytes(fresh) + _media_bytes(legacy)
+    )
+    assert entry["taskWorkReclaimableBytes"] < (
+        _tree_bytes(fresh) + _tree_bytes(legacy)
+    )
     assert entry["transactionsLegacyBytes"] == _tree_bytes(old_tx)
     assert entry["transactionsBytes"] == _tree_bytes(new_tx)
     assert project_storage_profile(_services(tmp_path))["totals"][
         "taskWorkReclaimableBytes"
-    ] == _media_bytes(fresh)
+    ] == _media_bytes(fresh) + _media_bytes(legacy)
 
 
 def test_the_scratch_sweep_stops_when_the_pass_budget_runs_out(

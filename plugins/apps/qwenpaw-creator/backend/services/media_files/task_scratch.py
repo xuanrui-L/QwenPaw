@@ -1139,6 +1139,9 @@ def project_storage_profile(
         root = Path(services.projects.project_root(project_id))
         baseline = read_scratch_baseline(root)
         kept_since = read_history_optout(root)
+        # The sweep judges releasability with the same flag, so the report and
+        # the sweep cannot disagree about what "settled history" means.
+        kept = history_reclaim_kept(root)
         confirmed_at = read_reclaim_confirmation(root)
         try:
             finished = {
@@ -1166,15 +1169,21 @@ def project_storage_profile(
             stamp = task.updated_at if task is not None else _utc(newest)
             if baseline is None or stamp < baseline:
                 measured["taskWorkLegacyBytes"] += size
-                continue
-            measured["taskWorkBytes"] += size
-            if (
-                task is not None
-                and is_releasable_terminal_task(task)
-                and moment - task.updated_at >= ORPHAN_RELEASE_GRACE
+            else:
+                measured["taskWorkBytes"] += size
+            if task is not None and _releasable_now(
+                task,
+                baseline=baseline or moment,
+                kept=kept,
+                moment=moment,
+                grace=ORPHAN_RELEASE_GRACE,
             ):
-                # What a release would actually take: the kept documents and
-                # non-media files stay in taskWorkBytes only.
+                # The same rule the sweep applies, so the number the console
+                # compares against the cap is the number the sweep would
+                # actually take.  Pre-baseline scratch is reclaimable history
+                # unless the Project asked to keep it; filing it as legacy
+                # here while the sweep released it left an oversized Project
+                # withheld with no confirm button anywhere.
                 measured["taskWorkReclaimableBytes"] += _releasable_bytes(
                     directory,
                 )
