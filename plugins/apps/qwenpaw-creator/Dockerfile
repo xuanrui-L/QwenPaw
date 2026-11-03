@@ -73,6 +73,13 @@ RUN PYPI_HOST=$(echo "${PYPI_INDEX_URL}" | sed -E 's|https?://([^/]+).*|\1|') &&
     --trusted-host "${PYPI_HOST}" \
     -r /app/bundled-plugins/qwenpaw-creator/requirements.txt
 
+# Creator's document reader renders HTML sources through Playwright. The base
+# image already ships a system Chromium and exports
+# PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, which the web renderer honours via
+# executable_path, so the image needs no browser download of its own. Local
+# (non-Docker) installs must run `python -m playwright install chromium` once,
+# as requirements.txt notes.
+
 # Override entrypoint to auto-install Creator plugin on startup.
 COPY --chmod=755 plugins/apps/qwenpaw-creator/entrypoint.sh /entrypoint-creator.sh
 

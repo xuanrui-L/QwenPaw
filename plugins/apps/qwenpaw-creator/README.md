@@ -171,3 +171,14 @@ Before a paid image or video generation call, the Agent presents a **production 
 Open **Apps** in the QwenPaw console, find **QwenPaw Creator**, and select Install. After installation, open Creator directly from Apps.
 
 Creator uses a few local tools without changing your system installation: `ffmpeg` handles media processing and composition (set `CREATOR_FFMPEG_PATH`, otherwise it falls back to system `ffmpeg` or `imageio-ffmpeg`); `jq` supports structured Agent edits to project files (`CREATOR_JQ_PATH` or `PATH`). If a dependency is missing, Creator starts in degraded mode; inspect `GET /api/qwenpaw-creator/health` for details.
+
+Runtime switches (all optional; the Docker image enables the document reader by default because it bundles the matching Chromium):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CREATOR_DOC_READER_WEB_ENABLED` | off (image: on) | Render HTML sources through Playwright/Chromium so document understanding can observe them; without it HTML understanding BLOCKs. The Docker image points the reader at its system Chromium via `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`; local installs need `python -m playwright install chromium` once. |
+| `CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES` | 4 GiB | Per-Project settled history above this makes the automatic sweeps step back and wait for a console confirmation. |
+| `CREATOR_MESSAGE_ELISION_MAX_BYTES` | 64 MiB | Stored conversation streams above this are reported, not collapsed, because collapsing costs ~4x the stream in resident memory. |
+| `CREATOR_STORAGE_SWEEP_MAX_BYTES` / `CREATOR_STORAGE_SWEEP_MAX_SECONDS` | 16 GiB / 300 s | One maintenance pass budget; whatever it cannot reach waits for the next boot. |
+| `CREATOR_STORAGE_KEEP_HISTORY` | unset | Fleet-wide emergency stop: restore the pre-baseline protection for every Project. |
+| `CREATOR_RECOVERY_AUDIT_LEDGER` / `CREATOR_RECOVERY_LIGHT_TERMINAL` | on | Roll back the boot-recovery fast paths (audit ledger reuse / terminal light audit) to the full per-transaction audit. |
