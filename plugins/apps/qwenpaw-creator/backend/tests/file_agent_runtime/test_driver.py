@@ -2226,6 +2226,74 @@ def test_specialist_cancel_emits_terminal_event(
     assert cancelled_event.payload.get("cancelled") is True
 
 
+def test_cancel_specialist_run_signals_only_a_live_owner(
+    tmp_path,
+) -> None:
+    from services.file_agent_runtime.driver import _SpecialistHandle
+
+    async def scenario() -> None:
+        services, _snapshot = _create_project(tmp_path, initial_goal="素材")
+        driver = _driver(services, lambda _m, _t: AgentModelTurn())
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        # No live handle: the caller must fall back to durable settlement
+        # instead of assuming someone else will emit the terminal event.
+        assert (
+            driver.cancel_specialist_run(
+                PROJECT_ID,
+                "spec-missing",
+                reason="source_asset_deleted",
+            )
+            is False
+        )
+
+        task = asyncio.create_task(_hang())
+        handle = _SpecialistHandle(
+            project_id=PROJECT_ID,
+            specialist_run_id="spec-live",
+        )
+        handle.task = task
+        driver._specialist_tasks.setdefault(PROJECT_ID, {})[
+            "spec-live"
+        ] = handle
+        assert (
+            driver.cancel_specialist_run(
+                PROJECT_ID,
+                "spec-live",
+                reason="source_asset_deleted",
+            )
+            is True
+        ), "a live worker owns the run and must be signalled"
+        assert handle.cancel_reason == "source_asset_deleted"
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # An already-finished task no longer owns anything: report False so
+        # the caller still settles the durable record.
+        finished = asyncio.create_task(_hang())
+        finished.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await finished
+        stale = _SpecialistHandle(
+            project_id=PROJECT_ID,
+            specialist_run_id="spec-done",
+        )
+        stale.task = finished
+        driver._specialist_tasks[PROJECT_ID]["spec-done"] = stale
+        assert (
+            driver.cancel_specialist_run(
+                PROJECT_ID,
+                "spec-done",
+                reason="source_asset_deleted",
+            )
+            is False
+        )
+
+    asyncio.run(scenario())
+
+
 def test_durable_interrupt_stops_owner_without_restarting_message(
     tmp_path,
 ) -> None:

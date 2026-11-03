@@ -2206,6 +2206,36 @@ class FileCreatorAgentRuntime:
         ):
             handle.cancel(reason)
 
+    def cancel_specialist_run(
+        self,
+        project_id: str,
+        specialist_run_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        """Revoke a single detached specialist run by id.
+
+        Returns True when an in-process worker owns the run and was
+        signalled to cancel. That worker persists the CANCELLED status and
+        emits the ``subagent.failed{cancelled}`` terminal lifecycle event
+        itself, so the caller must NOT also transition the durable record:
+        a pre-emptive CAS would let the worker observe an already-terminal
+        status and skip its terminal event, leaving the Agent status bar
+        stuck on the run's activity (e.g. "素材理解中") forever.
+
+        Returns False when no live worker owns the run in this process (an
+        orphan after restart, or a durable-only media-execution run); the
+        caller then settles the durable record on its own.
+        """
+
+        handle = self._specialist_tasks.get(project_id, {}).get(
+            specialist_run_id,
+        )
+        if handle is None or handle.task is None or handle.task.done():
+            return False
+        handle.cancel(reason)
+        return True
+
     async def _reclaim_specialist_orphans(self, project_id: str) -> None:
         """Fail over detached specialist runs stranded by an unclean exit.
 
