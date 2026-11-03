@@ -53,6 +53,7 @@ import {
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { nodeGenerating } from "@/lib/generationActivity";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import type { ProjectEditOperation } from "@/store/projectSnapshotStore";
@@ -1481,6 +1482,7 @@ export default function AssetsPage() {
   const patching = useProjectSnapshotStore((state) => state.patching);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
+  const refreshSession = useCreatorSessionStore((state) => state.refreshSession);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [origin, setOrigin] = useState<OriginKey>("any");
@@ -1772,8 +1774,13 @@ export default function AssetsPage() {
         try {
           await deleteSourceAssetVersion(id, versionId);
           message.success(t("assets.deleteSuccess"));
-          // Refresh project data
-          await pollOnce(id);
+          // Refresh project data, task/run states, and session to clear stale
+          // agent activities (e.g. "素材理解中") that targeted the deleted source.
+          await Promise.all([
+            pollOnce(id),
+            refreshTasks(id),
+            refreshSession(),
+          ]);
           // Clear selection if deleted item was selected
           if (selected?.id === versionId) {
             selectItem(null);

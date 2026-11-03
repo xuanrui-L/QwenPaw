@@ -2025,9 +2025,16 @@ async def delete_source_asset_version(
     on-disk files that are no longer referenced by remaining metadata.
     If the version is still referenced elsewhere (timeline elements,
     visual variants, etc.), the deletion is refused with a 409 Conflict.
+
+    After deletion, any pending SpecialistRuns or Tasks that reference
+    the deleted version's logical asset are cancelled to prevent stale
+    agent operations.
     """
+    from services.runtime_files.execution_store import ProjectExecutionStore
+    from domain.enums import SpecialistRunStatus, TaskStatus
+
     try:
-        await asyncio.to_thread(
+        snapshot = await asyncio.to_thread(
             services.projects.remove_source_asset_version,
             project_id,
             version_id,
@@ -2038,6 +2045,84 @@ async def delete_source_asset_version(
         raise
     except Exception as error:
         raise StorageIntegrityError(str(error)) from error
+
+    # Cancel any pending runs/tasks that reference the deleted version's
+    # logical asset. The source intelligence agent uses target_ref format
+    # `source:<sourceId>`. We cancel runs whose target_refs point to sources
+    # that no longer exist after deletion.
+    try:
+        exec_store = ProjectExecutionStore(services.root)
+        runs = await asyncio.to_thread(
+            exec_store.list_specialist_runs, project_id
+        )
+        tasks = await asyncio.to_thread(exec_store.list_tasks, project_id)
+
+        # Build set of remaining source IDs for quick lookup
+        remaining_source_ids = set(
+            snapshot.project.sources.sources.items.keys()
+        )
+
+        # Find runs targeting sources that no longer exist
+        for run in runs:
+            if run.status not in (
+                SpecialistRunStatus.QUEUED,
+                SpecialistRunStatus.RUNNING,
+            ):
+                continue
+            # Check if any target_ref references a now-missing source
+            should_cancel = False
+            for target_ref in run.target_refs:
+                if target_ref.startswith("source:"):
+                    source_id = target_ref.removeprefix("source:")
+                    if source_id not in remaining_source_ids:
+                        should_cancel = True
+                        break
+            
+            if should_cancel:
+                # Cancel this run and its tasks
+                try:
+                    await asyncio.to_thread(
+                        exec_store.transition_specialist_run,
+                        project_id,
+                        run.run_id,
+                        expected_status={
+                            SpecialistRunStatus.QUEUED,
+                            SpecialistRunStatus.RUNNING,
+                        },
+                        status=SpecialistRunStatus.CANCELLED,
+                        updates={
+                            "cancel_reason": "SOURCE_ASSET_DELETED",
+                        },
+                    )
+                except Exception:
+                    pass  # Best-effort cancellation
+                # Cancel associated tasks
+                for task in tasks:
+                    if task.run_id == run.run_id and task.status in (
+                        TaskStatus.QUEUED,
+                        TaskStatus.RUNNING,
+                    ):
+                        try:
+                            await asyncio.to_thread(
+                                exec_store.transition_task,
+                                project_id,
+                                task.task_id,
+                                expected_status={
+                                    TaskStatus.QUEUED,
+                                    TaskStatus.RUNNING,
+                                },
+                                status=TaskStatus.CANCELLED,
+                                updates={
+                                    "error": {
+                                        "code": "SOURCE_ASSET_DELETED",
+                                        "message": "Source asset was deleted",
+                                    },
+                                },
+                            )
+                        except Exception:
+                            pass  # Best-effort cancellation
+    except Exception:
+        pass  # Best-effort cleanup; don't fail the deletion
 
 
 __all__ = ["router"]

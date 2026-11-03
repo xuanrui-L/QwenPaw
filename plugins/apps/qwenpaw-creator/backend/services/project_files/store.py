@@ -32,6 +32,7 @@ from utils.logger import setup_logger
 from .models import (
     ArtifactVersionRenderSource,
     AudioCreation,
+    I2VCreation,
     OverlayCreation,
     Project,
     R2VCreation,
@@ -437,6 +438,19 @@ class ProjectStore:
         file_id / thumbnail_file_id entries from files_by_id that are no
         longer referenced by any remaining metadata, and deletes the
         corresponding on-disk files.
+
+        References that BLOCK deletion (asset is actively used):
+        - TimelineElement render_source → element depends on this version
+        - AudioCreation.source_asset_version_id → audio track uses this
+        - R2VCreation storyboard/video_reference_version_ids
+        - OverlayCreation.reference_version_ids
+        - I2VCreation.first_frame_version_id
+
+        References that are auto-cleaned (safe to detach):
+        - ProjectSource.selected_asset_version_id → replaced or source removed
+        - SourceIntelligenceVersion → deleted alongside the source version
+        - CharacterVoice.sample_source_version_id → cleared to None
+        - VisualVariant / CastLineup refs → version removed from list
         """
         safe_id = _safe_project_id(project_id)
 
@@ -449,14 +463,12 @@ class ProjectStore:
                     f"Source asset version not found: {version_id}",
                 )
 
-            # Check if the version is referenced anywhere
-            references = self._find_source_version_references(
-                project, version_id
-            )
-            if references:
+            # Check for timeline-level references that block deletion
+            timeline_refs = self._find_timeline_references(project, version_id)
+            if timeline_refs:
                 raise ConflictError(
                     f"Cannot delete source asset version {version_id}: "
-                    f"referenced by {references}",
+                    f"actively used in timeline by {timeline_refs}",
                 )
 
             version = project.assets.source_versions_by_id[version_id]
@@ -485,6 +497,11 @@ class ProjectStore:
                     "generation": project.generation + 1,
                     "updated_at": datetime.now(UTC),
                 },
+            )
+
+            # Auto-clean non-timeline dangling references
+            updated_project = self._detach_source_version_refs(
+                updated_project, version_id
             )
 
             # Determine which file_ids are no longer referenced by any
@@ -628,56 +645,24 @@ class ProjectStore:
                 exc_info=True,
             )
 
-    def _find_source_version_references(
+    def _find_timeline_references(
         self,
         project: Project,
         version_id: str,
     ) -> list[str]:
-        """Find all references to a source asset version in the project."""
-        references = []
+        """Find timeline-level references that block deletion.
 
-        # Check ProjectSource selected version
-        for source in project.sources.sources.items.values():
-            if source.selected_asset_version_id == version_id:
-                references.append(f"project-source:{source.source_id}")
+        Returns a list of reference descriptions for timeline elements that
+        actively use the given source version. If non-empty, deletion should
+        be blocked to prevent data corruption.
+        """
+        references: list[str] = []
+        for timeline_id, timeline in project.timelines.items.items():
+            # Skip snapshot timelines (frozen copies)
+            if timeline_id.startswith("snapshot:"):
+                continue
 
-        # Check SourceIntelligenceVersion dependency
-        for intel_id, intel in (
-            project.assets.intelligence_versions_by_id.items()
-        ):
-            if intel.source_asset_version_id == version_id:
-                references.append(f"intelligence:{intel_id}")
-
-        # Check CharacterVoice sample source
-        for entity_id, entity in project.visual.entities.items.items():
-            if (
-                entity.voice is not None
-                and entity.voice.sample_source_version_id == version_id
-            ):
-                references.append(f"voice:{entity_id}")
-
-        # Check visual variant references
-        for entity_id, entity in project.visual.entities.items.items():
-            for variant_id, variant in entity.variants.items.items():
-                if version_id in (
-                    variant.reference_asset_version_ids or []
-                ):
-                    references.append(
-                        f"visual-variant-refs:{entity_id}@{variant_id}"
-                    )
-
-        # Check cast lineup references
-        for lineup_id, lineup in project.visual.cast_lineups.items.items():
-            if version_id in (lineup.reference_asset_version_ids or []):
-                references.append(f"cast-lineup:{lineup_id}")
-
-        # Check timeline element references
-        for timeline in project.timelines.items.values():
             for element_id, element in timeline.elements_by_id.items():
-                # Skip snapshot timelines (frozen copies)
-                if timeline.timeline_id.startswith("snapshot:"):
-                    continue
-
                 # Check render_source (SourceVersionRenderSource only)
                 render_source = element.render_source
                 if (
@@ -702,6 +687,10 @@ class ProjectStore:
                         creation.video_reference_version_ids or []
                     ):
                         references.append(f"r2v-video-ref:{element_id}")
+                # I2VCreation reference
+                elif isinstance(creation, I2VCreation):
+                    if creation.first_frame_version_id == version_id:
+                        references.append(f"i2v-first-frame:{element_id}")
                 # OverlayCreation references
                 elif isinstance(creation, OverlayCreation):
                     if version_id in (
@@ -714,6 +703,198 @@ class ProjectStore:
                         references.append(f"audio-source:{element_id}")
 
         return references
+
+    def _detach_source_version_refs(
+        self,
+        project: Project,
+        version_id: str,
+    ) -> Project:
+        """Auto-clean dangling references to a deleted source version.
+
+        Clears / removes references in:
+        - ProjectSource.selected_asset_version_id → replaced with another
+          version of the same logical asset, or the ProjectSource is removed
+        - SourceIntelligenceVersion → deleted alongside the source version
+        - CharacterVoice.sample_source_version_id → cleared to None
+        - VisualVariant.reference_asset_version_ids → version removed
+        - VisualCastLineup.reference_asset_version_ids → version removed
+        """
+        updates: dict = {}
+
+        # 1. Fix ProjectSource.selected_asset_version_id
+        #    selected_asset_version_id is a required EntityId (not optional).
+        #    When the selected version is deleted, pick another version with
+        #    the same logical_asset_id; if none remains, remove the source.
+        replaced_sources: dict = {}
+        removed_source_ids: set[str] = set()
+        for source_id, source in project.sources.sources.items.items():
+            if source.selected_asset_version_id == version_id:
+                # Find another version with the same logical_asset_id
+                replacement = None
+                for vid, ver in (
+                    project.assets.source_versions_by_id.items()
+                ):
+                    if (
+                        vid != version_id
+                        and ver.logical_asset_id
+                        == source.logical_asset_id
+                    ):
+                        replacement = vid
+                        break
+                if replacement:
+                    replaced_sources[source_id] = source.model_copy(
+                        update={
+                            "selected_asset_version_id": replacement,
+                        },
+                    )
+                else:
+                    removed_source_ids.add(source_id)
+        if replaced_sources or removed_source_ids:
+            new_source_items = {
+                sid: s
+                for sid, s in project.sources.sources.items.items()
+                if sid not in removed_source_ids
+            }
+            new_source_items.update(replaced_sources)
+            new_collection = project.sources.sources.model_copy(
+                update={
+                    "items": new_source_items,
+                    "order": [
+                        oid
+                        for oid in project.sources.sources.order
+                        if oid not in removed_source_ids
+                    ],
+                },
+            )
+            updates["sources"] = project.sources.model_copy(
+                update={"sources": new_collection},
+            )
+
+        # 2. Delete SourceIntelligenceVersions that depend on this version
+        remaining_intel = {
+            iid: iv
+            for iid, iv in (
+                project.assets.intelligence_versions_by_id.items()
+            )
+            if iv.source_asset_version_id != version_id
+        }
+        if len(remaining_intel) != len(
+            project.assets.intelligence_versions_by_id
+        ):
+            updates["assets"] = project.assets.model_copy(
+                update={
+                    "intelligence_versions_by_id": remaining_intel,
+                },
+            )
+
+        # Work on the possibly-updated project
+        current = project.model_copy(update=updates) if updates else project
+
+        # 3. Clear CharacterVoice.sample_source_version_id
+        visual_updates: dict = {}
+        cleared_entities: dict = {}
+        for entity_id, entity in (
+            current.visual.entities.items.items()
+        ):
+            if (
+                entity.voice is not None
+                and entity.voice.sample_source_version_id == version_id
+            ):
+                new_voice = entity.voice.model_copy(
+                    update={"sample_source_version_id": None},
+                )
+                cleared_entities[entity_id] = entity.model_copy(
+                    update={"voice": new_voice},
+                )
+        if cleared_entities:
+            visual_updates["entities"] = (
+                current.visual.entities.model_copy(
+                    update={
+                        "items": {
+                            **current.visual.entities.items,
+                            **cleared_entities,
+                        },
+                    },
+                )
+            )
+
+        # 4. Remove version from VisualVariant refs
+        base_entities = (
+            visual_updates.get("entities") or current.visual.entities
+        )
+        variant_updates: dict = {}
+        for entity_id, entity in base_entities.items.items():
+            for variant_id, variant in entity.variants.items.items():
+                if version_id in (
+                    variant.reference_asset_version_ids or []
+                ):
+                    new_refs = [
+                        r
+                        for r in (
+                            variant.reference_asset_version_ids or []
+                        )
+                        if r != version_id
+                    ]
+                    variant_updates.setdefault(entity_id, {})[
+                        variant_id
+                    ] = variant.model_copy(
+                        update={
+                            "reference_asset_version_ids": new_refs,
+                        },
+                    )
+        if variant_updates:
+            merged_items = dict(base_entities.items)
+            for entity_id, var_map in variant_updates.items():
+                entity = merged_items[entity_id]
+                new_variants_collection = entity.variants.model_copy(
+                    update={
+                        "items": {
+                            **entity.variants.items,
+                            **var_map,
+                        },
+                    },
+                )
+                merged_items[entity_id] = entity.model_copy(
+                    update={"variants": new_variants_collection},
+                )
+            visual_updates["entities"] = base_entities.model_copy(
+                update={"items": merged_items},
+            )
+
+        # 5. Remove version from VisualCastLineup refs
+        base_lineups = current.visual.cast_lineups
+        lineup_updates: dict = {}
+        for lineup_id, lineup in base_lineups.items.items():
+            if version_id in (
+                lineup.reference_asset_version_ids or []
+            ):
+                new_refs = [
+                    r
+                    for r in (lineup.reference_asset_version_ids or [])
+                    if r != version_id
+                ]
+                lineup_updates[lineup_id] = lineup.model_copy(
+                    update={
+                        "reference_asset_version_ids": new_refs,
+                    },
+                )
+        if lineup_updates:
+            visual_updates["cast_lineups"] = (
+                base_lineups.model_copy(
+                    update={
+                        "items": {
+                            **base_lineups.items,
+                            **lineup_updates,
+                        },
+                    },
+                )
+            )
+
+        if visual_updates:
+            new_visual = current.visual.model_copy(update=visual_updates)
+            current = current.model_copy(update={"visual": new_visual})
+
+        return current
 
     def list(
         self,
