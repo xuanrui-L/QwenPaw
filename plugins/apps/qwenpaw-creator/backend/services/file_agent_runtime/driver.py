@@ -1506,11 +1506,22 @@ class _SpecialistHandle:
     cancel_reason: str | None = None
     task: asyncio.Task[None] | None = None
 
-    def cancel(self, reason: str) -> None:
-        if self.cancel_reason is None:
-            self.cancel_reason = reason
+    def cancel(self, reason: str) -> bool:
+        """Revoke this run once; report whether this call owns the cleanup.
+
+        A repeated signal must not cancel the task again. The first
+        cancellation's cleanup is what persists the terminal status and
+        emits the terminal lifecycle event; interrupting that coroutine
+        would leave the run RUNNING_MODEL with a dead worker and no
+        terminal event forever.
+        """
+
+        if self.cancel_reason is not None:
+            return False
+        self.cancel_reason = reason
         if self.task is not None and not self.task.done():
             self.task.cancel()
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1603,6 +1614,10 @@ class FileCreatorAgentRuntime:
         # Detached (asynchronous) specialist runs by project; cancelled
         # by interrupt/stop/project-delete, never by a new mainline run.
         self._specialist_tasks: dict[str, dict[str, _SpecialistHandle]] = {}
+        # Cancellation finalizers that must survive their worker being
+        # cancelled again (kept referenced so they are not garbage
+        # collected mid-await, mirroring _interrupt_cleanup_tasks).
+        self._specialist_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._interrupt_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._blocked_heads: dict[str, int] = {}
         # Durable-interrupt stall tracking: project -> (run_id, first seen
@@ -2223,18 +2238,47 @@ class FileCreatorAgentRuntime:
         status and skip its terminal event, leaving the Agent status bar
         stuck on the run's activity (e.g. "素材理解中") forever.
 
+        A handle whose task has not been spawned yet still counts as an
+        in-process owner: admission registered the run and settles the
+        revocation itself at its next await, so a concurrent durable CAS
+        here would only race it.
+
         Returns False when no live worker owns the run in this process (an
         orphan after restart, or a durable-only media-execution run); the
         caller then settles the durable record on its own.
+
+        A run that is already being cancelled still reports True: the
+        in-process cleanup owns the terminal status and its lifecycle event,
+        so a concurrent durable CAS would only race it and could steal the
+        event that disarms the Agent status bar. The repeated signal itself
+        never re-cancels the task (see ``_SpecialistHandle.cancel``).
         """
 
         handle = self._specialist_tasks.get(project_id, {}).get(
             specialist_run_id,
         )
-        if handle is None or handle.task is None or handle.task.done():
+        if handle is None:
+            return False
+        if handle.task is not None and handle.task.done():
+            # The worker already terminalized itself and its registration
+            # is being discarded; nothing here can still emit the event.
             return False
         handle.cancel(reason)
         return True
+
+    def _discard_specialist_handle(
+        self,
+        project_id: str,
+        specialist_run_id: str,
+    ) -> None:
+        """Drop one detached specialist registration for this Project."""
+
+        handles = self._specialist_tasks.get(project_id)
+        if handles is None:
+            return
+        handles.pop(specialist_run_id, None)
+        if not handles:
+            self._specialist_tasks.pop(project_id, None)
 
     async def _reclaim_specialist_orphans(self, project_id: str) -> None:
         """Fail over detached specialist runs stranded by an unclean exit.
@@ -5602,7 +5646,6 @@ class FileCreatorAgentRuntime:
             review_policy=tools.context.review_policy,
             metadata=record_metadata,
         )
-        await asyncio.to_thread(self.executions.create_specialist_run, record)
         common = {
             "parentActionId": parent_action_id,
             "parentRunId": parent_run_id,
@@ -5611,73 +5654,121 @@ class FileCreatorAgentRuntime:
             "displayName": role_name,
             "targetRefs": list(delegated.target_refs),
         }
-        await self._event(
-            project_id,
-            session_id,
-            "subagent.accepted",
-            parent_run_id,
-            request,
-            {**common, "task": delegated.task},
-        )
-        await asyncio.to_thread(
-            self.executions.transition_specialist_run,
-            project_id,
-            specialist_run_id,
-            expected_status=SpecialistRunStatus.QUEUED,
-            status=SpecialistRunStatus.RUNNING_MODEL,
-        )
-        await self._event(
-            project_id,
-            session_id,
-            "subagent.started",
-            parent_run_id,
-            request,
-            common,
-        )
-
         handle = _SpecialistHandle(
             project_id=project_id,
             specialist_run_id=specialist_run_id,
             role=role_name,
             target_refs=tuple(delegated.target_refs),
         )
-        # The detached specialist owns its tools: commits go through a
-        # token fence, so a later mainline run (which increments the
-        # project epoch) can never invalidate this run's publications.
-        specialist_tools = AgentProjectTools(
-            self.services.projects,
-            context=tools.context,
-            transformer=self.services.jq,
-            commits=_FencedCommitBoundary(
-                self,
-                _TokenFence(handle),
-                ProjectCommitBoundary(self.services.projects),
-            ),
-        )
-        drive = asyncio.create_task(
-            self._drive_subagent(
-                project_id=project_id,
-                session_id=session_id,
-                parent_run_id=parent_run_id,
-                parent_action_id=parent_action_id,
-                request=request,
-                tools=specialist_tools,
-                delegated=delegated,
-                role=role,
-                snapshot=snapshot,
-                prompt=prompt,
-                specialist_run_id=specialist_run_id,
-                round_id=round_id,
-                common=common,
-                record_metadata=record_metadata,
-                handle=handle,
-            ),
-            name=f"creator-specialist:{project_id}:{specialist_run_id}",
-        )
-        handle.task = drive
+        # Register the in-process owner BEFORE the durable record exists.
+        # A DELETE (or a stop) landing inside the awaits below would
+        # otherwise find no handle and settle the run through the durable
+        # CAS, after which admission would still go on spawning a worker
+        # that pays the model for work nobody wants any more.
         self._specialist_tasks.setdefault(project_id, {})[
             specialist_run_id
         ] = handle
+        spawned = False
+
+        async def _settle_revoked(*, announce: bool) -> dict[str, Any]:
+            """Admission was revoked before the worker could start."""
+
+            await self._finalize_specialist_cancellation(
+                project_id=project_id,
+                session_id=session_id,
+                specialist_run_id=specialist_run_id,
+                parent_run_id=parent_run_id,
+                request=request,
+                common=common,
+                announce=announce,
+            )
+            return {
+                "ok": True,
+                "status": "CANCELLED",
+                "runId": specialist_run_id,
+                "role": role_name,
+                "targetRefs": list(delegated.target_refs),
+            }
+
+        try:
+            await asyncio.to_thread(
+                self.executions.create_specialist_run,
+                record,
+            )
+            if handle.cancel_reason is not None:
+                return await _settle_revoked(announce=False)
+            await self._event(
+                project_id,
+                session_id,
+                "subagent.accepted",
+                parent_run_id,
+                request,
+                {**common, "task": delegated.task},
+            )
+            if handle.cancel_reason is not None:
+                return await _settle_revoked(announce=True)
+            await asyncio.to_thread(
+                self.executions.transition_specialist_run,
+                project_id,
+                specialist_run_id,
+                expected_status=SpecialistRunStatus.QUEUED,
+                status=SpecialistRunStatus.RUNNING_MODEL,
+            )
+            if handle.cancel_reason is not None:
+                return await _settle_revoked(announce=True)
+            await self._event(
+                project_id,
+                session_id,
+                "subagent.started",
+                parent_run_id,
+                request,
+                common,
+            )
+            if handle.cancel_reason is not None:
+                # Nothing between here and the spawn yields, so this is the
+                # last place that can still refuse the model turn.
+                return await _settle_revoked(announce=True)
+            # The detached specialist owns its tools: commits go through a
+            # token fence, so a later mainline run (which increments the
+            # project epoch) can never invalidate this run's publications.
+            specialist_tools = AgentProjectTools(
+                self.services.projects,
+                context=tools.context,
+                transformer=self.services.jq,
+                commits=_FencedCommitBoundary(
+                    self,
+                    _TokenFence(handle),
+                    ProjectCommitBoundary(self.services.projects),
+                ),
+            )
+            drive = asyncio.create_task(
+                self._drive_subagent(
+                    project_id=project_id,
+                    session_id=session_id,
+                    parent_run_id=parent_run_id,
+                    parent_action_id=parent_action_id,
+                    request=request,
+                    tools=specialist_tools,
+                    delegated=delegated,
+                    role=role,
+                    snapshot=snapshot,
+                    prompt=prompt,
+                    specialist_run_id=specialist_run_id,
+                    round_id=round_id,
+                    common=common,
+                    record_metadata=record_metadata,
+                    handle=handle,
+                ),
+                name=f"creator-specialist:{project_id}:{specialist_run_id}",
+            )
+            handle.task = drive
+            spawned = True
+        finally:
+            if not spawned:
+                # Nobody will run this in-process any more: drop the
+                # registration so cancel_specialist_run tells callers the
+                # truth and they settle the durable record themselves.
+                self._discard_specialist_handle(project_id, specialist_run_id)
 
         def _discard(
             done: asyncio.Task[Any],
@@ -5685,11 +5776,7 @@ class FileCreatorAgentRuntime:
             owner: str = project_id,
             run: str = specialist_run_id,
         ) -> None:
-            handles = self._specialist_tasks.get(owner)
-            if handles is not None:
-                handles.pop(run, None)
-                if not handles:
-                    self._specialist_tasks.pop(owner, None)
+            self._discard_specialist_handle(owner, run)
             if not done.cancelled() and done.exception() is not None:
                 logger.error(
                     "specialist run crashed: project=%s run=%s",
@@ -5734,6 +5821,21 @@ class FileCreatorAgentRuntime:
         through a tool result.
         """
 
+        if handle.cancel_reason is not None:
+            # Revoked before the worker got a chance to run (a stop or an
+            # asset DELETE that landed while admission was still handing
+            # over): starting paid model turns for work a human already
+            # cancelled is never acceptable, and the run must still reach a
+            # terminal state so the Agent status bar disarms.
+            await self._finalize_specialist_cancellation(
+                project_id=project_id,
+                session_id=session_id,
+                specialist_run_id=specialist_run_id,
+                parent_run_id=parent_run_id,
+                request=request,
+                common=common,
+            )
+            return
         try:
             result = await self._drive_subagent_inner(
                 project_id=project_id,
@@ -5754,7 +5856,35 @@ class FileCreatorAgentRuntime:
             )
         except (asyncio.CancelledError, StaleAgentRun):
             # Revoked by interrupt/stop/project-delete: a human took over,
-            # so no notification chases the cancelled work.
+            # so no notification chases the cancelled work. Finalizing in a
+            # separate task is what makes this boundary reliable: this
+            # coroutine is already being cancelled, and a second signal
+            # (stop + delete interleaved, or a re-issued interrupt) must not
+            # abort the cleanup that owns the terminal status and the
+            # terminal lifecycle event. Init/material-preparation failures
+            # land here too because this try covers the whole inner run.
+            finalize = asyncio.create_task(
+                self._finalize_specialist_cancellation(
+                    project_id=project_id,
+                    session_id=session_id,
+                    specialist_run_id=specialist_run_id,
+                    parent_run_id=parent_run_id,
+                    request=request,
+                    common=common,
+                ),
+                name=(
+                    f"creator-specialist-cancelled:{project_id}:"
+                    f"{specialist_run_id}"
+                ),
+            )
+            self._specialist_cleanup_tasks.add(finalize)
+            finalize.add_done_callback(
+                self._specialist_cleanup_tasks.discard,
+            )
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                # Cancelled again: the shielded finalizer keeps going on
+                # its own, which is exactly the point.
+                await asyncio.shield(finalize)
             raise
         except Exception as exc:  # pylint: disable=broad-except
             await self._notify_specialist_terminal(
@@ -5776,6 +5906,91 @@ class FileCreatorAgentRuntime:
             generation=result.get("generation"),
             review_id=result.get("reviewId"),
         )
+
+    async def _finalize_specialist_cancellation(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        specialist_run_id: str,
+        parent_run_id: str,
+        request: CreatorMessageRecord,
+        common: Mapping[str, Any],
+        announce: bool = True,
+    ) -> str:
+        """Settle one revoked specialist run, at most once.
+
+        Every cancellation path funnels through here (worker model loop,
+        init/material preparation, admission hand-over, and the asset
+        DELETE route). The durable CAS decides the single owner: the winner
+        persists CANCELLED and emits the ``subagent.failed{cancelled}``
+        event the frontend needs to disarm the activity, everyone else
+        leaves the outcome and the event alone.
+
+        Returns ``"claimed"`` when this call moved the record to CANCELLED,
+        ``"preserved"`` when a terminal outcome was already in place (or
+        there is no record to settle), and ``"lost"`` when the CAS hit a
+        concurrent terminal transition.
+        """
+
+        if not self.services.projects.project_path(project_id).is_file():
+            # Project DELETE is already the terminal authority; do not let
+            # specialist cleanup recreate Runtime directories below the
+            # removed id.
+            return "preserved"
+        try:
+            current = await asyncio.to_thread(
+                self.executions.get_specialist_run,
+                project_id,
+                specialist_run_id,
+            )
+        except RecordNotFoundError:
+            # Revoked before admission persisted the record: nothing was
+            # announced and no run exists to settle.
+            return "preserved"
+        if current.status in TERMINAL_SPECIALIST_STATUSES:
+            # The stop may land after the terminal status already persisted
+            # (the finalizer was still awaiting its terminal event): keep
+            # the durable outcome and propagate the cancellation — a CAS
+            # conflict here must never masquerade as a business failure
+            # that would chase a hard stop with a spurious [FAILED]
+            # notification.
+            return "preserved"
+        try:
+            await asyncio.to_thread(
+                self.executions.transition_specialist_run,
+                project_id,
+                specialist_run_id,
+                expected_status=current.status,
+                status=SpecialistRunStatus.CANCELLED,
+                updates={"final_marker": "CANCELLED"},
+            )
+        except ExecutionStateConflict:
+            # The run reached a terminal state concurrently; whoever moved
+            # it owns the outcome.
+            return "lost"
+        if announce:
+            # Emit subagent.failed so the frontend can disarm.
+            try:
+                await self._event(
+                    project_id,
+                    session_id,
+                    "subagent.failed",
+                    parent_run_id,
+                    request,
+                    {
+                        **common,
+                        "cancelled": True,
+                        "error": "specialist run cancelled",
+                    },
+                )
+            except Exception:  # noqa: BLE001 - status already terminal
+                logger.exception(
+                    "specialist cancellation event failed: project=%s run=%s",
+                    project_id,
+                    specialist_run_id,
+                )
+        return "claimed"
 
     async def _notify_specialist_terminal(
         self,
@@ -6807,56 +7022,25 @@ class FileCreatorAgentRuntime:
                 f"{role_name} exceeded "
                 f"{self.specialist_max_model_turns} model turns",
             )
-        except (asyncio.CancelledError, StaleAgentRun):
+        except (asyncio.CancelledError, StaleAgentRun) as error:
             logger.warning(
                 "Specialist run %s (%s) cancelled",
                 specialist_run_id,
                 role.value,
             )
-            if not self.services.projects.project_path(project_id).is_file():
-                # Project DELETE is already the terminal authority; do not let
-                # specialist cleanup recreate Runtime directories below the
-                # removed id.
-                raise
-            # The stop may land after the terminal status already persisted
-            # (the finalizer was still awaiting its terminal event): keep
-            # the durable outcome and propagate the cancellation — a CAS
-            # conflict here must never masquerade as a business failure
-            # that would chase a hard stop with a spurious [FAILED]
-            # notification.
-            current = await asyncio.to_thread(
-                self.executions.get_specialist_run,
-                project_id,
-                specialist_run_id,
+            outcome = await self._finalize_specialist_cancellation(
+                project_id=project_id,
+                session_id=session_id,
+                specialist_run_id=specialist_run_id,
+                parent_run_id=parent_run_id,
+                request=request,
+                common=common,
             )
-            if current.status in TERMINAL_SPECIALIST_STATUSES:
-                raise
-            try:
-                await asyncio.to_thread(
-                    self.executions.transition_specialist_run,
-                    project_id,
-                    specialist_run_id,
-                    expected_status=current.status,
-                    status=SpecialistRunStatus.CANCELLED,
-                    updates={"final_marker": "CANCELLED"},
-                )
-            except ExecutionStateConflict:
-                # The run reached a terminal state concurrently; whoever
-                # moved it owns the outcome.
+            if outcome == "lost" and not isinstance(
+                error,
+                asyncio.CancelledError,
+            ):
                 raise asyncio.CancelledError() from None
-            # Emit subagent.failed so the frontend can disarm.
-            await self._event(
-                project_id,
-                session_id,
-                "subagent.failed",
-                parent_run_id,
-                request,
-                {
-                    **common,
-                    "cancelled": True,
-                    "error": "specialist run cancelled",
-                },
-            )
             raise
         except Exception as exc:
             logger.error(
