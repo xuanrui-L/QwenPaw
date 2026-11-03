@@ -50,6 +50,7 @@ from .model_context import (
     MODEL_INPUT_BYTES,
     MediaVault,
     ModelContextBudgetError,
+    budget_diagnostics,
     declared_context_tokens,
     demote_derived_inline_media,
     demote_human_inline_media,
@@ -1028,6 +1029,7 @@ class AgentScopeAgentChatClient:
             except ModelContextBudgetError as exc:
                 return None, exc
 
+        candidate: Sequence[Mapping[str, Any]] = messages
         demoted, receipt = demote_derived_inline_media(
             messages,
             budget_bytes=max_bytes,
@@ -1035,6 +1037,7 @@ class AgentScopeAgentChatClient:
         )
         record.append(("派生观察媒体", receipt))
         if receipt["demoted_blocks"]:
+            candidate = demoted
             prepared, refused = prepare(demoted)
             if prepared is not None:
                 return prepared, self._report_demotions(record, max_bytes)
@@ -1044,6 +1047,31 @@ class AgentScopeAgentChatClient:
         # inline block together costs less than the overage, no amount of
         # demotion can fit, and the ladder would strip a person's attachments
         # one by one while heading for the identical failure.
+        if not failure.diagnostics:
+            # A provider refusal arrives without a local measurement, and an
+            # empty reading opens that gate unconditionally: the ladder would
+            # strip a person's uploads one by one on the promise that media is
+            # what does not fit, while the request may be overflowing on
+            # contract text no demotion can shrink. Measure the shape this step
+            # aims at, through the same compaction its own success test
+            # applies, so the gap the gate reads is the gap this request has to
+            # close. What the caller was told keeps its own words: this probe
+            # states a budget the ladder tightened, not the one that refused.
+            probed, refused = prepare(candidate)
+            reading = (
+                refused.diagnostics
+                if refused is not None and refused.diagnostics
+                else budget_diagnostics(
+                    probed if probed is not None else candidate,
+                    tools,
+                    max_bytes=max_bytes,
+                    max_tokens=token_budget,
+                )
+            )
+            failure = ModelContextBudgetError(
+                str(failure),
+                diagnostics=reading,
+            )
         if not media_could_bridge_the_gap(failure.diagnostics):
             raise ModelContextUnfitError(
                 "\n".join(

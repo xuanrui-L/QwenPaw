@@ -222,6 +222,7 @@ from .production_status import (
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
 from .work_graph import WorkNodeStatus, derive_work_graph
 from .model_context import (
+    MEDIA_OBSERVATION_SOURCE,
     MEDIA_RECALL_SOURCE,
     compact_conversation_history,
     estimate_input_tokens,
@@ -6643,7 +6644,14 @@ class FileCreatorAgentRuntime:
         )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": user_content},
+            {
+                "role": "user",
+                # The native parts here are the Project's own files, which any
+                # reader tool can show again: a runtime observation, not an
+                # upload, so the first rung of the demotion ladder may trade it.
+                "source": MEDIA_OBSERVATION_SOURCE,
+                "content": user_content,
+            },
         ]
         tool_manifest = list(
             self.specialist_tools.manifest_for(
@@ -7327,7 +7335,11 @@ class FileCreatorAgentRuntime:
                             },
                         )
                         messages.append(
-                            {"role": "user", "content": frame_content},
+                            {
+                                "role": "user",
+                                "source": MEDIA_OBSERVATION_SOURCE,
+                                "content": frame_content,
+                            },
                         )
                 if call.name == "read_document" and not failed:
                     # Rendered pages enter the VLM context as native images
@@ -7373,7 +7385,11 @@ class FileCreatorAgentRuntime:
                             },
                         )
                         messages.append(
-                            {"role": "user", "content": page_content},
+                            {
+                                "role": "user",
+                                "source": MEDIA_OBSERVATION_SOURCE,
+                                "content": page_content,
+                            },
                         )
                 if waiting_review is not None:
                     target_ref = str(
