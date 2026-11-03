@@ -895,6 +895,33 @@ def _snapshot_content(content: Any) -> Mapping[str, Any] | None:
     return None
 
 
+# The project view compaction reattaches after it evicts the exchange that
+# held the snapshot. It is a compaction artifact carried in the provider's
+# user role, not a turn anyone asked for, so the prefix is what identifies it
+# once it leaves this module: ``_context_snapshot`` is stripped on the way.
+PROJECT_MODEL_VIEW_PREFIX = "CURRENT_PROJECT_MODEL_VIEW="
+
+
+def is_carried_project_view(message: Mapping[str, Any]) -> bool:
+    """Whether this row is a project view an earlier compaction reattached.
+
+    A run that adopts the shape it just sent hands its own output back as the
+    next turn's input. Recognizing the artifact by its marker alone would then
+    pin one stale view per turn: user-role rows are never evictable here, so
+    the pinned copies accumulate until nothing left can move and the request
+    refuses itself. Matching the prefix keeps the guarantee the compaction
+    already intends — one view, always the newest.
+    """
+    if message.get("_context_snapshot"):
+        return True
+    content = message.get("content")
+    return (
+        message.get("role") == "user"
+        and isinstance(content, str)
+        and content.startswith(PROJECT_MODEL_VIEW_PREFIX)
+    )
+
+
 def compact_conversation_history(
     history: list[dict[str, Any]],
     *,
@@ -1144,13 +1171,15 @@ def prepare_model_messages(
                 carried_snapshot = latest_snapshot
         del result[start:end]
         # Keep only the newest carried view, and count it in the next check.
-        result = [item for item in result if not item.get("_context_snapshot")]
+        # A previous turn's view reaches here too, because a run may resume
+        # from the shape it last sent instead of rebuilding from durable rows.
+        result = [item for item in result if not is_carried_project_view(item)]
         if carried_snapshot:
             result.append(
                 {
                     "role": "user",
                     "_context_snapshot": True,
-                    "content": "CURRENT_PROJECT_MODEL_VIEW="
+                    "content": PROJECT_MODEL_VIEW_PREFIX
                     + json_text(carried_snapshot),
                 },
             )

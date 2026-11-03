@@ -171,3 +171,29 @@ Before a paid image or video generation call, the Agent presents a **production 
 Open **Apps** in the QwenPaw console, find **QwenPaw Creator**, and select Install. After installation, open Creator directly from Apps.
 
 Creator uses a few local tools without changing your system installation: `ffmpeg` handles media processing and composition (set `CREATOR_FFMPEG_PATH`, otherwise it falls back to system `ffmpeg` or `imageio-ffmpeg`); `jq` supports structured Agent edits to project files (`CREATOR_JQ_PATH` or `PATH`). If a dependency is missing, Creator starts in degraded mode; inspect `GET /api/qwenpaw-creator/health` for details.
+
+### Context budget for long sessions
+
+Before every model request Creator measures the input once. When it is too
+large, older tool exchanges are compacted first and only then is media the
+runtime can observe again demoted. Set these when starting the process; a
+change needs a restart.
+
+- `CREATOR_MODEL_CONTEXT_TOKENS`: the **maximum input tokens** of the model
+  this deployment uses. Undeclared by default, which leaves the serialized
+  request size (384KB) as the only guard, unable to predict the provider's own
+  window refusal. Once declared, an input over the window gives way early, and
+  a request that still does not fit after every media block has been demoted
+  ends with `MODEL_CONTEXT_UNFIT` and waits for shorter input instead of
+  replaying. About an eighth of the window is reserved for the reply.
+- `CREATOR_MEDIA_OBSERVATION_DEGRADE_ENABLED`: set to `0` to switch the media
+  demotion ladder off and take the hard failure with its full diagnostics.
+- `CREATOR_MEDIA_CLAMP_RATIO`: the share of the budget one inline media part
+  may be charged for, default `0.5`, accepted range `0.05`-`1`.
+
+Known boundary: media that reaches the request as a URL (a DashScope
+temporary OSS object, a public asset address) is neither charged to this
+budget nor demotable - it costs a few hundred bytes on the wire while the
+provider still bills full vision tokens. Deployments using that transport
+should declare `CREATOR_MODEL_CONTEXT_TOKENS` so the token measure holds the
+window.
