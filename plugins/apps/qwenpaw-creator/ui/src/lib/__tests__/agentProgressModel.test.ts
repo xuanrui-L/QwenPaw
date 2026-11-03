@@ -256,3 +256,45 @@ describe("orphaned admissions reaped by recovery", () => {
     expect(result.counts.attention).toBe(1);
   });
 });
+
+describe("retried source understanding", () => {
+  it("hides an unsuccessful attempt once a later re-run of the same target succeeded", () => {
+    const old = run({
+      id: "src-old",
+      role: "source_intelligence_agent",
+      status: "FAILED",
+      targetRefs: ["asset:a1"],
+      createdAt: "2026-10-12T00:00:00Z",
+    });
+    const fresh = run({
+      id: "src-new",
+      role: "source_intelligence_agent",
+      status: "SUCCEEDED",
+      targetRefs: ["asset:a1"],
+      createdAt: "2026-11-03T00:00:00Z",
+    });
+
+    const result = model([], [], [old, fresh]);
+    const ids = items(result).map((item) => item.id);
+
+    expect(ids).not.toContain("run:src-old");
+    expect(ids).toContain("run:src-new");
+    expect(result.counts.attention).toBe(0);
+    expect(result.counts.completed).toBe(1);
+  });
+
+  it("keeps an unsuccessful attempt while no later run succeeded", () => {
+    const old = run({
+      id: "src-only",
+      role: "source_intelligence_agent",
+      status: "BLOCKED",
+      targetRefs: ["asset:a2"],
+      createdAt: "2026-10-12T00:00:00Z",
+    });
+
+    const result = model([], [], [old]);
+
+    expect(items(result).map((item) => item.id)).toContain("run:src-only");
+    expect(result.counts.attention).toBe(1);
+  });
+});
