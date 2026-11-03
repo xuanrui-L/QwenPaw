@@ -21,12 +21,22 @@ from api.file_asset_routes import (
 )
 from api.file_media_routes import router as media_router
 from domain.errors import CreatorError, ValidationError
-from domain.enums import SpecialistRole, SpecialistRunStatus
+from domain.enums import (
+    SpecialistRole,
+    SpecialistRunStatus,
+    TaskKind,
+    TaskStatus,
+)
+from services.media import source_observation
 from services.media_files.keyframe_cache import CachedKeyframe
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
 from services.runtime_files import safe_remote_download
-from services.runtime_files.execution_models import SpecialistRunRecord
+from services.runtime_files.execution_models import (
+    SpecialistRunRecord,
+    TaskAttemptStatus,
+    TaskRecord,
+)
 from services.runtime_files.execution_store import ProjectExecutionStore
 
 
@@ -763,3 +773,139 @@ def test_delete_asset_settles_durable_run_when_no_live_owner(
     ]
     assert run.status is SpecialistRunStatus.CANCELLED
     assert run.metadata.get("cancelReason") == "SOURCE_ASSET_DELETED"
+
+
+class _RecordingObservationCancellation:
+    """Stands in for the observation service inside the real registry."""
+
+    def __init__(self, services: CreatorFileServices) -> None:
+        self.services = services
+        self.calls: list[tuple] = []
+
+    async def cancel_for_asset(
+        self,
+        project_id: str,
+        *,
+        logical_asset_id: str | None = None,
+        version_id: str | None = None,
+    ) -> int:
+        self.calls.append((project_id, logical_asset_id, version_id))
+        # Deliberately settles nothing: the route's own durable CAS still has
+        # to converge a Task no live worker owns in this process.
+        return 0
+
+
+def _seed_standalone_observation_task(
+    services: CreatorFileServices,
+    *,
+    task_id: str,
+    logical_asset_id: str,
+    version_id: str,
+) -> str:
+    """One RUNNING observe_source_clip Task with no SpecialistRun behind it."""
+
+    executions = ProjectExecutionStore(services.root)
+    executions.create_task(
+        TaskRecord(
+            task_id=task_id,
+            project_id="project-1",
+            kind=TaskKind.OBSERVE_SOURCE_CLIP,
+            request_fingerprint=f"observe-{task_id}",
+            input_refs=[f"asset:{logical_asset_id}"],
+            metadata={
+                "targetRef": f"asset:{logical_asset_id}",
+                "assetVersionId": version_id,
+            },
+        ),
+    )
+    executions.append_attempt(
+        "project-1",
+        task_id,
+        event_id=f"{task_id}-a1-running",
+        attempt_id=f"{task_id}-a1",
+        status=TaskAttemptStatus.RUNNING,
+        input={"assetVersionId": version_id},
+    )
+    return task_id
+
+
+def test_delete_asset_cancels_independent_observation_task(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_scenario,
+) -> None:
+    # A standalone media Task belongs to no SpecialistRun, so matching only
+    # Task.run_id left it RUNNING against media that had just been deleted —
+    # and its in-process worker kept running the VLM call, ready to publish an
+    # observation of footage that no longer exists.
+    app, services = _app(tmp_path)
+    # Registered through the service registry (not by patching the route's
+    # import) so the assertion is about the route's behaviour: a delete that
+    # never reaches the owning service leaves the live VLM call running.
+    observations = _RecordingObservationCancellation(services)
+    source_observation._SERVICES[str(services.root)] = observations
+    monkeypatch.setattr(
+        file_asset_routes,
+        "get_creator_agent_runtime",
+        lambda: None,
+    )
+
+    async def scenario(client):
+        created = await _upload_source(
+            client,
+            _TEXT_ASSET_PAYLOAD,
+            "asset-del-1",
+        )
+        version_id = created.json()["assetVersionId"]
+        logical_id = (
+            services.projects.read(
+                "project-1",
+            )
+            .project.assets.source_versions_by_id[version_id]
+            .logical_asset_id
+        )
+        task_id = _seed_standalone_observation_task(
+            services,
+            task_id="observe-del",
+            logical_asset_id=logical_id,
+            version_id=version_id,
+        )
+        other_id = _seed_standalone_observation_task(
+            services,
+            task_id="observe-other",
+            logical_asset_id="asset-other",
+            version_id="version-other",
+        )
+        deleted = await client.delete(
+            f"/projects/project-1/assets/{version_id}",
+            headers={"Idempotency-Key": "del-observe"},
+        )
+        executions = ProjectExecutionStore(services.root)
+        return (
+            deleted,
+            executions.get_task("project-1", task_id),
+            executions.get_task("project-1", other_id),
+            logical_id,
+            version_id,
+            list(observations.calls),
+        )
+
+    try:
+        result = run_scenario(app, scenario)
+    finally:
+        source_observation.clear_source_observation_service_registry()
+
+    deleted, task, other, logical_id, version_id, calls = result
+
+    assert deleted.status_code == 204
+    assert calls == [
+        ("project-1", logical_id, version_id),
+    ], "the live observation worker must be revoked through its service"
+    assert task.status is TaskStatus.CANCELLED
+    assert task.error == {
+        "code": "SOURCE_ASSET_DELETED",
+        "message": "Source asset was deleted",
+    }
+    assert (
+        other.status is TaskStatus.RUNNING
+    ), "a Task reading another asset must survive this deletion"
