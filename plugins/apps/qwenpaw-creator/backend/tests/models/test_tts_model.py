@@ -89,7 +89,7 @@ def test_synthesize_rejects_unknown_system_voice(monkeypatch) -> None:
     monkeypatch.setattr(tts_model, "_post_json", fail_post_json)
 
     with pytest.raises(ValueError, match="unknown voice"):
-        asyncio.run(tts_model.synthesize("你 好", voice="zh-CN-YunxiNeural"))
+        asyncio.run(tts_model.synthesize("你好", voice="zh-CN-YunxiNeural"))
 
 
 def test_configured_default_voice_falls_back_to_one_the_model_offers(
@@ -135,7 +135,9 @@ def test_unknown_voice_error_previews_instead_of_dumping_the_list(
     monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
     with pytest.raises(ValueError, match=r"\(88 in total\)") as raised:
         asyncio.run(tts_model.synthesize("你好世界", voice="Cherry"))
-    assert "loongmary_v3.1" not in str(raised.value)
+    # The ninth name is the first one the preview drops; naming a voice that
+    # no model publishes at all would pass the same assertion vacuously.
+    assert "wenhuaiqing_v3.1" not in str(raised.value)
 
 
 def test_gateway_refuses_a_speech_model_it_has_not_published(
@@ -476,12 +478,17 @@ def test_labels_do_not_quote_a_stale_voice_count() -> None:
     list changes without telling the copy that counts it."""
 
     for capability in supported_models():
-        stated = re.search(r"（(\d+) 个系统音色", capability.label)
-        if stated is not None:
-            assert int(stated.group(1)) == len(capability.system_voices), (
-                f"{capability.model} label says {stated.group(1)} voices, "
+        stated = re.findall(r"(\d+)\s*个系统音色", capability.label)
+        for count in stated:
+            assert int(count) == len(capability.system_voices), (
+                f"{capability.model} label says {count} voices, "
                 f"the table registers {len(capability.system_voices)}"
             )
+        if capability.model.startswith("qwen-audio"):
+            # Pin the convention instead of only checking it when it is
+            # honoured: a Qwen-Audio label that dropped its count would pass
+            # the loop above, silently and green.
+            assert len(stated) == 1, f"{capability.model} states no count"
 
 
 def test_qwen_audio_models_carry_their_own_voice_lists() -> None:

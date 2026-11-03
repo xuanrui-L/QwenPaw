@@ -105,9 +105,9 @@ def test_gateway_synthesis_uses_the_speech_route(monkeypatch) -> None:
     result = asyncio.run(tts_model.synthesize("你好世界"))
 
     assert captured["url"].endswith(f"/v1/{SPEECH_SUFFIX}")
-    # The leaner body is what the proxy was measured to accept; the local
-    # catalogue is empty for this model, so the configured name is passed
-    # through instead of being refused before the call.
+    # The leaner body is what the proxy was measured to accept; the voice is a
+    # deployment default that this model does publish, so it survives the local
+    # check untouched and goes out as configured.
     assert captured["payload"]["model"] == "qwen-audio-3.0-tts-flash"
     assert captured["payload"]["input"] == {
         "text": "你好世界",
@@ -197,6 +197,48 @@ def test_bailian_replaces_a_default_voice_the_model_cannot_speak(
         ).system_voices[0]
     )
     assert result.voice == captured["voice"]
+
+
+def test_gateway_also_replaces_a_default_voice_the_model_cannot_speak(
+    monkeypatch,
+) -> None:
+    """No catalogue, not more permissive.
+
+    The proxy rejects a voice outside a model's list the same way Bailian does
+    - as a retryable 502 that reads like a broken route - so the local
+    substitution has to happen on that endpoint too, not only on Bailian.
+    """
+    captured = _bind_gateway_tts(
+        monkeypatch,
+        model="qwen-audio-3.0-tts-flash",
+        voice="Cherry",
+    )
+
+    asyncio.run(tts_model.synthesize("你好世界"))
+
+    assert (
+        captured["payload"]["input"]["voice"]
+        == capability_for(
+            "qwen-audio-3.0-tts-flash",
+        ).system_voices[0]
+    )
+
+
+def test_gateway_still_forwards_a_voice_the_caller_named(
+    monkeypatch,
+) -> None:
+    """A name the caller typed stays the caller's business: with no published
+    catalogue the proxy owns that judgement, so it is forwarded rather than
+    second guessed here."""
+    captured = _bind_gateway_tts(
+        monkeypatch,
+        model="qwen-audio-3.0-tts-flash",
+        voice="Cherry",
+    )
+
+    asyncio.run(tts_model.synthesize("你好世界", voice="StudioVoice"))
+
+    assert captured["payload"]["input"]["voice"] == "StudioVoice"
 
 
 # -- ASR -----------------------------------------------------------------

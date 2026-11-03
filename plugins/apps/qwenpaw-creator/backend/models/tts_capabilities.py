@@ -14,8 +14,10 @@ The provider exposes two families that share nothing but the credential:
 - ``qwen-audio``: shares the CosyVoice enrollment surface but does ship system
   voices, and the set is per model - ``3.0-plus`` carries two flagship voices
   and ``3.0-flash`` a dozen social/companion ones, while ``3.1-plus`` grows to
-  four and ``3.1-flash`` publishes 139. Voices never cross between models, so
-  each model needs its own list. Only the Chinese and English names are
+  four and ``3.1-flash`` publishes 139. Plus's four names are all inside
+  Flash's list, yet Plus accepts nothing beyond them - a voice is only good
+  for a model that publishes it, so each model needs its own list. Only the
+  Chinese and English names are
   recorded here - ``3.1-flash`` publishes 51 further low-resource locales whose
   ids start with the model name, and a name absent from its model's list is
   refused locally before any call. ``providers`` records the endpoints that
@@ -326,6 +328,43 @@ def require_capability(model: str) -> TtsModelCapability:
     return _BY_MODEL[DEFAULT_TTS_MODEL]
 
 
+def resolve_system_voice(
+    capability: TtsModelCapability,
+    requested: str,
+    configured: str,
+) -> str | None:
+    """The system voice this call will actually speak, or None if rejected.
+
+    ``None`` means the caller named a voice this model does not publish; the
+    caller turns that into an error - or, on the model proxy, into a
+    pass-through it trusts the proxy to judge.
+
+    A name that did not come from the caller is a different case: one
+    ``TTS_VOICE`` default is shared by every model while each model publishes
+    its own list, so switching the synthesis model outside the configuration
+    dialog leaves a name the model cannot speak. Refusing it would silence
+    every narration in that deployment, so it is swapped for the model's own
+    first voice.
+
+    This is the only place that decides. The semantic-replay cache in
+    ``audio_execution`` keys a stored narration by the voice it resolved to,
+    so a second, slightly different resolution there would make every
+    fallback miss its own cache and pay the provider for the same audio
+    again.
+    """
+
+    active = (requested or configured).strip()
+    if not active or active in capability.system_voices:
+        return active
+    if requested.strip():
+        return None
+    if capability.system_voices:
+        return capability.system_voices[0]
+    # A family with no published list at all has nothing to fall back to, so
+    # the configured name is passed through unchanged.
+    return active
+
+
 __all__ = [
     "DEFAULT_TTS_MODEL",
     "TtsFamily",
@@ -335,5 +374,6 @@ __all__ = [
     "capability_for",
     "models_for",
     "require_capability",
+    "resolve_system_voice",
     "supported_models",
 ]

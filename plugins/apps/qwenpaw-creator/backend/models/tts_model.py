@@ -32,7 +32,11 @@ import httpx
 
 from models import config
 from models.media_transport import upload_reference_file_for_provider
-from models.tts_capabilities import TtsModelCapability, require_capability
+from models.tts_capabilities import (
+    TtsModelCapability,
+    require_capability,
+    resolve_system_voice,
+)
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
 from utils.paths import local_path_from_file_url
@@ -126,38 +130,57 @@ def _resolve_system_voice(
     capability: TtsModelCapability,
     model: str,
     requested: str,
+    configured: str,
     *,
     via_gateway: bool,
-    from_config: bool = False,
 ) -> str:
     """The voice to synthesize with, checked against the local catalogue.
 
     A model proxy publishes no voice catalogue at all (its customization
-    listing answers an empty ``voice_list``), so on that provider the
-    configured name is the only source of truth and is passed through with a
-    warning - refusing it would make speech synthesis unreachable there.
-    Every other provider keeps the fail-fast check: a made-up name would
-    otherwise be rejected by the provider only after the call had burned an
-    execution authorization round-trip. A name that came from the deployment
-    default rather than from the caller is not a made-up name, so it falls
-    back to a voice this model can actually speak instead of going silent.
+    listing answers an empty ``voice_list``), so a name is passed through with
+    a warning for the models that have no local list to check - refusing them
+    would make speech synthesis unreachable there. Every other route keeps the
+    fail-fast check on a name the caller typed: a made-up name would otherwise
+    be rejected by the provider only after the call had burned an execution
+    authorization round-trip.
+
+    A name that came from the deployment default rather than from the caller
+    is not a made-up name, and the proxy would reject it exactly as Bailian
+    does - as a retryable 502 that reads like a broken route - so it falls
+    back to a voice this model can actually speak on either endpoint.
     """
     if not capability.has_system_voices:
-        if via_gateway and requested:
+        # Nothing to check against: this model publishes no list at all, so on
+        # the proxy any name - typed or configured - is the proxy's business,
+        # while Bailian direct really does need a created voice.
+        configured_name = (requested or configured).strip()
+        if via_gateway and configured_name:
             logger.warning(
                 "TTS voice %r is not in the local catalogue for %s; "
                 "the gateway catalogue is unpublished, passing it through",
-                requested,
+                configured_name,
                 model,
             )
-            return requested
+            return configured_name
         raise ValueError(
             f"{model} has no system voices; create a character voice "
             "first and synthesize with its voice id",
         )
-    if requested in capability.system_voices:
-        return requested
+    active = resolve_system_voice(capability, requested, configured)
+    if active is not None:
+        if not requested and active != configured.strip():
+            logger.warning(
+                "TTS default voice %r is not a system voice of %s; narrating "
+                "with %s instead",
+                configured,
+                model,
+                active,
+            )
+        return active
     if via_gateway:
+        # Only a name the caller typed reaches this branch: the proxy
+        # publishes no catalogue, so it is forwarded rather than second
+        # guessed locally.
         logger.warning(
             "TTS voice %r is unknown locally for %s; the gateway "
             "catalogue is unpublished, passing it through",
@@ -165,21 +188,6 @@ def _resolve_system_voice(
             model,
         )
         return requested
-    if from_config:
-        # One default voice is configured across every model while each model
-        # publishes its own list, so switching the synthesis model outside the
-        # configuration dialog leaves a name this model cannot speak. Refusing
-        # it would silence every narration in that deployment, so take the
-        # model's own first voice and say so.
-        fallback = capability.system_voices[0]
-        logger.warning(
-            "TTS default voice %r is not a system voice of %s; narrating "
-            "with %s instead",
-            requested,
-            model,
-            fallback,
-        )
-        return fallback
     raise ValueError(
         f"unknown voice {requested!r} for {model}; its system voices "
         f"are {_voice_preview(capability.system_voices)}",
@@ -456,9 +464,9 @@ async def synthesize(
         active_voice = _resolve_system_voice(
             capability,
             capability.model,
-            requested or config.get_tts_voice(),
+            requested,
+            config.get_tts_voice(),
             via_gateway=via_gateway,
-            from_config=not requested,
         )
     transport = require_capability(model).transport
     if via_gateway and transport == "websocket":
