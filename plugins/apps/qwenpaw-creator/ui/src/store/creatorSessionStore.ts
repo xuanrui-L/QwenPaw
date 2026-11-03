@@ -638,7 +638,6 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
         const sessionGeneration = ++sessionRefreshGeneration;
         const state = get();
         const sameProject = state.projectId === projectId;
-        const initialResumeAfter = sameProject ? state.lastEventSeq : 0;
         const preferredConversationId = sameProject
           ? state.activeConversationId
           : null;
@@ -674,7 +673,28 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             return;
           // Mainline IDLE/ERROR does not settle detached specialist work.
           // Replay from the local cursor to rebuild its independent lifecycle.
-          const resumeAfter = initialResumeAfter;
+          // Same-project reconnect resumes at the local cursor. First entry /
+          // project switch: use a bounded recent window only for terminal
+          // projects, where durable messages already come from
+          // `listMessages({tail:true})` and progress from the session snapshot,
+          // so replaying the whole history would rebuild nothing useful and just
+          // makes the feed visibly cascade downward. When the session still has
+          // in-flight work, fall back to a full replay so streaming-text prefixes
+          // and subagent card metadata (which live only on the window-edge
+          // events) are not truncated. Bottom-follow is suppressed during replay
+          // in AgentDock, so a full replay no longer "cascades".
+          const REPLAY_WINDOW = 400;
+          const isTerminalStatus = ["IDLE", "CANCELLED", "ERROR"].includes(
+            sessionResponse.session.status,
+          );
+          const resumeAfter = sameProject
+            ? state.lastEventSeq
+            : isTerminalStatus
+              ? Math.max(
+                  0,
+                  sessionResponse.session.lastEventSeq - REPLAY_WINDOW,
+                )
+              : 0;
           replayUntilSeq = sessionResponse.session.lastEventSeq;
           let conversations = conversationPage.items;
           let activeConversationId =
