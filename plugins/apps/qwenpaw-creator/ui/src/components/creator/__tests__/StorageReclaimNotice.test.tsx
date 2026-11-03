@@ -19,6 +19,12 @@ describe("StorageReclaimNotice", () => {
     // are portals outside the rendered tree, so cleanup cannot remove them.
     message.destroy();
     Modal.destroyAll();
+    // destroyAll() unmounts instances but leaves closing portals in the DOM
+    // until their animation ticks; a leftover OK button would swallow the
+    // next case's click, so purge the nodes outright.
+    document
+      .querySelectorAll(".ant-modal-root, .ant-message")
+      .forEach((node) => node.remove());
   });
 
   it("names the waiting bytes and offers the one press", () => {
@@ -53,7 +59,7 @@ describe("StorageReclaimNotice", () => {
       confirmedAt: "2026-11-03T00:00:00+00:00",
     });
     const onConfirmed = vi.fn();
-    render(
+    const { container } = render(
       <StorageReclaimNotice
         projectId="project-a"
         projectName="被逐出宗门那天"
@@ -62,15 +68,25 @@ describe("StorageReclaimNotice", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "确认并释放" }));
+    // Query inside the rendered notice: a modal portal left closing by an
+    // earlier case repeats the same label in document order.
+    fireEvent.click(
+      container.querySelector("[data-storage-reclaim-notice] button")!,
+    );
     // The confirm dialog repeats the label as its OK button; the last match
-    // in document order is the dialog's, the first is the notice's own.
-    const buttons = await waitFor(() => {
-      const found = screen.getAllByRole("button", { name: "确认并释放" });
-      expect(found.length).toBeGreaterThan(1);
-      return found;
+    // in document order is the dialog's.
+    // The newest modal root owns the OK button; a portal left closing by an
+    // earlier case still repeats the label in role order.
+    const okButton = await waitFor(() => {
+      const modals = Array.from(document.querySelectorAll(".ant-modal"));
+      expect(modals.length).toBeGreaterThan(0);
+      const ok = (modals[modals.length - 1] as HTMLElement).querySelector(
+        ".ant-btn-primary",
+      ) as HTMLElement | null;
+      expect(ok).not.toBeNull();
+      return ok as HTMLElement;
     });
-    fireEvent.click(buttons[buttons.length - 1]);
+    fireEvent.click(okButton);
 
     // The press is the decision: the notice steps aside before the sweep
     // answers, instead of spinning for the whole deletion.
@@ -88,8 +104,11 @@ describe("StorageReclaimNotice", () => {
 
   it("brings the notice back when the press fails", async () => {
     mockedReclaim.mockRejectedValue(new Error("boom"));
+    // The static antd holder races Modal.destroyAll() plus the now-immediate
+    // modal close, so pin the call rather than the rendered bubble.
+    const errorSpy = vi.spyOn(message, "error");
     const onConfirmed = vi.fn();
-    render(
+    const { container } = render(
       <StorageReclaimNotice
         projectId="project-a"
         projectName="被逐出宗门那天"
@@ -98,20 +117,31 @@ describe("StorageReclaimNotice", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "确认并释放" }));
+    // Query inside the rendered notice: a modal portal left closing by an
+    // earlier case repeats the same label in document order.
+    fireEvent.click(
+      container.querySelector("[data-storage-reclaim-notice] button")!,
+    );
     // The confirm dialog repeats the label as its OK button; the last match
-    // in document order is the dialog's, the first is the notice's own.
-    const buttons = await waitFor(() => {
-      const found = screen.getAllByRole("button", { name: "确认并释放" });
-      expect(found.length).toBeGreaterThan(1);
-      return found;
+    // in document order is the dialog's.
+    // The newest modal root owns the OK button; a portal left closing by an
+    // earlier case still repeats the label in role order.
+    const okButton = await waitFor(() => {
+      const modals = Array.from(document.querySelectorAll(".ant-modal"));
+      expect(modals.length).toBeGreaterThan(0);
+      const ok = (modals[modals.length - 1] as HTMLElement).querySelector(
+        ".ant-btn-primary",
+      ) as HTMLElement | null;
+      expect(ok).not.toBeNull();
+      return ok as HTMLElement;
     });
-    fireEvent.click(buttons[buttons.length - 1]);
-    expect(
-      document.querySelector("[data-storage-reclaim-notice]"),
-    ).toBeNull();
+    fireEvent.click(okButton);
 
-    expect(await screen.findByText(/无法释放沉淀历史/)).toBeInTheDocument();
+    // The rejection lands in the same flush, so what this case pins is the
+    // recovery: the notice comes back and the refusal is reported.
+    await waitFor(() => expect(mockedReclaim).toHaveBeenCalled());
+    await waitFor(() => expect(errorSpy).toHaveBeenCalled());
+    expect(String(errorSpy.mock.calls[0][0])).toMatch(/无法释放沉淀历史/);
     await waitFor(() =>
       expect(
         document.querySelector("[data-storage-reclaim-notice]"),
