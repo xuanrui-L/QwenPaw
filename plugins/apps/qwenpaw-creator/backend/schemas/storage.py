@@ -78,5 +78,9 @@ class StorageProfileData(StrictModel):
     released_files: int = Field(default=0, alias="releasedFiles")
     released_bytes: int = Field(default=0, alias="releasedBytes")
     elision_backup_bytes: int = Field(default=0, alias="elisionBackupBytes")
+    auto_reclaim_max_bytes: int = Field(
+        default=0,
+        alias="autoReclaimMaxBytes",
+    )
     totals: StorageTotalsData = Field(default_factory=StorageTotalsData)
     projects: list[ProjectStorageProfileData] = Field(default_factory=list)

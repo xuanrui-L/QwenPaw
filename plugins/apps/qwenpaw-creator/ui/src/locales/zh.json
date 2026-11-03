@@ -2464,5 +2464,13 @@
     "attempt": "第 {{attempt}} / {{max}} 次重试",
     "backoff": "{{seconds}} 秒后重试",
     "responding": "等待模型响应"
+  },
+  "storage": {
+    "pendingHint": "已有 {{size}} 沉淀历史等待你确认",
+    "confirmButton": "确认并释放",
+    "confirmTitle": "释放「{{name}}」中 {{size}} 的沉淀历史？",
+    "confirmBody": "该项目的沉淀历史超过了阈值，自动清理已主动停下。确认后会把你的决定记录在案，并立刻执行同样的两项清理，删除构成这些字节的已沉淀会话与事务。",
+    "confirmed": "已释放 {{size}} 沉淀历史",
+    "failed": "无法释放沉淀历史：{{message}}"
   }
 }

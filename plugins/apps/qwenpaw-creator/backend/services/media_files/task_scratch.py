@@ -1223,6 +1223,11 @@ def project_storage_profile(
         "elisionBackupBytes": _elision_backup_bytes(
             Path(services.root),
         ),
+        # The console compares each Project's pending bytes against this to
+        # decide whether the automatic pass stepped back and is waiting for a
+        # person, so the threshold travels with the report instead of being
+        # a constant somebody has to keep in sync.
+        "autoReclaimMaxBytes": auto_reclaim_max_bytes(),
         "totals": totals,
         "projects": projects,
     }

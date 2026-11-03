@@ -24,14 +24,17 @@ import {
   getRecreateParams,
   listProjects,
   getArtifactVersionMediaUrl,
+  getStorageProfile,
   CreatorHttpError,
   newClientId,
 } from "@/api/creator";
+import type { ProjectStorageProfile } from "@/api/creator";
 import { useModelConfigStore } from "@/store/modelConfigStore";
 import { useRecreateStore } from "@/store/recreateStore";
 import { useRouter, useSearchParams } from "@/routing/navigation";
 import ModelBadges from "@/components/creator/ModelBadges";
 import ModelCreditsNotice from "@/components/creator/ModelCreditsNotice";
+import StorageReclaimNotice from "@/components/creator/StorageReclaimNotice";
 import CreditsRing from "@/components/creator/CreditsRing";
 import ModelConfigModal from "@/components/creator/ModelConfigModal";
 import { SCENARIO_OPTIONS } from "@/components/creator/useProjectLaunch";
@@ -55,11 +58,14 @@ import i18n from "@/i18n";
 interface ProjectCardProps {
   project: ProjectSummary;
   hasActiveTasks: boolean;
+  storage?: ProjectStorageProfile;
+  reclaimCap: number;
   onOpen: (id: string) => void;
   onDelete: (project: ProjectSummary) => void;
   onCopy: (project: ProjectSummary) => void;
   onRecreate: (project: ProjectSummary) => void;
   onPreview: (project: ProjectSummary) => void;
+  onReclaimConfirmed: () => void;
   formatDate: (dateStr: string) => string;
 }
 
@@ -88,11 +94,14 @@ function statusDotColor(status: string | null | undefined): string {
 const ProjectCard = memo(function ProjectCard({
   project,
   hasActiveTasks,
+  storage,
+  reclaimCap,
   onOpen,
   onDelete,
   onCopy,
   onRecreate,
   onPreview,
+  onReclaimConfirmed,
   formatDate,
 }: ProjectCardProps) {
   const { t } = useTranslation();
@@ -104,6 +113,10 @@ const ProjectCard = memo(function ProjectCard({
     projectScenarioLabel = found ? t(found.labelKey) : project.scenario;
   }
   const canPreview = Boolean(project.finalVideoVersionId);
+  const awaitingReclaim =
+    storage !== undefined &&
+    storage.reclaimConfirmedAt === null &&
+    storage.pendingReclaimBytes > reclaimCap;
   // When there are active background tasks, override the session status
   // to match the in-project live status display.
   const displayStatus =
@@ -141,6 +154,14 @@ const ProjectCard = memo(function ProjectCard({
         <p className="line-clamp-2 min-h-[36px] text-xs leading-[18px] text-[var(--color-text-tertiary)]">
           {project.description}
         </p>
+        {awaitingReclaim && (
+          <StorageReclaimNotice
+            projectId={project.projectId}
+            projectName={project.name}
+            pendingBytes={storage.pendingReclaimBytes}
+            onConfirmed={onReclaimConfirmed}
+          />
+        )}
       </div>
       <div className="flex flex-col gap-1.5 text-xs leading-[18px] text-[var(--color-text-tertiary)]">
         <div className="flex items-center justify-between gap-2">
@@ -258,6 +279,12 @@ export default function HomePage() {
   const modelConfig = useModelConfigStore((state) => state.config);
   const refreshModelConfig = useModelConfigStore((state) => state.refresh);
   const [configModalOpen, setConfigModalOpen] = useState(false);
+  // The storage profile is advisory: it feeds the one notice a Project earns
+  // when its settled history grows past what the automatic sweep may take.
+  const [storageByProject, setStorageByProject] = useState<
+    Record<string, ProjectStorageProfile>
+  >({});
+  const [reclaimCap, setReclaimCap] = useState(0);
 
   useEffect(() => {
     void refreshModelConfig();
@@ -297,6 +324,22 @@ export default function HomePage() {
   useEffect(() => {
     void fetchProjects();
   }, [fetchProjects]);
+
+  const fetchStorage = useCallback(async () => {
+    try {
+      const profile = await getStorageProfile();
+      setReclaimCap(profile.autoReclaimMaxBytes);
+      setStorageByProject(
+        Object.fromEntries(profile.projects.map((row) => [row.projectId, row])),
+      );
+    } catch {
+      // The notice is advisory: a profile failure must not disturb the list.
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchStorage();
+  }, [fetchStorage]);
 
   // Set which view to display based on a search parameter. Strip the param
   // after consuming it, but bail when it's absent so the strip-induced
@@ -680,11 +723,14 @@ export default function HomePage() {
                     hasActiveTasks={projectsWithActiveTasks.has(
                       project.projectId,
                     )}
+                    storage={storageByProject[project.projectId]}
+                    reclaimCap={reclaimCap}
                     onOpen={handleOpen}
                     onDelete={handleDelete}
                     onCopy={handleCopy}
                     onRecreate={handleRecreate}
                     onPreview={setPreviewProject}
+                    onReclaimConfirmed={fetchStorage}
                     formatDate={formatDate}
                   />
                 ))}

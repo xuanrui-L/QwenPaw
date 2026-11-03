@@ -248,3 +248,28 @@ def test_confirming_writes_a_receipt_the_sweeps_then_honour(
     )
     assert marker.is_file()
     assert len(list(transactions.iterdir())) == 50
+
+
+def test_the_profile_carries_the_cap_and_the_pending_bytes(
+    api_request,
+    app,
+    api_runtime_root,
+    monkeypatch,
+):
+    """The console decides 'over the cap' from the report, not a constant.
+
+    A threshold hardcoded in the UI drifts the moment the environment moves
+    it, so the report travels with the number the sweeps actually honour.
+    """
+
+    monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "100")
+    _seed_legacy_project(api_runtime_root, PROJECT_A, count=60)
+
+    body = api_request(app, "GET", "/storage/profile").json()
+
+    assert body["autoReclaimMaxBytes"] == 100
+    row = next(
+        item for item in body["projects"] if item["projectId"] == PROJECT_A
+    )
+    assert row["pendingReclaimBytes"] > 100
+    assert row["reclaimConfirmedAt"] is None
