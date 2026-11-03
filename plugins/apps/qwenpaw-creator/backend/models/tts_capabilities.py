@@ -8,13 +8,19 @@ The provider exposes two families that share nothing but the credential:
   voice design live on separate companion models (``-vc-`` / ``-vd-``) and are
   managed through ``qwen-voice-enrollment`` / ``qwen-voice-design``.
 - ``cosyvoice``: synthesis over WebSocket; one ``voice-enrollment`` surface
-  handles both cloning and design, and the newest models ship no system voices
-  at all, so a character voice must be created before anything can be spoken.
+  handles both cloning and design. ``cosyvoice-v3.5-plus`` ships no system
+  voice at all, so there a character voice must be created before anything can
+  be spoken.
 - ``qwen-audio``: shares the CosyVoice enrollment surface but does ship system
-  voices, and the set is per model - ``-plus`` carries two flagship voices and
-  ``-flash`` a dozen social/companion ones. Voices never cross between the two,
-  so each model needs its own list. These are also the only speech models the
-  model proxy routes, which is what ``providers`` records.
+  voices, and the set is per model - ``3.0-plus`` carries two flagship voices
+  and ``3.0-flash`` a dozen social/companion ones, while ``3.1-plus`` grows to
+  four and ``3.1-flash`` publishes 139. Voices never cross between models, so
+  each model needs its own list. Only the Chinese and English names are
+  recorded here - ``3.1-flash`` publishes 51 further low-resource locales whose
+  ids start with the model name, and a name absent from its model's list is
+  refused locally before any call. ``providers`` records the endpoints that
+  actually serve a model: the 3.0 pair is the only speech the model proxy
+  routes today, so 3.1 stays Bailian-only until it publishes those names.
 
 Keeping the differences in one table lets the rest of the backend ask
 capability questions ("does this model have system voices?", "which model do I
@@ -109,6 +115,117 @@ _QWEN_AUDIO_FLASH_VOICES = (
     "loongjohn",
 )
 
+# The 3.1 pair speaks the same WebSocket protocol and enrolls through the same
+# ``voice-enrollment`` surface as 3.0; only the published voices are new, and
+# their ids carry a ``_v3.1`` revision suffix.
+_QWEN_AUDIO_31_PLUS_VOICES = (
+    "longanlingxin_v3.1",
+    "xunanchuan_v3.1",
+    "longanhuan_v3.1",
+    "longanfengyue_v3.1",
+)
+
+# 3.1-flash publishes 139 voices. The 51 low-resource-language ones
+# (``qwen-audio-3.1-tts-flash-<name>_<locale>``) are left out: Creator
+# narration is Chinese or English, and each of those voices is restricted to
+# its own locale, so listing them would offer 51 names that fail on any other
+# text.
+_QWEN_AUDIO_31_FLASH_VOICES = (
+    # Multi-language and dialect voices: these four also carry the regional
+    # dialects reachable through the instruction field.
+    "longanhuan_v3.1",
+    "longanlingxin_v3.1",
+    "longanfengyue_v3.1",
+    "xunanchuan_v3.1",
+    # Premium Mandarin.
+    "yuxiaoyun_v3.1",
+    "qiaoxiaojiao_v3.1",
+    "xiaxiaochen_v3.1",
+    "anmingyuan_v3.1",
+    "wenhuaiqing_v3.1",
+    "anxiaolan_v3.1",
+    "xieshurou_v3.1",
+    "baiqinglan_v3.1",
+    "xuyuyuan_v3.1",
+    "anruorou_v3.1",
+    "wenhuaizhi_v3.1",
+    "xiaoxingzhi_v3.1",
+    "guyunshu_v3.1",
+    "huozhuoshi_v3.1",
+    "yeqinghe_v3.1",
+    "yunhuanhuan_v3.1",
+    "xuxiaoqiao_v3.1",
+    "baianran_v3.1",
+    "xuyanchu_v3.1",
+    "yezhiqing_v3.1",
+    "andi_v3.1",
+    "anyuqing_v3.1",
+    "linxiaoling_v3.1",
+    "longfeifei_v3.1",
+    "longjing_v3.1",
+    "longqiang_v3.1",
+    "longyan_v3.1",
+    "longxiaobai_v3.1",
+    "longyue_v3.1",
+    "longcheng_v3.1",
+    "longlaotie_v3.1",
+    "longshao_v3.1",
+    "longshu_v3.1",
+    "longze_v3.1",
+    "longhao_v3.1",
+    "longjin_v3.1",
+    "longnan_v3.1",
+    "longshuo_v3.1",
+    "longtian_v3.1",
+    "longxiaocheng_v3.1",
+    "longke_v3.1",
+    "loongbella_v3.1",
+    # Premium English.
+    "Emily_v3.1",
+    "Luna_v3.1",
+    "Eric_v3.1",
+    "Luca_v3.1",
+    "Abby_v3.1",
+    "Annie_v3.1",
+    "Ava_v3.1",
+    "Beth_v3.1",
+    "Betty_v3.1",
+    "Cally_v3.1",
+    "Cindy_v3.1",
+    "Donna_v3.1",
+    "Andy_v3.1",
+    "Brian_v3.1",
+    "David_v3.1",
+    # Remaining system voices.
+    "longanyuanfei_v3.1",
+    "longjielidou_v3.1",
+    "longanlingxi_v3.1",
+    "longhuohuo_v3.1",
+    "longyingtao_v3.1",
+    "longanya_v3.1",
+    "longwan_v3.1",
+    "longxing_v3.1",
+    "longhua_v3.1",
+    "longhan_v3.1",
+    "longanzhi_v3.1",
+    "longzhe_v3.1",
+    "longanyang_v3.1",
+    "libai_v3.1",
+    "longling_v3.1",
+    "longniuniu_v3.1",
+    "longshanshan_v3.1",
+    "longpaopao_v3.1",
+    "loongstella_v3.1",
+    "longyuan_v3.1",
+    "longmiao_v3.1",
+    "longsanshu_v3.1",
+    "longanli_v3.1",
+    "longanwen_v3.1",
+    "longanlang_v3.1",
+    "longxiaoxia_v3.1",
+    "longanchong_v3.1",
+)
+
 _CAPABILITIES: tuple[TtsModelCapability, ...] = (
     TtsModelCapability(
         model="qwen3-tts-flash",
@@ -153,6 +270,24 @@ _CAPABILITIES: tuple[TtsModelCapability, ...] = (
         label="Qwen-Audio 3.0 TTS Plus（旗舰音色，2 个系统音色）",
         system_voices=_QWEN_AUDIO_PLUS_VOICES,
         providers=("bailian", "gateway"),
+    ),
+    # 3.1 keeps the flash-before-plus order for the reason noted above, and
+    # stays on the default ``providers=("bailian",)``: the proxy has not
+    # published these names yet, and asking it for one reads back as a 502
+    # rather than as a configuration error.
+    TtsModelCapability(
+        model="qwen-audio-3.1-tts-flash",
+        family="cosyvoice",
+        transport="websocket",
+        label="Qwen-Audio 3.1 TTS Flash（88 个系统音色，实时快速）",
+        system_voices=_QWEN_AUDIO_31_FLASH_VOICES,
+    ),
+    TtsModelCapability(
+        model="qwen-audio-3.1-tts-plus",
+        family="cosyvoice",
+        transport="websocket",
+        label="Qwen-Audio 3.1 TTS Plus（旗舰音色，4 个系统音色）",
+        system_voices=_QWEN_AUDIO_31_PLUS_VOICES,
     ),
 )
 

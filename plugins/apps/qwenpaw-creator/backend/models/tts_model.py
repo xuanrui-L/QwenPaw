@@ -109,12 +109,26 @@ def _tts_endpoint(base_url: str, *, via_gateway: bool) -> str:
     )
 
 
+def _voice_preview(voices: tuple[str, ...], limit: int = 8) -> str:
+    """A short, honest sample of a voice list for error text.
+
+    One model publishes 88 system voices; dumping them into a message that
+    lands in the agent transcript teaches the model to guess at a long list of
+    near-identical names instead of reading the configured one.
+    """
+
+    if len(voices) <= limit:
+        return ", ".join(voices)
+    return f"{', '.join(voices[:limit])}, ... ({len(voices)} in total)"
+
+
 def _resolve_system_voice(
     capability: TtsModelCapability,
     model: str,
     requested: str,
     *,
     via_gateway: bool,
+    from_config: bool = False,
 ) -> str:
     """The voice to synthesize with, checked against the local catalogue.
 
@@ -124,7 +138,9 @@ def _resolve_system_voice(
     warning - refusing it would make speech synthesis unreachable there.
     Every other provider keeps the fail-fast check: a made-up name would
     otherwise be rejected by the provider only after the call had burned an
-    execution authorization round-trip.
+    execution authorization round-trip. A name that came from the deployment
+    default rather than from the caller is not a made-up name, so it falls
+    back to a voice this model can actually speak instead of going silent.
     """
     if not capability.has_system_voices:
         if via_gateway and requested:
@@ -149,9 +165,24 @@ def _resolve_system_voice(
             model,
         )
         return requested
+    if from_config:
+        # One default voice is configured across every model while each model
+        # publishes its own list, so switching the synthesis model outside the
+        # configuration dialog leaves a name this model cannot speak. Refusing
+        # it would silence every narration in that deployment, so take the
+        # model's own first voice and say so.
+        fallback = capability.system_voices[0]
+        logger.warning(
+            "TTS default voice %r is not a system voice of %s; narrating "
+            "with %s instead",
+            requested,
+            model,
+            fallback,
+        )
+        return fallback
     raise ValueError(
-        f"unknown voice {requested!r} for {model}; available "
-        f"system voices: {', '.join(capability.system_voices)}",
+        f"unknown voice {requested!r} for {model}; its system voices "
+        f"are {_voice_preview(capability.system_voices)}",
     )
 
 
@@ -421,21 +452,26 @@ async def synthesize(
         active_voice = voice_id
     else:
         model = capability.model
+        requested = (voice or "").strip()
         active_voice = _resolve_system_voice(
             capability,
             capability.model,
-            (voice or "").strip() or config.get_tts_voice(),
+            requested or config.get_tts_voice(),
             via_gateway=via_gateway,
+            from_config=not requested,
         )
     transport = require_capability(model).transport
     if via_gateway and transport == "websocket":
         # The DashScope SDK's websocket dials Bailian directly and could not
-        # carry the proxy key, so the qwen-audio speech models go over HTTP.
-        # A genuine CosyVoice model has no measured HTTP route here.
-        if not model.casefold().startswith("qwen-audio"):
+        # carry the proxy key, so the speech models the proxy really publishes
+        # go over HTTP instead. The gate is the table's provider list, not the
+        # model's name: Qwen-Audio 3.1 shares the prefix and has no measured
+        # proxy route yet, so a name check would send it to an endpoint that
+        # never listed it. A genuine CosyVoice model has no HTTP route either.
+        if "gateway" not in require_capability(model).providers:
             raise ModelError(
-                f"{model} 通过 WebSocket 合成，当前模型代理不支持；"
-                "请改用 qwen-audio-3.0-tts 系列，或将 TTS 端点切回百炼直连",
+                f"{model} 通过 WebSocket 合成，且当前模型代理未发布该模型；"
+                "请改用模型代理已发布的语音模型，或将 TTS 端点切回百炼直连",
                 model_name=model,
                 retryable=False,
             )
