@@ -674,31 +674,17 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           // Mainline IDLE/ERROR does not settle detached specialist work.
           // Replay from the local cursor to rebuild its independent lifecycle.
           // Same-project reconnect resumes at the local cursor. First entry /
-          // project switch: use a bounded recent window only for terminal
-          // projects, where durable messages already come from
-          // `listMessages({tail:true})` and progress from the session snapshot,
-          // so replaying the whole history would rebuild nothing useful and just
-          // makes the feed visibly cascade downward. When the session still has
-          // in-flight work, fall back to a full replay so streaming-text prefixes
-          // and subagent card metadata (which live only on the window-edge
-          // events) are not truncated. Bottom-follow is suppressed during replay
-          // in AgentDock, so a full replay no longer "cascades".
-          const REPLAY_WINDOW = 400;
-          const isTerminalStatus = ["IDLE", "CANCELLED", "ERROR"].includes(
-            sessionResponse.session.status,
-          );
-          // A terminal session status only means the mainline loop stopped; a
-          // detached specialist can still be running, and its card is rebuilt
-          // solely from window-edge events. If the status bar reports live work,
-          // keep the full replay so those specialist cards survive the reload.
-          const hasActiveWork =
-            (sessionResponse.agentStatusBar?.activity?.runningTaskCount ?? 0) >
-            0;
-          const resumeAfter = sameProject
-            ? state.lastEventSeq
-            : isTerminalStatus && !hasActiveWork
-            ? Math.max(0, sessionResponse.session.lastEventSeq - REPLAY_WINDOW)
-            : 0;
+          // project switch replays the whole event log: the durable session
+          // snapshot carries status, head pointers and the progress bar only —
+          // no terminal projection for `subagentActivities` or run
+          // cancellation, which is what ToolCallCard reads to tell "delegation
+          // accepted" from "specialist finally failed". Clipping the replay to
+          // a recent window therefore rebuilds nothing and silently downgrades
+          // an old failed delegation to a success (and a cancelled mainline run
+          // to unknown). The bounded window this used to apply existed to stop
+          // the feed cascading downward, which AgentDock now handles directly
+          // by suppressing bottom-follow during replay.
+          const resumeAfter = sameProject ? state.lastEventSeq : 0;
           replayUntilSeq = sessionResponse.session.lastEventSeq;
           let conversations = conversationPage.items;
           let activeConversationId =

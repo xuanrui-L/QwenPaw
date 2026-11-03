@@ -172,7 +172,7 @@ describe("bounded frontend caches", () => {
     expect(testEventSources()[0].url).toContain("events?after=7");
   });
 
-  it("bounds the first-entry replay to a recent window for terminal projects", async () => {
+  it("replays the whole durable log on first entry even for a terminal project", async () => {
     installMockFetch(
       bootstrapRoutes({
         session: {
@@ -184,12 +184,13 @@ describe("bounded frontend caches", () => {
       }),
     );
     await store().bootstrap("p1");
-    // Terminal session: durable messages come from the tail page and progress
-    // from the snapshot, so replay only pulls the last REPLAY_WINDOW (400).
-    expect(testEventSources()[0].url).toContain("events?after=9600");
+    // The snapshot holds no terminal projection, so an idle mainline must not
+    // clip the replay: the old 400-event window rebuilt an accepted-then-failed
+    // delegation as a success (CR #7).
+    expect(testEventSources()[0].url).toContain("events?after=0");
   });
 
-  it("falls back to a full replay on first entry when the session is still working", async () => {
+  it("replays the whole durable log when the session is still working", async () => {
     installMockFetch(
       bootstrapRoutes({
         session: {
@@ -201,8 +202,8 @@ describe("bounded frontend caches", () => {
       }),
     );
     await store().bootstrap("p1");
-    // In-flight work: the window would truncate streaming-text prefixes and
-    // subagent card metadata that live only on the window-edge events.
+    // In-flight work: streaming-text prefixes and subagent card metadata live
+    // on the events a window would drop.
     expect(testEventSources()[0].url).toContain("events?after=0");
   });
 
@@ -220,7 +221,7 @@ describe("bounded frontend caches", () => {
     );
     await store().bootstrap("p1");
     // Terminal mainline but a detached specialist is still running: its card is
-    // rebuilt only from window-edge events, so keep the full replay.
+    // rebuilt only from the lifecycle events themselves.
     expect(testEventSources()[0].url).toContain("events?after=0");
   });
 

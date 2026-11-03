@@ -1847,20 +1847,31 @@ export default function AgentDock({
     scrollTop: number;
   } | null>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
-  const loadOlder = useCallback(() => {
-    const element = scrollRef.current;
-    const state = useCreatorSessionStore.getState();
-    if (!element || state.loadingOlder || !state.hasMoreMessages) return;
-    // The suppressed replay window parks the viewport at the top, which would
-    // otherwise auto-fire this and pull an extra history page that fights the
-    // replay-end snap for the scroll position.
-    if (state.isReplaying) return;
-    olderAnchor.current = {
-      scrollHeight: element.scrollHeight,
-      scrollTop: element.scrollTop,
-    };
-    void loadOlderMessages();
-  }, [loadOlderMessages]);
+  const loadOlder = useCallback(
+    (origin: "sentinel" | "manual" = "sentinel") => {
+      const element = scrollRef.current;
+      const state = useCreatorSessionStore.getState();
+      if (!element || state.loadingOlder || !state.hasMoreMessages) return;
+      // The suppressed replay window parks the viewport at the top, which would
+      // otherwise auto-fire this and pull an extra history page that fights the
+      // replay-end snap for the scroll position. That argument only covers the
+      // automatic sentinel, and only while the stream is healthy: an EventSource
+      // that dies before finishing the replay leaves isReplaying raised, and
+      // locking the explicit button here would make an already-available HTTP
+      // history page permanently unreachable.
+      if (
+        state.isReplaying &&
+        (origin !== "manual" || state.connectionState === "connected")
+      )
+        return;
+      olderAnchor.current = {
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+      void loadOlderMessages();
+    },
+    [loadOlderMessages],
+  );
   useLayoutEffect(() => {
     if (loadingOlder) return;
     const anchor = olderAnchor.current;
@@ -1880,7 +1891,8 @@ export default function AgentDock({
     if (!sentinel || !root) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) loadOlder();
+        if (entries.some((entry) => entry.isIntersecting))
+          loadOlder("sentinel");
       },
       { root, rootMargin: "160px 0px 0px 0px" },
     );
@@ -2370,7 +2382,7 @@ export default function AgentDock({
                     <button
                       type="button"
                       disabled={loadingOlder}
-                      onClick={loadOlder}
+                      onClick={() => loadOlder("manual")}
                       className="flex w-full items-center justify-center gap-1 text-center text-[11px] text-[var(--color-text-tertiary)]"
                     >
                       {loadingOlder && (
