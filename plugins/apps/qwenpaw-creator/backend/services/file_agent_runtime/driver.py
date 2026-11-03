@@ -1731,7 +1731,7 @@ class FileCreatorAgentRuntime:
         """Bound one provider turn; max_model_turns cannot stop a hung turn."""
 
         try:
-            return await asyncio.wait_for(
+            turn = await asyncio.wait_for(
                 client.complete(
                     messages=messages,
                     tools=tools,
@@ -1747,6 +1747,15 @@ class FileCreatorAgentRuntime:
                 f"{label} model turn exceeded "
                 f"{self.model_turn_timeout_seconds:g} seconds",
             ) from exc
+        sent = getattr(turn, "sent_messages", None)
+        if isinstance(sent, list) and sent:
+            # Adopt the shape this turn actually sent, in place, so the next
+            # turn of the same run cannot put back the media the demotion
+            # ladder already moved out and re-prove the refusal with another
+            # burned call. The durable records are untouched: this list is the
+            # ephemeral wire context, and the model has already answered it.
+            messages[:] = sent
+        return turn
 
     @property
     def started(self) -> bool:
