@@ -36,6 +36,7 @@ from .models import (
     OverlayCreation,
     Project,
     R2VCreation,
+    S2VCreation,
     SourceVersionRenderSource,
 )
 from .archive import write_project_archive
@@ -445,6 +446,12 @@ class ProjectStore:
         - R2VCreation storyboard/video_reference_version_ids
         - OverlayCreation.reference_version_ids
         - I2VCreation.first_frame_version_id
+        - S2VCreation.portrait_version_id / audio_version_id
+
+        Automatic snapshot timelines count here too: a snapshot freezes the
+        timeline/element objects only, so it still points at this same source
+        version and its on-disk file. Deleting the file would make that
+        history permanently unrestorable.
 
         References that are auto-cleaned (safe to detach):
         - ProjectSource.selected_asset_version_id → replaced or source removed
@@ -479,6 +486,20 @@ class ProjectStore:
                 candidate_file_ids.append(version.thumbnail_file_id)
             if version.native_model_file_id is not None:
                 candidate_file_ids.append(version.native_model_file_id)
+            # Step 2 of _detach_source_version_refs drops every intelligence
+            # version built from this source version, but those records own a
+            # file too. Collect their file ids while the records still exist:
+            # afterwards nothing references them, so they would keep sitting on
+            # disk while remaining in the index forever (an orphan the
+            # unindexed-file sweep cannot even find).
+            for (
+                intelligence
+            ) in project.assets.intelligence_versions_by_id.values():
+                if (
+                    intelligence.source_asset_version_id == version_id
+                    and intelligence.file_id is not None
+                ):
+                    candidate_file_ids.append(intelligence.file_id)
 
             # Remove the version from metadata
             remaining_versions = {
@@ -652,13 +673,15 @@ class ProjectStore:
 
         Returns a list of reference descriptions for timeline elements that
         actively use the given source version. If non-empty, deletion should
-        be blocked to prevent data corruption.
+        be blocked to prevent data corruption. Snapshot timelines count too
+        (see ``remove_source_asset_version``), and their descriptions are
+        prefixed with the snapshot timeline id so a conflict explains which
+        piece of history is holding the asset.
         """
         references: list[str] = []
         for timeline_id, timeline in project.timelines.items.items():
-            # Skip snapshot timelines (frozen copies)
-            if timeline_id.startswith("snapshot:"):
-                continue
+            is_snapshot = timeline_id.startswith("snapshot:")
+            scope = f"{timeline_id}/" if is_snapshot else ""
 
             for element_id, element in timeline.elements_by_id.items():
                 # Check render_source (SourceVersionRenderSource only)
@@ -671,7 +694,7 @@ class ProjectStore:
                     )
                     and render_source.version_id == version_id
                 ):
-                    references.append(f"render-source:{element_id}")
+                    references.append(f"{scope}render-source:{element_id}")
 
                 creation = element.creation
                 # R2VCreation references
@@ -680,24 +703,44 @@ class ProjectStore:
                         creation.storyboard_reference_version_ids or []
                     ):
                         references.append(
-                            f"r2v-storyboard-ref:{element_id}",
+                            f"{scope}r2v-storyboard-ref:{element_id}",
                         )
                     if version_id in (
                         creation.video_reference_version_ids or []
                     ):
-                        references.append(f"r2v-video-ref:{element_id}")
+                        references.append(
+                            f"{scope}r2v-video-ref:{element_id}",
+                        )
                 # I2VCreation reference
                 elif isinstance(creation, I2VCreation):
                     if creation.first_frame_version_id == version_id:
-                        references.append(f"i2v-first-frame:{element_id}")
+                        references.append(
+                            f"{scope}i2v-first-frame:{element_id}",
+                        )
+                # S2VCreation inputs are consumed directly by r2v_execution
+                # without ever being copied into an owned version, so dropping
+                # the file here would break an active digital-human shot.
+                elif isinstance(creation, S2VCreation):
+                    if creation.portrait_version_id == version_id:
+                        references.append(
+                            f"{scope}s2v-portrait:{element_id}",
+                        )
+                    if creation.audio_version_id == version_id:
+                        references.append(
+                            f"{scope}s2v-drive-audio:{element_id}",
+                        )
                 # OverlayCreation references
                 elif isinstance(creation, OverlayCreation):
                     if version_id in (creation.reference_version_ids or []):
-                        references.append(f"overlay-ref:{element_id}")
+                        references.append(
+                            f"{scope}overlay-ref:{element_id}",
+                        )
                 # AudioCreation references
                 elif isinstance(creation, AudioCreation):
                     if creation.source_asset_version_id == version_id:
-                        references.append(f"audio-source:{element_id}")
+                        references.append(
+                            f"{scope}audio-source:{element_id}",
+                        )
 
         return references
 
