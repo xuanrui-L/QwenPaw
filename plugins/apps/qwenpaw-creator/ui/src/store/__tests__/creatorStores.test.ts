@@ -172,6 +172,47 @@ describe("bounded frontend caches", () => {
     expect(testEventSources()[0].url).toContain("events?after=7");
   });
 
+  it("bounds the first-entry replay to a recent window for terminal projects", async () => {
+    installMockFetch(
+      bootstrapRoutes({
+        session: { lastMessageSeq: 1, lastConsumedMessageSeq: 1, lastEventSeq: 10_000, status: "IDLE" },
+      }),
+    );
+    await store().bootstrap("p1");
+    // Terminal session: durable messages come from the tail page and progress
+    // from the snapshot, so replay only pulls the last REPLAY_WINDOW (400).
+    expect(testEventSources()[0].url).toContain("events?after=9600");
+  });
+
+  it("falls back to a full replay on first entry when the session is still working", async () => {
+    installMockFetch(
+      bootstrapRoutes({
+        session: { lastMessageSeq: 1, lastConsumedMessageSeq: 1, lastEventSeq: 10_000, status: "RUNNING" },
+      }),
+    );
+    await store().bootstrap("p1");
+    // In-flight work: the window would truncate streaming-text prefixes and
+    // subagent card metadata that live only on the window-edge events.
+    expect(testEventSources()[0].url).toContain("events?after=0");
+  });
+
+  it("resumes a same-project reconnect at the local cursor, ignoring the window", async () => {
+    installMockFetch(
+      bootstrapRoutes({
+        session: { lastMessageSeq: 1, lastConsumedMessageSeq: 1, lastEventSeq: 20_000, status: "IDLE" },
+      }),
+    );
+    seed({
+      session: sessionView({ lastMessageSeq: 1, lastConsumedMessageSeq: 1, lastEventSeq: 20_000, status: "IDLE" }),
+      activeConversationId: "c1",
+      messages: [msg({ messageId: "m1", messageSeq: 1 })],
+      lastEventSeq: 20_000,
+    });
+    await store().bootstrap("p1");
+    // Same-project: continue from the local cursor rather than re-clipping it.
+    expect(testEventSources()[0].url).toContain("events?after=20000");
+  });
+
   it("folds a large durable SSE replay into one bounded store update", async () => {
     installMockFetch(bootstrapRoutes({ session: { lastEventSeq: 307 } }));
     await store().bootstrap("p1");
