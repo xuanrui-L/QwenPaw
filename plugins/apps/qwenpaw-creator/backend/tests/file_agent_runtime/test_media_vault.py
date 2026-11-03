@@ -25,6 +25,19 @@ pytestmark = pytest.mark.unit
 # A payload with a real PNG header, so the type can be read back off the
 # bytes exactly the way a provider would need it.
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"frame" * 20_000
+# A WEBP shares the "RIFF" framing with a WAV and only differs four bytes
+# later, so reading the type off a stored picture means reading past the size
+# field rather than matching a prefix.
+_WEBP_BYTES = (
+    b"RIFF"
+    + (12).to_bytes(4, "little")
+    + b"WEBP"
+    + b"VP8 "
+    + b"lossy frame" * 900
+)
+_WAV_BYTES = (
+    b"RIFF" + (12).to_bytes(4, "little") + b"WAVE" + b"fmt " + b"\x00" * 8
+)
 
 
 def _data_url(payload: bytes, mime: str = "image/png") -> str:
@@ -196,3 +209,47 @@ def test_a_block_too_large_to_fit_stays_a_pointer(tmp_path, monkeypatch):
 
     with pytest.raises(FileAgentRuntimeError, match="no restorable bytes"):
         asyncio.run(scenario())
+
+
+def test_a_webp_frame_is_read_back_as_a_picture_not_as_audio():
+    """A stored type is recovered from the bytes, and RIFF names a framing.
+
+    Matching the four leading bytes alone would call every WEBP an audio/WAV,
+    and the recall path only ships parts whose family a provider can display.
+    A picture read back as audio therefore comes home as a sentence about a
+    file the model was told it could not be shown.
+    """
+    assert media_vault.sniff_mime(_WEBP_BYTES) == "image/webp"
+    assert media_vault.sniff_mime(_WAV_BYTES) == "audio/wav"
+    assert media_vault.sniff_mime(_PNG_BYTES) == "image/png"
+    assert (
+        media_vault.sniff_mime(bytes(range(10))) == "application/octet-stream"
+    )
+
+
+def test_a_recalled_webp_reaches_the_model_as_an_image_part(
+    tmp_path,
+    monkeypatch,
+):
+    """The pointer promised a picture; recall has to deliver a picture."""
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    store = ContentStore(tmp_path)
+    digest = media_vault.store_data_url(
+        _data_url(_WEBP_BYTES, mime="image/webp"),
+        store=store,
+    )
+
+    async def scenario():
+        runtime = _recall_runtime()
+        result = await runtime._run_recall_media(
+            arguments={"handles": [f"sha256:{digest}"]},
+        )
+        return result, await runtime._recalled_media_content(result=result)
+
+    result, parts = asyncio.run(scenario())
+
+    assert result["recalled"][0]["mime"] == "image/webp"
+    assert parts[-1]["type"] == "image_url"
+    restored = parts[-1]["image_url"]["url"]
+    assert restored.startswith("data:image/webp;")
+    assert base64.b64decode(restored.split(";base64,", 1)[1]) == _WEBP_BYTES

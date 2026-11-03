@@ -68,6 +68,10 @@ def digest_for(payload: bytes) -> str:
 # runtime inlines as media; anything else is returned as opaque bytes rather
 # than guessed at, which a provider rejects with an error the model cannot
 # read any better than the pointer it came from.
+#
+# RIFF is deliberately absent: it names a framing, not a format, so the table
+# below would match a WEBP image on its first four bytes and hand the model an
+# audio type it can neither look at nor explain.
 _MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"\x89PNG\r\n\x1a\n", "image/png"),
@@ -77,7 +81,6 @@ _MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"II*\x00", "image/tiff"),
     (b"MM\x00*", "image/tiff"),
     (b"ID3", "audio/mpeg"),
-    (b"RIFF", "audio/wav"),
     (b"OggS", "audio/ogg"),
     (b"fLaC", "audio/flac"),
     (b"%PDF", "application/pdf"),
@@ -86,13 +89,15 @@ _MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
 
 def sniff_mime(payload: bytes) -> str:
     """Best-effort media type from the leading bytes of a stored payload."""
+    # WEBP is "RIFF" plus a four-byte size and the "WEBP" tag, and MP4 carries
+    # the box length before "ftyp": both need the header read, not matched.
+    # RIFF is checked before the table, never through it, because the tag that
+    # decides the family sits after the size field the table cannot skip.
+    if payload[:4] == b"RIFF":
+        return "image/webp" if payload[8:12] == b"WEBP" else "audio/wav"
     for magic, media_type in _MAGIC_SIGNATURES:
         if payload.startswith(magic):
             return media_type
-    # WEBP is "RIFF" plus a four-byte size and the "WEBP" tag, and MP4 carries
-    # the box length before "ftyp": both need the header read, not matched.
-    if payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
-        return "image/webp"
     if payload[4:8] == b"ftyp":
         return "video/mp4"
     return "application/octet-stream"
