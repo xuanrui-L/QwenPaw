@@ -21,10 +21,13 @@ from api.file_asset_routes import (
 )
 from api.file_media_routes import router as media_router
 from domain.errors import CreatorError, ValidationError
+from domain.enums import SpecialistRole, SpecialistRunStatus
 from services.media_files.keyframe_cache import CachedKeyframe
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
 from services.runtime_files import safe_remote_download
+from services.runtime_files.execution_models import SpecialistRunRecord
+from services.runtime_files.execution_store import ProjectExecutionStore
 
 
 class _ChunkStream(httpx.SyncByteStream):
@@ -613,3 +616,150 @@ def test_asset_uploads_steer_the_agent_once_per_ingest(
         f"asset-version:{remote.json()['assetVersionId']}",
     ]
     assert wakes == ["project-1", "project-1"]
+
+
+class _RecordingRuntime:
+    """Stand in for the process Creator runtime during asset deletion."""
+
+    def __init__(self, *, owns_run: bool) -> None:
+        self.owns_run = owns_run
+        self.calls: list[tuple[str, str, str]] = []
+
+    def cancel_specialist_run(
+        self,
+        project_id: str,
+        run_id: str,
+        *,
+        reason: str,
+    ) -> bool:
+        self.calls.append((project_id, run_id, reason))
+        return self.owns_run
+
+
+def _seed_active_source_run(
+    services: CreatorFileServices,
+    version_id: str,
+    run_id: str,
+) -> str:
+    """Create a QUEUED (active) SOURCE_INTELLIGENCE run for ``version_id``."""
+
+    snapshot = services.projects.read("project-1")
+    logical_id = snapshot.project.assets.source_versions_by_id[
+        version_id
+    ].logical_asset_id
+    executions = ProjectExecutionStore(services.root)
+    executions.create_specialist_run(
+        SpecialistRunRecord(
+            run_id=run_id,
+            project_id="project-1",
+            round_id="agent-round-del",
+            role=SpecialistRole.SOURCE_INTELLIGENCE,
+            status=SpecialistRunStatus.QUEUED,
+            target_refs=[f"asset:{logical_id}"],
+            input_generation=snapshot.generation,
+            input_etag=snapshot.etag,
+            related_run_id="agent-run-del",
+            prompt_spec_id="file_project_json.source_intelligence.v1",
+            caused_by_message_id="message-del",
+            caused_by_message_seq=1,
+            metadata={"parentActionId": "delegate-call-del"},
+        ),
+    )
+    return run_id
+
+
+def _upload_source(client, payload, key):
+    return client.post(
+        "/projects/project-1/assets",
+        headers={"Idempotency-Key": key},
+        json=payload,
+    )
+
+
+_TEXT_ASSET_PAYLOAD = {
+    "clientRequestId": "asset-del-1",
+    "kind": "text",
+    "name": "brief.txt",
+    "value": "hello creator",
+    "postIngestAction": "ATTACH_SOURCE",
+}
+
+
+def test_delete_asset_cancels_live_run_without_stealing_its_terminal_event(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_scenario,
+) -> None:
+    # When a live worker owns the run the route must defer to it: the worker
+    # persists CANCELLED and emits subagent.failed{cancelled}, which is what
+    # disarms the "素材理解中" status bar. A pre-emptive durable CAS would
+    # make the worker skip its event and freeze the indicator.
+    app, services = _app(tmp_path)
+    runtime = _RecordingRuntime(owns_run=True)
+    monkeypatch.setattr(
+        file_asset_routes,
+        "get_creator_agent_runtime",
+        lambda: runtime,
+    )
+
+    async def scenario(client):
+        created = await _upload_source(
+            client,
+            _TEXT_ASSET_PAYLOAD,
+            "asset-del-1",
+        )
+        version_id = created.json()["assetVersionId"]
+        run_id = _seed_active_source_run(services, version_id, "spec-live")
+        deleted = await client.delete(
+            f"/projects/project-1/assets/{version_id}",
+            headers={"Idempotency-Key": "del-live"},
+        )
+        executions = ProjectExecutionStore(services.root)
+        return deleted, executions.get_specialist_run("project-1", run_id)
+
+    deleted, run = run_scenario(app, scenario)
+    assert deleted.status_code == 204
+    assert runtime.calls == [
+        ("project-1", "spec-live", "source_asset_deleted"),
+    ]
+    assert run.status is SpecialistRunStatus.QUEUED
+
+
+def test_delete_asset_settles_durable_run_when_no_live_owner(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_scenario,
+) -> None:
+    # With no in-process worker (orphan / durable-only media run) the route
+    # still has to converge the durable record so the stale activity stops
+    # being reconstructed as "in progress" on reload.
+    app, services = _app(tmp_path)
+    runtime = _RecordingRuntime(owns_run=False)
+    monkeypatch.setattr(
+        file_asset_routes,
+        "get_creator_agent_runtime",
+        lambda: runtime,
+    )
+
+    async def scenario(client):
+        created = await _upload_source(
+            client,
+            _TEXT_ASSET_PAYLOAD,
+            "asset-del-1",
+        )
+        version_id = created.json()["assetVersionId"]
+        run_id = _seed_active_source_run(services, version_id, "spec-orphan")
+        deleted = await client.delete(
+            f"/projects/project-1/assets/{version_id}",
+            headers={"Idempotency-Key": "del-orphan"},
+        )
+        executions = ProjectExecutionStore(services.root)
+        return deleted, executions.get_specialist_run("project-1", run_id)
+
+    deleted, run = run_scenario(app, scenario)
+    assert deleted.status_code == 204
+    assert runtime.calls == [
+        ("project-1", "spec-orphan", "source_asset_deleted"),
+    ]
+    assert run.status is SpecialistRunStatus.CANCELLED
+    assert run.metadata.get("cancelReason") == "SOURCE_ASSET_DELETED"

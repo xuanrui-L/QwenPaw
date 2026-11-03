@@ -2066,9 +2066,11 @@ async def delete_source_asset_version(
     # reference the asset as `asset:<logicalAssetId>` (delegate_to_agent
     # contract) or `source:<sourceId>` (internal command). We cancel when the
     # logical asset matches, or when its `source:` target no longer exists
-    # after deletion. NOTE: this is a durable-state cancellation via the
-    # execution store's CAS transition; in-process worker termination and
-    # scratch/credit release remain owned by each scheduler's own cancel path.
+    # after deletion. A live in-process specialist worker is cancelled through
+    # the runtime so it emits its own terminal lifecycle event; only runs with
+    # no live owner here fall back to a durable-state CAS cancellation via the
+    # execution store, whose scratch/credit release remain owned by each
+    # scheduler's own cancel path.
     try:
         exec_store = ProjectExecutionStore(services.root)
         runs = await asyncio.to_thread(
@@ -2076,6 +2078,7 @@ async def delete_source_asset_version(
             project_id,
         )
         tasks = await asyncio.to_thread(exec_store.list_tasks, project_id)
+        runtime = get_creator_agent_runtime()
 
         remaining_source_ids = set(
             snapshot.project.sources.sources.items.keys(),
@@ -2103,6 +2106,21 @@ async def delete_source_asset_version(
                         should_cancel = True
                         break
             if not should_cancel:
+                continue
+
+            # Prefer cancelling the live in-process worker: it persists the
+            # CANCELLED status AND emits the terminal `subagent.failed`
+            # lifecycle event, which is what disarms the Agent status bar. A
+            # durable-only transition below would leave the worker running
+            # (its events keep the activity "in progress"), and pre-transitioning
+            # the run would make the worker skip its terminal event and freeze
+            # the indicator. Only fall back to the durable CAS path when no live
+            # worker owns the run in this process.
+            if runtime is not None and runtime.cancel_specialist_run(
+                project_id,
+                run.run_id,
+                reason="source_asset_deleted",
+            ):
                 continue
 
             try:
