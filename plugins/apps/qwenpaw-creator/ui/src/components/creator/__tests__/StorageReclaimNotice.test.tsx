@@ -72,6 +72,11 @@ describe("StorageReclaimNotice", () => {
     });
     fireEvent.click(buttons[buttons.length - 1]);
 
+    // The press is the decision: the notice steps aside before the sweep
+    // answers, instead of spinning for the whole deletion.
+    expect(
+      document.querySelector("[data-storage-reclaim-notice]"),
+    ).toBeNull();
     await waitFor(() =>
       expect(mockedReclaim).toHaveBeenCalledWith("project-a"),
     );
@@ -81,7 +86,7 @@ describe("StorageReclaimNotice", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps the notice when the press fails", async () => {
+  it("brings the notice back when the press fails", async () => {
     mockedReclaim.mockRejectedValue(new Error("boom"));
     const onConfirmed = vi.fn();
     render(
@@ -102,8 +107,16 @@ describe("StorageReclaimNotice", () => {
       return found;
     });
     fireEvent.click(buttons[buttons.length - 1]);
+    expect(
+      document.querySelector("[data-storage-reclaim-notice]"),
+    ).toBeNull();
 
     expect(await screen.findByText(/无法释放沉淀历史/)).toBeInTheDocument();
-    expect(onConfirmed).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        document.querySelector("[data-storage-reclaim-notice]"),
+      ).not.toBeNull(),
+    );
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
   });
 });

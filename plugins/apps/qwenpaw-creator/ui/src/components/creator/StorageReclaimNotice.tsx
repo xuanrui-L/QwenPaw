@@ -29,6 +29,7 @@ export default function StorageReclaimNotice({
 }: StorageReclaimNoticeProps) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
   const size = formatBytes(pendingBytes);
 
   const askAndReclaim = () => {
@@ -38,28 +39,39 @@ export default function StorageReclaimNotice({
       okText: t("storage.confirmButton"),
       cancelText: t("common.cancel"),
       okButtonProps: { danger: true },
-      onOk: async () => {
+      onOk: () => {
+        // The press is the decision; the deletion is minutes for a 17 GB
+        // Project and the receipt lands before it finishes. Waiting for the
+        // whole sweep kept a spinning button on screen long after the space
+        // was gone, so the notice steps aside at once and reports the real
+        // delta when the sweep answers. A refused press brings it back.
+        setDismissed(true);
         setBusy(true);
-        try {
-          const result = await confirmProjectReclaim(projectId);
-          message.success(
-            t("storage.confirmed", {
-              size: formatBytes(result.releasedBytes + result.transactionBytes),
-            }),
-          );
-          onConfirmed();
-        } catch (error) {
-          const detail =
-            error instanceof CreatorHttpError
-              ? error.userMessage
-              : String(error);
-          message.error(t("storage.failed", { message: detail }));
-        } finally {
-          setBusy(false);
-        }
+        onConfirmed();
+        confirmProjectReclaim(projectId)
+          .then((result) => {
+            message.success(
+              t("storage.confirmed", {
+                size: formatBytes(
+                  result.releasedBytes + result.transactionBytes,
+                ),
+              }),
+            );
+          })
+          .catch((error) => {
+            setDismissed(false);
+            const detail =
+              error instanceof CreatorHttpError
+                ? error.userMessage
+                : String(error);
+            message.error(t("storage.failed", { message: detail }));
+          })
+          .finally(() => setBusy(false));
       },
     });
   };
+
+  if (dismissed) return null;
 
   return (
     <div

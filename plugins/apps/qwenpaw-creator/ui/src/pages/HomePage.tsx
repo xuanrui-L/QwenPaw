@@ -341,6 +341,22 @@ export default function HomePage() {
     void fetchStorage();
   }, [fetchStorage]);
 
+  // A reclaim can also finish outside this tab (the confirm route from a
+  // script, another tab, or the boot sweep), and nothing else re-reads the
+  // profile, so coming back to the window refreshes the notice instead of
+  // leaving a button for space that is already gone.
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") void fetchStorage();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [fetchStorage]);
+
   // Set which view to display based on a search parameter. Strip the param
   // after consuming it, but bail when it's absent so the strip-induced
   // searchParams change doesn't re-run setView a second time.
