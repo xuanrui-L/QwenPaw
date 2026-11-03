@@ -30,6 +30,7 @@ from services.file_agent_runtime.model_client import (
     AgentScopeVlmChatClient,
     AgentToolCall,
     CallbackAgentChatClient,
+    ModelContextUnfitError,
     OverflowAfterOutputError,
     RateLimitExhaustedError,
     RateLimitRetryNotice,
@@ -1845,24 +1846,62 @@ def test_a_refusal_that_survived_both_steps_says_what_it_gave_up():
 
     The input that keeps failing is no longer the input the caller sent, so
     the error without the demotion record would be describing a request that
-    nobody assembled.
+    nobody assembled. One upload stays put because no durable copy could be
+    written for it, which is what makes the surviving request still too big
+    after every movable block has moved.
     """
-    failure = _refusal(5_000)
-    client = _ladder_client(lambda _url: "d" * 64)
+    archived = _data_url(b"\x10" * (2 * 1024 * 1024), mime="image/jpeg")
+    unstorable = _data_url(b"\x20" * (2 * 1024 * 1024), mime="image/jpeg")
+    messages = [
+        {"role": "system", "content": "A" * 5_000},
+        {
+            "role": "tool",
+            "tool_call_id": "call-frame",
+            "name": "read",
+            "content": [
+                {"type": "text", "text": "观察到的帧"},
+                {"type": "image_url", "image_url": {"url": archived}},
+            ],
+        },
+        {
+            "role": "user",
+            "source": "user",
+            "content": [
+                {"type": "text", "text": "第一张参考图"},
+                {"type": "image_url", "image_url": {"url": archived}},
+            ],
+        },
+        {
+            "role": "user",
+            "source": "user",
+            "content": [
+                {"type": "text", "text": "第二张参考图"},
+                {"type": "image_url", "image_url": {"url": unstorable}},
+            ],
+        },
+    ]
+    max_bytes = 9_000
 
-    with pytest.raises(AgentModelError) as caught:
+    def vault(url: str) -> str | None:
+        return "f" * 64 if url == archived else None
+
+    with pytest.raises(ModelContextBudgetError) as caught:
+        prepare_model_messages(messages, [], max_bytes=max_bytes)
+    client = _ladder_client(vault)
+
+    with pytest.raises(ModelContextUnfitError) as unfit:
         client._fit_refused_request(
-            _ladder_payload(),
+            messages,
             [],
-            max_bytes=5_000,
-            failure=failure,
+            max_bytes=max_bytes,
+            failure=caught.value,
         )
 
-    text = str(caught.value)
+    text = str(unfit.value)
     assert "媒体降级记录" in text
     assert "派生观察媒体 1 块（已存档 1 块）" in text
     assert "真人附件媒体 1 块（已存档 1 块）" in text
-    assert "sha256:" + "d" * 12 in text
+    assert "sha256:" + "f" * 12 in text
 
 
 def test_turning_demotion_off_restores_the_hard_local_refusal(monkeypatch):
@@ -1922,6 +1961,76 @@ def test_only_the_priciest_upload_moves_when_one_was_enough():
     assert prepared[2]["content"][1]["image_url"]["url"] == small
     assert prepared[2]["content"][0]["text"] == "按这张参考图改分镜"
     assert "真人附件媒体 1 块（已存档 1 块）" in note
+
+
+def test_uploads_stay_put_when_text_is_what_overflows_the_budget():
+    """An upload moves for media-shaped pressure, and for nothing else.
+
+    The overage here is contract text: every inline block together costs less
+    than the gap, so no number of demotions could fit the request. Running the
+    ladder anyway would take a person's references away on the way to the
+    identical failure, and the retry would take the rest.
+    """
+    first = _data_url(b"\x22" * (300 * 128), mime="image/jpeg")
+    second = _data_url(b"\x33" * (300 * 128), mime="image/jpeg")
+    messages = [
+        {"role": "system", "content": "A" * 40_000},
+        _attachment(first, seq=21),
+        _attachment(second, seq=22),
+    ]
+    max_bytes = 30_000
+    stored: list[str] = []
+
+    def store(url: str) -> str:
+        stored.append(url)
+        return "f" * 64
+
+    client = _ladder_client(store)
+
+    with pytest.raises(ModelContextBudgetError) as caught:
+        prepare_model_messages(messages, [], max_bytes=max_bytes)
+
+    with pytest.raises(ModelContextUnfitError) as unfit:
+        client._fit_refused_request(
+            messages,
+            [],
+            max_bytes=max_bytes,
+            failure=caught.value,
+        )
+
+    assert stored == []
+    assert "真人附件未移动" in str(unfit.value)
+    assert [message["content"][1]["type"] for message in messages[1:]] == [
+        "image_url",
+        "image_url",
+    ]
+
+
+def test_the_gap_guard_only_dismisses_media_that_cannot_pay_for_the_gap():
+    """The gate reads the refusal's own accounting and errs toward moving.
+
+    Missing numbers and a token-window refusal stay with the ladder: a byte
+    charge cannot answer a token gap, and a guard that dismissed relief on an
+    unknown would turn a recoverable overflow into a hard refusal.
+    """
+    assert model_context.media_could_bridge_the_gap({})
+    assert model_context.media_could_bridge_the_gap(
+        {"max_bytes": 30_000, "used_bytes": 20_000, "media_charge_bytes": 0},
+    )
+    assert not model_context.media_could_bridge_the_gap(
+        {
+            "max_bytes": 30_000,
+            "used_bytes": 60_000,
+            "media_charge_bytes": 20_000,
+        },
+    )
+    assert model_context.media_could_bridge_the_gap(
+        {
+            "max_bytes": 30_000,
+            "used_bytes": 60_000,
+            "media_charge_bytes": 40_000,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2476,12 +2585,13 @@ def test_a_text_only_overflow_is_answered_by_retiring_old_tool_exchanges():
 
 
 def test_an_overflow_that_cannot_be_made_smaller_fails_as_a_model_error():
-    """The last refusal stays a retryable model error, with the provider's text.
+    """The proven-unfittable input stops the run instead of resuming it.
 
     Handing back the provider's raw exception made the driver classify the run
-    as a non-retryable agent failure, so an oversized session reported nothing
-    it could act on and offered no retry. The recovery boundary owns the stop;
-    the error type still belongs to the model.
+    as a generic agent failure with nothing the user could act on, so the text
+    stays an AgentModelError family member. What changed is the verdict on a
+    retry: every lever this client owns has been pulled, so an automatic
+    resume would only re-send bytes the same window already refused.
     """
     messages = [
         {"role": "system", "content": "项目创作契约"},
@@ -2507,3 +2617,4 @@ def test_an_overflow_that_cannot_be_made_smaller_fails_as_a_model_error():
     assert provider.calls == 1
     assert asked == []
     assert "maximum context length" in str(caught.value)
+    assert isinstance(caught.value, ModelContextUnfitError)

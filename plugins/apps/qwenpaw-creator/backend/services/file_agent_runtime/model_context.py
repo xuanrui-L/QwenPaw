@@ -821,6 +821,31 @@ def format_budget_failure(exc: ModelContextBudgetError) -> str:
     return "\n".join(lines)
 
 
+def media_could_bridge_the_gap(diagnostics: Mapping[str, Any]) -> bool:
+    """Whether retiring inline media could plausibly close a refusal's gap.
+
+    The accounting that names the overage also names what every inline block
+    costs, so a request overflowing on contract text can be told apart from
+    one overflowing on a screenshot. Only the second kind earns a human upload
+    being moved: an attachment cannot shrink text by a byte, so demoting the
+    whole batch spends the uploads on the way to the same failure.
+
+    A refusal carrying no diagnostics answers ``True``, so the ladder runs
+    exactly as it did before this gate existed.
+    """
+    if not diagnostics:
+        return True
+    used = int(diagnostics.get("used_bytes") or 0)
+    ceiling = int(diagnostics.get("max_bytes") or 0)
+    charged = int(diagnostics.get("media_charge_bytes") or 0)
+    if used <= ceiling:
+        # The token guard refused, not the byte guard. Media is still the only
+        # thing this ladder can move, and a byte charge is not comparable to a
+        # token gap, so the guard is not dismissed here.
+        return True
+    return charged >= used - ceiling
+
+
 def format_demotion_record(
     entries: Sequence[tuple[str, Mapping[str, Any]]],
 ) -> str:
