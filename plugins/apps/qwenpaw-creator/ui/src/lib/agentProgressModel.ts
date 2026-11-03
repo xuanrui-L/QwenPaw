@@ -605,6 +605,18 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
       (task) =>
         task.specialistRunId === run.id || run.taskRefs?.includes(task.id),
     );
+    // Recovery reaps admissions that outlived their process before a Task
+    // existed (ORPHANED_QUEUED_RUN). Nothing ever executed, no task carries
+    // the outcome, and the target is already satisfied or failed elsewhere:
+    // listing it as an operation would keep a dead enqueue on the board
+    // forever, which is exactly the "waiting" row this projection exists to
+    // prevent.
+    if (
+      run.status === "CANCELLED" &&
+      linkedTasks.length === 0 &&
+      (run.finalSummaryText ?? "").startsWith("ORPHANED_QUEUED_RUN")
+    )
+      continue;
     if (
       !["RUNNING_MODEL", "WAITING_AUTHORIZATION", "BLOCKED"].includes(
         run.status,
