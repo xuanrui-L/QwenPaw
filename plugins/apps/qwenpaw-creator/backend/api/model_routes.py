@@ -400,10 +400,10 @@ def _assemble_model_config(
         include_environment
         and os.environ.get("WEB_GROUNDING_VALIDATION_SOURCE")
     ):
-        base["grounding"][
-            "validation_source"
-        ] = validation_source_from_reuse_llm(
-            base["grounding"].get("reuse_llm", True),
+        base["grounding"]["validation_source"] = (
+            validation_source_from_reuse_llm(
+                base["grounding"].get("reuse_llm", True),
+            )
         )
     base["grounding"]["reuse_llm"] = reuse_llm_from_validation_source(
         base["grounding"].get("validation_source") or "",
@@ -700,7 +700,9 @@ def _supports_dashscope_native_search(item: ModelConfigItem) -> bool:
     protocol = item.protocol.casefold()
     host = urlparse(item.base_url).hostname or ""
     return (
-        "dashscope" in protocol or "百炼" in item.protocol or "dashscope" in host
+        "dashscope" in protocol
+        or "百炼" in item.protocol
+        or "dashscope" in host
     )
 
 
@@ -2048,7 +2050,9 @@ def _probe_target_refusal(
         )
     if target_origin not in homes:
         default_note = (
-            "本次目标来自内置默认地址，该分项尚未保存 Base URL。" if unconfigured_target else ""
+            "本次目标来自内置默认地址，该分项尚未保存 Base URL。"
+            if unconfigured_target
+            else ""
         )
         return (
             "安全限制：本次探测会使用已保存的 API Key，但目标地址与该 Key 保存时的"
@@ -2238,6 +2242,9 @@ def _assert_probe_peer(response: Any) -> None:
 # all prove the credential and nothing more.  Inferring the level from the
 # verb is what let that listing claim a verified voice.
 _ATTEST_HANDLED = "handled"
+# A synthesis probe is graded on the audio URL production goes on to download;
+# a 200 without one answered, it did not verify.
+_ATTEST_TTS = "tts-audio"
 _ATTEST_ASR_WHISPER = "asr-whisper"
 _ATTEST_ASR_QWEN3 = "asr-qwen3"
 _ATTEST_ASR_FUN = "asr-fun"
@@ -2323,7 +2330,8 @@ def _grade_fun_asr_terminal(
         return False, ""
     if not _walkable_entries(results):
         return False, (
-            f"转写任务的 results 不是列表（{type(results).__name__}），" "生产遍历子任务会失败"
+            f"转写任务的 results 不是列表（{type(results).__name__}），"
+            "生产遍历子任务会失败"
         )
     succeeded = next(
         (
@@ -2346,7 +2354,10 @@ def _grade_fun_asr_terminal(
             + (f"：{failures[:160]}" if failures else "")
         )
     if not str(succeeded.get("transcription_url") or ""):
-        return False, "转写子任务已成功但未返回 transcription_url，生产下载转写结果时会失败"
+        return (
+            False,
+            "转写子任务已成功但未返回 transcription_url，生产下载转写结果时会失败",
+        )
     return True, ""
 
 
@@ -2391,7 +2402,9 @@ def _non_json_transcript_refusal(body: str, content_type: str) -> str:
     sample = _body_sample(body)
     lowered = sample.casefold()
     if lowered.startswith("<"):
-        return f"转写探测收到 HTML 页面（可能是登录拦截），不是转写结果：{sample}"
+        return (
+            f"转写探测收到 HTML 页面（可能是登录拦截），不是转写结果：{sample}"
+        )
     if lowered.startswith("event:") or lowered.startswith("data:"):
         return (
             f"转写探测收到流式响应（{content_type or '未知类型'}），"
@@ -2426,7 +2439,8 @@ def _grade_whisper_document(document: Mapping[str, Any]) -> tuple[bool, str]:
         segments = document["segments"]
         if not isinstance(segments, (list, tuple)):
             return False, (
-                "转写结果的 segments 不是列表" f"（{type(segments).__name__}），生产逐项读取会失败"
+                "转写结果的 segments 不是列表"
+                f"（{type(segments).__name__}），生产逐项读取会失败"
             )
         for raw in segments:
             if not isinstance(raw, Mapping):
@@ -2441,7 +2455,9 @@ def _grade_whisper_document(document: Mapping[str, Any]) -> tuple[bool, str]:
                 try:
                     float(value)
                 except (TypeError, ValueError):
-                    return False, ("转写结果的 segments 时间戳不是数值，生产转换会失败")
+                    return False, (
+                        "转写结果的 segments 时间戳不是数值，生产转换会失败"
+                    )
         return True, ""
     if "text" in document:
         # Without ``verbose_json`` the answer is a bare ``text``; the reader
@@ -2495,6 +2511,42 @@ def _grade_qwen3_document(document: Mapping[str, Any]) -> tuple[bool, str]:
     return False, ""
 
 
+def _grade_tts_attestation(response: httpx.Response) -> tuple[bool, str]:
+    """Grade a synthesis probe on the field production actually reads.
+
+    ``tts_model`` takes ``output.audio.url`` and downloads it, so a 2xx whose
+    body carries no such URL - an acknowledgement, a queue receipt, an error
+    page shaped like JSON - proves the endpoint answered and nothing about the
+    model producing audio. That is the difference between a configuration the
+    operator can trust and one that only looks reachable.
+    """
+
+    body = response.text or ""
+    if not body.strip():
+        return False, "语音合成探测收到空响应，无法确认模型可合成"
+    try:
+        document = json.loads(body)
+    except ValueError:
+        return False, f"语音合成探测返回非 JSON 响应：{_body_sample(body)}"
+    if not isinstance(document, Mapping):
+        return False, (
+            "语音合成探测返回的 JSON 顶层不是对象，生产按字段读取会失败："
+            f"{_body_sample(body)}"
+        )
+    wrapped = _error_wrapped_in_2xx(document)
+    if wrapped:
+        return False, f"语音合成探测在 2xx 响应中返回错误：{wrapped}"
+    output = document.get("output")
+    audio = output.get("audio") if isinstance(output, Mapping) else None
+    url = audio.get("url") if isinstance(audio, Mapping) else None
+    if not (isinstance(url, str) and url.strip()):
+        return False, (
+            "语音合成探测未返回 output.audio.url，生产无从下载音频："
+            f"{_body_sample(body)}"
+        )
+    return True, ""
+
+
 _ASR_DOCUMENT_GRADERS: dict[
     str,
     Callable[[Mapping[str, Any]], tuple[bool, str]],
@@ -2523,6 +2575,8 @@ def _grade_attestation(
     """
     if not attests:
         return False, ""
+    if attests == _ATTEST_TTS:
+        return _grade_tts_attestation(response)
     grader = _ASR_DOCUMENT_GRADERS.get(attests)
     if grader is None:
         return True, ""
@@ -2536,7 +2590,8 @@ def _grade_attestation(
         return False, _non_json_transcript_refusal(body, content_type)
     if not isinstance(document, Mapping):
         return False, (
-            "转写探测返回的 JSON 顶层不是对象，生产按字段读取会失败：" f"{_body_sample(body)}"
+            "转写探测返回的 JSON 顶层不是对象，生产按字段读取会失败："
+            f"{_body_sample(body)}"
         )
     wrapped = _error_wrapped_in_2xx(document)
     if wrapped:
@@ -2658,15 +2713,23 @@ def _probe_payload(
     if body.type == "tts":
         # The upload-policy probe accepts any model string, so it cannot catch a
         # mistyped model name. Synthesizing one character costs a fraction of a
-        # cent and actually validates the model/voice pair. Models without
-        # system voices cannot synthesize at all until a character voice
-        # exists, so for those verify the credential against the voice-listing
-        # surface instead.
+        # cent and actually validates the model/voice pair - but only over the
+        # route that model really speaks on. A WebSocket model is not served by
+        # the HTTP multimodal-generation endpoint this branch would call, so
+        # probing it there answers for a route production never uses: the
+        # configuration reads green while narration stays broken, or red while
+        # narration works. Either way it is the mistake this endpoint's whole
+        # job is to avoid. Models without system voices cannot synthesize at all
+        # until a character voice exists. Both cases fall back to the voice
+        # listing, which proves the credential and nothing about the timbre.
         from models.tts_capabilities import require_capability
 
         parsed = urlparse(body.base_url)
         capability = require_capability(body.model_name)
-        if not capability.has_system_voices:
+        if (
+            not capability.has_system_voices
+            or capability.transport == "websocket"
+        ):
             action = (
                 "list_voice" if capability.family == "cosyvoice" else "list"
             )
@@ -2686,7 +2749,7 @@ def _probe_payload(
             "/api/v1/services/aigc/multimodal-generation/generation",
             headers,
             {
-                "_attests": _ATTEST_HANDLED,
+                "_attests": _ATTEST_TTS,
                 "model": body.model_name,
                 "input": {
                     "text": "嗨",
@@ -2760,7 +2823,8 @@ def _probe_payload(
         )
         if not capability.known:
             unknown_capability_error = (
-                "VIDEO_MODEL_CAPABILITY_UNKNOWN: 精确模型 ID 与协议组合" + "未收录，已停止连接探测"
+                "VIDEO_MODEL_CAPABILITY_UNKNOWN: 精确模型 ID 与协议组合"
+                + "未收录，已停止连接探测"
             )
             raise ValueError(unknown_capability_error)
         if video_backend == "veo":
@@ -3012,7 +3076,8 @@ async def test_model_connection(
             ok=False,
             ms=round((time.monotonic() - start) * 1000),
             error=(
-                f"连接超时，请检查网络或 Base URL" f"（当前 Base URL: {selected.base_url}）"
+                f"连接超时，请检查网络或 Base URL"
+                f"（当前 Base URL: {selected.base_url}）"
             ),
         )
     except (

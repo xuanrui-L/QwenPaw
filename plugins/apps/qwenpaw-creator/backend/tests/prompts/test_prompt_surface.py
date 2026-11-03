@@ -122,7 +122,10 @@ def test_medium_rule_keeps_the_storyboard_medium_exception() -> None:
     assert "`storyboard_prompt` 是中间分镜" in rule
     assert "粗铅笔" in rule and "炭笔" in rule
     assert "只补足用户没有指明的目标" in rule
-    assert "storyboard_prompt 与 video_prompt 都要显式声明本项目的渲染媒介" not in rule
+    assert (
+        "storyboard_prompt 与 video_prompt 都要显式声明本项目的渲染媒介"
+        not in rule
+    )
 
 
 def test_creator_duration_is_injected_from_the_active_video_model(
@@ -396,6 +399,26 @@ def test_scenario_steers_how_the_voice_is_used(monkeypatch) -> None:
     assert "tts_generation" not in other
 
 
+@pytest.mark.unit
+def test_voice_lists_are_summarised_not_dumped_into_the_prompt(
+    monkeypatch,
+) -> None:
+    """One model publishes 88 system voices. The prompt states the count and
+    samples a few names: a transcript-sized enum teaches the agent to guess at
+    near-identical names instead of omitting the parameter."""
+
+    _tts(monkeypatch, model="qwen-audio-3.1-tts-flash")
+    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
+    assert "共 88 个" in editing
+    assert "longanhuan_v3.1" in editing
+    assert "loongmary_v3.1" not in editing
+    # The delegator never hears the names, only what the model can do.
+    delegator = render_creator_system_prompt(
+        project_id="project-guidance-test",
+    )
+    assert "longanhuan_v3.1" not in delegator
+
+
 @pytest.mark.parametrize(
     ("video_model", "backend", "supports_reference_voice"),
     [
@@ -410,7 +433,9 @@ def test_native_dialogue_voice_guidance_matches_video_capability(
     backend,
     supports_reference_voice,
 ) -> None:
-    _tts(monkeypatch, model="qwen-audio-3.0-tts-flash")
+    # A model that publishes no system voices: the case this guards. The
+    # Qwen-Audio models all ship lists now, so CosyVoice stands in.
+    _tts(monkeypatch, model="cosyvoice-v3.5-plus")
     monkeypatch.setattr(
         model_config,
         "get_video_model_name",
