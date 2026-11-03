@@ -34,7 +34,11 @@ import httpx
 
 from models import config
 from models.media_transport import upload_local_file_to_dashscope_temp
-from models.tts_capabilities import TtsModelCapability, require_capability
+from models.tts_capabilities import (
+    TtsModelCapability,
+    require_capability,
+    resolve_system_voice,
+)
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
 from utils.paths import local_path_from_file_url
@@ -360,31 +364,28 @@ async def synthesize(
     else:
         model = capability.model
         requested = (voice or "").strip()
-        active_voice = requested or config.get_tts_voice()
+        configured = config.get_tts_voice()
         if not capability.has_system_voices:
             raise ValueError(
                 f"{model} has no system voices; create a character voice "
                 "first and synthesize with its voice id",
             )
-        if active_voice not in capability.system_voices:
-            if requested:
-                # Fail fast on a made-up voice name: the provider would reject
-                # it anyway, but only after the call burned an execution
-                # authorization round-trip.
-                raise ValueError(
-                    f"unknown voice {requested!r} for {model}; its system "
-                    f"voices are {_voice_preview(capability.system_voices)}",
-                )
-            # One default voice is configured across every model, while each
-            # model publishes its own list, so switching the synthesis model
-            # outside the configuration dialog leaves a name this model cannot
-            # speak. Refusing it would silence every narration in that
-            # deployment, so take the model's own first voice and say so.
-            active_voice = capability.system_voices[0]
+        active_voice = resolve_system_voice(capability, requested, configured)
+        if active_voice is None:
+            # Fail fast on a made-up voice name: the provider would reject
+            # it anyway, but only after the call burned an execution
+            # authorization round-trip.
+            raise ValueError(
+                f"unknown voice {requested!r} for {model}; its system "
+                f"voices are {_voice_preview(capability.system_voices)}",
+            )
+        if not requested and active_voice != configured.strip():
+            # The deployment default is not this model's voice; say what was
+            # actually spoken, because it is what gets recorded on the asset.
             logger.warning(
                 "TTS default voice %r is not a system voice of %s; narrating "
                 "with %s instead",
-                config.get_tts_voice(),
+                configured,
                 model,
                 active_voice,
             )

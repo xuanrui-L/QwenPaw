@@ -411,7 +411,11 @@ def test_voice_lists_are_summarised_not_dumped_into_the_prompt(
     editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
     assert "共 88 个" in editing
     assert "longanhuan_v3.1" in editing
-    assert "loongmary_v3.1" not in editing
+    # The line samples the first six names, so pin the boundary itself: a
+    # revert to the whole table then moves two assertions instead of the one
+    # vacuous check a name no model publishes would always have passed.
+    assert "qiaoxiaojiao_v3.1" in editing
+    assert "xiaxiaochen_v3.1" not in editing
     # The delegator never hears the names, only what the model can do.
     delegator = render_creator_system_prompt(
         project_id="project-guidance-test",
