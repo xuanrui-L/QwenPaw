@@ -9,6 +9,8 @@ from dataclasses import replace
 import hashlib
 import io
 import json
+import threading
+from typing import Any
 
 import pytest
 from PIL import Image
@@ -2402,7 +2404,402 @@ def test_cancel_specialist_run_signals_only_a_live_owner(
             is False
         )
 
+        # Registered but not yet spawned (admission is still inside its
+        # awaits): the handle owns the run and settles the revocation
+        # itself, so a concurrent durable CAS would only race it.
+        registering = _SpecialistHandle(
+            project_id=PROJECT_ID,
+            specialist_run_id="spec-registering",
+        )
+        driver._specialist_tasks[PROJECT_ID]["spec-registering"] = registering
+        assert (
+            driver.cancel_specialist_run(
+                PROJECT_ID,
+                "spec-registering",
+                reason="source_asset_deleted",
+            )
+            is True
+        ), "admission in flight owns the run even before the worker exists"
+        assert registering.cancel_reason == "source_asset_deleted"
+        # A repeated signal still reports this process as the owner (its
+        # cleanup emits the terminal event), but it neither rewrites the
+        # first reason nor claims the run for somebody else.
+        assert (
+            driver.cancel_specialist_run(
+                PROJECT_ID,
+                "spec-registering",
+                reason="project_deleted",
+            )
+            is True
+        )
+        assert registering.cancel_reason == "source_asset_deleted"
+
     asyncio.run(scenario())
+
+
+def _upload_one_asset(services, *, scope: str) -> str:
+    """Publish one local image Asset and return its delegation target."""
+
+    ingested, _replayed = _ingest_many_sync(
+        services,
+        project_id=PROJECT_ID,
+        key=f"{scope}-upload",
+        inputs=[
+            _AssetInput(
+                name="lulu.png",
+                content=_png_bytes_for_grounding(),
+                media_type="image/png",
+            ),
+        ],
+        attach_source=False,
+        scope=scope,
+    )
+    return f"asset:{ingested['items'][0]['assetId']}"
+
+
+def _delegating_callback(
+    *,
+    role: str,
+    call_id: str,
+    target_ref: str,
+    specialist_started: asyncio.Event | None = None,
+):
+    """Delegate once from the mainline; the specialist may hang its turn.
+
+    Both roles share one model client, so the tool manifest tells them
+    apart: only the mainline is offered ``delegate_to_agent``.
+    """
+
+    turns = {"specialist": 0}
+    delegations = {"count": 0}
+
+    async def callback(_messages, tools):
+        names = {item["function"]["name"] for item in tools}
+        if "delegate_to_agent" not in names:
+            turns["specialist"] += 1
+            if specialist_started is not None:
+                specialist_started.set()
+                await asyncio.Event().wait()
+            return AgentModelTurn(content="[SUCCESS] 观察完成。")
+        delegations["count"] += 1
+        if delegations["count"] == 1:
+            return _delegate_call(
+                call_id,
+                role=role,
+                target_refs=[target_ref],
+                task="理解上传的素材",
+            )
+        return AgentModelTurn(content="收到。")
+
+    return callback, turns
+
+
+def _only_specialist_run(driver):
+    runs = driver.executions.list_specialist_runs(PROJECT_ID)
+    assert len(runs) == 1, runs
+    return runs[0]
+
+
+def _subagent_lifecycle(events, run_id: str):
+    return [
+        item
+        for item in events
+        if item.event_type.startswith("subagent.")
+        and item.payload.get("runId") == run_id
+    ]
+
+
+def test_cancel_during_source_preparation_still_terminalizes_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Revocation inside material preparation must still reach a terminal.
+
+    ``source_intelligence_content_parts`` runs before the inner specialist
+    try-block, so a stop landing there used to unwind the worker without
+    persisting CANCELLED and without ``subagent.failed{cancelled}`` — the
+    Agent status bar kept showing “素材理解中” forever, exactly the report
+    this whole change is about.
+    """
+
+    preparation_started = asyncio.Event()
+
+    async def hanging_preparation(_services, **_kwargs):
+        preparation_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("preparation must never resume")
+
+    monkeypatch.setattr(
+        driver_module,
+        "source_intelligence_content_parts",
+        hanging_preparation,
+    )
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="理解这个素材",
+        )
+        target_ref = _upload_one_asset(
+            services,
+            scope="delegate-prep-cancel",
+        )
+        callback, turns = _delegating_callback(
+            role="source_intelligence_agent",
+            call_id="delegate-prep-cancel",
+            target_ref=target_ref,
+        )
+        driver = _driver(services, callback)
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await asyncio.wait_for(preparation_started.wait(), timeout=30.0)
+            run = _only_specialist_run(driver)
+            assert run.status.value == "RUNNING_MODEL"
+            worker = driver._specialist_tasks[PROJECT_ID][run.run_id].task
+            assert worker is not None
+            claimed = driver.cancel_specialist_run(
+                PROJECT_ID,
+                run.run_id,
+                reason="source_asset_deleted",
+            )
+            done, _pending = await asyncio.wait({worker}, timeout=30.0)
+            assert worker in done
+            assert worker.cancelled()
+            await _wait_for(
+                lambda: driver.executions.get_specialist_run(
+                    PROJECT_ID,
+                    run.run_id,
+                ).status.value
+                == "CANCELLED",
+            )
+            await _wait_consumed(services, 1)
+            await driver.wait_until_idle(PROJECT_ID, timeout_seconds=30.0)
+            return (
+                claimed,
+                driver.executions.get_specialist_run(
+                    PROJECT_ID,
+                    run.run_id,
+                ),
+                services.sessions.list_events(PROJECT_ID, SESSION_ID),
+                run.run_id,
+                turns,
+            )
+        finally:
+            await driver.stop()
+
+    claimed, run, events, run_id, turns = asyncio.run(scenario())
+
+    assert claimed is True
+    assert run.status.value == "CANCELLED"
+    assert turns["specialist"] == 0, "a stopped run may not pay for a turn"
+    lifecycle = _subagent_lifecycle(events, run_id)
+    assert [item.event_type for item in lifecycle] == [
+        "subagent.accepted",
+        "subagent.started",
+        "subagent.failed",
+    ]
+    assert lifecycle[-1].payload.get("cancelled") is True
+
+
+def test_cancel_before_registration_terminates_admission_without_model_call(
+    tmp_path,
+) -> None:
+    """A stop inside the admission awaits must not reach the model.
+
+    The handle is registered before the durable record exists, so
+    ``cancel_specialist_run`` can claim a run whose worker was never
+    spawned; admission then settles the revocation itself at its next
+    check instead of paying for work a human already cancelled.
+    """
+
+    started_parked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="理解这个素材",
+        )
+        target_ref = _upload_one_asset(
+            services,
+            scope="delegate-admission-cancel",
+        )
+        callback, turns = _delegating_callback(
+            role="source_intelligence_agent",
+            call_id="delegate-admission-cancel",
+            target_ref=target_ref,
+        )
+        driver = _driver(services, callback)
+        append_event = driver._event
+
+        async def parked_event(*args, **kwargs):
+            await append_event(*args, **kwargs)
+            event_type = kwargs.get("event_type") or (
+                args[2] if len(args) > 2 else ""
+            )
+            if event_type == "subagent.started":
+                started_parked.set()
+                await asyncio.wait_for(release.wait(), timeout=30.0)
+
+        driver._event = parked_event  # type: ignore[method-assign]
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await asyncio.wait_for(started_parked.wait(), timeout=30.0)
+            run = _only_specialist_run(driver)
+            handle = driver._specialist_tasks[PROJECT_ID][run.run_id]
+            assert handle.task is None, "the worker must not exist yet"
+            claimed = driver.cancel_specialist_run(
+                PROJECT_ID,
+                run.run_id,
+                reason="source_asset_deleted",
+            )
+            release.set()
+            await _wait_for(
+                lambda: driver.executions.get_specialist_run(
+                    PROJECT_ID,
+                    run.run_id,
+                ).status.value
+                == "CANCELLED",
+            )
+            # Admission settled the revocation, so the registration is gone:
+            # a leftover handle would make every later DELETE claim a run
+            # that no longer exists in this process.
+            await _wait_for(
+                lambda: run.run_id
+                not in driver._specialist_tasks.get(PROJECT_ID, {}),
+            )
+            await _wait_consumed(services, 1)
+            await driver.wait_until_idle(PROJECT_ID, timeout_seconds=30.0)
+            return (
+                claimed,
+                driver.executions.get_specialist_run(
+                    PROJECT_ID,
+                    run.run_id,
+                ),
+                services.sessions.list_events(PROJECT_ID, SESSION_ID),
+                run.run_id,
+                turns,
+            )
+        finally:
+            release.set()
+            await driver.stop()
+
+    claimed, run, events, run_id, turns = asyncio.run(scenario())
+
+    assert claimed is True
+    assert run.status.value == "CANCELLED"
+    assert turns["specialist"] == 0, "admission must refuse the model turn"
+    lifecycle = _subagent_lifecycle(events, run_id)
+    assert [item.event_type for item in lifecycle] == [
+        "subagent.accepted",
+        "subagent.started",
+        "subagent.failed",
+    ]
+    assert lifecycle[-1].payload.get("cancelled") is True
+
+
+def test_second_cancel_does_not_interrupt_cancellation_cleanup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A repeated signal must not abort the cleanup that owns the terminal.
+
+    ``interrupt`` already claimed the cancellation, so an asset DELETE
+    arriving while the cleanup is still reading the record has to leave the
+    worker alone: a second ``task.cancel()`` used to kill the finalizer
+    itself and strand the run in RUNNING_MODEL.
+    """
+
+    specialist_started = asyncio.Event()
+    cleanup_read = threading.Event()
+    release_read = threading.Event()
+    captured: dict[str, Any] = {}
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="把主线剪成竖屏",
+        )
+        callback, turns = _delegating_callback(
+            role="ai_editing_director",
+            call_id="delegate-second-cancel",
+            target_ref="timeline:timeline:main",
+            specialist_started=specialist_started,
+        )
+        driver = _driver(services, callback)
+        real_get = driver.executions.get_specialist_run
+        parked = {"done": False}
+
+        def traced_get(project_id, run_id, *args, **kwargs):
+            if (
+                not parked["done"]
+                and run_id == captured.get("run_id")
+                and captured.get("interrupted")
+            ):
+                parked["done"] = True
+                cleanup_read.set()
+                assert release_read.wait(30.0), "cleanup read was never freed"
+            return real_get(project_id, run_id, *args, **kwargs)
+
+        monkeypatch.setattr(
+            driver.executions,
+            "get_specialist_run",
+            traced_get,
+        )
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await asyncio.wait_for(specialist_started.wait(), timeout=30.0)
+            run = _only_specialist_run(driver)
+            captured["run_id"] = run.run_id
+            handle = driver._specialist_tasks[PROJECT_ID][run.run_id]
+            worker = handle.task
+            assert worker is not None
+            captured["interrupted"] = True
+            await driver.interrupt(PROJECT_ID, reason="user_interrupt")
+            await _wait_for(cleanup_read.is_set)
+            cancelling_before = worker.cancelling()
+            assert cancelling_before >= 1
+            assert handle.cancel_reason == "user_interrupt"
+            second = driver.cancel_specialist_run(
+                PROJECT_ID,
+                run.run_id,
+                reason="source_asset_deleted",
+            )
+            assert second is True, (
+                "the in-process cleanup owns the terminal event, so the "
+                "route must not race it with a durable CAS"
+            )
+            assert worker.cancelling() == cancelling_before
+            assert handle.cancel_reason == "user_interrupt"
+            assert not worker.done()
+            release_read.set()
+            await _wait_for(
+                lambda: real_get(PROJECT_ID, run.run_id).status.value
+                == "CANCELLED",
+            )
+            await driver.wait_until_idle(PROJECT_ID, timeout_seconds=30.0)
+            return (
+                run.run_id,
+                services.sessions.list_events(PROJECT_ID, SESSION_ID),
+                turns,
+            )
+        finally:
+            release_read.set()
+            await driver.stop()
+
+    run_id, events, turns = asyncio.run(scenario())
+
+    assert turns["specialist"] == 1
+    lifecycle = _subagent_lifecycle(events, run_id)
+    assert [item.event_type for item in lifecycle] == [
+        "subagent.accepted",
+        "subagent.started",
+        "subagent.failed",
+    ]
+    assert lifecycle[-1].payload.get("cancelled") is True
 
 
 def test_durable_interrupt_stops_owner_without_restarting_message(
