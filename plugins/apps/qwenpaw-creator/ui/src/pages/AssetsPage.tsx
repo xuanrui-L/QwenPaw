@@ -45,7 +45,12 @@ import type {
   VisualCastLineupDocument,
   VisualVariantDocument,
 } from "@/contracts/creator";
-import { navigate, useParams, useSearchParams } from "@/routing/navigation";
+import {
+  navigate,
+  useParams,
+  usePathname,
+  useSearchParams,
+} from "@/routing/navigation";
 import {
   useReviewFieldFocus,
   useReviewMediaFocus,
@@ -1465,6 +1470,7 @@ export function VoiceGenerationModal({
 export default function AssetsPage() {
   const { t } = useTranslation();
   const { id = "" } = useParams();
+  const pathname = usePathname();
   const query = useSearchParams();
   const project = useProjectSnapshotStore((state) =>
     state.projectId === id ? state.project : null,
@@ -1486,6 +1492,23 @@ export default function AssetsPage() {
     (state) => state.refreshSession,
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // A delete response can land after the user already switched Project (or
+  // left this page). The refreshes below rebind the global snapshot/task
+  // stores and the selection cleanup navigates, so every step that follows an
+  // await must still belong to the page instance that issued the request.
+  const liveAssetProjectId = useRef(id);
+  liveAssetProjectId.current = id;
+  const liveAssetsPath = useRef(pathname);
+  liveAssetsPath.current = pathname;
+  const liveSelectedAsset = useRef<string | null>(query.get("asset"));
+  liveSelectedAsset.current = query.get("asset");
+  const assetsPageAlive = useRef(true);
+  useEffect(() => {
+    assetsPageAlive.current = true;
+    return () => {
+      assetsPageAlive.current = false;
+    };
+  }, []);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [origin, setOrigin] = useState<OriginKey>("any");
   const sidebarOpen = useAgentDockUiStore((state) => state.open);
@@ -1773,6 +1796,11 @@ export default function AssetsPage() {
       okType: "danger",
       cancelText: t("common.cancel"),
       onOk: async () => {
+        const scopeProjectId = id;
+        const ownsScope = () =>
+          assetsPageAlive.current &&
+          liveAssetProjectId.current === scopeProjectId &&
+          liveAssetsPath.current === `/project/${scopeProjectId}/assets`;
         // Delete failure and post-delete refresh must be isolated: a refresh
         // error must never be reported as "delete failed" once the 204 landed.
         try {
@@ -1784,6 +1812,7 @@ export default function AssetsPage() {
           return;
         }
         message.success(t("assets.deleteSuccess"));
+        if (!ownsScope()) return;
         // Refreshes are best-effort and settle independently. Stale
         // "素材理解中" cards converge via the backend terminal subagent events,
         // not via refreshSession directly.
@@ -1799,8 +1828,11 @@ export default function AssetsPage() {
         } catch (error) {
           console.error(error);
         }
-        // Clear selection if deleted item was selected
-        if (selected?.id === versionId) {
+        if (!ownsScope()) return;
+        // Clear the selection this delete invalidated — read the current URL
+        // rather than the render-time item, so a selection the user made while
+        // the request was in flight survives it.
+        if (liveSelectedAsset.current === versionId) {
           selectItem(null);
         }
       },

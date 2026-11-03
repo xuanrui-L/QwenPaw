@@ -1,13 +1,20 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Modal, message } from "antd";
 import AssetsPage, {
   GenerationPromptEditor,
   visualEntityPromptTarget,
   VoiceGenerationModal,
 } from "@/pages/AssetsPage";
 import BlueprintPrepDrawer from "@/components/blueprint/BlueprintPrepDrawer";
-import { NavigationRuntime } from "@/routing/navigation";
+import { navigate, NavigationRuntime } from "@/routing/navigation";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
@@ -101,6 +108,114 @@ function intelVersion(
     created_at: "2026-07-20T00:03:00Z",
     ...over,
   };
+}
+
+/** Snapshot/task/session reads any Project page fires while it renders. */
+function projectRoutes(projectId: string) {
+  return [
+    {
+      match: `/projects/${projectId}/project`,
+      method: "GET",
+      response: {
+        json: {
+          projectId,
+          generation: 3,
+          etag: '"sha256:g3"',
+          syncStatus: "healthy",
+          project: cloneProject(),
+        },
+      },
+    },
+    {
+      match: `/projects/${projectId}/specialist-runs`,
+      response: { json: { items: [] } },
+    },
+    {
+      match: `/projects/${projectId}/tasks`,
+      response: { json: { items: [] } },
+    },
+    {
+      match: `/projects/${projectId}/session`,
+      response: { json: { session: null } },
+    },
+  ] as Parameters<typeof installMockFetch>[0];
+}
+
+/**
+ * Install routes whose DELETE answer is held back until `release()`, so a test
+ * can move the user elsewhere while the request is still in flight.
+ */
+function gateSourceDelete(routes: Parameters<typeof installMockFetch>[0]) {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const mock = installMockFetch([
+    {
+      match: "/assets/cat-video-v1",
+      method: "DELETE",
+      response: { ok: true, status: 204, json: null },
+    },
+    ...routes,
+  ]);
+  const inner = mock.fetchMock;
+  const attempted: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if ((init?.method ?? "GET").toUpperCase() === "DELETE") {
+        // Recorded before the wait: the caller only learns the request left the
+        // browser once the answer is released.
+        attempted.push(url);
+        await blocked;
+      }
+      return inner(url as never, init as never) as unknown as Response;
+    }),
+  );
+  const deleteLanded = () => attempted.length > 0;
+  // Reads only: the gated DELETE is recorded once its answer is released.
+  const p1Reads = () =>
+    mock.calls.filter(
+      (call) => call.method === "GET" && call.url.includes("/projects/p1/"),
+    ).length;
+  return { release, deleteLanded, p1Reads, calls: mock.calls };
+}
+
+type ConfirmOptions = Parameters<typeof Modal.confirm>[0];
+
+/** Replace the confirm dialog with a capturable handler (no portal needed). */
+function captureConfirmDialog() {
+  let options: ConfirmOptions | undefined;
+  vi.spyOn(Modal, "confirm").mockImplementation(((config: ConfirmOptions) => {
+    options = config;
+    return { destroy: vi.fn(), update: vi.fn() };
+  }) as typeof Modal.confirm);
+  return {
+    open: () => options !== undefined,
+    accept: () => void options?.onOk?.(),
+  };
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <output data-location>{`${location.pathname}${location.search}`}</output>
+  );
+}
+
+function renderAssetsRoutes(entry: string) {
+  return render(
+    <MemoryRouter initialEntries={[entry]}>
+      <NavigationRuntime />
+      <Routes>
+        <Route path="/project/:id/assets" element={<AssetsPage />} />
+        {/* Sibling page of the same Project: leaving it must not be undone. */}
+        <Route path="/project/:id/plan" element={<div data-plan-page />} />
+      </Routes>
+      <LocationProbe />
+    </MemoryRouter>,
+  );
 }
 
 /** Project whose cat video has a built v1 intelligence; optionally select an unbuilt v2. */
@@ -475,4 +590,114 @@ it("uses the uploaded audio picked by the user even after entering a voice descr
       preferredName: project.visual.entities.items.cat.name,
     }),
   );
+});
+
+describe("AssetsPage delete callback ownership", () => {
+  beforeEach(() => {
+    message.destroy();
+    useProjectSnapshotStore.getState().reset();
+    useCreatorTaskViewStore.getState().reset();
+    useCreatorInteractionStore.getState().reset();
+    useAgentDockUiStore.getState().reset();
+    seedProject();
+  });
+  afterEach(() => {
+    // antd's message API is a module singleton; leftover toasts would make the
+    // "delete landed" text ambiguous in the next test.
+    message.destroy();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const locationPath = () =>
+    document.querySelector("[data-location]")?.textContent ?? "";
+  // antd's message list is a module singleton, so count the success toasts
+  // instead of querying their text: the count grows exactly when the delete
+  // callback resumes after the gated response.
+  const successToasts = () =>
+    document.querySelectorAll(".ant-message-notice-success").length;
+
+  it("does not rebind stores when the delete lands after the user switched Project", async () => {
+    const gate = gateSourceDelete([
+      ...projectRoutes("p1"),
+      ...projectRoutes("p2"),
+    ]);
+    const dialog = captureConfirmDialog();
+    renderAssetsRoutes("/project/p1/assets?asset=cat-video-v1");
+
+    fireEvent.click(
+      document.querySelector('[data-asset-delete="cat-video-v1"]')!,
+    );
+    expect(dialog.open()).toBe(true);
+    dialog.accept();
+    await waitFor(() => expect(gate.deleteLanded()).toBe(true));
+
+    act(() => navigate("/project/p2/plan"));
+    await waitFor(() => expect(locationPath()).toBe("/project/p2/plan"));
+    useProjectSnapshotStore.setState({
+      projectId: "p2",
+      project: cloneProject(),
+      generation: 3,
+      etag: '"sha256:g3"',
+      syncStatus: "healthy",
+    });
+    useCreatorTaskViewStore.setState({ projectId: "p2", tasks: [] });
+    const readsBefore = gate.p1Reads();
+    const toastsBefore = successToasts();
+
+    act(() => gate.release());
+    await waitFor(() => expect(successToasts()).toBeGreaterThan(toastsBefore));
+
+    expect(gate.p1Reads()).toBe(readsBefore);
+    expect(useProjectSnapshotStore.getState().projectId).toBe("p2");
+    expect(useCreatorTaskViewStore.getState().projectId).toBe("p2");
+    expect(locationPath()).toBe("/project/p2/plan");
+  });
+
+  it("does not pull the user back to the assets page after leaving it", async () => {
+    const gate = gateSourceDelete(projectRoutes("p1"));
+    const dialog = captureConfirmDialog();
+    renderAssetsRoutes("/project/p1/assets?asset=cat-video-v1");
+
+    fireEvent.click(
+      document.querySelector('[data-asset-delete="cat-video-v1"]')!,
+    );
+    dialog.accept();
+    await waitFor(() => expect(gate.deleteLanded()).toBe(true));
+
+    act(() => navigate("/project/p1/plan"));
+    await waitFor(() => expect(locationPath()).toBe("/project/p1/plan"));
+    const readsBefore = gate.p1Reads();
+    const toastsBefore = successToasts();
+
+    act(() => gate.release());
+    await waitFor(() => expect(successToasts()).toBeGreaterThan(toastsBefore));
+
+    // The selection cleanup navigates, and the deleted asset was selected when
+    // the request started, so the late callback used to yank this page away.
+    expect(locationPath()).toBe("/project/p1/plan");
+    expect(gate.p1Reads()).toBe(readsBefore);
+  });
+
+  it("keeps the asset selected while the delete was in flight", async () => {
+    const gate = gateSourceDelete(projectRoutes("p1"));
+    const dialog = captureConfirmDialog();
+    renderAssetsRoutes("/project/p1/assets?asset=cat-video-v1");
+
+    fireEvent.click(
+      document.querySelector('[data-asset-delete="cat-video-v1"]')!,
+    );
+    dialog.accept();
+    await waitFor(() => expect(gate.deleteLanded()).toBe(true));
+
+    fireEvent.click(screen.getByText("测试项目最终成片"));
+    await waitFor(() => expect(locationPath()).toContain("asset="));
+    const selectedPath = locationPath();
+    const toastsBefore = successToasts();
+
+    act(() => gate.release());
+    await waitFor(() => expect(successToasts()).toBeGreaterThan(toastsBefore));
+    // The stale closure over the pre-delete selection used to clear this.
+    expect(locationPath()).toBe(selectedPath);
+  });
 });
