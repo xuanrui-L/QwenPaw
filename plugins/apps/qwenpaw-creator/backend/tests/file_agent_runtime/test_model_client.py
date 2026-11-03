@@ -350,6 +350,110 @@ def test_new_snapshot_frees_history_space_for_script_and_skills(
     assert json.dumps(messages) == original
 
 
+def _project_view_wire(count: int, *, first_generation: int = 0):
+    """A run that keeps reading the Project: one exchange per turn."""
+    messages = [
+        {"role": "system", "content": "s" * 4000},
+        {
+            "role": "user",
+            "source": "user",
+            "content": "把六集分镜做完再交审阅",
+        },
+    ]
+    for index in range(first_generation, first_generation + count):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "read_project",
+                    "tool_calls": [
+                        AgentToolCall(
+                            call_id=f"read-{index}",
+                            name="read_project",
+                            arguments={},
+                        ).history_dict(),
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": f"read-{index}",
+                    "content": json.dumps(
+                        {
+                            "project": {
+                                "project_id": "project-1",
+                                "description": "d" * 9000,
+                            },
+                            "episodes": [
+                                {"title": f"e{index}", "text": "t" * 600},
+                            ],
+                            "generation": index,
+                            "etag": f"etag-{index}",
+                        },
+                    ),
+                },
+            ],
+        )
+    return messages
+
+
+def _carried_views(sent):
+    return [
+        item for item in sent if model_context.is_carried_project_view(item)
+    ]
+
+
+def test_resuming_from_a_sent_turn_never_pins_a_second_project_view():
+    """The compactor's carried view must not pile up when its output is fed
+    back as the next turn's input.
+
+    A run that resumes from the shape it last sent hands
+    ``prepare_model_messages`` its own product. That view rides in the
+    provider's user role, which compaction may never evict, and the marker
+    naming it is stripped before the module returns — so recognizing the
+    artifact by the marker alone pins one stale copy per turn until nothing
+    left can move and the request refuses itself over bytes the runtime made.
+    """
+    budget = 16 * 1024
+    wire = _project_view_wire(6)
+    counts = []
+    generations = []
+    for turn in range(5):
+        sent = prepare_model_messages(wire, [], max_bytes=budget)
+        views = _carried_views(sent)
+        counts.append(len(views))
+        assert views, "a compacted turn must carry the newest project view"
+        generations.append(
+            json.loads(views[-1]["content"].partition("=")[2])["generation"],
+        )
+        # Exactly what adopting the sent shape does: the next turn resumes
+        # from this list and answers with one more read.
+        wire = list(sent)
+        wire.extend(
+            _project_view_wire(1, first_generation=20 + turn)[-2:],
+        )
+    assert counts == [1, 1, 1, 1, 1]
+    assert generations == sorted(set(generations))
+
+
+def test_the_carried_view_is_recognized_after_it_leaves_the_compactor():
+    """A view survives as its prefix alone, and that is what identifies it.
+
+    The demotion ladder and the driver both re-prepare what a previous step
+    already produced, so the artifact has to be recognizable by a consumer
+    that never sees the marker.
+    """
+    sent = prepare_model_messages(
+        _project_view_wire(6),
+        [],
+        max_bytes=16 * 1024,
+    )
+    views = _carried_views(sent)
+    assert len(views) == 1
+    assert "_context_snapshot" not in views[0]
+    for item in sent:
+        assert model_context.is_carried_project_view(item) is (item in views)
+
+
 def _configure_text_model(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -1568,6 +1672,36 @@ def test_input_token_budget_never_invents_an_unpublished_window(monkeypatch):
     for junk in ("", "   ", "0", "-1", "thirty two thousand"):
         monkeypatch.setenv(model_context.MODEL_CONTEXT_TOKENS_ENV, junk)
         assert client._input_token_budget() is None
+
+
+def test_media_that_arrives_as_a_url_is_outside_the_media_budget():
+    """The documented boundary of this budget: inline bytes only.
+
+    A DashScope (or MaaS) transport uploads the local file to the model's
+    temporary object store and hands the provider a URL, so the request
+    carries a few hundred bytes while the model still pays full vision tokens
+    for the clip. Nothing in the media accounting can see that cost: the
+    charge, the diagnostics and the demotion all key off a ``data:`` URL, and
+    the window that would name it stays off until an operator declares one
+    (see the context-budget section of the plugin README). Pinned as a known
+    limit, so the day the budget learns to price fetched media this test is
+    the record of which promise moved.
+    """
+    url = "https://dashscope-file.example/model-temp/clip.mp4?expires=17"
+    attached = _attachment(url)
+    inline = _attachment(_data_url(b"frame" * 5000))
+
+    assert model_context.collect_inline_media(attached["content"]) == []
+    assert model_context.collect_inline_media(inline["content"])
+
+    # Nothing to refuse, and nothing to trade: the upload leaves untouched.
+    assert prepare_model_messages([attached], [], max_bytes=1024) == [attached]
+
+    _, receipt = model_context.demote_human_inline_media(
+        [attached],
+        vault=None,
+    )
+    assert receipt["demoted_blocks"] == 0
 
 
 # ---------------------------------------------------------------------------
