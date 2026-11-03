@@ -2962,3 +2962,146 @@ def test_turning_demotion_off_promises_a_retry_it_does_not_make(
     assert notices == []
     assert isinstance(caught.value, ModelContextUnfitError)
     assert "maximum context length" in str(caught.value)
+
+
+def _provider_refusal() -> ModelContextBudgetError:
+    """A refusal a provider wrote down, which carries no local measurement."""
+    return ModelContextBudgetError("maximum context length is 8192 tokens")
+
+
+def _refusal_at(
+    messages: list[dict],
+    max_bytes: int,
+) -> ModelContextBudgetError:
+    try:
+        prepare_model_messages(messages, [], max_bytes=max_bytes)
+    except ModelContextBudgetError as exc:
+        return exc
+    raise AssertionError("the wire was expected to overflow")
+
+
+def test_a_provider_refusal_is_not_allowed_to_guess_what_does_not_fit():
+    """An empty reading opens the upload gate, so the ladder strips on a hunch.
+
+    Only the accounting behind a refusal says whether the overage is
+    media-shaped, and a provider refusal arrives with none of it. The gate read
+    that silence as permission and began archiving a person's upload against a
+    budget it had never measured for this shape, while the request was
+    overflowing on 30KB of contract text no demotion is allowed to shrink.
+    """
+    data_url = _data_url(b"\x00" * (2 * 1024 * 1024), mime="image/jpeg")
+    messages = [
+        {"role": "system", "content": "A" * 5_000},
+        {
+            "role": "user",
+            "source": "user",
+            "messageSeq": 7,
+            "content": [
+                {"type": "text", "text": "T" * 30_000},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+    asked: list[str] = []
+    client = _ladder_client(lambda url: asked.append(url) or "d" * 64)
+
+    with pytest.raises(ModelContextUnfitError) as unfit:
+        client._fit_refused_request(
+            messages,
+            [],
+            max_bytes=20_000,
+            failure=_provider_refusal(),
+        )
+
+    assert asked == []
+    assert [part["type"] for part in messages[1]["content"]] == [
+        "text",
+        "image_url",
+    ]
+    # What the caller reads keeps the provider's own words: the probe states a
+    # budget the ladder tightened, not the one that refused.
+    assert "maximum context length" in str(unfit.value)
+    # And the gate closed on a measurement, not on an absent one.
+    reading = model_context.budget_diagnostics(messages, [], max_bytes=20_000)
+    assert not model_context.media_could_bridge_the_gap(reading)
+
+
+def test_a_media_shaped_provider_refusal_still_buys_relief_with_an_upload():
+    """Measuring the gap must not turn a real media overage into a dead end.
+
+    The same probe that stops the ladder from guessing has to let it work when
+    the media really is what does not fit, or a single oversized screenshot
+    would end the turn instead of costing the one block that overflowed.
+    """
+    data_url = _data_url(b"\x00" * (2 * 1024 * 1024), mime="image/jpeg")
+    messages = [
+        {"role": "system", "content": "A" * 5_000},
+        _attachment(data_url, seq=7),
+    ]
+    asked: list[str] = []
+    client = _ladder_client(lambda url: asked.append(url) or "e" * 64)
+
+    prepared, _note = client._fit_refused_request(
+        messages,
+        [],
+        max_bytes=9_000,
+        failure=_provider_refusal(),
+    )
+
+    assert "image_url" not in json.dumps(prepared[1]["content"])
+    assert len(asked) == 1
+
+
+def _observation_wire() -> list[dict]:
+    """A wire as the reader tools leave it: sampled frames on a user row."""
+    observed = _data_url(b"\x00" * (2 * 1024 * 1024), mime="image/jpeg")
+    uploaded = _data_url(b"\x10" * (64 * 1024), mime="image/jpeg")
+    return [
+        {"role": "system", "content": "A" * 5_000},
+        {
+            "role": "tool",
+            "tool_call_id": "call-frame",
+            "content": [{"type": "image_url", "image_url": {"url": observed}}],
+        },
+        {
+            "role": "user",
+            "source": model_context.MEDIA_OBSERVATION_SOURCE,
+            "messageSeq": 9,
+            "content": [{"type": "image_url", "image_url": {"url": observed}}],
+        },
+        _attachment(uploaded, seq=11),
+    ]
+
+
+def test_media_the_runtime_observed_is_traded_before_a_person_could_be():
+    """An unmarked observation row is archived as though it were an upload.
+
+    The protocol lets inline media ride only the user role, so what tells the
+    ladder that a tool can produce those bytes again is the source stamped on
+    the row. Without it the first rung leaves a frame in place, the last rung
+    moves it as a person's attachment, and the demotion record blames the one
+    input nobody may trade for cheap relief the runtime was free to take.
+    """
+    wire = _observation_wire()
+
+    _demoted, receipt = model_context.demote_derived_inline_media(
+        wire,
+        budget_bytes=14_000,
+        vault=lambda _url: "f" * 64,
+    )
+
+    assert receipt["demoted_blocks"] == 2
+    # Only the upload a person made counts as theirs, so the last rung is left
+    # with one candidate and the frame never reaches it.
+    assert receipt["human_attachment_blocks"] == 1
+
+    client = _ladder_client(lambda _url: "f" * 64)
+    prepared, note = client._fit_refused_request(
+        wire,
+        [],
+        max_bytes=14_000,
+        failure=_refusal_at(wire, 14_000),
+    )
+
+    assert "真人附件" not in note
+    assert "image_url" in json.dumps(prepared[3]["content"])

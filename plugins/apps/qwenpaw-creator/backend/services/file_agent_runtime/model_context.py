@@ -218,6 +218,13 @@ def _media_aware_bytes(
 # injection with this source.
 MEDIA_RECALL_SOURCE = "media_recall"
 
+# Media the runtime observed on the model's behalf - a delegated target's own
+# file, frames a video reader sampled, pages a document reader rendered. Any
+# tool can produce it again, so it is a runtime receipt in the provider's user
+# role rather than a requirement a person typed or uploaded, and the first
+# rung of the ladder may trade it without touching an upload.
+MEDIA_OBSERVATION_SOURCE = "media_observation"
+
 # These are runtime receipts carried in the provider's user role, not human
 # requirements. Keep durable messages intact, but let old receipts leave the
 # bounded history just like old tool results. Unknown sources fail closed.
@@ -231,6 +238,7 @@ _AUTOMATED_HISTORY_SOURCES = frozenset(
         "yolo_auto_resume",
         "review_approval_resume",
         MEDIA_RECALL_SOURCE,
+        MEDIA_OBSERVATION_SOURCE,
     },
 )
 
@@ -554,7 +562,7 @@ def estimate_input_tokens(value: Any) -> int:
     return 0
 
 
-def _budget_diagnostics(
+def budget_diagnostics(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]],
     *,
@@ -1157,7 +1165,7 @@ def prepare_model_messages(
         if removable is None:
             raise ModelContextBudgetError(
                 "模型必要输入仍超过单次上下文预算；请缩小单次请求或分段读取项目。",
-                diagnostics=_budget_diagnostics(
+                diagnostics=budget_diagnostics(
                     result,
                     tools,
                     max_bytes=max_bytes,
