@@ -1768,14 +1768,21 @@ export default function AssetsPage() {
       okType: "danger",
       cancelText: t("common.cancel"),
       onOk: async () => {
+        // Delete failure and post-delete refresh must be isolated: a refresh
+        // error must never be reported as "delete failed" once the 204 landed.
         try {
           await deleteSourceAssetVersion(id, versionId);
-          message.success(t("assets.deleteSuccess"));
-          // Refresh project data and task/session views after a successful
-          // delete. These are best-effort and settle independently: a failed
-          // refresh must NOT surface a "delete failed" error once the delete has
-          // already succeeded. Stale "素材理解中" cards converge via the backend
-          // terminal subagent events, not via refreshSession directly.
+        } catch (error) {
+          const text =
+            error instanceof Error ? error.message : t("assets.deleteFailed");
+          message.error(text, 6);
+          return;
+        }
+        message.success(t("assets.deleteSuccess"));
+        // Refreshes are best-effort and settle independently. Stale
+        // "素材理解中" cards converge via the backend terminal subagent events,
+        // not via refreshSession directly.
+        try {
           const refreshes = await Promise.allSettled([
             pollOnce(id),
             refreshTasks(id),
@@ -1784,14 +1791,12 @@ export default function AssetsPage() {
           refreshes.forEach((result) => {
             if (result.status === "rejected") console.error(result.reason);
           });
-          // Clear selection if deleted item was selected
-          if (selected?.id === versionId) {
-            selectItem(null);
-          }
         } catch (error) {
-          const text =
-            error instanceof Error ? error.message : t("assets.deleteFailed");
-          message.error(text, 6);
+          console.error(error);
+        }
+        // Clear selection if deleted item was selected
+        if (selected?.id === versionId) {
+          selectItem(null);
         }
       },
     });
