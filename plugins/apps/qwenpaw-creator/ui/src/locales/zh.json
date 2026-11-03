@@ -1026,6 +1026,7 @@
     "rateLimitExhausted": "模型遭遇限流，已重试 {{retries}} 次仍无法访问",
     "rateLimitContinue": "继续",
     "rateLimitResumeMessage": "继续执行之前因模型限流中断的任务",
+    "contextUnfit": "输入已超出模型上下文窗口，可让出的内容已全部让出；请减少本次附图数量或精简文字后重新发送。",
     "mentionHint": "输入 @ 可引用分镜、素材等对象作为上下文；当前选中的对象也会自动带入对话。",
     "clearAll": "清空全部引用、划选文本与输入框内的 @ 引用",
     "clear": "清空",

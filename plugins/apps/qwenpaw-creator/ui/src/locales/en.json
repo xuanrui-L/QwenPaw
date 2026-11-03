@@ -1026,6 +1026,7 @@
     "rateLimitExhausted": "Model rate-limited, still unavailable after {{retries}} retries",
     "rateLimitContinue": "Continue",
     "rateLimitResumeMessage": "Continue the task that was interrupted by model rate limiting",
+    "contextUnfit": "This input exceeded the model's context window and everything that could be given up has been. Send fewer attachments or shorten the request, then resend it.",
     "mentionHint": "Type @ to reference storyboards, assets etc. as context; currently selected objects are also auto-included.",
     "clearAll": "Clear all references, selected text and @ mentions",
     "clear": "Clear",

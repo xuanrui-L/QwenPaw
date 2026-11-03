@@ -352,6 +352,15 @@ class AgentModelTurn:
     provider_message_id: str | None = None
     finish_reason: str = "completed"
     usage: dict[str, Any] | None = field(default=None, compare=False)
+    # The request this turn actually answers. Compaction and the demotion
+    # ladder can both leave a different shape than the caller handed over, and
+    # a turn that hides which one the model read lets the next turn rebuild
+    # the bytes that were already refused.
+    sent_messages: list[dict[str, Any]] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 _ARGS_PREVIEW_CHARS = 160
@@ -1084,6 +1093,11 @@ class AgentScopeAgentChatClient:
                 return prepared, self._report_demotions(record, max_bytes)
             failure = refused or failure
         record.append(("真人附件媒体", totals))
+        logger.warning(
+            "Model input exceeded the window and nothing left can be given "
+            "up: %s",
+            failure,
+        )
         raise ModelContextUnfitError(
             "\n".join(
                 part
@@ -1224,6 +1238,14 @@ class AgentScopeAgentChatClient:
             is_context_length_error(exc)
         ):
             raise exc
+        if not media_observation_degrade_enabled():
+            # With the ladder switched off this boundary stops where the
+            # feature stops, and keeps the terminal the driver refuses to
+            # resume: a reclassified retryable failure would spend another
+            # call on bytes no longer allowed to move.
+            raise ModelContextUnfitError(
+                "\n".join((str(exc), *demotion_notes)),
+            ) from exc
         forced_budget = max(1024, max_bytes // 2)
         rebuilt, forced_note = self._fit_refused_request(
             messages,
@@ -1533,8 +1555,8 @@ class AgentScopeAgentChatClient:
                         max_bytes=_context_budget_bytes,
                     )
                     if relief is None:
-                        # Nothing media-shaped can leave. The lever that is
-                        # still available retires older completed tool
+                        # Nothing media-shaped can leave *the gentle step*. The
+                        # lever still available retires older completed tool
                         # exchanges by re-running compaction against half the
                         # budget: the window the provider just refused is
                         # smaller than the one assumed here, and a text-only
@@ -1546,14 +1568,39 @@ class AgentScopeAgentChatClient:
                             max_bytes=_context_budget_bytes,
                         )
                         if smaller is None:
-                            logger.warning(
-                                "Model input exceeded the provider window and "
-                                "nothing left can be given up: %s",
+                            # Compaction having nothing to retire is not the
+                            # same as the request having nothing to give up. A
+                            # turn carrying only a person's uploads has no
+                            # gentle relief to fail into, and this is the
+                            # ordinary way the oversized input gets reported:
+                            # the local byte guard prices inline media at a
+                            # fraction of what a vision window charges, so the
+                            # provider, not the guard, is the one that refuses.
+                            # Ending here left every turn of an uploaded
+                            # reference session paying one burned call before
+                            # stopping as non-retryable, with the ladder that
+                            # could have moved those bytes never entered.
+                            # A notice promises a second request, and with the
+                            # ladder switched off the boundary makes none.
+                            if on_rate_limit_retry is not None and (
+                                media_observation_degrade_enabled()
+                            ):
+                                await on_rate_limit_retry(
+                                    RateLimitRetryNotice(
+                                        attempt=1,
+                                        max_attempts=2,
+                                        delay_seconds=0,
+                                        reason="context_recovery",
+                                    ),
+                                )
+                            return await self._recover_forced_overflow(
                                 exc,
+                                messages=messages,
+                                tools=tools,
+                                max_bytes=_context_budget_bytes,
+                                retry_kwargs=retry_kwargs,
+                                demotion_notes=_demotion_notes,
                             )
-                            raise ModelContextUnfitError(
-                                "\n".join((exc_text, *_demotion_notes)),
-                            ) from exc
                         logger.warning(
                             "creator overflow recovery: compacting history "
                             "into %d bytes after a provider refusal",
@@ -1568,7 +1615,20 @@ class AgentScopeAgentChatClient:
                                     reason="context_recovery",
                                 ),
                             )
-                        return await self.complete(
+                        # The compacted request is still this client's, so a
+                        # second refusal has to reach the forced step the same
+                        # way a gentle one does. Left unwrapped, a session that
+                        # needed compaction could never trade a media block.
+                        return await call_with_overflow_recovery(
+                            self.complete,
+                            lambda retry_exc: self._recover_forced_overflow(
+                                retry_exc,
+                                messages=messages,
+                                tools=tools,
+                                max_bytes=_context_budget_bytes,
+                                retry_kwargs=retry_kwargs,
+                                demotion_notes=_demotion_notes,
+                            ),
                             messages=smaller,
                             tools=tools,
                             _context_budget_bytes=half_budget,
@@ -1924,6 +1984,7 @@ class AgentScopeAgentChatClient:
             ),
             finish_reason=finish_reason,
             usage=_usage_payload(getattr(response, "usage", None)),
+            sent_messages=list(messages),
         )
 
 
