@@ -40,6 +40,7 @@ from schemas.common import StrictModel
 from services.document_reader import is_supported_document
 from services.file_agent_runtime.notifications import RuntimeEventKind
 from services.file_agent_runtime.registry import get_creator_agent_runtime
+from services.media.source_observation import source_observation_service
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileError,
@@ -2013,6 +2014,70 @@ async def get_asset_content(
     )
 
 
+async def _cancel_deleted_asset_task(
+    exec_store: ProjectExecutionStore,
+    project_id: str,
+    task: TaskRecord,
+) -> None:
+    """Settle one still-active Task whose input asset was deleted."""
+
+    try:
+        await asyncio.to_thread(
+            exec_store.transition_task,
+            project_id,
+            task.task_id,
+            expected_status={TaskStatus.QUEUED, TaskStatus.RUNNING},
+            status=TaskStatus.CANCELLED,
+            updates={
+                "error": {
+                    "code": "SOURCE_ASSET_DELETED",
+                    "message": "Source asset was deleted",
+                },
+            },
+        )
+    except Exception:  # noqa: BLE001 - best-effort cancellation
+        logger.warning(
+            "asset delete: failed to cancel task %s",
+            task.task_id,
+            exc_info=True,
+        )
+
+
+def _task_targets_deleted_asset(
+    task: TaskRecord,
+    *,
+    deleted_logical_id: str | None,
+    version_id: str,
+    remaining_source_ids: set[str],
+) -> bool:
+    """Whether one durable Task is reading the asset being deleted.
+
+    Not every media-execution Task belongs to a SpecialistRun:
+    ``observe_source_clip`` schedules a standalone Task whose asset identity
+    lives in ``input_refs`` / ``metadata.targetRef`` /
+    ``metadata.assetVersionId``. Matching only ``Task.run_id`` would leave
+    those workers running against media that has just been deleted.
+    """
+
+    if str(task.metadata.get("assetVersionId") or "") == version_id:
+        return True
+    refs = list(task.input_refs)
+    target_ref = task.metadata.get("targetRef")
+    if target_ref:
+        refs.append(str(target_ref))
+    for ref in refs:
+        if ref.startswith("asset:"):
+            if (
+                deleted_logical_id
+                and ref.removeprefix("asset:") == deleted_logical_id
+            ):
+                return True
+        elif ref.startswith("source:"):
+            if ref.removeprefix("source:") not in remaining_source_ids:
+                return True
+    return False
+
+
 @router.delete("/assets/{version_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_source_asset_version(
     project_id: str,
@@ -2087,6 +2152,7 @@ async def delete_source_asset_version(
             set(SpecialistRunStatus) - TERMINAL_SPECIALIST_STATUSES
         )
         active_task_statuses = {TaskStatus.QUEUED, TaskStatus.RUNNING}
+        settled_task_ids: set[str] = set()
 
         for run in runs:
             if run.status not in active_run_statuses:
@@ -2115,7 +2181,11 @@ async def delete_source_asset_version(
             # (its events keep the activity "in progress"), and pre-transitioning
             # the run would make the worker skip its terminal event and freeze
             # the indicator. Only fall back to the durable CAS path when no live
-            # worker owns the run in this process.
+            # worker owns the run in this process. The runtime claims a run whose
+            # worker has not been spawned yet too: admission registers its owner
+            # before writing the record and settles a revocation that lands
+            # inside the hand-over awaits, so the window between "record exists"
+            # and "worker exists" is never orphaned here.
             if runtime is not None and runtime.cancel_specialist_run(
                 project_id,
                 run.run_id,
@@ -2145,30 +2215,59 @@ async def delete_source_asset_version(
                 )
 
             for task in tasks:
-                if (
-                    task.run_id == run.run_id
-                    and task.status in active_task_statuses
-                ):
-                    try:
-                        await asyncio.to_thread(
-                            exec_store.transition_task,
-                            project_id,
-                            task.task_id,
-                            expected_status=active_task_statuses,
-                            status=TaskStatus.CANCELLED,
-                            updates={
-                                "error": {
-                                    "code": "SOURCE_ASSET_DELETED",
-                                    "message": "Source asset was deleted",
-                                },
-                            },
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.warning(
-                            "asset delete: failed to cancel task %s",
-                            task.task_id,
-                            exc_info=True,
-                        )
+                if task.task_id in settled_task_ids:
+                    continue
+                if task.status not in active_task_statuses:
+                    continue
+                matches_asset = _task_targets_deleted_asset(
+                    task,
+                    deleted_logical_id=deleted_logical_id,
+                    version_id=version_id,
+                    remaining_source_ids=remaining_source_ids,
+                )
+                if task.run_id != run.run_id and not matches_asset:
+                    continue
+                settled_task_ids.add(task.task_id)
+                await _cancel_deleted_asset_task(exec_store, project_id, task)
+
+        # Standalone media Tasks (observe_source_clip) belong to no
+        # SpecialistRun, so the loop above never reached them. Stop their live
+        # workers through the owning service first — a durable transition
+        # alone would leave the VLM call running and let it publish an
+        # observation of media that has just been deleted — then settle any
+        # Task still active on that asset.
+        try:
+            await source_observation_service(services).cancel_for_asset(
+                project_id,
+                logical_asset_id=deleted_logical_id,
+                version_id=version_id,
+            )
+        except Exception:  # noqa: BLE001 - best-effort cancellation
+            logger.warning(
+                "asset delete: stopping observations for project %s failed",
+                project_id,
+                exc_info=True,
+            )
+        refreshed_tasks = await asyncio.to_thread(
+            exec_store.list_tasks,
+            project_id,
+        )
+        for task in refreshed_tasks:
+            if task.run_id is not None:
+                continue
+            if task.task_id in settled_task_ids:
+                continue
+            if task.status not in active_task_statuses:
+                continue
+            if not _task_targets_deleted_asset(
+                task,
+                deleted_logical_id=deleted_logical_id,
+                version_id=version_id,
+                remaining_source_ids=remaining_source_ids,
+            ):
+                continue
+            settled_task_ids.add(task.task_id)
+            await _cancel_deleted_asset_task(exec_store, project_id, task)
     except Exception:  # noqa: BLE001 - best-effort cleanup
         logger.warning(
             "asset delete: run/task cancellation failed for project %s",
