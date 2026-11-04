@@ -26,6 +26,8 @@ from services.project_files.assets import (
 )
 from services.project_files.auto_snapshot import auto_snapshot_timelines
 from services.project_files.models import (
+    ArtifactSlot,
+    ArtifactVersion,
     AssetIndex,
     AudioCreation,
     EditCreation,
@@ -43,7 +45,6 @@ from services.project_files.models import (
     TimelineSpan,
 )
 from services.project_files.store import ProjectStore
-
 
 pytestmark = pytest.mark.unit
 NOW = datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc)
@@ -440,7 +441,7 @@ def _r2v_element(
         creation=R2VCreation(
             video_prompt="镜头横移",
             storyboard_reference_version_ids=list(
-                storyboard_version_ids or []
+                storyboard_version_ids or [],
             ),
             video_reference_version_ids=list(video_version_ids or []),
         ),
@@ -900,7 +901,7 @@ def test_force_delete_refuses_required_audio_reference(tmp_path):
     assert all(not reference["detachable"] for reference in references)
     # An unlabelled Element falls back to its id so the list never goes blank.
     assert {reference["elementLabel"] for reference in references} == {
-        "el-audio-1"
+        "el-audio-1",
     }
 
     after = store.read(DELETION_PROJECT_ID)
@@ -1237,3 +1238,204 @@ def test_shared_intelligence_file_survives_other_analysed_versions(tmp_path):
     assert "file-analysis" in after.assets.files_by_id
     assert (root / analysis.relative_uri).is_file()
     assert not (root / first.relative_uri).exists()
+
+
+def test_force_delete_marks_final_video_and_element_outputs_stale(
+    tmp_path,
+) -> None:
+    """Force-clearing timeline references must invalidate rendered outputs.
+
+    Detaching a source version from an element changes the creative material,
+    so the previously selected final_video and element-level renders are stale
+    and ``derive_work_graph`` must report compose as not-DONE.
+    """
+    store, base = _deletion_store(tmp_path)
+    frame = _publish(
+        store,
+        "file-frame",
+        "assets/sources/frame/version-1/original.png",
+        PORTRAIT_BYTES,
+        media_type="image/png",
+    )
+    project = _staged(
+        base,
+        files=[frame],
+        versions=[
+            _version(
+                version_id="version-frame",
+                file_id="file-frame",
+                checksum=frame.sha256,
+                media_kind="image",
+                media_type="image/png",
+            ),
+        ],
+        elements=[
+            _i2v_element(
+                "el-i2v-1",
+                first_frame_version_id="version-frame",
+            ),
+        ],
+    )
+
+    # Add artifact slots and versions that represent completed renders.
+    final_slot = ArtifactSlot(
+        slot_id="timeline:main:render",
+        kind="final_video",
+        owner_ref="timeline:main",
+        version_ids=["final-v1"],
+        selected_version_id="final-v1",
+    )
+    element_slot = ArtifactSlot(
+        slot_id="element:el-i2v-1:video",
+        kind="element_video",
+        owner_ref="element:el-i2v-1",
+        version_ids=["elem-v1"],
+        selected_version_id="elem-v1",
+    )
+    final_version = ArtifactVersion(
+        version_id="final-v1",
+        slot_id="timeline:main:render",
+        kind="final_video",
+        owner_ref="timeline:main",
+        name="最终成片",
+        file_id="file-frame",
+        checksum=frame.sha256,
+        based_on_generation=0,
+        stale=False,
+        created_at=NOW,
+    )
+    element_version = ArtifactVersion(
+        version_id="elem-v1",
+        slot_id="element:el-i2v-1:video",
+        kind="element_video",
+        owner_ref="element:el-i2v-1",
+        name="镜头视频",
+        file_id="file-frame",
+        checksum=frame.sha256,
+        based_on_generation=0,
+        stale=False,
+        created_at=NOW,
+    )
+    project.assets.artifact_slots_by_id[final_slot.slot_id] = final_slot
+    project.assets.artifact_slots_by_id[element_slot.slot_id] = element_slot
+    project.assets.artifact_versions_by_id[
+        final_version.version_id
+    ] = final_version
+    project.assets.artifact_versions_by_id[
+        element_version.version_id
+    ] = element_version
+
+    base = _publish_project(store, base, project)
+
+    # Sanity: both renders start fresh.
+    after_read = store.read(DELETION_PROJECT_ID).project
+    assert after_read.assets.artifact_versions_by_id["final-v1"].stale is False
+    assert after_read.assets.artifact_versions_by_id["elem-v1"].stale is False
+
+    # Force delete detaches the reference and must mark renders stale.
+    snapshot = store.remove_source_asset_version(
+        DELETION_PROJECT_ID,
+        "version-frame",
+        force=True,
+    )
+    after = snapshot.project
+
+    assert "version-frame" not in after.assets.source_versions_by_id
+    final_after = after.assets.artifact_versions_by_id["final-v1"]
+    assert final_after.stale is True
+    assert final_after.stale_reason == "素材已删除，需要重新生成"
+    elem_after = after.assets.artifact_versions_by_id["elem-v1"]
+    assert elem_after.stale is True
+    assert elem_after.stale_reason == "素材已删除，需要重新生成"
+
+    # A storyboard slot (not final_video / element_video) stays untouched.
+    storyboard_slot = ArtifactSlot(
+        slot_id="element:el-i2v-1:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:el-i2v-1",
+        version_ids=["sb-v1"],
+        selected_version_id="sb-v1",
+    )
+    storyboard_version = ArtifactVersion(
+        version_id="sb-v1",
+        slot_id="element:el-i2v-1:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:el-i2v-1",
+        name="分镜图",
+        file_id="file-frame",
+        checksum=frame.sha256,
+        based_on_generation=0,
+        stale=False,
+        created_at=NOW,
+    )
+    after.assets.artifact_slots_by_id[
+        storyboard_slot.slot_id
+    ] = storyboard_slot
+    after.assets.artifact_versions_by_id[
+        storyboard_version.version_id
+    ] = storyboard_version
+    # Re-publish so the store accepts the addition, then force-delete
+    # another version to confirm staleness is still applied.
+    base2 = _publish_project(store, snapshot, after)
+    frame2 = _publish(
+        store,
+        "file-frame2",
+        "assets/sources/frame2/version-1/original.png",
+        PORTRAIT_BYTES,
+        media_type="image/png",
+    )
+    project2 = _staged(
+        base2,
+        files=[frame2],
+        versions=[
+            _version(
+                version_id="version-frame2",
+                file_id="file-frame2",
+                checksum=frame2.sha256,
+                media_kind="image",
+                media_type="image/png",
+            ),
+        ],
+        elements=[
+            _i2v_element(
+                "el-i2v-2",
+                first_frame_version_id="version-frame2",
+            ),
+        ],
+    )
+    # Add a second element's slots.
+    slot2 = ArtifactSlot(
+        slot_id="element:el-i2v-2:video",
+        kind="element_video",
+        owner_ref="element:el-i2v-2",
+        version_ids=["elem2-v1"],
+        selected_version_id="elem2-v1",
+    )
+    ver2 = ArtifactVersion(
+        version_id="elem2-v1",
+        slot_id="element:el-i2v-2:video",
+        kind="element_video",
+        owner_ref="element:el-i2v-2",
+        name="镜头视频2",
+        file_id="file-frame2",
+        checksum=frame2.sha256,
+        based_on_generation=0,
+        stale=False,
+        created_at=NOW,
+    )
+    project2.assets.artifact_slots_by_id[slot2.slot_id] = slot2
+    project2.assets.artifact_versions_by_id[ver2.version_id] = ver2
+    base2 = _publish_project(store, base2, project2)
+
+    # Force-delete the second frame.
+    snapshot2 = store.remove_source_asset_version(
+        DELETION_PROJECT_ID,
+        "version-frame2",
+        force=True,
+    )
+    after2 = snapshot2.project
+
+    # The second element's video is stale, the first element's is untouched.
+    assert after2.assets.artifact_versions_by_id["elem2-v1"].stale is True
+    # The storyboard slot (not final_video / element_video) was not invalidated.
+    assert after2.assets.artifact_versions_by_id["sb-v1"].stale is False

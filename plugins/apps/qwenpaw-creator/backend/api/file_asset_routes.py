@@ -386,13 +386,27 @@ def _asset_size_bytes(item: _AssetInput | _StagedAssetInput) -> int:
     return len(item.content)
 
 
+def _media_kind_compatible(*, stored: str, uploaded: str) -> bool:
+    """True when *uploaded* media kind can safely reuse *stored*.
+
+    ``other`` is the opaque fallback (e.g. application/octet-stream): it
+    accepts any concrete kind, which is then upgraded on the stored row.
+    A stored concrete kind (image/audio/video) is only compatible with the
+    same concrete kind — bytes alone do not turn an image into audio.
+    """
+    if stored in (uploaded, "other"):
+        return True
+    return False
+
+
 def _reusable_source_version(
     *,
     files: dict[str, Any],
     versions: dict[str, Any],
     checksum: str,
-) -> dict[str, Any] | None:
-    """Return the file-backed AssetVersion already holding these exact bytes.
+    media_kind: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return every file-backed AssetVersion already holding these exact bytes.
 
     Idempotency only spans one client request identity, so re-picking the same
     file is a fresh ``Idempotency-Key`` and used to mint a second AssetVersion,
@@ -402,10 +416,10 @@ def _reusable_source_version(
     never have been cached.
 
     Projects created before this rule can hold several versions of the same
-    bytes under different logical Assets, so the pick is fully deterministic
-    (earliest ``created_at``, ``version_id`` as tie-breaker) instead of trusting
-    the order the JSON index happens to parse in: the answer names the Asset the
-    user will see and the Agent will be told about.
+    bytes under different logical Assets, so results are sorted by
+    ``created_at`` (earliest-first, ``version_id`` as tie-breaker): the
+    oldest healthy candidate whose stored media kind is compatible with
+    *media_kind* is picked by the caller.
     """
 
     matches = [
@@ -415,9 +429,18 @@ def _reusable_source_version(
         and version.get("file_id")
         and version["file_id"] in files
     ]
+    if media_kind is not None:
+        matches = [
+            version
+            for version in matches
+            if _media_kind_compatible(
+                stored=version.get("media_kind", "other"),
+                uploaded=media_kind,
+            )
+        ]
     if not matches:
-        return None
-    return min(
+        return []
+    return sorted(
         matches,
         key=lambda version: (
             str(version.get("created_at") or ""),
@@ -614,23 +637,29 @@ def _ingest_many_locked(
                 source_id = _stable_id("source", project_id, key, suffix)
                 checksum = _asset_checksum(item)
                 size_bytes = _asset_size_bytes(item)
-                reusable = _reusable_source_version(
+                new_media_kind = _media_kind(item.media_type, item.name)
+                candidates = _reusable_source_version(
                     files=files,
                     versions=versions,
                     checksum=checksum,
+                    media_kind=new_media_kind,
                 )
-                if reusable is not None:
+                reusable: dict[str, Any] | None = None
+                for cand in candidates:
                     try:
                         _ensure_existing_file(
                             file_store,
                             IndexedFile.model_validate(
-                                files[reusable["file_id"]],
+                                files[cand["file_id"]],
                             ),
                         )
+                        reusable = cand
+                        break
                     except StorageIntegrityError:
-                        # Inheriting a damaged reference is worse than
-                        # carrying one duplicate row: publish afresh.
-                        reusable = None
+                        # This candidate's file is damaged; try the next
+                        # healthy version with the same checksum instead
+                        # of falling back to a fresh upload.
+                        continue
                 reused_name: str | None = None
                 if reusable is not None:
                     # These bytes are already creative material in this
@@ -640,6 +669,16 @@ def _ingest_many_locked(
                     version_id = reusable["version_id"]
                     file_id = reusable["file_id"]
                     reused_name = str(reusable.get("name") or "") or None
+                    # When the stored media kind is "other" (e.g.
+                    # application/octet-stream from a raw upload without
+                    # postIngestAction), upgrade it to the upload's concrete
+                    # kind so parsers that inspect the version row
+                    # (voice-sample validators, media-kind routers) see the
+                    # real format instead of the opaque fallback.
+                    stored_kind = reusable.get("media_kind", "other")
+                    if stored_kind == "other" and new_media_kind != "other":
+                        versions[version_id]["media_kind"] = new_media_kind
+                        versions[version_id]["media_type"] = item.media_type
                 else:
                     logical_asset_id = _stable_id(
                         "asset",
@@ -1140,7 +1179,9 @@ def _register_remote_asset_sync(
             ).model_dump(mode="json")
             existing_source = source_items.get(source_id)
             if existing_source is not None and existing_source != source:
-                raise ConflictError("远程 ProjectSource 稳定 ID 已存在但内容不同")
+                raise ConflictError(
+                    "远程 ProjectSource 稳定 ID 已存在但内容不同",
+                )
             if existing_source is None:
                 source_items[source_id] = source
                 source_order.append(source_id)
@@ -1556,12 +1597,14 @@ def _download_source_cache_sync(
         _source_cache_progress_set(
             identity,
             state="cached",
-            received_bytes=download.staged.size_bytes
-            if download is not None
-            else 0,
-            total_bytes=download.staged.size_bytes
-            if download is not None
-            else expected_size_bytes,
+            received_bytes=(
+                download.staged.size_bytes if download is not None else 0
+            ),
+            total_bytes=(
+                download.staged.size_bytes
+                if download is not None
+                else expected_size_bytes
+            ),
         )
     except BaseException as error:
         if not isinstance(error, KeyboardInterrupt):
@@ -1753,7 +1796,9 @@ async def download_source_cache(
 
 def _translate(error: BaseException) -> None:
     if isinstance(error, IdempotencyConflictError):
-        raise ConflictError("Idempotency-Key 已用于不同的 Asset 请求") from error
+        raise ConflictError(
+            "Idempotency-Key 已用于不同的 Asset 请求",
+        ) from error
     if isinstance(error, IdempotencyStateConflictError):
         raise ConflictError("Asset idempotency 状态冲突") from error
     if isinstance(error, AssetFileError):
