@@ -52,8 +52,9 @@ from .model_context import (
     MODEL_INPUT_BYTES,
     MediaVault,
     ModelContextBudgetError,
+    _TEXT_BYTES_PER_TOKEN,
     budget_diagnostics,
-    declared_context_tokens,
+    context_window,
     demote_derived_inline_media,
     demote_human_inline_media,
     format_budget_failure,
@@ -1137,21 +1138,20 @@ class AgentScopeAgentChatClient:
         return self.model
 
     def _input_token_budget(self) -> int | None:
-        """Input ceiling for the window this deployment declares.
+        """Input ceiling for this deployment's model context window.
 
-        Returns ``None`` when no window is declared, so the byte guard stays
-        the only limit rather than inventing one this provider may not share.
-        An SDK model class carries a default window that describes the class,
-        not the model actually configured here, so it is deliberately not read:
-        pricing a 32K model against a library default would quietly let through
-        requests the provider then refuses.
-        The reserve leaves room for the reply and for SDK formatting, matching
-        how the platform budgets its own scrollable context.
+        Resolves the window from the same host catalog the platform scroll
+        reads, so the plugin never prices against a different ceiling.  When
+        no window is available the byte transport floor stays the sole limit.
         """
-        context_size = declared_context_tokens()
+        context_size = context_window(
+            model_config.get_text_model_name(),
+        )
         if context_size is None:
             return None
-        reserve = max(1024, context_size // 8)
+        # Match the platform scroll output reserve:
+        #   min(_MAX_OUTPUT_RESERVE_TOKENS=4096, max(1, hard_limit * 0.05))
+        reserve = min(4096, max(1, int(context_size * 0.05)))
         return max(1024, context_size - reserve)
 
     def _media_vault(self) -> MediaVault | None:
@@ -1499,12 +1499,26 @@ class AgentScopeAgentChatClient:
         _context_budget_bytes: int = MODEL_INPUT_BYTES,
         _demotion_notes: Sequence[str] = (),
     ) -> AgentModelTurn:
+        token_budget = self._input_token_budget()
+        # The byte budget prepare_model_messages checks can be two orders of
+        # magnitude larger than the transport floor: a 1M-token window is
+        # ~4 MB of plain text, so a 384 KB transport floor would refuse
+        # every substantial request before the provider ever sees it.  Only
+        # the top-level call derives this ceiling from the token window;
+        # recovery paths already carry a tightened budget.
+        if token_budget is None or _context_budget_bytes != MODEL_INPUT_BYTES:
+            prepare_bytes = _context_budget_bytes
+        else:
+            prepare_bytes = max(
+                MODEL_INPUT_BYTES,
+                int(token_budget * _TEXT_BYTES_PER_TOKEN),
+            )
         try:
             messages = prepare_model_messages(
                 messages,
                 tools,
-                max_bytes=_context_budget_bytes,
-                max_tokens=self._input_token_budget(),
+                max_bytes=prepare_bytes,
+                max_tokens=token_budget,
             )
         except ModelContextBudgetError as exc:
             # This refusal happens locally, before a request goes out, so the
@@ -1515,7 +1529,7 @@ class AgentScopeAgentChatClient:
             messages, note = self._fit_refused_request(
                 messages,
                 tools,
-                max_bytes=_context_budget_bytes,
+                max_bytes=prepare_bytes,
                 failure=exc,
             )
             _demotion_notes = (*_demotion_notes, note)
