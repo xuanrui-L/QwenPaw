@@ -11,7 +11,11 @@ import stat
 
 import pytest
 
-from domain.errors import ConflictError
+from domain.errors import ConflictError, SourceAssetInUseError
+from services.file_agent_runtime.work_graph import (
+    WorkNodeStatus,
+    derive_work_graph,
+)
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileCorrupt,
@@ -23,10 +27,14 @@ from services.project_files.assets import (
 from services.project_files.auto_snapshot import auto_snapshot_timelines
 from services.project_files.models import (
     AssetIndex,
+    AudioCreation,
     EditCreation,
     ElementLocation,
+    I2VCreation,
     IndexedFile,
+    OverlayCreation,
     Project,
+    R2VCreation,
     S2VCreation,
     SourceAssetVersion,
     SourceIntelligenceVersion,
@@ -384,6 +392,90 @@ def _edit_element(element_id: str, version_id: str) -> TimelineElement:
     )
 
 
+def _i2v_element(
+    element_id: str,
+    *,
+    first_frame_version_id: str | None = None,
+    label: str = "",
+) -> TimelineElement:
+    return TimelineElement(
+        element_id=element_id,
+        label=label,
+        span=TimelineSpan(start_tick=0, duration_tick=3000),
+        location=ElementLocation(),
+        creation=I2VCreation(
+            first_frame_version_id=first_frame_version_id,
+            video_prompt="雪花落满屋檐",
+        ),
+    )
+
+
+def _audio_element(element_id: str, version_id: str) -> TimelineElement:
+    """One audio track: its creation and render_source name the same version."""
+    return TimelineElement(
+        element_id=element_id,
+        span=TimelineSpan(start_tick=0, duration_tick=2000),
+        creation=AudioCreation(
+            source_asset_version_id=version_id,
+            role="bgm",
+        ),
+        render_source=SourceVersionRenderSource(
+            version_id=version_id,
+            source_in_tick=0,
+            source_out_tick=2000,
+        ),
+    )
+
+
+def _r2v_element(
+    element_id: str,
+    *,
+    storyboard_version_ids: list[str] | None = None,
+    video_version_ids: list[str] | None = None,
+) -> TimelineElement:
+    return TimelineElement(
+        element_id=element_id,
+        span=TimelineSpan(start_tick=0, duration_tick=3000),
+        location=ElementLocation(),
+        creation=R2VCreation(
+            video_prompt="镜头横移",
+            storyboard_reference_version_ids=list(storyboard_version_ids or []),
+            video_reference_version_ids=list(video_version_ids or []),
+        ),
+    )
+
+
+def _overlay_element(
+    element_id: str,
+    *,
+    reference_version_ids: list[str] | None = None,
+    render_source_version_id: str | None = None,
+    text: str = "标题",
+    prompt: str = "",
+) -> TimelineElement:
+    return TimelineElement(
+        element_id=element_id,
+        span=TimelineSpan(start_tick=0, duration_tick=1000),
+        location=ElementLocation(),
+        # Text keeps the overlay valid after its references are emptied; the
+        # media-sticker form passes text="" and lives on its references alone.
+        creation=OverlayCreation(
+            text=text,
+            prompt=prompt,
+            reference_version_ids=list(reference_version_ids or []),
+        ),
+        render_source=(
+            SourceVersionRenderSource(
+                version_id=render_source_version_id,
+                source_in_tick=0,
+                source_out_tick=1000,
+            )
+            if render_source_version_id
+            else None
+        ),
+    )
+
+
 def _staged(base, *, files=(), versions=(), intelligence=(), elements=None):
     """The base Project plus the supplied asset records and main timeline."""
     project = base.project.model_copy(deep=True)
@@ -503,11 +595,18 @@ def test_s2v_portrait_reference_blocks_asset_deletion(tmp_path):
     with pytest.raises(
         ConflictError,
         match="s2v-portrait:el-s2v-1",
-    ):
+    ) as caught:
         store.remove_source_asset_version(
             DELETION_PROJECT_ID,
             "version-portrait",
         )
+    # The machine-readable half lets the UI name the shot instead of
+    # surfacing this English sentence with internal ids.
+    assert caught.value.code == "ASSET_IN_USE"
+    assert [
+        reference["refKind"]
+        for reference in caught.value.details["timelineReferences"]
+    ] == ["s2v-portrait"]
 
     after = store.read(DELETION_PROJECT_ID).project
     assert "version-portrait" in after.assets.source_versions_by_id
@@ -525,11 +624,16 @@ def test_s2v_drive_audio_reference_blocks_asset_deletion(tmp_path):
     with pytest.raises(
         ConflictError,
         match="s2v-drive-audio:el-s2v-1",
-    ):
+    ) as caught:
         store.remove_source_asset_version(
             DELETION_PROJECT_ID,
             "version-drive",
         )
+    assert caught.value.code == "ASSET_IN_USE"
+    assert [
+        reference["refKind"]
+        for reference in caught.value.details["timelineReferences"]
+    ] == ["s2v-drive-audio"]
 
     after = store.read(DELETION_PROJECT_ID).project
     assert "version-drive" in after.assets.source_versions_by_id
@@ -598,6 +702,16 @@ def test_snapshot_only_reference_blocks_asset_deletion(tmp_path):
         store.remove_source_asset_version(DELETION_PROJECT_ID, "version-clip")
     # The conflict names the snapshot timeline so the block is diagnosable.
     assert f"{snapshot_id}/render-source:" in str(caught.value)
+    assert caught.value.code == "ASSET_IN_USE"
+    snapshot_ref = next(
+        reference
+        for reference in caught.value.details["timelineReferences"]
+        if reference["isSnapshot"]
+    )
+    assert snapshot_ref["timelineId"] == snapshot_id
+    # An Edit Element cannot render without its source range at all, so even
+    # a force delete leaves this reference in place.
+    assert snapshot_ref["detachable"] is False
 
     # Rolling the snapshot back onto the live timeline must keep working,
     # and that is exactly why the bytes have to survive: the restored
@@ -625,6 +739,356 @@ def test_snapshot_only_reference_blocks_asset_deletion(tmp_path):
         store.remove_source_asset_version(DELETION_PROJECT_ID, "version-clip")
     assert "render-source:el-edit-1" in str(caught.value)
     assert clip_path.is_file()
+
+
+def _i2v_project_with_snapshot(tmp_path):
+    """Live i2v Element plus an auto snapshot freezing the same first frame."""
+    store, base = _deletion_store(tmp_path)
+    frame = _publish(
+        store,
+        "file-frame",
+        "assets/sources/frame/version-1/original.png",
+        PORTRAIT_BYTES,
+        media_type="image/png",
+    )
+    project = _staged(
+        base,
+        files=[frame],
+        versions=[
+            _version(
+                version_id="version-frame",
+                file_id="file-frame",
+                checksum=frame.sha256,
+                media_kind="image",
+                media_type="image/png",
+            ),
+        ],
+        elements=[
+            _i2v_element(
+                "el-i2v-1",
+                first_frame_version_id="version-frame",
+                label="镜头一｜风雪定场",
+            ),
+        ],
+    )
+    base = _publish_project(store, base, project)
+    # Freeze the timeline the way a real Element edit does: the snapshot keeps
+    # the pre-change Element while the modified live one survives beside it.
+    base_data = project.model_dump(mode="json")
+    candidate_data = copy.deepcopy(base_data)
+    candidate_data["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        "el-i2v-1"
+    ]["label"] = "镜头一｜风雪定场（修订）"
+    assert auto_snapshot_timelines(base_data, candidate_data)
+    snapshot_id = next(
+        tid
+        for tid in candidate_data["timelines"]["order"]
+        if tid.startswith("snapshot:")
+    )
+    base = _publish_project(
+        store,
+        base,
+        Project.model_validate(candidate_data),
+    )
+    return store, base, frame, snapshot_id
+
+
+def test_force_delete_detaches_live_and_snapshot_references(tmp_path):
+    # A snapshot used to pin an asset forever (nothing deletes snapshots), so
+    # force has to clear the frozen pointer too: leaving it would keep the
+    # bytes alive for a history entry nobody can restore the file for.
+    store, base, frame, snapshot_id = _i2v_project_with_snapshot(tmp_path)
+    root = store.project_root(DELETION_PROJECT_ID)
+    frame_path = root / frame.relative_uri
+    assert frame_path.is_file()
+    assert (
+        derive_work_graph(base.project).by_id["video:el-i2v-1"].status
+        is WorkNodeStatus.READY
+    )
+
+    with pytest.raises(SourceAssetInUseError) as caught:
+        store.remove_source_asset_version(DELETION_PROJECT_ID, "version-frame")
+    references = caught.value.details["timelineReferences"]
+    assert sorted(
+        (reference["refKind"], reference["isSnapshot"])
+        for reference in references
+    ) == [
+        ("i2v-first-frame", False),
+        ("i2v-first-frame", True),
+    ]
+    assert all(reference["detachable"] for reference in references)
+    # The live record carries the human name the UI shows instead of an id.
+    assert next(
+        reference for reference in references if not reference["isSnapshot"]
+    )["elementLabel"] == "镜头一｜风雪定场（修订）"
+
+    snapshot = store.remove_source_asset_version(
+        DELETION_PROJECT_ID,
+        "version-frame",
+        force=True,
+    )
+
+    after = snapshot.project
+    assert "version-frame" not in after.assets.source_versions_by_id
+    assert "file-frame" not in after.assets.files_by_id
+    assert not frame_path.exists()
+    for timeline_id, element_id in (
+        ("timeline:main", "el-i2v-1"),
+        (snapshot_id, f"{snapshot_id}:el-i2v-1"),
+    ):
+        element = after.timelines.items[timeline_id].elements_by_id[element_id]
+        # Identity untouched, only the input pointer cleared.
+        assert element.element_id == element_id
+        assert element.creation.first_frame_version_id is None
+    # The shot now reads as "needs a first frame" rather than keeping a live
+    # input the graph would happily reuse for another render.
+    node = derive_work_graph(after).by_id["video:el-i2v-1"]
+    assert node.status is WorkNodeStatus.GATED
+    assert node.missing == ("first_frame_version_id 缺失",)
+
+
+def test_force_delete_refuses_required_audio_reference(tmp_path):
+    # ``AudioCreation.source_asset_version_id`` is a required EntityId and an
+    # Edit Element's render_source must stay a source range: half-clearing
+    # those would persist a Project the model itself rejects, so force keeps
+    # refusing and the Element has to go first.
+    store, base = _deletion_store(tmp_path)
+    song = _publish(
+        store,
+        "file-song",
+        "assets/sources/song/version-1/original.wav",
+        DRIVE_AUDIO_BYTES,
+        media_type="audio/wav",
+    )
+    project = _staged(
+        base,
+        files=[song],
+        versions=[
+            _version(
+                version_id="version-song",
+                file_id="file-song",
+                checksum=song.sha256,
+                media_kind="audio",
+                media_type="audio/wav",
+                duration_seconds=3,
+            ),
+        ],
+        elements=[_audio_element("el-audio-1", "version-song")],
+    )
+    before = _publish_project(store, base, project)
+    song_path = store.project_root(DELETION_PROJECT_ID) / song.relative_uri
+
+    with pytest.raises(SourceAssetInUseError) as caught:
+        store.remove_source_asset_version(
+            DELETION_PROJECT_ID,
+            "version-song",
+            force=True,
+        )
+
+    references = caught.value.details["timelineReferences"]
+    assert sorted(reference["refKind"] for reference in references) == [
+        "audio-source",
+        "render-source",
+    ]
+    assert all(not reference["detachable"] for reference in references)
+    # An unlabelled Element falls back to its id so the list never goes blank.
+    assert {
+        reference["elementLabel"] for reference in references
+    } == {"el-audio-1"}
+
+    after = store.read(DELETION_PROJECT_ID)
+    assert after.etag == before.etag
+    assert after.generation == before.generation
+    assert "version-song" in after.project.assets.source_versions_by_id
+    assert song_path.is_file()
+
+
+def test_force_delete_detaches_render_source_and_r2v_refs(tmp_path):
+    # Every detachable shape in one pass, and a surviving sibling version in
+    # the same lists to prove the clear is per-reference, not per-field.
+    store, base = _deletion_store(tmp_path)
+    dropped = _publish(
+        store,
+        "file-dropped",
+        "assets/sources/dropped/version-1/original.png",
+        PORTRAIT_BYTES,
+        media_type="image/png",
+    )
+    survivor = _publish(
+        store,
+        "file-survivor",
+        "assets/sources/survivor/version-1/original.png",
+        CLIP_BYTES,
+        media_type="image/png",
+    )
+    project = _staged(
+        base,
+        files=[dropped, survivor],
+        versions=[
+            _version(
+                version_id="version-dropped",
+                file_id="file-dropped",
+                checksum=dropped.sha256,
+                media_kind="image",
+                media_type="image/png",
+            ),
+            _version(
+                version_id="version-survivor",
+                file_id="file-survivor",
+                checksum=survivor.sha256,
+                media_kind="image",
+                media_type="image/png",
+            ),
+        ],
+        elements=[
+            _r2v_element(
+                "el-r2v-1",
+                storyboard_version_ids=[
+                    "version-dropped",
+                    "version-survivor",
+                ],
+                video_version_ids=["version-dropped"],
+            ),
+            _overlay_element(
+                "el-overlay-1",
+                reference_version_ids=["version-dropped"],
+                render_source_version_id="version-dropped",
+            ),
+        ],
+    )
+    _publish_project(store, base, project)
+    dropped_path = store.project_root(DELETION_PROJECT_ID) / dropped.relative_uri
+
+    store.remove_source_asset_version(
+        DELETION_PROJECT_ID,
+        "version-dropped",
+        force=True,
+    )
+
+    after = store.read(DELETION_PROJECT_ID).project
+    assert "version-dropped" not in after.assets.source_versions_by_id
+    assert not dropped_path.exists()
+    r2v = after.timelines.items["timeline:main"].elements_by_id["el-r2v-1"]
+    assert r2v.creation.storyboard_reference_version_ids == [
+        "version-survivor",
+    ]
+    assert r2v.creation.video_reference_version_ids == []
+    overlay = after.timelines.items["timeline:main"].elements_by_id[
+        "el-overlay-1"
+    ]
+    assert overlay.creation.reference_version_ids == []
+    assert overlay.render_source is None
+    assert "version-survivor" in after.assets.source_versions_by_id
+
+
+def test_force_delete_refuses_the_only_payload_of_a_text_free_overlay(tmp_path):
+    # A media sticker is declared valid by holding nothing but reference
+    # versions: clearing this one would leave an OverlayCreation its own
+    # validator rejects, so the delete must stay refused (and retryable by
+    # deleting the Element) instead of turning into an unpersistable project.
+    store, base = _deletion_store(tmp_path)
+    sticker = _publish(
+        store,
+        "file-sticker",
+        "assets/sources/sticker/version-1/original.png",
+        PORTRAIT_BYTES,
+        media_type="image/png",
+    )
+    project = _staged(
+        base,
+        files=[sticker],
+        versions=[
+            _version(
+                version_id="version-sticker",
+                file_id="file-sticker",
+                checksum=sticker.sha256,
+                media_kind="image",
+                media_type="image/png",
+            ),
+        ],
+        elements=[
+            _overlay_element(
+                "el-sticker-1",
+                reference_version_ids=["version-sticker"],
+                render_source_version_id="version-sticker",
+                text="",
+            ),
+        ],
+    )
+    before = _publish_project(store, base, project)
+    sticker_path = store.project_root(DELETION_PROJECT_ID) / sticker.relative_uri
+
+    with pytest.raises(SourceAssetInUseError) as caught:
+        store.remove_source_asset_version(
+            DELETION_PROJECT_ID,
+            "version-sticker",
+            force=True,
+        )
+
+    detachable = {
+        reference["refKind"]: reference["detachable"]
+        for reference in caught.value.details["timelineReferences"]
+    }
+    assert detachable == {"overlay-ref": False, "render-source": False}
+
+    after = store.read(DELETION_PROJECT_ID)
+    assert after.etag == before.etag
+    assert after.generation == before.generation
+    assert "version-sticker" in after.project.assets.source_versions_by_id
+    assert sticker_path.is_file()
+
+
+def test_force_delete_detaches_an_overlay_that_keeps_its_own_payload(tmp_path):
+    # The sibling of the case above: a decoration with a design brief left is
+    # still a valid OverlayCreation once the reference goes, so force may clear
+    # it. Only the pointer to the deleted bytes is touched.
+    store, base = _deletion_store(tmp_path)
+    sticker = _publish(
+        store,
+        "file-sticker",
+        "assets/sources/sticker/version-1/original.png",
+        PORTRAIT_BYTES,
+        media_type="image/png",
+    )
+    project = _staged(
+        base,
+        files=[sticker],
+        versions=[
+            _version(
+                version_id="version-sticker",
+                file_id="file-sticker",
+                checksum=sticker.sha256,
+                media_kind="image",
+                media_type="image/png",
+            ),
+        ],
+        elements=[
+            _overlay_element(
+                "el-sticker-1",
+                reference_version_ids=["version-sticker"],
+                render_source_version_id="version-sticker",
+                text="",
+                prompt="雪花飘落",
+            ),
+        ],
+    )
+    _publish_project(store, base, project)
+
+    store.remove_source_asset_version(
+        DELETION_PROJECT_ID,
+        "version-sticker",
+        force=True,
+    )
+
+    after = store.read(DELETION_PROJECT_ID).project
+    assert "version-sticker" not in after.assets.source_versions_by_id
+    assert not (store.project_root(DELETION_PROJECT_ID) / sticker.relative_uri).exists()
+    overlay = after.timelines.items["timeline:main"].elements_by_id[
+        "el-sticker-1"
+    ]
+    assert overlay.creation.reference_version_ids == []
+    assert overlay.creation.prompt == "雪花飘落"
+    assert overlay.render_source is None
 
 
 def test_deleting_analyzed_asset_removes_intelligence_file(tmp_path):

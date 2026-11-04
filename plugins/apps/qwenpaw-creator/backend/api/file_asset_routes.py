@@ -384,6 +384,46 @@ def _asset_size_bytes(item: _AssetInput | _StagedAssetInput) -> int:
     return len(item.content)
 
 
+def _reusable_source_version(
+    *,
+    files: dict[str, Any],
+    versions: dict[str, Any],
+    checksum: str,
+) -> dict[str, Any] | None:
+    """Return the file-backed AssetVersion already holding these exact bytes.
+
+    Idempotency only spans one client request identity, so re-picking the same
+    file is a fresh ``Idempotency-Key`` and used to mint a second AssetVersion,
+    a second ProjectSource and a second copy of the bytes on disk. Only
+    file-backed versions qualify: a remote-URL version hashes the URL, not the
+    content, so matching it here would point a local upload at media that may
+    never have been cached.
+
+    Projects created before this rule can hold several versions of the same
+    bytes under different logical Assets, so the pick is fully deterministic
+    (earliest ``created_at``, ``version_id`` as tie-breaker) instead of trusting
+    the order the JSON index happens to parse in: the answer names the Asset the
+    user will see and the Agent will be told about.
+    """
+
+    matches = [
+        version
+        for version in versions.values()
+        if version.get("checksum") == checksum
+        and version.get("file_id")
+        and version["file_id"] in files
+    ]
+    if not matches:
+        return None
+    return min(
+        matches,
+        key=lambda version: (
+            str(version.get("created_at") or ""),
+            str(version.get("version_id") or ""),
+        ),
+    )
+
+
 _AV_MIME_PREFIXES = (
     ("image/", "image"),
     ("video/", "video"),
@@ -492,6 +532,22 @@ def _ingest_many_locked(
     attach_source: bool,
     scope: str,
 ) -> tuple[dict[str, Any], bool]:
+    """Publish staged Assets under one per-Project idempotency boundary.
+
+    Two identities are kept apart on purpose. ``key`` (the Idempotency-Key) is
+    the request identity: replaying it must not create anything, and the
+    durable record answers from cache. Content identity is the sha256 of the
+    bytes: an upload whose checksum already has a file-backed AssetVersion in
+    this Project reuses that version and its logical Asset rather than adding
+    a duplicate row plus a second copy on disk, and its response item carries
+    ``reused: true``. A batch that only finds duplicates writes nothing at all
+    because the candidate equals the base and the commit below is skipped.
+
+    Remote-URL registration (``_register_remote_asset_sync``) is deliberately
+    outside this rule: its checksum is a URL hash and its task/cache records
+    pin the key-derived Asset ids, so deduplicating it would have to carry a
+    reused id through the download Task as well.
+    """
     if not inputs:
         raise ValidationError("至少需要一个 Asset")
     records = IdempotencyRecordStore(_records_root(services, project_id))
@@ -549,76 +605,125 @@ def _ingest_many_locked(
             file_store = AssetFileStore(
                 services.projects.project_root(project_id),
             )
-            output_items: list[dict[str, str]] = []
+            output_items: list[dict[str, Any]] = []
             created_at = datetime.now(UTC)
             for index, item in enumerate(inputs):
                 suffix = str(index)
-                logical_asset_id = _stable_id("asset", project_id, key, suffix)
-                version_id = _stable_id(
-                    "asset-version",
-                    project_id,
-                    key,
-                    suffix,
-                )
-                file_id = _stable_id("file", project_id, key, suffix)
                 source_id = _stable_id("source", project_id, key, suffix)
                 checksum = _asset_checksum(item)
                 size_bytes = _asset_size_bytes(item)
-                relative_uri = PurePosixPath(
-                    "assets",
-                    "sources",
-                    f"{file_id}{_extension(item.name, item.media_type)}",
-                ).as_posix()
-                indexed = IndexedFile(
-                    file_id=file_id,
-                    kind="source_original",
-                    relative_uri=relative_uri,
-                    sha256=checksum,
-                    size_bytes=size_bytes,
-                    media_type=item.media_type,
-                    created_at=created_at,
-                )
-                version = SourceAssetVersion(
-                    version_id=version_id,
-                    logical_asset_id=logical_asset_id,
-                    name=item.name,
-                    file_id=file_id,
+                reusable = _reusable_source_version(
+                    files=files,
+                    versions=versions,
                     checksum=checksum,
-                    media_kind=_media_kind(item.media_type, item.name),
-                    media_type=item.media_type,
-                    created_at=created_at,
-                    metadata={"clientRequestId": key},
                 )
-                existing_file = files.get(file_id)
-                existing_version = versions.get(version_id)
-                if existing_file is not None or existing_version is not None:
-                    if existing_file != indexed.model_dump(
-                        mode="json",
-                    ) or existing_version != version.model_dump(mode="json"):
-                        raise ConflictError("Asset 稳定 ID 已存在但内容不同")
-                    _ensure_existing_file(file_store, indexed)
-                else:
-                    staged = (
-                        item.staged
-                        if isinstance(item, _StagedAssetInput)
-                        else file_store.stage_bytes(
-                            item.content,
-                            staging_id=operation_id[:80],
-                        )
-                    )
+                if reusable is not None:
                     try:
-                        file_store.publish(
-                            staged,
-                            relative_uri,
-                            expected_sha256=checksum,
-                            expected_size_bytes=size_bytes,
+                        _ensure_existing_file(
+                            file_store,
+                            IndexedFile.model_validate(
+                                files[reusable["file_id"]],
+                            ),
                         )
-                    except AssetAlreadyExists:
-                        file_store.abandon(staged)
+                    except StorageIntegrityError:
+                        # Inheriting a damaged reference is worse than
+                        # carrying one duplicate row: publish afresh.
+                        reusable = None
+                reused_name: str | None = None
+                if reusable is not None:
+                    # These bytes are already creative material in this
+                    # Project, so the upload keeps the identity it already
+                    # has: no second index entry and no second file on disk.
+                    logical_asset_id = reusable["logical_asset_id"]
+                    version_id = reusable["version_id"]
+                    file_id = reusable["file_id"]
+                    reused_name = str(reusable.get("name") or "") or None
+                else:
+                    logical_asset_id = _stable_id(
+                        "asset",
+                        project_id,
+                        key,
+                        suffix,
+                    )
+                    version_id = _stable_id(
+                        "asset-version",
+                        project_id,
+                        key,
+                        suffix,
+                    )
+                    file_id = _stable_id("file", project_id, key, suffix)
+                    relative_uri = PurePosixPath(
+                        "assets",
+                        "sources",
+                        f"{file_id}{_extension(item.name, item.media_type)}",
+                    ).as_posix()
+                    indexed = IndexedFile(
+                        file_id=file_id,
+                        kind="source_original",
+                        relative_uri=relative_uri,
+                        sha256=checksum,
+                        size_bytes=size_bytes,
+                        media_type=item.media_type,
+                        created_at=created_at,
+                    )
+                    version = SourceAssetVersion(
+                        version_id=version_id,
+                        logical_asset_id=logical_asset_id,
+                        name=item.name,
+                        file_id=file_id,
+                        checksum=checksum,
+                        media_kind=_media_kind(item.media_type, item.name),
+                        media_type=item.media_type,
+                        created_at=created_at,
+                        metadata={"clientRequestId": key},
+                    )
+                    existing_file = files.get(file_id)
+                    existing_version = versions.get(version_id)
+                    if (
+                        existing_file is not None
+                        or existing_version is not None
+                    ):
+                        if existing_file != indexed.model_dump(
+                            mode="json",
+                        ) or existing_version != version.model_dump(
+                            mode="json",
+                        ):
+                            raise ConflictError(
+                                "Asset 稳定 ID 已存在但内容不同",
+                            )
                         _ensure_existing_file(file_store, indexed)
-                    files[file_id] = indexed.model_dump(mode="json")
-                    versions[version_id] = version.model_dump(mode="json")
-                if attach_source and source_id not in source_items:
+                    else:
+                        staged = (
+                            item.staged
+                            if isinstance(item, _StagedAssetInput)
+                            else file_store.stage_bytes(
+                                item.content,
+                                staging_id=operation_id[:80],
+                            )
+                        )
+                        try:
+                            file_store.publish(
+                                staged,
+                                relative_uri,
+                                expected_sha256=checksum,
+                                expected_size_bytes=size_bytes,
+                            )
+                        except AssetAlreadyExists:
+                            file_store.abandon(staged)
+                            _ensure_existing_file(file_store, indexed)
+                        files[file_id] = indexed.model_dump(mode="json")
+                        versions[version_id] = version.model_dump(mode="json")
+                existing_source = next(
+                    (
+                        entry
+                        for entry in source_items.values()
+                        if entry["logical_asset_id"] == logical_asset_id
+                    ),
+                    None,
+                )
+                if attach_source and existing_source is None:
+                    # One logical Asset stays one Source: a re-upload must not
+                    # duplicate the material in the source panel either.
                     source = ProjectSource(
                         source_id=source_id,
                         display_name=item.name,
@@ -627,14 +732,16 @@ def _ingest_many_locked(
                     )
                     source_items[source_id] = source.model_dump(mode="json")
                     source_order.append(source_id)
-                output_items.append(
-                    {
-                        "name": item.name,
-                        "assetId": logical_asset_id,
-                        "assetVersionId": version_id,
-                        "checksum": checksum,
-                    },
-                )
+                output_item: dict[str, Any] = {
+                    "name": item.name,
+                    "assetId": logical_asset_id,
+                    "assetVersionId": version_id,
+                    "checksum": checksum,
+                    "reused": reusable is not None,
+                }
+                if reused_name is not None:
+                    output_item["reusedName"] = reused_name
+                output_items.append(output_item)
 
             # A recovered retry may find every index entry already published.
             # Avoid manufacturing a no-op generation in that case.
@@ -871,6 +978,10 @@ async def _notify_assets_uploaded(
     Uploads that precede the first session message stay silent — the launch
     composer sends its refs with the first user message, and waking the
     dispatcher before any instruction exists would start a run with no goal.
+
+    A re-uploaded file lands as ``reused``: the refs still name usable media,
+    but the wording must not claim a new Asset entered the library, or the
+    Agent will plan work around material it already has.
     """
 
     runtime = get_creator_agent_runtime()
@@ -884,10 +995,37 @@ async def _notify_assets_uploaded(
         )
         if session.last_message_seq <= 0:
             return
-        names = "、".join(str(item["name"]) for item in items)
+        # The ingest released the lifecycle lock, so a concurrent delete may
+        # have taken one of these versions away in the meantime. A ref to a
+        # vanished version would fail the moment the Agent reads the material,
+        # so only what still exists gets advertised.
+        live = await asyncio.to_thread(services.projects.read, project_id)
+        surviving = live.project.assets.source_versions_by_id
+        usable = [
+            item
+            for item in items
+            if str(item.get("assetVersionId") or "") in surviving
+        ]
+        if not usable:
+            return
+        names = "、".join(str(item["name"]) for item in usable)
+        reused = sum(1 for item in usable if item.get("reused"))
+        if reused == len(usable):
+            lead = (
+                f"用户再次提供了 {len(usable)} 个素材：{names}。"
+                "这些内容与已入库素材相同，本次没有新增素材，"
+                "引用指向的仍是原有版本。"
+            )
+        elif reused:
+            lead = (
+                f"用户刚上传了 {len(usable)} 个素材：{names}，"
+                f"其中 {reused} 个与已入库素材内容相同，已复用原有版本。"
+            )
+        else:
+            lead = f"用户刚上传了 {len(usable)} 个素材：{names}。"
         refs = [
             f"asset-version:{item['assetVersionId']}"
-            for item in items
+            for item in usable
             if item.get("assetVersionId")
         ]
         await runtime.notifications.notify(
@@ -895,8 +1033,8 @@ async def _notify_assets_uploaded(
             kind=RuntimeEventKind.SOURCE_ASSETS_UPLOADED,
             request_id=request_id,
             text=(
-                f"用户刚上传了 {len(items)} 个素材：{names}。"
-                "素材已入库并可直接引用；如果你此前在等待用户提供素材，"
+                lead
+                + "素材已入库并可直接引用；如果你此前在等待用户提供素材，"
                 "现在可以基于它们继续当前工作。"
                 "这是状态同步，不是新的用户修改意见。"
             ),
@@ -1776,6 +1914,8 @@ async def ingest_asset(
         "status": result["status"],
         "progress": result["progress"],
         "assetVersionId": item["assetVersionId"],
+        "reused": bool(item.get("reused")),
+        "reusedName": item.get("reusedName"),
         "result": {"items": result["items"], "idempotentReplay": replayed},
         "error": None,
     }
@@ -2082,6 +2222,10 @@ def _task_targets_deleted_asset(
 async def delete_source_asset_version(
     project_id: str,
     version_id: str,
+    force: bool = Query(
+        False,
+        description="解除时间线中的可解除引用后强制删除",
+    ),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> None:
     """Delete an uploaded source asset version and its unreferenced files.
@@ -2089,7 +2233,10 @@ async def delete_source_asset_version(
     This removes the version from the project metadata and deletes any
     on-disk files that are no longer referenced by remaining metadata.
     If the version is still referenced elsewhere (timeline elements,
-    visual variants, etc.), the deletion is refused with a 409 Conflict.
+    visual variants, etc.), the deletion is refused with a 409 Conflict
+    whose ``details.timelineReferences`` name the occupying shots.
+    ``force`` clears the references an Element can survive without; audio
+    and Edit Elements still have to be deleted by the caller first.
 
     After deletion, any pending SpecialistRuns or Tasks that reference
     the deleted version's logical asset are cancelled to prevent stale
@@ -2119,13 +2266,21 @@ async def delete_source_asset_version(
             services.projects.remove_source_asset_version,
             project_id,
             version_id,
+            force,
         )
     except NotFoundError:
         raise
     except ConflictError:
         raise
     except Exception as error:
-        raise StorageIntegrityError(str(error)) from error
+        # Never forward an internal exception sentence (a pydantic field error,
+        # say) to the client: it names model internals the user cannot act on.
+        logger.exception(
+            "asset delete failed: project=%s version=%s",
+            _log_safe(project_id),
+            _log_safe(version_id),
+        )
+        raise StorageIntegrityError("素材删除失败，请稍后重试") from error
 
     # Cancel pending runs/tasks that targeted the deleted asset. A run may
     # reference the asset as `asset:<logicalAssetId>` (delegate_to_agent

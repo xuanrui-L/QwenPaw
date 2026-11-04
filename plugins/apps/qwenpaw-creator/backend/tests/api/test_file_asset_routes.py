@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from hashlib import sha256
 
 import httpx
@@ -16,6 +17,7 @@ from api.dependencies import creator_error_handler, project_file_services
 from api.file_asset_routes import (
     _assert_supported_source_upload,
     _media_kind,
+    _reusable_source_version,
     _validate_public_remote_url,
     router,
 )
@@ -30,7 +32,13 @@ from domain.enums import (
 from services.media import source_observation
 from services.media_files.keyframe_cache import CachedKeyframe
 from services.project_files.facade import CreatorFileServices
-from services.project_files.models import Project
+from services.project_files.models import (
+    ElementLocation,
+    I2VCreation,
+    Project,
+    TimelineElement,
+    TimelineSpan,
+)
 from services.runtime_files import safe_remote_download
 from services.runtime_files.execution_models import (
     SpecialistRunRecord,
@@ -775,6 +783,86 @@ def test_delete_asset_settles_durable_run_when_no_live_owner(
     assert run.metadata.get("cancelReason") == "SOURCE_ASSET_DELETED"
 
 
+def test_delete_asset_route_names_references_and_accepts_force(
+    tmp_path,
+    run_scenario,
+) -> None:
+    # The frontend branch depends on the route contract: a referenced asset
+    # answers a structured 409 the UI can render by name, and the same delete
+    # retried with ?force=true clears that reference instead of refusing.
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        # The ingest guard pairs clientRequestId with the Idempotency-Key, so
+        # this asset keeps its own pair instead of reusing the shared payload.
+        created = await _upload_source(
+            client,
+            {
+                **_TEXT_ASSET_PAYLOAD,
+                "clientRequestId": "asset-in-use-1",
+            },
+            "asset-in-use-1",
+        )
+        version_id = created.json()["assetVersionId"]
+        base = services.projects.read("project-1")
+        project = base.project.model_copy(deep=True)
+        element = TimelineElement(
+            element_id="el-shot-1",
+            label="镜头一｜风雪定场",
+            span=TimelineSpan(start_tick=0, duration_tick=3000),
+            location=ElementLocation(),
+            creation=I2VCreation(
+                first_frame_version_id=version_id,
+                video_prompt="雪花落满屋檐",
+            ),
+        )
+        project.timelines.items["timeline:main"] = project.timelines.items[
+            "timeline:main"
+        ].model_copy(
+            update={"elements_by_id": {element.element_id: element}},
+        )
+        services.projects.replace(
+            "project-1",
+            project.model_copy(
+                update={
+                    "generation": base.project.generation + 1,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            ),
+            base.etag,
+        )
+
+        conflict = await client.delete(
+            f"/projects/project-1/assets/{version_id}",
+            headers={"Idempotency-Key": "del-in-use"},
+        )
+        body = conflict.json()
+        forced = await client.delete(
+            f"/projects/project-1/assets/{version_id}?force=true",
+            headers={"Idempotency-Key": "del-forced"},
+        )
+        after = services.projects.read("project-1").project
+        return conflict, body, forced, version_id, after
+
+    conflict, body, forced, version_id, after = run_scenario(app, scenario)
+
+    assert conflict.status_code == 409
+    assert body["code"] == "ASSET_IN_USE"
+    references = body["details"]["timelineReferences"]
+    assert references[0]["refKind"] == "i2v-first-frame"
+    assert references[0]["elementLabel"] == "镜头一｜风雪定场"
+    assert references[0]["detachable"] is True
+
+    assert forced.status_code == 204
+    assert version_id not in after.assets.source_versions_by_id
+    assert (
+        after.timelines.items["timeline:main"]
+        .elements_by_id["el-shot-1"]
+        .creation.first_frame_version_id
+        is None
+    )
+
+
 class _RecordingObservationCancellation:
     """Stands in for the observation service inside the real registry."""
 
@@ -909,3 +997,267 @@ def test_delete_asset_cancels_independent_observation_task(
     assert (
         other.status is TaskStatus.RUNNING
     ), "a Task reading another asset must survive this deletion"
+
+
+async def _post_image(client, *, key: str, name: str, content: bytes):
+    """One composer-style multipart upload, silent towards the Agent."""
+
+    return await client.post(
+        "/projects/project-1/assets",
+        headers={"Idempotency-Key": key},
+        data={
+            "clientRequestId": key,
+            "postIngestAction": "ATTACH_SOURCE",
+            "notifyAgent": "false",
+        },
+        files={"file": (name, content, "image/png")},
+    )
+
+
+def test_reuploading_identical_bytes_reuses_one_asset(
+    tmp_path,
+    run_scenario,
+) -> None:
+    # Idempotency only spans one request identity, so picking the same file
+    # twice used to land as two AssetVersions, two Sources and two copies of
+    # the bytes. Content identity now folds the second upload onto the first.
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        first = await _post_image(
+            client,
+            key="dup-1",
+            name="frame.png",
+            content=b"duplicate-payload",
+        )
+        again = await _post_image(
+            client,
+            key="dup-2",
+            name="frame-copy.png",
+            content=b"duplicate-payload",
+        )
+        return first, again
+
+    first, again = run_scenario(app, scenario)
+
+    assert first.status_code == 202
+    assert again.status_code == 202
+    assert first.json()["reused"] is False
+    assert again.json()["reused"] is True
+    assert (
+        again.json()["assetVersionId"] == first.json()["assetVersionId"]
+    ), "identical bytes must name the AssetVersion the Project already has"
+    assert again.json()["assetId"] == first.json()["assetId"]
+
+    project = services.projects.read("project-1").project
+    assert len(project.assets.source_versions_by_id) == 1
+    assert len(project.assets.files_by_id) == 1
+    assert (
+        len(project.sources.sources.items) == 1
+    ), "a reused Asset must not add a second Source row"
+    assert project.generation == 1, "a pure duplicate commits nothing"
+    stored = list(
+        (services.projects.project_root("project-1") / "assets" / "sources").iterdir(),
+    )
+    assert len(stored) == 1, "no second copy of the bytes reaches disk"
+
+
+def test_reusable_source_version_prefers_the_oldest_stored_match() -> None:
+    # Projects created before dedup can hold several versions of one content
+    # under different logical Assets. The pick decides which Asset the user
+    # and the Agent are pointed at, so it may not depend on index order.
+    files = {"file-old": {}, "file-new": {}}
+    versions = {
+        "version-new": {
+            "version_id": "version-new",
+            "checksum": "abc",
+            "file_id": "file-new",
+            "created_at": "2026-01-02T00:00:00+00:00",
+        },
+        "version-url": {
+            "version_id": "version-url",
+            "checksum": "abc",
+            # A remote registration hashes the URL, never the bytes.
+            "file_id": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+        "version-old": {
+            "version_id": "version-old",
+            "checksum": "abc",
+            "file_id": "file-old",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+    }
+
+    assert (
+        _reusable_source_version(
+            files=files,
+            versions=versions,
+            checksum="abc",
+        )
+        or {}
+    )["version_id"] == "version-old"
+    assert (
+        _reusable_source_version(
+            files=files,
+            versions=versions,
+            checksum="other",
+        )
+        is None
+    )
+
+
+def test_reuploading_identical_text_reuses_one_asset(
+    tmp_path,
+    run_scenario,
+) -> None:
+    # Pasted text is content too: the same value under a fresh request
+    # identity must not stack another Asset row.
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        first = await _upload_source(
+            client,
+            {**_TEXT_ASSET_PAYLOAD, "clientRequestId": "text-dup-1"},
+            "text-dup-1",
+        )
+        again = await _upload_source(
+            client,
+            {
+                **_TEXT_ASSET_PAYLOAD,
+                "clientRequestId": "text-dup-2",
+                "name": "brief-v2.txt",
+            },
+            "text-dup-2",
+        )
+        return first, again
+
+    first, again = run_scenario(app, scenario)
+
+    assert first.status_code == 202
+    assert again.json()["reused"] is True
+    assert (
+        again.json()["assetVersionId"] == first.json()["assetVersionId"]
+    )
+    project = services.projects.read("project-1").project
+    assert len(project.assets.source_versions_by_id) == 1
+    assert len(project.sources.sources.items) == 1
+
+
+def test_batch_import_reuses_duplicate_within_batch(
+    tmp_path,
+    run_scenario,
+) -> None:
+    # A folder containing the same file twice enters as one Asset, while the
+    # distinct file still lands: the fold happens per item, not per request.
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        accepted = await client.post(
+            "/projects/project-1/asset-imports",
+            headers={"Idempotency-Key": "import-dup"},
+            data={
+                "clientRequestId": "import-dup",
+                "postIngestAction": "ATTACH_SOURCE",
+            },
+            files=[
+                ("files", ("a.png", b"shared-bytes", "image/png")),
+                ("files", ("b.png", b"other-bytes", "image/png")),
+                ("files", ("a-copy.png", b"shared-bytes", "image/png")),
+            ],
+        )
+        loaded = await client.get(
+            f"/projects/project-1/asset-imports/{accepted.json()['importId']}",
+        )
+        return accepted, loaded
+
+    accepted, loaded = run_scenario(app, scenario)
+
+    assert accepted.status_code == 202
+    assert loaded.status_code == 200
+    items = loaded.json()["items"]
+    assert [item["name"] for item in items] == ["a.png", "b.png", "a-copy.png"]
+    assert (
+        items[2]["assetVersionId"] == items[0]["assetVersionId"]
+    ), "the repeated file folds onto the version the batch just published"
+    assert len({item["assetVersionId"] for item in items}) == 2
+    project = services.projects.read("project-1").project
+    assert len(project.assets.source_versions_by_id) == 2
+    assert len(project.sources.sources.items) == 2
+
+
+def test_renamed_reupload_reuses_and_keeps_the_stored_name(
+    tmp_path,
+    run_scenario,
+) -> None:
+    # Renaming a file and uploading it again is the same creative material:
+    # the Asset keeps the name it was first stored under rather than silently
+    # rewriting a label the user may have edited.
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        first = await _post_image(
+            client,
+            key="rename-1",
+            name="开场.png",
+            content=b"renamed-payload",
+        )
+        again = await _post_image(
+            client,
+            key="rename-2",
+            name="开场-新名.png",
+            content=b"renamed-payload",
+        )
+        return first, again
+
+    first, again = run_scenario(app, scenario)
+
+    assert first.json()["assetVersionId"] == again.json()["assetVersionId"]
+    item = again.json()["result"]["items"][0]
+    assert item["reused"] is True
+    assert item["reusedName"] == "开场.png"
+    version = next(iter(
+        services.projects.read("project-1").project.assets.source_versions_by_id.values(),
+    ))
+    assert version.name == "开场.png"
+    assert version.checksum == sha256(b"renamed-payload").hexdigest()
+
+
+def test_deleted_asset_uploads_fresh_when_reuploaded(
+    tmp_path,
+    run_scenario,
+) -> None:
+    # Dedup reads the Project's live index only: once an Asset is deleted, the
+    # same bytes are new material again and must not be folded onto a ghost.
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        first = await _post_image(
+            client,
+            key="again-1",
+            name="one.png",
+            content=b"returning-bytes",
+        )
+        version_id = first.json()["assetVersionId"]
+        deleted = await client.delete(
+            f"/projects/project-1/assets/{version_id}",
+        )
+        replay = await _post_image(
+            client,
+            key="again-2",
+            name="one.png",
+            content=b"returning-bytes",
+        )
+        return first, deleted, replay
+
+    first, deleted, replay = run_scenario(app, scenario)
+
+    assert deleted.status_code == 204
+    assert replay.status_code == 202
+    assert replay.json()["reused"] is False
+    assert replay.json()["assetVersionId"] != first.json()["assetVersionId"]
+    project = services.projects.read("project-1").project
+    assert list(project.assets.source_versions_by_id) == [
+        replay.json()["assetVersionId"],
+    ]
+    assert len(project.sources.sources.items) == 1
