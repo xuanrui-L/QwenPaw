@@ -339,7 +339,7 @@ def _requested_tts_identity(
         return (voice_model or capability.clone_model(), voice_id)
     active = resolve_system_voice(
         capability,
-        voice,
+        (voice or "").strip(),
         model_config.get_tts_voice(),
     )
     # ``None`` is a name the runner refuses or forwards as typed, so no asset
