@@ -1182,6 +1182,7 @@ async def get_tts_capabilities() -> dict[str, Any]:
                 "transport": item.transport,
                 "systemVoices": list(item.system_voices),
                 "supportsDesign": item.supports_design,
+                "providers": list(item.providers),
             }
             for item in supported_models()
         ],

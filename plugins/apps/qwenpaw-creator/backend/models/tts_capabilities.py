@@ -33,6 +33,7 @@ from typing import Literal
 
 TtsFamily = Literal["qwen-tts", "cosyvoice"]
 TtsTransport = Literal["http", "websocket"]
+TtsProvider = Literal["bailian", "gateway"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,8 @@ class TtsModelCapability:
     clone_target: str = ""
     # Model that designed voices are bound to; empty means "not supported".
     design_target: str = ""
+    # Providers this model is available on (protocol→provider mapping).
+    providers: tuple[TtsProvider, ...] = ("bailian",)
 
     @property
     def has_system_voices(self) -> bool:
@@ -97,6 +100,14 @@ _QWEN_AUDIO_30_FLASH_VOICES = (
     "loongmary",
     "loongeva_v3.6",
     "loongjohn",
+)
+
+# Qwen-Audio 3.0 Plus ships two flagship voices; the ids do not carry the
+# ``_v3.6`` suffix that Flash's new voices use and are not interchangeable
+# with the 3.1 names.
+_QWEN_AUDIO_30_PLUS_VOICES = (
+    "longanlingxin",
+    "longanlufeng",
 )
 
 # Qwen-Audio 3.1 Plus ships four flagship voices; the ids carry the ``_v3.1``
@@ -220,15 +231,6 @@ _CAPABILITIES: tuple[TtsModelCapability, ...] = (
         design_target="qwen3-tts-vd-2026-01-26",
     ),
     TtsModelCapability(
-        model="qwen3-tts-instruct-flash",
-        family="qwen-tts",
-        transport="http",
-        label="Qwen3 TTS Instruct Flash（系统音色，可控情绪语速）",
-        system_voices=_QWEN_TTS_VOICES,
-        clone_target="qwen3-tts-vc-2026-01-22",
-        design_target="qwen3-tts-vd-2026-01-26",
-    ),
-    TtsModelCapability(
         model="cosyvoice-v3.5-plus",
         family="cosyvoice",
         transport="websocket",
@@ -241,12 +243,25 @@ _CAPABILITIES: tuple[TtsModelCapability, ...] = (
         transport="websocket",
         label="Qwen-Audio 3.0 TTS Flash（12 个系统音色）",
         system_voices=_QWEN_AUDIO_30_FLASH_VOICES,
+        providers=("bailian", "gateway"),
+    ),
+    # Listed after its cheaper sibling on purpose: a protocol switch that has
+    # to pick a replacement model takes the first available one, and that
+    # should never be the flagship.
+    TtsModelCapability(
+        model="qwen-audio-3.0-tts-plus",
+        family="cosyvoice",
+        transport="websocket",
+        label="Qwen-Audio 3.0 TTS Plus（旗舰音色，2 个系统音色）",
+        system_voices=_QWEN_AUDIO_30_PLUS_VOICES,
+        providers=("bailian", "gateway"),
     ),
     # 3.1 speaks the same WebSocket protocol and enrolls voices through the
     # same ``voice-enrollment`` surface as 3.0; only the published voices are
     # new. Flash is listed before Plus - the order the interactive-video table
     # uses too, so merging the two tables never renumbers the choices the
-    # configuration page renders in table order.
+    # configuration page renders in table order. 3.1 stays on the default
+    # ``providers=("bailian",)``: the proxy has not published these names yet.
     TtsModelCapability(
         model="qwen-audio-3.1-tts-flash",
         family="cosyvoice",
@@ -270,6 +285,12 @@ DEFAULT_TTS_MODEL = "qwen3-tts-flash"
 
 def supported_models() -> tuple[TtsModelCapability, ...]:
     return _CAPABILITIES
+
+
+def models_for(provider: TtsProvider) -> tuple[TtsModelCapability, ...]:
+    """Models available on ``provider`` (e.g. ``"bailian"`` or ``"gateway"``)."""
+
+    return tuple(item for item in _CAPABILITIES if provider in item.providers)
 
 
 def capability_for(model: str) -> TtsModelCapability | None:
@@ -332,8 +353,10 @@ __all__ = [
     "DEFAULT_TTS_MODEL",
     "TtsFamily",
     "TtsModelCapability",
+    "TtsProvider",
     "TtsTransport",
     "capability_for",
+    "models_for",
     "require_capability",
     "resolve_system_voice",
     "supported_models",
