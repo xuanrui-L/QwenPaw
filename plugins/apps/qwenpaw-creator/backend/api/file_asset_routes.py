@@ -40,7 +40,9 @@ from schemas.common import StrictModel
 from services.document_reader import is_supported_document
 from services.file_agent_runtime.notifications import RuntimeEventKind
 from services.file_agent_runtime.registry import get_creator_agent_runtime
+from services.media.source_memory import source_memory_service
 from services.media.source_observation import source_observation_service
+from services.media.source_video_reader import source_video_reader_service
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileError,
@@ -1033,8 +1035,7 @@ async def _notify_assets_uploaded(
             kind=RuntimeEventKind.SOURCE_ASSETS_UPLOADED,
             request_id=request_id,
             text=(
-                lead
-                + "素材已入库并可直接引用；如果你此前在等待用户提供素材，"
+                lead + "素材已入库并可直接引用；如果你此前在等待用户提供素材，"
                 "现在可以基于它们继续当前工作。"
                 "这是状态同步，不是新的用户修改意见。"
             ),
@@ -2385,24 +2386,29 @@ async def delete_source_asset_version(
                 settled_task_ids.add(task.task_id)
                 await _cancel_deleted_asset_task(exec_store, project_id, task)
 
-        # Standalone media Tasks (observe_source_clip) belong to no
-        # SpecialistRun, so the loop above never reached them. Stop their live
-        # workers through the owning service first — a durable transition
-        # alone would leave the VLM call running and let it publish an
-        # observation of media that has just been deleted — then settle any
-        # Task still active on that asset.
-        try:
-            await source_observation_service(services).cancel_for_asset(
-                project_id,
-                logical_asset_id=deleted_logical_id,
-                version_id=version_id,
-            )
-        except Exception:  # noqa: BLE001 - best-effort cancellation
-            logger.warning(
-                "asset delete: stopping observations for project %s failed",
-                project_id,
-                exc_info=True,
-            )
+        # Standalone media Tasks (observation, memory build, frame read) belong
+        # to no SpecialistRun, so the loop above never reached them. Each owner
+        # service has to stop its own live worker first — a durable transition
+        # alone would leave the coroutine running, paying for the next model
+        # stage and publishing artifacts of media that has just been deleted —
+        # then settle any Task still active on that asset.
+        for revoke in (
+            source_observation_service(services).cancel_for_asset,
+            source_video_reader_service(services).cancel_for_asset,
+            source_memory_service(services).cancel_for_asset,
+        ):
+            try:
+                await revoke(
+                    project_id,
+                    logical_asset_id=deleted_logical_id,
+                    version_id=version_id,
+                )
+            except Exception:  # noqa: BLE001 - best-effort cancellation
+                logger.warning(
+                    "asset delete: stopping media workers for project %s failed",
+                    project_id,
+                    exc_info=True,
+                )
         refreshed_tasks = await asyncio.to_thread(
             exec_store.list_tasks,
             project_id,

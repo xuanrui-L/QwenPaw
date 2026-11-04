@@ -224,10 +224,10 @@ function assetInUseBlockedItem(ref: AssetInUseReference, t: Translate): string {
     ref.refKind === "audio-source" || ref.creationType === "audio"
       ? "assets.blockedReason.audio"
       : ref.creationType === "edit"
-        ? "assets.blockedReason.edit"
-        : ref.creationType === "overlay"
-          ? "assets.blockedReason.overlay"
-          : "assets.blockedReason.default";
+      ? "assets.blockedReason.edit"
+      : ref.creationType === "overlay"
+      ? "assets.blockedReason.overlay"
+      : "assets.blockedReason.default";
   return t("assets.deleteInUseBlockedItem", {
     timeline: ref.timelineName || ref.timelineId,
     element: ref.elementLabel || ref.elementId,
@@ -1954,10 +1954,22 @@ export default function AssetsPage() {
       cancelText: t("common.cancel"),
       onOk: async () => {
         const scopeProjectId = id;
-        const ownsScope = () =>
-          assetsPageAlive.current &&
-          liveAssetProjectId.current === scopeProjectId &&
-          liveAssetsPath.current === `/project/${scopeProjectId}/assets`;
+        const ownsScope = () => {
+          if (
+            !assetsPageAlive.current ||
+            liveAssetProjectId.current !== scopeProjectId
+          ) {
+            return false;
+          }
+          // Router also matches "/project/p1/assets/" and keeps that slash in
+          // location.pathname, so compare the normalized path: an exact match
+          // would read a user who never left the page as gone and skip both
+          // the refreshes and the selection cleanup below.
+          const expected = `/project/${scopeProjectId}/assets`;
+          return (
+            (liveAssetsPath.current.replace(/\/+$/, "") || "/") === expected
+          );
+        };
         // Delete failure and post-delete refresh must be isolated: a refresh
         // error must never be reported as "delete failed" once the 204 landed.
         const reportFailure = (error: unknown) => {
@@ -1988,8 +2000,7 @@ export default function AssetsPage() {
             // late 409 still has to name the Element that holds the bytes
             // rather than surface the backend's internal sentence.
             const late = assetInUseReferences(retryError);
-            const lateBlocking =
-              late?.filter((ref) => !ref.detachable) ?? [];
+            const lateBlocking = late?.filter((ref) => !ref.detachable) ?? [];
             if (lateBlocking.length) {
               showAssetInUseBlocked(lateBlocking, t);
             } else {

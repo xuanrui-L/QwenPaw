@@ -701,6 +701,49 @@ describe("AssetsPage delete callback ownership", () => {
     // The stale closure over the pre-delete selection used to clear this.
     expect(locationPath()).toBe(selectedPath);
   });
+
+  it("refreshes and drops the deleted selection when the user stayed", async () => {
+    const gate = gateSourceDelete(projectRoutes("p1"));
+    const dialog = captureConfirmDialog();
+    renderAssetsRoutes("/project/p1/assets?asset=cat-video-v1");
+
+    fireEvent.click(
+      document.querySelector('[data-asset-delete="cat-video-v1"]')!,
+    );
+    dialog.accept();
+    await waitFor(() => expect(gate.deleteLanded()).toBe(true));
+    const readsBefore = gate.p1Reads();
+    const toastsBefore = successToasts();
+
+    act(() => gate.release());
+    await waitFor(() => expect(successToasts()).toBeGreaterThan(toastsBefore));
+    await waitFor(() => expect(gate.p1Reads()).toBeGreaterThan(readsBefore));
+    expect(locationPath()).toBe("/project/p1/assets");
+  });
+
+  it("still owns the page when the assets URL carries a trailing slash", async () => {
+    // Router matches "/project/p1/assets/" too and keeps that slash in
+    // location.pathname. Comparing it strictly made every post-delete step
+    // look like the user had left, so the deleted asset stayed in the list,
+    // in the detail pane and in the URL.
+    const gate = gateSourceDelete(projectRoutes("p1"));
+    const dialog = captureConfirmDialog();
+    renderAssetsRoutes("/project/p1/assets/?asset=cat-video-v1");
+
+    fireEvent.click(
+      document.querySelector('[data-asset-delete="cat-video-v1"]')!,
+    );
+    expect(dialog.open()).toBe(true);
+    dialog.accept();
+    await waitFor(() => expect(gate.deleteLanded()).toBe(true));
+    const readsBefore = gate.p1Reads();
+    const toastsBefore = successToasts();
+
+    act(() => gate.release());
+    await waitFor(() => expect(successToasts()).toBeGreaterThan(toastsBefore));
+    await waitFor(() => expect(gate.p1Reads()).toBeGreaterThan(readsBefore));
+    expect(locationPath()).toBe("/project/p1/assets");
+  });
 });
 
 /**
@@ -711,8 +754,8 @@ function inUseBody(references: Array<Record<string, unknown>>) {
   return {
     code: "ASSET_IN_USE",
     message:
-      "Cannot delete source asset version cat-video-v1: actively used in "
-      + "timeline by ['i2v-first-frame:elem:shot-1']",
+      "Cannot delete source asset version cat-video-v1: actively used in " +
+      "timeline by ['i2v-first-frame:elem:shot-1']",
     retryable: false,
     details: { versionId: "cat-video-v1", timelineReferences: references },
   };
