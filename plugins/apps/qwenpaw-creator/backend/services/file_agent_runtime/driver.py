@@ -2082,9 +2082,18 @@ class FileCreatorAgentRuntime:
             await asyncio.gather(dispatcher, return_exceptions=True)
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+        # A revoked specialist settles itself in a shielded cleanup task, and
+        # the tasks above can spawn one on their way out. Shutdown must let
+        # those writes finish: cancelling them would leave the durable record
+        # in RUNNING_MODEL with no in-process owner and no terminal event,
+        # which is exactly the state a restart would have to guess about.
+        settlement_tasks = list(self._specialist_cleanup_tasks)
+        if settlement_tasks:
+            await asyncio.gather(*settlement_tasks, return_exceptions=True)
         self._active.clear()
         self._specialist_tasks.clear()
         self._interrupt_cleanup_tasks.clear()
+        self._specialist_cleanup_tasks.clear()
         self._loop = None
 
     def notify(self, project_id: str) -> None:
@@ -5763,6 +5772,49 @@ class FileCreatorAgentRuntime:
             )
             handle.task = drive
             spawned = True
+        except (asyncio.CancelledError, StaleAgentRun):
+            # A stop, an interrupt or an asset DELETE took the run away while
+            # admission still owned it. The registration is dropped below, so
+            # this is the last place that can settle the record: the DELETE
+            # deferred its durable fallback to this in-process owner, and an
+            # unhandled exit would strand the run in QUEUED/RUNNING_MODEL with
+            # nobody left to terminalize it.
+            await self._settle_cancellation_shielded(
+                project_id=project_id,
+                session_id=session_id,
+                specialist_run_id=specialist_run_id,
+                parent_run_id=parent_run_id,
+                request=request,
+                common=common,
+            )
+            raise
+        except Exception as error:  # pylint: disable=broad-except
+            # Admission broke after its first durable write. A revocation that
+            # is already in force owns the outcome, so the run settles as
+            # CANCELLED through the same shielded finalizer: reporting a
+            # business failure for work a human deleted would chase the stop
+            # with a spurious [FAILED] notification. Without a revocation the
+            # record must still close, so a broken admission turns FAILED.
+            if handle.cancel_reason is not None:
+                await self._settle_cancellation_shielded(
+                    project_id=project_id,
+                    session_id=session_id,
+                    specialist_run_id=specialist_run_id,
+                    parent_run_id=parent_run_id,
+                    request=request,
+                    common=common,
+                )
+            else:
+                await self._fail_specialist_admission(
+                    project_id=project_id,
+                    session_id=session_id,
+                    specialist_run_id=specialist_run_id,
+                    parent_run_id=parent_run_id,
+                    request=request,
+                    common=common,
+                    error=error,
+                )
+            raise
         finally:
             if not spawned:
                 # Nobody will run this in-process any more: drop the
@@ -5863,28 +5915,14 @@ class FileCreatorAgentRuntime:
             # abort the cleanup that owns the terminal status and the
             # terminal lifecycle event. Init/material-preparation failures
             # land here too because this try covers the whole inner run.
-            finalize = asyncio.create_task(
-                self._finalize_specialist_cancellation(
-                    project_id=project_id,
-                    session_id=session_id,
-                    specialist_run_id=specialist_run_id,
-                    parent_run_id=parent_run_id,
-                    request=request,
-                    common=common,
-                ),
-                name=(
-                    f"creator-specialist-cancelled:{project_id}:"
-                    f"{specialist_run_id}"
-                ),
+            await self._settle_cancellation_shielded(
+                project_id=project_id,
+                session_id=session_id,
+                specialist_run_id=specialist_run_id,
+                parent_run_id=parent_run_id,
+                request=request,
+                common=common,
             )
-            self._specialist_cleanup_tasks.add(finalize)
-            finalize.add_done_callback(
-                self._specialist_cleanup_tasks.discard,
-            )
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                # Cancelled again: the shielded finalizer keeps going on
-                # its own, which is exactly the point.
-                await asyncio.shield(finalize)
             raise
         except Exception as exc:  # pylint: disable=broad-except
             await self._notify_specialist_terminal(
@@ -5991,6 +6029,118 @@ class FileCreatorAgentRuntime:
                     specialist_run_id,
                 )
         return "claimed"
+
+    async def _settle_cancellation_shielded(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        specialist_run_id: str,
+        parent_run_id: str,
+        request: CreatorMessageRecord,
+        common: Mapping[str, Any],
+    ) -> None:
+        """Finalize a revoked run in a task the caller cannot be cancelled in.
+
+        Every exit that abandons in-process ownership funnels through here —
+        the worker's own loop and the admission hand-over alike. The calling
+        coroutine is already being cancelled, so awaiting the finalizer inline
+        would let a second stop/delete/interrupt signal abort the one cleanup
+        that owns the terminal status and the ``subagent.failed{cancelled}``
+        event the frontend needs to disarm the activity.
+        """
+
+        finalize = asyncio.create_task(
+            self._finalize_specialist_cancellation(
+                project_id=project_id,
+                session_id=session_id,
+                specialist_run_id=specialist_run_id,
+                parent_run_id=parent_run_id,
+                request=request,
+                common=common,
+            ),
+            name=(
+                f"creator-specialist-cancelled:{project_id}:"
+                f"{specialist_run_id}"
+            ),
+        )
+        self._specialist_cleanup_tasks.add(finalize)
+        finalize.add_done_callback(
+            self._specialist_cleanup_tasks.discard,
+        )
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            # Cancelled again: the shielded finalizer keeps going on
+            # its own, which is exactly the point.
+            await asyncio.shield(finalize)
+
+    async def _fail_specialist_admission(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        specialist_run_id: str,
+        parent_run_id: str,
+        request: CreatorMessageRecord,
+        common: Mapping[str, Any],
+        error: BaseException,
+    ) -> None:
+        """Close a specialist run whose admission broke before the hand-over.
+
+        The durable record exists from admission's first write, so an exception
+        there would otherwise leave a QUEUED/RUNNING_MODEL run with no owner at
+        all: the worker was never spawned, and a DELETE that found the
+        registration had already deferred the terminal outcome to it.
+        """
+
+        if not self.services.projects.project_path(project_id).is_file():
+            # Project DELETE is already the terminal authority; nothing below
+            # a removed id may be recreated by this cleanup.
+            return
+        try:
+            current = await asyncio.to_thread(
+                self.executions.get_specialist_run,
+                project_id,
+                specialist_run_id,
+            )
+        except RecordNotFoundError:
+            # Broke before the record was ever persisted.
+            return
+        if current.status in TERMINAL_SPECIALIST_STATUSES:
+            # The worker or another path already terminalized the run; its
+            # outcome and event stay untouched.
+            return
+        summary = f"{type(error).__name__}: {error}"
+        try:
+            await asyncio.to_thread(
+                self.executions.transition_specialist_run,
+                project_id,
+                specialist_run_id,
+                expected_status=current.status,
+                status=SpecialistRunStatus.FAILED,
+                updates={
+                    "final_marker": "FAILED",
+                    "final_summary_text": summary,
+                },
+            )
+        except ExecutionStateConflict:
+            # Whoever moved it to a terminal state concurrently owns the
+            # outcome and the event.
+            return
+        try:
+            await self._event(
+                project_id,
+                session_id,
+                "subagent.failed",
+                parent_run_id,
+                request,
+                {**common, "error": summary},
+            )
+        except Exception:  # noqa: BLE001 - status already terminal
+            logger.exception(
+                "specialist admission failure event failed: project=%s run=%s",
+                project_id,
+                specialist_run_id,
+            )
 
     async def _notify_specialist_terminal(
         self,

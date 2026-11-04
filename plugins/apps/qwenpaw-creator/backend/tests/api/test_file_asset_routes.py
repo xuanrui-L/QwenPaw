@@ -29,7 +29,11 @@ from domain.enums import (
     TaskKind,
     TaskStatus,
 )
-from services.media import source_observation
+from services.media import (
+    source_memory,
+    source_observation,
+    source_video_reader,
+)
 from services.media_files.keyframe_cache import CachedKeyframe
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
@@ -917,6 +921,84 @@ def _seed_standalone_observation_task(
     return task_id
 
 
+class _RecordingWorkerCancellation:
+    """Stands in for one media owner service inside the real registry."""
+
+    def __init__(self, services: CreatorFileServices) -> None:
+        self.services = services
+        self.calls: list[tuple] = []
+
+    async def cancel_for_asset(
+        self,
+        project_id: str,
+        *,
+        logical_asset_id: str | None = None,
+        version_id: str | None = None,
+    ) -> int:
+        self.calls.append((project_id, logical_asset_id, version_id))
+        return 0
+
+
+def test_delete_asset_revokes_media_workers_through_every_owner(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_scenario,
+) -> None:
+    # Settling a Task record is not cancelling its worker: the frame read and
+    # the memory build each own an in-process coroutine that would otherwise
+    # keep paying for model stages and publish artifacts built from bytes that
+    # were just deleted. Every owner has to be reached, per Task kind.
+    app, services = _app(tmp_path)
+    observations = _RecordingWorkerCancellation(services)
+    reads = _RecordingWorkerCancellation(services)
+    memories = _RecordingWorkerCancellation(services)
+    source_observation._SERVICES[str(services.root)] = observations
+    source_video_reader._SERVICES[str(services.root)] = reads
+    source_memory._SERVICES[str(services.root)] = memories
+    monkeypatch.setattr(
+        file_asset_routes,
+        "get_creator_agent_runtime",
+        lambda: None,
+    )
+
+    async def scenario(client):
+        created = await _upload_source(
+            client,
+            _TEXT_ASSET_PAYLOAD,
+            "asset-del-1",
+        )
+        version_id = created.json()["assetVersionId"]
+        logical_id = (
+            services.projects.read(
+                "project-1",
+            )
+            .project.assets.source_versions_by_id[version_id]
+            .logical_asset_id
+        )
+        deleted = await client.delete(
+            f"/projects/project-1/assets/{version_id}",
+            headers={"Idempotency-Key": "del-owner"},
+        )
+        return deleted, logical_id, version_id
+
+    try:
+        deleted, logical_id, version_id = run_scenario(app, scenario)
+    finally:
+        source_observation.clear_source_observation_service_registry()
+        source_video_reader.clear_source_video_reader_service_registry()
+        source_memory.clear_source_memory_service_registry()
+
+    assert deleted.status_code == 204
+    expected = [("project-1", logical_id, version_id)]
+    assert observations.calls == expected
+    assert (
+        reads.calls == expected
+    ), "the frame reader must be revoked through its own service"
+    assert (
+        memories.calls == expected
+    ), "the memory build must be revoked through its own service"
+
+
 def test_delete_asset_cancels_independent_observation_task(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1057,7 +1139,9 @@ def test_reuploading_identical_bytes_reuses_one_asset(
     ), "a reused Asset must not add a second Source row"
     assert project.generation == 1, "a pure duplicate commits nothing"
     stored = list(
-        (services.projects.project_root("project-1") / "assets" / "sources").iterdir(),
+        (
+            services.projects.project_root("project-1") / "assets" / "sources"
+        ).iterdir(),
     )
     assert len(stored) == 1, "no second copy of the bytes reaches disk"
 
@@ -1136,9 +1220,7 @@ def test_reuploading_identical_text_reuses_one_asset(
 
     assert first.status_code == 202
     assert again.json()["reused"] is True
-    assert (
-        again.json()["assetVersionId"] == first.json()["assetVersionId"]
-    )
+    assert again.json()["assetVersionId"] == first.json()["assetVersionId"]
     project = services.projects.read("project-1").project
     assert len(project.assets.source_versions_by_id) == 1
     assert len(project.sources.sources.items) == 1
@@ -1216,9 +1298,13 @@ def test_renamed_reupload_reuses_and_keeps_the_stored_name(
     item = again.json()["result"]["items"][0]
     assert item["reused"] is True
     assert item["reusedName"] == "开场.png"
-    version = next(iter(
-        services.projects.read("project-1").project.assets.source_versions_by_id.values(),
-    ))
+    version = next(
+        iter(
+            services.projects.read(
+                "project-1"
+            ).project.assets.source_versions_by_id.values(),
+        ),
+    )
     assert version.name == "开场.png"
     assert version.checksum == sha256(b"renamed-payload").hexdigest()
 

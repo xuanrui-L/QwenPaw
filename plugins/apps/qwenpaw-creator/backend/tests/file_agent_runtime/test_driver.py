@@ -2598,6 +2598,147 @@ def test_cancel_before_registration_terminates_admission_without_model_call(
     assert lifecycle[-1].payload.get("cancelled") is True
 
 
+@pytest.mark.parametrize(
+    ("exit_mode", "expected_status"),
+    [
+        ("await-raises", "CANCELLED"),
+        ("await-cancelled", "CANCELLED"),
+        ("mainline-interrupt", "CANCELLED"),
+        ("runtime-stop", "CANCELLED"),
+        ("broken-unrevoked", "FAILED"),
+    ],
+)
+def test_admission_abandons_ownership_only_after_terminalizing(
+    tmp_path,
+    exit_mode: str,
+    expected_status: str,
+) -> None:
+    """An abnormal registration exit must still settle the durable run.
+
+    The DELETE claims the run through the pre-spawn handle and therefore skips
+    its own durable fallback. If admission then breaks inside one of its awaits
+    and only drops the registration, the record stays RUNNING_MODEL with no
+    in-process owner, no cleanup task and no terminal lifecycle event.
+
+    A revocation already in force owns the outcome, so a registration that
+    breaks afterwards still settles CANCELLED; without a revocation the same
+    breakdown must close the record as FAILED rather than leave it running.
+    """
+
+    # A real interrupt/stop races with the parked await below: depending on
+    # when the cancellation is delivered, registration exits through the
+    # CancelledError branch or through its own lock-wait timeout. Both are
+    # abnormal exits and both must reach the same terminal state, so the
+    # simulated lock budget stays short.
+    lock_wait_budget = 2.0
+    started_parked = asyncio.Event()
+    proceed = asyncio.Event()
+    release = asyncio.Event()
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="理解这个素材",
+        )
+        target_ref = _upload_one_asset(
+            services,
+            scope=f"delegate-admission-{exit_mode}",
+        )
+        callback, turns = _delegating_callback(
+            role="source_intelligence_agent",
+            call_id=f"delegate-admission-{exit_mode}",
+            target_ref=target_ref,
+        )
+        driver = _driver(services, callback)
+        append_event = driver._event
+
+        async def parked_event(*args, **kwargs):
+            await append_event(*args, **kwargs)
+            event_type = kwargs.get("event_type") or (
+                args[2] if len(args) > 2 else ""
+            )
+            if event_type != "subagent.started":
+                return
+            started_parked.set()
+            # Hold admission inside its await until the caller has claimed the
+            # cancellation, then force the requested exit at that await.
+            await asyncio.wait_for(proceed.wait(), timeout=30.0)
+            if exit_mode in {"await-raises", "broken-unrevoked"}:
+                raise asyncio.TimeoutError("project lock wait timed out")
+            if exit_mode == "await-cancelled":
+                raise asyncio.CancelledError()
+            await asyncio.wait_for(release.wait(), timeout=lock_wait_budget)
+
+        driver._event = parked_event  # type: ignore[method-assign]
+        await driver.start()
+        stopped = False
+        try:
+            driver.notify(PROJECT_ID)
+            await asyncio.wait_for(started_parked.wait(), timeout=30.0)
+            run = _only_specialist_run(driver)
+            handle = driver._specialist_tasks[PROJECT_ID][run.run_id]
+            assert handle.task is None, "the worker must not exist yet"
+            claimed = (
+                None
+                if exit_mode == "broken-unrevoked"
+                else driver.cancel_specialist_run(
+                    PROJECT_ID,
+                    run.run_id,
+                    reason="source_asset_deleted",
+                )
+            )
+            proceed.set()
+            if exit_mode == "mainline-interrupt":
+                await driver.interrupt(PROJECT_ID, reason="user_interrupt")
+            elif exit_mode == "runtime-stop":
+                # Stop has to drain the settlement its unwinding tasks spawn
+                # instead of returning with a live RUNNING_MODEL row.
+                await driver.stop()
+                stopped = True
+            await _wait_for(
+                lambda: driver.executions.get_specialist_run(
+                    PROJECT_ID,
+                    run.run_id,
+                ).status.value
+                == expected_status,
+                timeout=20.0,
+            )
+            await _wait_for(
+                lambda: run.run_id
+                not in driver._specialist_tasks.get(PROJECT_ID, {}),
+            )
+            events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+            return (
+                claimed,
+                driver.executions.get_specialist_run(
+                    PROJECT_ID,
+                    run.run_id,
+                ),
+                events,
+                run.run_id,
+                turns,
+            )
+        finally:
+            release.set()
+            if not stopped:
+                await driver.stop()
+
+    claimed, run, events, run_id, turns = asyncio.run(scenario())
+
+    if exit_mode != "broken-unrevoked":
+        assert claimed is True
+    assert run.status.value == expected_status
+    assert turns["specialist"] == 0, "an abandoned admission may not pay"
+    lifecycle = _subagent_lifecycle(events, run_id)
+    assert (
+        lifecycle[-1].event_type == "subagent.failed"
+    ), "the run must disarm the activity it announced"
+    if expected_status == "CANCELLED":
+        assert lifecycle[-1].payload.get("cancelled") is True
+    else:
+        assert "TimeoutError" in str(lifecycle[-1].payload.get("error"))
+
+
 def test_second_cancel_does_not_interrupt_cancellation_cleanup(
     tmp_path,
     monkeypatch,
