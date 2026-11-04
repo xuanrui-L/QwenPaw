@@ -400,10 +400,10 @@ def _assemble_model_config(
         include_environment
         and os.environ.get("WEB_GROUNDING_VALIDATION_SOURCE")
     ):
-        base["grounding"]["validation_source"] = (
-            validation_source_from_reuse_llm(
-                base["grounding"].get("reuse_llm", True),
-            )
+        base["grounding"][
+            "validation_source"
+        ] = validation_source_from_reuse_llm(
+            base["grounding"].get("reuse_llm", True),
         )
     base["grounding"]["reuse_llm"] = reuse_llm_from_validation_source(
         base["grounding"].get("validation_source") or "",
@@ -469,8 +469,7 @@ def _assemble_model_config(
         field = ".".join(str(part) for part in loc) if loc else "unknown field"
         message = first_error.get("msg", str(exc))
         raise ValidationError(
-            f"模型配置文件不可用: {field} {message}；"
-            "请修正 model_config.json 或重新保存模型配置",
+            f"模型配置文件不可用: {field} {message}；" "请修正 model_config.json 或重新保存模型配置",
         ) from exc
 
 
@@ -706,9 +705,7 @@ def _supports_dashscope_native_search(item: ModelConfigItem) -> bool:
     protocol = item.protocol.casefold()
     host = urlparse(item.base_url).hostname or ""
     return (
-        "dashscope" in protocol
-        or "百炼" in item.protocol
-        or "dashscope" in host
+        "dashscope" in protocol or "百炼" in item.protocol or "dashscope" in host
     )
 
 
@@ -2210,9 +2207,7 @@ def _probe_target_refusal(
         )
     if target_origin not in homes:
         default_note = (
-            "本次目标来自内置默认地址，该分项尚未保存 Base URL。"
-            if unconfigured_target
-            else ""
+            "本次目标来自内置默认地址，该分项尚未保存 Base URL。" if unconfigured_target else ""
         )
         return (
             "安全限制：本次探测会使用已保存的 API Key，但目标地址与该 Key 保存时的"
@@ -2490,8 +2485,7 @@ def _grade_fun_asr_terminal(
         return False, ""
     if not _walkable_entries(results):
         return False, (
-            f"转写任务的 results 不是列表（{type(results).__name__}），"
-            "生产遍历子任务会失败"
+            f"转写任务的 results 不是列表（{type(results).__name__}），" "生产遍历子任务会失败"
         )
     succeeded = next(
         (
@@ -2562,9 +2556,7 @@ def _non_json_transcript_refusal(body: str, content_type: str) -> str:
     sample = _body_sample(body)
     lowered = sample.casefold()
     if lowered.startswith("<"):
-        return (
-            f"转写探测收到 HTML 页面（可能是登录拦截），不是转写结果：{sample}"
-        )
+        return f"转写探测收到 HTML 页面（可能是登录拦截），不是转写结果：{sample}"
     if lowered.startswith("event:") or lowered.startswith("data:"):
         return (
             f"转写探测收到流式响应（{content_type or '未知类型'}），"
@@ -2599,8 +2591,7 @@ def _grade_whisper_document(document: Mapping[str, Any]) -> tuple[bool, str]:
         segments = document["segments"]
         if not isinstance(segments, (list, tuple)):
             return False, (
-                "转写结果的 segments 不是列表"
-                f"（{type(segments).__name__}），生产逐项读取会失败"
+                "转写结果的 segments 不是列表" f"（{type(segments).__name__}），生产逐项读取会失败"
             )
         for raw in segments:
             if not isinstance(raw, Mapping):
@@ -2615,9 +2606,7 @@ def _grade_whisper_document(document: Mapping[str, Any]) -> tuple[bool, str]:
                 try:
                     float(value)
                 except (TypeError, ValueError):
-                    return False, (
-                        "转写结果的 segments 时间戳不是数值，生产转换会失败"
-                    )
+                    return False, ("转写结果的 segments 时间戳不是数值，生产转换会失败")
         return True, ""
     if "text" in document:
         # Without ``verbose_json`` the answer is a bare ``text``; the reader
@@ -2690,8 +2679,7 @@ def _grade_tts_attestation(response: httpx.Response) -> tuple[bool, str]:
         return False, f"语音合成探测返回非 JSON 响应：{_body_sample(body)}"
     if not isinstance(document, Mapping):
         return False, (
-            "语音合成探测返回的 JSON 顶层不是对象，生产按字段读取会失败："
-            f"{_body_sample(body)}"
+            "语音合成探测返回的 JSON 顶层不是对象，生产按字段读取会失败：" f"{_body_sample(body)}"
         )
     wrapped = _error_wrapped_in_2xx(document)
     if wrapped:
@@ -2701,8 +2689,7 @@ def _grade_tts_attestation(response: httpx.Response) -> tuple[bool, str]:
     url = audio.get("url") if isinstance(audio, Mapping) else None
     if not (isinstance(url, str) and url.strip()):
         return False, (
-            "语音合成探测未返回 output.audio.url，生产无从下载音频："
-            f"{_body_sample(body)}"
+            "语音合成探测未返回 output.audio.url，生产无从下载音频：" f"{_body_sample(body)}"
         )
     return True, ""
 
@@ -2750,8 +2737,7 @@ def _grade_attestation(
         return False, _non_json_transcript_refusal(body, content_type)
     if not isinstance(document, Mapping):
         return False, (
-            "转写探测返回的 JSON 顶层不是对象，生产按字段读取会失败："
-            f"{_body_sample(body)}"
+            "转写探测返回的 JSON 顶层不是对象，生产按字段读取会失败：" f"{_body_sample(body)}"
         )
     wrapped = _error_wrapped_in_2xx(document)
     if wrapped:
@@ -2997,8 +2983,7 @@ def _probe_payload(
         )
         if not capability.known:
             unknown_capability_error = (
-                "VIDEO_MODEL_CAPABILITY_UNKNOWN: 精确模型 ID 与协议组合"
-                + "未收录，已停止连接探测"
+                "VIDEO_MODEL_CAPABILITY_UNKNOWN: 精确模型 ID 与协议组合" + "未收录，已停止连接探测"
             )
             raise ValueError(unknown_capability_error)
         if model_config.is_agentscope_gateway(
@@ -3259,8 +3244,7 @@ async def test_model_connection(
             ok=False,
             ms=round((time.monotonic() - start) * 1000),
             error=(
-                f"连接超时，请检查网络或 Base URL"
-                f"（当前 Base URL: {selected.base_url}）"
+                f"连接超时，请检查网络或 Base URL" f"（当前 Base URL: {selected.base_url}）"
             ),
         )
     except (
