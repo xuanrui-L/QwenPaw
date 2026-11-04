@@ -21,7 +21,6 @@ from uuid import uuid4
 from pydantic import ValidationError
 from domain.errors import (
     BadRequestError,
-    ConflictError,
     NotFoundError,
     SourceAssetInUseError,
 )
@@ -166,7 +165,9 @@ def _timeline_reference_record(
     is_snapshot = timeline.timeline_id.startswith(_SNAPSHOT_TIMELINE_PREFIX)
     return {
         "timelineId": timeline.timeline_id,
-        "timelineName": timeline.name or timeline.title or timeline.timeline_id,
+        "timelineName": timeline.name
+        or timeline.title
+        or timeline.timeline_id,
         "isSnapshot": is_snapshot,
         "elementId": element.element_id,
         "elementLabel": element.label
@@ -174,9 +175,7 @@ def _timeline_reference_record(
         "creationType": element.creation.type,
         "refKind": ref_kind,
         "detachable": detachable,
-        "pointer": (
-            f"{timeline.timeline_id}/" if is_snapshot else ""
-        )
+        "pointer": (f"{timeline.timeline_id}/" if is_snapshot else "")
         + f"{ref_kind}:{element.element_id}",
     }
 
@@ -543,9 +542,13 @@ class ProjectStore:
                 # Without force every reference blocks; with force only the
                 # references no Element can survive without do. Half-clearing
                 # an audio or Edit Element would persist an invalid Project.
-                blocking = timeline_refs if not force else [
-                    ref for ref in timeline_refs if not ref["detachable"]
-                ]
+                blocking = (
+                    timeline_refs
+                    if not force
+                    else [
+                        ref for ref in timeline_refs if not ref["detachable"]
+                    ]
+                )
                 if blocking:
                     raise SourceAssetInUseError(
                         _asset_in_use_message(version_id, blocking),

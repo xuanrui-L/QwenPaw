@@ -439,7 +439,9 @@ def _r2v_element(
         location=ElementLocation(),
         creation=R2VCreation(
             video_prompt="镜头横移",
-            storyboard_reference_version_ids=list(storyboard_version_ids or []),
+            storyboard_reference_version_ids=list(
+                storyboard_version_ids or []
+            ),
             video_reference_version_ids=list(video_version_ids or []),
         ),
     )
@@ -818,9 +820,14 @@ def test_force_delete_detaches_live_and_snapshot_references(tmp_path):
     ]
     assert all(reference["detachable"] for reference in references)
     # The live record carries the human name the UI shows instead of an id.
-    assert next(
-        reference for reference in references if not reference["isSnapshot"]
-    )["elementLabel"] == "镜头一｜风雪定场（修订）"
+    assert (
+        next(
+            reference
+            for reference in references
+            if not reference["isSnapshot"]
+        )["elementLabel"]
+        == "镜头一｜风雪定场（修订）"
+    )
 
     snapshot = store.remove_source_asset_version(
         DELETION_PROJECT_ID,
@@ -892,9 +899,9 @@ def test_force_delete_refuses_required_audio_reference(tmp_path):
     ]
     assert all(not reference["detachable"] for reference in references)
     # An unlabelled Element falls back to its id so the list never goes blank.
-    assert {
-        reference["elementLabel"] for reference in references
-    } == {"el-audio-1"}
+    assert {reference["elementLabel"] for reference in references} == {
+        "el-audio-1"
+    }
 
     after = store.read(DELETION_PROJECT_ID)
     assert after.etag == before.etag
@@ -957,7 +964,9 @@ def test_force_delete_detaches_render_source_and_r2v_refs(tmp_path):
         ],
     )
     _publish_project(store, base, project)
-    dropped_path = store.project_root(DELETION_PROJECT_ID) / dropped.relative_uri
+    dropped_path = (
+        store.project_root(DELETION_PROJECT_ID) / dropped.relative_uri
+    )
 
     store.remove_source_asset_version(
         DELETION_PROJECT_ID,
@@ -981,7 +990,9 @@ def test_force_delete_detaches_render_source_and_r2v_refs(tmp_path):
     assert "version-survivor" in after.assets.source_versions_by_id
 
 
-def test_force_delete_refuses_the_only_payload_of_a_text_free_overlay(tmp_path):
+def test_force_delete_refuses_the_only_payload_of_a_text_free_overlay(
+    tmp_path,
+):
     # A media sticker is declared valid by holding nothing but reference
     # versions: clearing this one would leave an OverlayCreation its own
     # validator rejects, so the delete must stay refused (and retryable by
@@ -1016,7 +1027,9 @@ def test_force_delete_refuses_the_only_payload_of_a_text_free_overlay(tmp_path):
         ],
     )
     before = _publish_project(store, base, project)
-    sticker_path = store.project_root(DELETION_PROJECT_ID) / sticker.relative_uri
+    sticker_path = (
+        store.project_root(DELETION_PROJECT_ID) / sticker.relative_uri
+    )
 
     with pytest.raises(SourceAssetInUseError) as caught:
         store.remove_source_asset_version(
@@ -1082,7 +1095,9 @@ def test_force_delete_detaches_an_overlay_that_keeps_its_own_payload(tmp_path):
 
     after = store.read(DELETION_PROJECT_ID).project
     assert "version-sticker" not in after.assets.source_versions_by_id
-    assert not (store.project_root(DELETION_PROJECT_ID) / sticker.relative_uri).exists()
+    assert not (
+        store.project_root(DELETION_PROJECT_ID) / sticker.relative_uri
+    ).exists()
     overlay = after.timelines.items["timeline:main"].elements_by_id[
         "el-sticker-1"
     ]
