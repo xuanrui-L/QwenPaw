@@ -100,3 +100,21 @@ def test_a_created_voice_keeps_its_own_identity(monkeypatch) -> None:
     model, voice = _identity(voice_id="vc-abc")
     assert voice == "vc-abc"
     assert model == capability_for("qwen-audio-3.1-tts-flash").clone_model()
+
+
+def test_no_system_voices_identity_is_honest(monkeypatch) -> None:
+    """A model with no published list has no name to substitute, so the
+    passthrough path returns the configured name — empty when nothing is set.
+
+    ``test_reuse_key_never_names_a_voice_the_model_cannot_speak`` skips this
+    row because plain synthesis is refused without a created character voice,
+    but ``_requested_tts_identity`` has no such guard: the function must not
+    crash and must produce a key that matches nothing (empty voice).
+    """
+
+    monkeypatch.setenv("TTS_MODEL_NAME", "cosyvoice-v3.5-plus")
+    monkeypatch.setenv("TTS_VOICE", "")
+
+    model, voice = _identity()
+    assert model == "cosyvoice-v3.5-plus"
+    assert voice == ""
