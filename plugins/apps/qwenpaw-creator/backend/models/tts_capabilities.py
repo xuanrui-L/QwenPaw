@@ -239,15 +239,6 @@ _CAPABILITIES: tuple[TtsModelCapability, ...] = (
         design_target="qwen3-tts-vd-2026-01-26",
     ),
     TtsModelCapability(
-        model="qwen3-tts-instruct-flash",
-        family="qwen-tts",
-        transport="http",
-        label="Qwen3 TTS Instruct Flash（系统音色，可控情绪语速）",
-        system_voices=_QWEN_TTS_VOICES,
-        clone_target="qwen3-tts-vc-2026-01-22",
-        design_target="qwen3-tts-vd-2026-01-26",
-    ),
-    TtsModelCapability(
         model="cosyvoice-v3.5-plus",
         family="cosyvoice",
         transport="websocket",
