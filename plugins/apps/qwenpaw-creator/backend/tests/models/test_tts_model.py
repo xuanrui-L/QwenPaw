@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import pytest
 
@@ -18,6 +19,7 @@ from models.tts_capabilities import (
     require_capability,
     supported_models,
 )
+from utils.exceptions import ModelError
 
 
 def _fake_post(captured: dict, response: dict):
@@ -60,7 +62,10 @@ def test_synthesize_uses_system_voice_and_flash_model(monkeypatch) -> None:
     result = asyncio.run(tts_model.synthesize("你好世界", voice="Serena"))
     assert "multimodal-generation/generation" in captured["url"]
     assert captured["payload"]["model"] == model_config.get_tts_model_name()
-    assert captured["payload"]["input"] == {"text": "你好世界", "voice": "Serena"}
+    assert captured["payload"]["input"] == {
+        "text": "你好世界",
+        "voice": "Serena",
+    }
     assert result.audio_bytes == b"RIFFxxxx"
     assert result.characters == 4
 
@@ -75,7 +80,7 @@ def test_missing_key_gates_configuration_and_synthesis(monkeypatch) -> None:
 
 
 def test_synthesize_rejects_unknown_system_voice(monkeypatch) -> None:
-    """A made-up voice must fail before reaching the provider."""
+    """A voice named by the caller must fail before reaching the provider."""
 
     async def fail_post_json(url, *, api_key, payload, timeout_seconds):
         raise AssertionError("provider must not be called")
@@ -83,8 +88,116 @@ def test_synthesize_rejects_unknown_system_voice(monkeypatch) -> None:
     monkeypatch.setenv("TTS_API_KEY", "sk-test")
     monkeypatch.setattr(tts_model, "_post_json", fail_post_json)
 
-    with pytest.raises(ValueError, match="available system voices"):
+    with pytest.raises(ValueError, match="unknown voice"):
         asyncio.run(tts_model.synthesize("你好", voice="zh-CN-YunxiNeural"))
+
+
+def test_configured_default_voice_falls_back_to_one_the_model_offers(
+    monkeypatch,
+) -> None:
+    """One default voice is configured across every model while each model
+    publishes its own list, so switching the model outside the dialog must
+    narrate with the model's first system voice, not go silent."""
+
+    captured: dict = {}
+
+    def fake_ws(*, model, voice, text, api_key, speech_rate=1.0):
+        captured.update(model=model, voice=voice)
+        return b"MP3xxxx", "audio/mpeg"
+
+    async def fail_post_json(url, **kwargs):
+        raise AssertionError("HTTP path must not be used for a ws model")
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
+    monkeypatch.setenv("TTS_VOICE", "Cherry")
+    monkeypatch.setattr(tts_model, "_synthesize_over_websocket", fake_ws)
+    monkeypatch.setattr(tts_model, "_post_json", fail_post_json)
+
+    result = asyncio.run(tts_model.synthesize("你好世界"))
+    assert captured["model"] == "qwen-audio-3.1-tts-flash"
+    assert (
+        captured["voice"]
+        == capability_for(
+            "qwen-audio-3.1-tts-flash",
+        ).system_voices[0]
+    )
+    assert result.media_type == "audio/mpeg"
+
+
+def test_unknown_voice_error_previews_instead_of_dumping_the_list(
+    monkeypatch,
+) -> None:
+    """One model publishes 88 system voices and this message lands in the
+    agent transcript, so it names a few and states the total."""
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
+    with pytest.raises(ValueError, match=r"\(88 in total\)") as raised:
+        asyncio.run(tts_model.synthesize("你好世界", voice="Cherry"))
+    # The ninth name is the first one the preview drops; naming a voice that
+    # no model publishes at all would pass the same assertion vacuously.
+    assert "wenhuaiqing_v3.1" not in str(raised.value)
+
+
+def test_gateway_refuses_a_speech_model_it_has_not_published(
+    monkeypatch,
+) -> None:
+    """The proxy gate reads the table's providers, not the model's name.
+
+    Qwen-Audio 3.1 shares the prefix the old name check matched on while the
+    proxy publishes only the 3.0 pair, so matching on the name would POST 3.1
+    to a route that never listed it and report the refusal as a broken
+    synthesis path.
+    """
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
+    monkeypatch.setattr(
+        model_config,
+        "is_agentscope_gateway",
+        lambda **kwargs: True,
+    )
+
+    with pytest.raises(ModelError, match="未发布"):
+        asyncio.run(tts_model.synthesize("你好世界", voice="longanhuan_v3.1"))
+
+
+def test_gateway_routes_a_published_speech_model_over_http(
+    monkeypatch,
+) -> None:
+    """Guard on the guard: the pair the proxy does publish still speaks."""
+
+    captured: dict = {}
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.0-tts-flash")
+    monkeypatch.setattr(
+        model_config,
+        "is_agentscope_gateway",
+        lambda **kwargs: True,
+    )
+    monkeypatch.setattr(
+        tts_model,
+        "_post_json",
+        _fake_post(
+            captured,
+            {
+                "output": {"audio": {"url": "https://example.com/a.wav"}},
+                "usage": {"characters": 4},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        tts_model,
+        "_download_audio",
+        lambda url: (b"RIFFxxxx", "audio/wav"),
+    )
+
+    result = asyncio.run(
+        tts_model.synthesize("你好世界", voice="longanfengyue"),
+    )
+    assert captured["payload"]["model"] == "qwen-audio-3.0-tts-flash"
+    assert result.voice == "longanfengyue"
 
 
 def test_enroll_voice_builds_enrollment_payload(monkeypatch) -> None:
@@ -229,8 +342,6 @@ def test_abnormal_close_normalizes_to_provider_error(
 
     import websocket
 
-    from utils.exceptions import ModelError
-
     def make_exc():
         if failure == "close_frame_race":
             return AttributeError(
@@ -268,8 +379,6 @@ def test_handshake_rejection_maps_status_to_retryability(
     429/5xx stay retryable."""
 
     import websocket
-
-    from utils.exceptions import ModelError
 
     class _Synth(_FakeSynthesizerBase):
         def streaming_call(self, text) -> None:
@@ -358,6 +467,24 @@ def test_every_supported_model_declares_a_usable_voice_source() -> None:
         )
         assert capability.clone_model()
         assert capability.transport in {"http", "websocket"}
+
+
+def test_labels_do_not_quote_a_stale_voice_count() -> None:
+    """The configuration page takes each label verbatim, and a published voice
+    list changes without telling the copy that counts it."""
+
+    for capability in supported_models():
+        stated = re.findall(r"(\d+)\s*个系统音色", capability.label)
+        for count in stated:
+            assert int(count) == len(capability.system_voices), (
+                f"{capability.model} label says {count} voices, "
+                f"the table registers {len(capability.system_voices)}"
+            )
+        if capability.model.startswith("qwen-audio"):
+            # Pin the convention instead of only checking it when it is
+            # honoured: a Qwen-Audio label that dropped its count would pass
+            # the loop above, silently and green.
+            assert len(stated) == 1, f"{capability.model} states no count"
 
 
 def test_qwen_audio_models_carry_their_own_voice_lists() -> None:

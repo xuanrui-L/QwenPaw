@@ -21,8 +21,8 @@ import respx
 from models import asr_model
 from models import config
 from models import tts_model
+from models.tts_capabilities import capability_for
 from utils.exceptions import ModelError
-
 
 GATEWAY_BASE = "https://platform-pre.agentscope.io/v1"
 PROTOCOL = "AgentScope Platform"
@@ -105,9 +105,9 @@ def test_gateway_synthesis_uses_the_speech_route(monkeypatch) -> None:
     result = asyncio.run(tts_model.synthesize("你好世界"))
 
     assert captured["url"].endswith(f"/v1/{SPEECH_SUFFIX}")
-    # The leaner body is what the proxy was measured to accept; the local
-    # catalogue is empty for this model, so the configured name is passed
-    # through instead of being refused before the call.
+    # The leaner body is what the proxy was measured to accept; the voice is a
+    # deployment default that this model does publish, so it survives the local
+    # check untouched and goes out as configured.
     assert captured["payload"]["model"] == "qwen-audio-3.0-tts-flash"
     assert captured["payload"]["input"] == {
         "text": "你好世界",
@@ -133,7 +133,8 @@ def test_gateway_refuses_a_genuine_websocket_model(monkeypatch) -> None:
 
 
 def test_bailian_keeps_refusing_an_unknown_voice(monkeypatch) -> None:
-    """The pass-through is gateway-only; a typo must still fail fast."""
+    """The pass-through is gateway-only; a name the caller typed must still
+    fail fast."""
     captured: dict = {}
     monkeypatch.setenv("TTS_API_KEY", "sk-test")
     monkeypatch.setattr(config, "get_tts_protocol", lambda: "")
@@ -147,14 +148,97 @@ def test_bailian_keeps_refusing_an_unknown_voice(monkeypatch) -> None:
         "get_tts_model_name",
         lambda: "qwen3-tts-flash",
     )
-    monkeypatch.setattr(config, "get_tts_voice", lambda: "NotAVoice")
+    monkeypatch.setattr(config, "get_tts_voice", lambda: "Cherry")
     monkeypatch.setattr(config, "get_tts_timeout_seconds", lambda: 30)
     monkeypatch.setattr(tts_model, "_post_json", _fake_post(captured, {}))
 
     with pytest.raises(ValueError, match="unknown voice"):
-        asyncio.run(tts_model.synthesize("你好世界"))
+        asyncio.run(tts_model.synthesize("你好世界", voice="NotAVoice"))
     # Refused before the call, so nothing was sent and nothing was billed.
     assert not captured
+
+
+def test_bailian_replaces_a_default_voice_the_model_cannot_speak(
+    monkeypatch,
+) -> None:
+    """A deployment default is not a caller's typo.
+
+    One default voice is configured across every model while each model
+    publishes its own list, so refusing a name the switch left behind would
+    silence every narration in that deployment.
+    """
+    captured: dict = {}
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "get_tts_protocol", lambda: "")
+    monkeypatch.setattr(
+        config,
+        "get_tts_base_url",
+        lambda: "https://dashscope.aliyuncs.com/api/v1",
+    )
+    monkeypatch.setattr(
+        config,
+        "get_tts_model_name",
+        lambda: "qwen-audio-3.1-tts-flash",
+    )
+    monkeypatch.setattr(config, "get_tts_voice", lambda: "NotAVoice")
+    monkeypatch.setattr(config, "get_tts_timeout_seconds", lambda: 30)
+
+    def fake_ws(*, model, voice, text, api_key, speech_rate=1.0):
+        captured.update(model=model, voice=voice)
+        return b"MP3xxxx", "audio/mpeg"
+
+    monkeypatch.setattr(tts_model, "_synthesize_over_websocket", fake_ws)
+
+    result = asyncio.run(tts_model.synthesize("你好世界"))
+    assert (
+        captured["voice"]
+        == capability_for(
+            "qwen-audio-3.1-tts-flash",
+        ).system_voices[0]
+    )
+    assert result.voice == captured["voice"]
+
+
+def test_gateway_also_replaces_a_default_voice_the_model_cannot_speak(
+    monkeypatch,
+) -> None:
+    """No catalogue, not more permissive.
+
+    The proxy rejects a voice outside a model's list the same way Bailian does
+    - as a retryable 502 that reads like a broken route - so the local
+    substitution has to happen on that endpoint too, not only on Bailian.
+    """
+    captured = _bind_gateway_tts(
+        monkeypatch,
+        model="qwen-audio-3.0-tts-flash",
+        voice="Cherry",
+    )
+
+    asyncio.run(tts_model.synthesize("你好世界"))
+
+    assert (
+        captured["payload"]["input"]["voice"]
+        == capability_for(
+            "qwen-audio-3.0-tts-flash",
+        ).system_voices[0]
+    )
+
+
+def test_gateway_still_forwards_a_voice_the_caller_named(
+    monkeypatch,
+) -> None:
+    """A name the caller typed stays the caller's business: with no published
+    catalogue the proxy owns that judgement, so it is forwarded rather than
+    second guessed here."""
+    captured = _bind_gateway_tts(
+        monkeypatch,
+        model="qwen-audio-3.0-tts-flash",
+        voice="Cherry",
+    )
+
+    asyncio.run(tts_model.synthesize("你好世界", voice="StudioVoice"))
+
+    assert captured["payload"]["input"]["voice"] == "StudioVoice"
 
 
 # -- ASR -----------------------------------------------------------------
@@ -232,7 +316,9 @@ def test_gateway_transcription_omits_the_oss_resolve_header(
 
     result = asyncio.run(asr_model.transcribe("https://example.com/line.wav"))
 
-    assert [segment.text for segment in result.segments] == ["欢迎使用阿里云。"]
+    assert [segment.text for segment in result.segments] == [
+        "欢迎使用阿里云。",
+    ]
     sent = route.calls.last.request
     assert "x-dashscope-ossresourceresolve" not in {
         key.lower() for key in sent.headers
@@ -244,7 +330,10 @@ def test_gateway_transcription_omits_the_oss_resolve_header(
     [
         # The shape the proxy was measured to return.
         (
-            {"text": "欢迎使用阿里云。", "output": {"sentence": {"text": "欢迎"}}},
+            {
+                "text": "欢迎使用阿里云。",
+                "output": {"sentence": {"text": "欢迎"}},
+            },
             ["欢迎"],
         ),
         # Segmented transcription: one sentence object per segment.
