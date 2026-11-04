@@ -2464,5 +2464,13 @@
     "attempt": "Retry {{attempt}} / {{max}}",
     "backoff": "Retrying in {{seconds}}s",
     "responding": "Waiting for the model response"
+  },
+  "storage": {
+    "pendingHint": "{{size}} of settled history is waiting for your confirmation",
+    "confirmButton": "Confirm and free",
+    "confirmTitle": "Free {{size}} of settled history in \"{{name}}\"?",
+    "confirmBody": "The automatic sweep stepped back from this Project because its settled history grew past the threshold. Confirming records your decision and runs the same two sweeps right now, deleting the finished sessions and transactions that make up the bytes.",
+    "confirmed": "Freed {{size}} of settled history",
+    "failed": "Could not free the settled history: {{message}}"
   }
 }

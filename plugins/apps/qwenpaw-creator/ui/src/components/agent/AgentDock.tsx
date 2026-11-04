@@ -102,7 +102,10 @@ import AgentWaitHint from "./AgentWaitHint";
 import AgentActivityIndicator from "./AgentActivityIndicator";
 import DecisionTray from "./DecisionTray";
 import FeedbackModal from "@/components/creator/FeedbackModal";
-import MentionInput, { type MentionInputHandle } from "./MentionInput";
+import MentionInput, {
+  type MentionInputContent,
+  type MentionInputHandle,
+} from "./MentionInput";
 import { reviewPendingUnits } from "./FileProjectReviewPanel";
 import OnboardingHint from "@/components/onboarding/OnboardingHint";
 import { useTranslation } from "react-i18next";
@@ -696,13 +699,65 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
   );
 }
 
-function ToolCallCard({ data }: { data: ToolCallPresentation }) {
-  const { t } = useTranslation();
-  const session = useCreatorSessionStore((state) => state.session);
-  const activity = useCreatorSessionStore(
-    (state) => state.subagentActivities[data.actionId],
-  );
+/**
+ * Delegated-only detail that needs the Project snapshot.
+ *
+ * Kept as its own subscriber so the ~every-tool-card path stays free of the
+ * snapshot: a plain `read_project` row must not re-render when the Project
+ * identity changes, and only specialist rows read it at all.
+ */
+function SpecialistTargets({ refs }: { refs: string[] }) {
   const project = useProjectSnapshotStore((state) => state.project);
+  if (refs.length === 0) return null;
+  return (
+    <div className="agent-targets">
+      {refs.map((ref) => (
+        <span key={ref}>{creatorTargetLabel(ref, project)}</span>
+      ))}
+    </div>
+  );
+}
+
+function SpecialistPreview({ activity }: { activity: SubagentActivity }) {
+  const project = useProjectSnapshotStore((state) => state.project);
+  const latestMessage =
+    activity &&
+    Object.values(activity.messages).sort(
+      (a, b) => b.firstEventSeq - a.firstEventSeq,
+    )[0];
+  const preview = latestMessage
+    ? publicAssistantText(subagentMessageText(latestMessage), {
+        streaming: !latestMessage.completed,
+        project,
+      })
+    : "";
+  if (!preview) return null;
+  return (
+    <div data-subagent-public-preview className="agent-specialist-preview">
+      <MarkdownContent compact>{preview}</MarkdownContent>
+    </div>
+  );
+}
+
+/**
+ * One tool-activity row.
+ *
+ * Receives `sessionSettled` as a boolean rather than the session object: the
+ * row only tests membership in a status set, and a boolean prop keeps memo
+ * effective across session updates that do not change that answer. A large
+ * project holds hundreds of these rows, so per-store-subscription fan-out and
+ * per-render `publicAssistantText` both used to dominate interaction time.
+ */
+const ToolCallCard = memo(function ToolCallCard({
+  data,
+  activity,
+  sessionSettled,
+}: {
+  data: ToolCallPresentation;
+  activity?: SubagentActivity;
+  sessionSettled: boolean;
+}) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const delegated = data.tool === "delegate_to_agent" || Boolean(activity);
   const role = creatorRoleLabel(
@@ -723,9 +778,7 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
         )
       ? "failed"
       : "cancelled"
-    : data.status === "started" &&
-      session &&
-      ["IDLE", "ERROR", "CANCELLED"].includes(session.status)
+    : data.status === "started" && sessionSettled
     ? "unknown"
     : data.status;
   const activeTool =
@@ -752,17 +805,6 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
       : !activity && data.executing !== true
       ? t("agentActivity.preparing")
       : statusCopy(status);
-  const latestMessage =
-    activity &&
-    Object.values(activity.messages).sort(
-      (a, b) => b.firstEventSeq - a.firstEventSeq,
-    )[0];
-  const preview = latestMessage
-    ? publicAssistantText(subagentMessageText(latestMessage), {
-        streaming: !latestMessage.completed,
-        project,
-      })
-    : "";
   return (
     <div
       data-agent-tool={data.actionId}
@@ -814,23 +856,13 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           </button>
         )}
       </div>
-      {delegated && targets.length > 0 && (
-        <div className="agent-targets">
-          {targets.map((ref) => (
-            <span key={ref}>{creatorTargetLabel(ref, project)}</span>
-          ))}
-        </div>
-      )}
+      {delegated && <SpecialistTargets refs={targets} />}
       {activeTool && status === "started" && (
         <p className="agent-specialist-subtitle">
           {creatorToolLabel(activeTool.tool, activeTool.arguments)}
         </p>
       )}
-      {!expanded && preview && (
-        <div data-subagent-public-preview className="agent-specialist-preview">
-          <MarkdownContent compact>{preview}</MarkdownContent>
-        </div>
-      )}
+      {!expanded && activity && <SpecialistPreview activity={activity} />}
       {status === "failed" && (
         <p className="agent-activity-notice">
           {t("agentActivity.toolFailureHint")}
@@ -844,7 +876,7 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
       {expanded && activity && <SubagentActivityBubble activity={activity} />}
     </div>
   );
-}
+});
 
 function refTypeLabel(type: RefSearchItem["type"]): string {
   const labels: Record<RefSearchItem["type"], string> = {
@@ -1202,6 +1234,12 @@ export default function AgentDock({
     tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status)) ||
     runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)) ||
     Boolean(session && STOPPABLE_SESSION_STATUSES.includes(session.status));
+  // Derived once for every tool row: a row only asks whether the main session
+  // has settled, so a boolean keeps their memo effective across the session
+  // updates that do not change that answer.
+  const sessionSettled = Boolean(
+    session && ["IDLE", "ERROR", "CANCELLED"].includes(session.status),
+  );
   const showWorkspace = tab === "activity";
 
   const currentProject = useRef(projectId);
@@ -1223,6 +1261,9 @@ export default function AgentDock({
   const [canSend, setCanSend] = useState(false);
   const [rateLimitResuming, setRateLimitResuming] = useState(false);
   const [inlineRefs, setInlineRefs] = useState<string[]>([]);
+  // Last refs written into `inlineRefs`, kept out of render state so it can
+  // gate the update without becoming a dependency of itself.
+  const inlineRefsSignature = useRef("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionOptions, setMentionOptions] = useState<RefSearchItem[]>([]);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -1812,11 +1853,20 @@ export default function AgentDock({
     setShowJump(false);
   };
 
-  const handleInputChange = (text: string) => {
-    const content = inputRef.current?.getContent();
-    setCanSend(Boolean(content?.text.trim()));
-    setInlineRefs(content?.refs.map((item) => item.ref) ?? []);
-    setDraft(text);
+  const handleInputChange = (_text: string, content: MentionInputContent) => {
+    setCanSend(Boolean(content.text.trim()));
+    // Compare before setting: allocating a fresh array on every keystroke made
+    // the dock re-render per character even when the referenced objects never
+    // changed. The refs already came from this keystroke's serialization, so
+    // there is no second getContent() DOM walk either.
+    const signature = content.refs.map((item) => item.ref).join("\u0000");
+    if (signature !== inlineRefsSignature.current) {
+      inlineRefsSignature.current = signature;
+      setInlineRefs(content.refs.map((item) => item.ref));
+    }
+    // The live text intentionally never reaches the store. `draft` is only the
+    // external-injection channel consumed below; writing every keystroke into
+    // it re-rendered this whole dock, and every tool card inside it, per key.
   };
 
   const pickMention = (item: RefSearchItem) => {
@@ -1858,7 +1908,15 @@ export default function AgentDock({
     useCreatorInteractionStore.getState().setSelection(null);
     setSelectionAttachment(null);
     inputRef.current?.clearMentions();
-    handleInputChange(inputRef.current?.getContent().text ?? "");
+    // Read back the post-clear content explicitly rather than relying on the
+    // refresh() inside clearMentions: same values as that notification, so the
+    // signature gate makes this a no-op while the ref stays non-null-safe.
+    const cleared = inputRef.current?.getContent() ?? {
+      text: "",
+      refs: [],
+      selections: [],
+    };
+    handleInputChange(cleared.text, cleared);
   };
 
   const submit = async () => {
@@ -2024,6 +2082,7 @@ export default function AgentDock({
     ) {
       inputRef.current?.clear();
       setCanSend(false);
+      inlineRefsSignature.current = "";
       setInlineRefs([]);
       setDraft("");
       setMentionQuery(null);
@@ -2329,14 +2388,24 @@ export default function AgentDock({
                         <ConversationMessage item={item} />
                         {(toolCallsByMessage.get(item.messageId) ?? []).map(
                           (call) => (
-                            <ToolCallCard key={call.actionId} data={call} />
+                            <ToolCallCard
+                              key={call.actionId}
+                              data={call}
+                              activity={subagentActivities[call.actionId]}
+                              sessionSettled={sessionSettled}
+                            />
                           ),
                         )}
                       </Fragment>
                     ))}
                     {conversationFlow.turns.length === 0 &&
                       unanchoredToolCalls.map((call) => (
-                        <ToolCallCard key={call.actionId} data={call} />
+                        <ToolCallCard
+                          key={call.actionId}
+                          data={call}
+                          activity={subagentActivities[call.actionId]}
+                          sessionSettled={sessionSettled}
+                        />
                       ))}
                   </div>
                 )}
@@ -2359,14 +2428,24 @@ export default function AgentDock({
                             <ConversationMessage item={item} />
                             {(toolCallsByMessage.get(item.messageId) ?? []).map(
                               (call) => (
-                                <ToolCallCard key={call.actionId} data={call} />
+                                <ToolCallCard
+                                  key={call.actionId}
+                                  data={call}
+                                  activity={subagentActivities[call.actionId]}
+                                  sessionSettled={sessionSettled}
+                                />
                               ),
                             )}
                           </Fragment>
                         ))}
                         {latest &&
                           unanchoredToolCalls.map((call) => (
-                            <ToolCallCard key={call.actionId} data={call} />
+                            <ToolCallCard
+                              key={call.actionId}
+                              data={call}
+                              activity={subagentActivities[call.actionId]}
+                              sessionSettled={sessionSettled}
+                            />
                           ))}
                       </div>
                     </div>

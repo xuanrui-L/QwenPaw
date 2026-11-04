@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Read-only storage accounting for the Creator runtime."""
+"""Storage accounting, and the one action that takes settled history back."""
 
 from __future__ import annotations
 
@@ -13,6 +13,15 @@ class ProjectStorageProfileData(StrictModel):
 
     project_id: str = Field(alias="projectId")
     baseline_at: str | None = Field(default=None, alias="baselineAt")
+    history_kept_at: str | None = Field(
+        default=None,
+        alias="historyKeptAt",
+    )
+    reclaim_confirmed_at: str | None = Field(
+        default=None,
+        alias="reclaimConfirmedAt",
+    )
+    pending_reclaim_bytes: int = Field(default=0, alias="pendingReclaimBytes")
     task_work_bytes: int = Field(default=0, alias="taskWorkBytes")
     task_work_legacy_bytes: int = Field(default=0, alias="taskWorkLegacyBytes")
     task_work_reclaimable_bytes: int = Field(
@@ -25,6 +34,24 @@ class ProjectStorageProfileData(StrictModel):
         alias="transactionsLegacyBytes",
     )
     orphan_bytes: int = Field(default=0, alias="orphanBytes")
+
+
+class HistoryReclaimRequest(StrictModel):
+    """An explicit, deliberate press: the action refuses a missing confirm."""
+
+    confirm: bool = False
+
+
+class HistoryReclaimResultData(StrictModel):
+    """What one on-demand history sweep actually took off the disk."""
+
+    project_id: str = Field(alias="projectId")
+    history_kept: bool = Field(alias="historyKept")
+    confirmed_at: str | None = Field(default=None, alias="confirmedAt")
+    removed_transactions: int = Field(default=0, alias="removedTransactions")
+    transaction_bytes: int = Field(default=0, alias="transactionBytes")
+    released_files: int = Field(default=0, alias="releasedFiles")
+    released_bytes: int = Field(default=0, alias="releasedBytes")
 
 
 class StorageTotalsData(StrictModel):
@@ -50,5 +77,10 @@ class StorageProfileData(StrictModel):
     scratch_release_enabled: bool = Field(alias="scratchReleaseEnabled")
     released_files: int = Field(default=0, alias="releasedFiles")
     released_bytes: int = Field(default=0, alias="releasedBytes")
+    elision_backup_bytes: int = Field(default=0, alias="elisionBackupBytes")
+    auto_reclaim_max_bytes: int = Field(
+        default=0,
+        alias="autoReclaimMaxBytes",
+    )
     totals: StorageTotalsData = Field(default_factory=StorageTotalsData)
     projects: list[ProjectStorageProfileData] = Field(default_factory=list)

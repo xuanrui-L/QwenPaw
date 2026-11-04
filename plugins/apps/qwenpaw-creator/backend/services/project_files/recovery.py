@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import copy
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -65,6 +66,62 @@ from .serialization import (
 from .store import ProjectSnapshot, ProjectStore
 
 logger = logging.getLogger("qwenpaw.creator.project_files.recovery")
+
+# Boot re-audits every terminal transaction by re-deriving business diffs and
+# ETags over frozen snapshots: 455 entries cost 236 seconds on one imported
+# Project, every single boot, for results no branch consumes.  The ledger
+# records an audit's outcome against a fingerprint of the bytes it audited, so
+# the next boot pays a stat per file instead of a deepcopy per megabyte.  Any
+# byte that moves changes the fingerprint and forces a real audit again.
+AUDIT_LEDGER_FILE_NAME = ".recovery-audit-ledger.json"
+_AUDIT_LEDGER_ENV = "CREATOR_RECOVERY_AUDIT_LEDGER"
+_DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+_FINGERPRINT_FILES = (
+    "journal.json",
+    "base.json",
+    "candidate.json",
+    "final.json",
+    "latest.json",
+    "round.json",
+    "changeset.json",
+)
+
+
+def audit_ledger_enabled() -> bool:
+    """Whether boot may reuse a previous audit of unchanged frozen bytes."""
+
+    raw = os.environ.get(_AUDIT_LEDGER_ENV, "").strip()
+    return raw.casefold() not in _DISABLED_VALUES
+
+
+_LIGHT_TERMINAL_ENV = "CREATOR_RECOVERY_LIGHT_TERMINAL"
+
+
+def light_terminal_audit_enabled() -> bool:
+    """Whether a terminal entry may be decided without reading its snapshots."""
+
+    raw = os.environ.get(_LIGHT_TERMINAL_ENV, "").strip()
+    return raw.casefold() not in _DISABLED_VALUES
+
+
+def _audit_fingerprint(transaction_root: Path) -> dict[str, Any]:
+    """Size and mtime of every frozen file, journal included.
+
+    Stats only: reading the journal costs a cross-process lock per entry, and
+    hashing 30 MB of snapshots would cost the seconds this ledger exists to
+    save.  Corruption that preserves both size and mtime is beyond what any
+    boot-time audit claims to catch.
+    """
+
+    files = {}
+    for name in _FINGERPRINT_FILES:
+        try:
+            info = (transaction_root / name).lstat()
+        except OSError:
+            files[name] = None
+            continue
+        files[name] = [info.st_size, info.st_mtime_ns]
+    return {"files": files}
 
 
 class RecoveryAction(StrEnum):
@@ -187,6 +244,14 @@ class ProjectCommitRecoveryCoordinator:
     ) -> None:
         self.store = store
         self.lock_timeout_seconds = lock_timeout_seconds
+        # One ledger read per pass per Project: re-parsing a thousand-entry
+        # ledger for every entry turned the fast path quadratic (42 s).
+        self._ledger_tables: dict[str, dict[str, Any]] = {}
+        self._ledger_dirty: set[str] = set()
+        # Recovery never rewrites project.json, yet the full audit re-read and
+        # re-validated the live document once per transaction entry: hundreds
+        # of identical 8 MB parses per Project per boot.
+        self._current_cache: dict[str, ProjectSnapshot] = {}
 
     def recover_project(
         self,
@@ -245,6 +310,7 @@ class ProjectCommitRecoveryCoordinator:
                 )
                 if not entry.name.startswith(".")
             )
+            self._flush_audit_ledger(runtime_root)
         return ProjectRecoveryReport(project_id=project_id, outcomes=outcomes)
 
     def recover_all(self) -> CreatorRecoveryReport:
@@ -283,6 +349,233 @@ class ProjectCommitRecoveryCoordinator:
         )
         return report
 
+    def _audit_ledger_store(
+        self,
+        runtime_root: Path,
+    ) -> AtomicJsonRecordStore[dict[str, Any]]:
+        return AtomicJsonRecordStore(
+            runtime_root / AUDIT_LEDGER_FILE_NAME,
+            None,
+        )
+
+    def _ledger_hit(
+        self,
+        runtime_root: Path,
+        transaction_root: Path,
+    ) -> TransactionRecoveryOutcome | None:
+        """The cached outcome for these exact bytes, if a boot audited them."""
+
+        stored = self._ledger_table(runtime_root)
+        entry = stored.get(transaction_root.name)
+        if not isinstance(entry, dict):
+            return None
+        if entry.get("fingerprint") != _audit_fingerprint(transaction_root):
+            return None
+        for action in RecoveryAction:
+            if action.value != entry.get("action"):
+                continue
+            return TransactionRecoveryOutcome(
+                transaction_id=str(entry.get("transaction_id", "")),
+                action=action,
+                state_before=(
+                    CommitJournalState(entry["state_before"])
+                    if entry.get("state_before")
+                    else None
+                ),
+                state_after=(
+                    CommitJournalState(entry["state_after"])
+                    if entry.get("state_after")
+                    else None
+                ),
+                detail="terminal transaction (audit ledger hit)",
+            )
+        return None
+
+    def _ledger_record(
+        self,
+        runtime_root: Path,
+        transaction_root: Path,
+        outcome: TransactionRecoveryOutcome,
+    ) -> TransactionRecoveryOutcome:
+        """Remember an outcome against the bytes it was derived from."""
+
+        stored = self._ledger_table(runtime_root)
+        stored[transaction_root.name] = {
+            "fingerprint": _audit_fingerprint(transaction_root),
+            "action": outcome.action.value,
+            "transaction_id": outcome.transaction_id,
+            "state_before": (
+                outcome.state_before.value if outcome.state_before else None
+            ),
+            "state_after": (
+                outcome.state_after.value if outcome.state_after else None
+            ),
+        }
+        self._ledger_dirty.add(str(runtime_root))
+        return outcome
+
+    def _ledger_table(self, runtime_root: Path) -> dict[str, Any]:
+        key = str(runtime_root)
+        stored = self._ledger_tables.get(key)
+        if stored is None:
+            try:
+                loaded = self._audit_ledger_store(runtime_root).read_or_none()
+            except OSError:
+                loaded = None
+            stored = loaded if isinstance(loaded, dict) else {}
+            self._ledger_tables[key] = stored
+        return stored
+
+    def _flush_audit_ledger(self, runtime_root: Path) -> None:
+        key = str(runtime_root)
+        if key not in self._ledger_dirty:
+            return
+        self._ledger_dirty.discard(key)
+        store = self._audit_ledger_store(runtime_root)
+        try:
+            store.write(self._ledger_table(runtime_root))
+        except OSError:
+            logger.warning(
+                "recovery audit ledger cannot be written: %s",
+                store.path,
+            )
+
+    def _current_snapshot(self, project_id: str) -> ProjectSnapshot:
+        """The live Project, read once per pass per Project."""
+
+        cached = self._current_cache.get(project_id)
+        if cached is None:
+            cached = self.store.read(project_id)
+            self._current_cache[project_id] = cached
+        return cached
+
+    def _audit_terminal_inputs(
+        self,
+        project_id: str,
+        runtime_root: Path,
+        transaction_root: Path,
+        journal: ProjectCommitJournal,
+    ) -> TransactionRecoveryOutcome | None:
+        """Decide a terminal entry from its small Runtime facts alone.
+
+        A terminal transaction publishes nothing, and whether it still needs
+        a repair is provable from journal + Round + ChangeSet + state, all
+        small files.  The frozen Project snapshots therefore stay unread on
+        the common path: reading them cost a deepcopy, a migration and an
+        ETag derivation per entry per boot.  Anything this cannot prove
+        returns ``None`` and the caller runs the full audit, so the only
+        signals lost are log-only alarms about snapshot bytes a terminal
+        entry no longer acts on.
+        """
+
+        if journal.state is CommitJournalState.ABORTED:
+            return TransactionRecoveryOutcome(
+                transaction_id=journal.transaction_id,
+                action=RecoveryAction.SKIPPED_ABORTED,
+                state_before=journal.state,
+                state_after=journal.state,
+            )
+        if journal.state is not CommitJournalState.RUNTIME_FINALIZED:
+            # PROJECT_REPLACED still promotes its journal and republishes
+            # Runtime facts; PREPARED is live.  Both keep the full audit.
+            return None
+        if not journal.final_etag:
+            raise _IntegrityProblem(
+                "RUNTIME_FINALIZED journal has no final_etag",
+            )
+        transaction_round = _read_optional_snapshot(
+            AtomicJsonRecordStore(
+                transaction_root / "round.json",
+                ChangeRoundRecord,
+            ),
+        )
+        aggregate_round = _read_optional_snapshot(
+            AtomicJsonRecordStore(
+                runtime_root
+                / "change-rounds"
+                / journal.round_id
+                / "round.json",
+                ChangeRoundRecord,
+            ),
+        )
+        if aggregate_round is None or transaction_round is None:
+            # A missing aggregate is either an integrity error or the narrow
+            # PREPARED recreate window; both belong to the full audit.
+            return None
+        round_record = transaction_round.value
+        if (
+            round_record.round_id != journal.round_id
+            or round_record.project_id != project_id
+        ):
+            raise _IntegrityProblem(
+                "ChangeRound identity does not match journal",
+            )
+        try:
+            _validate_same_round(aggregate_round.value, round_record)
+        except Exception as exc:
+            raise _IntegrityProblem(
+                "aggregate ChangeRound provenance conflicts with transaction",
+            ) from exc
+        changeset = AtomicJsonRecordStore(
+            transaction_root / "changeset.json",
+            RuntimeChangeSet,
+        ).read_or_none()
+        state = AtomicJsonRecordStore(
+            self.store.project_root(project_id) / "runtime" / "state.json",
+            RuntimeProjectState,
+        ).read_or_none()
+        if changeset is None or state is None:
+            return None
+        _validate_changeset_provenance(changeset, round_record, journal)
+        expected_round_status = _terminal_round_status(
+            round_record,
+            has_changes=bool(changeset.changes),
+        )
+        if (
+            round_record.review_policy is ReviewPolicy.REQUIRE_REVIEW
+            and round_record.status is TransactionStatus.COMMITTED
+            and state.active_round_id != round_record.round_id
+            and state.accepted_generation >= changeset.final_generation
+        ):
+            expected_round_status = TransactionStatus.COMMITTED
+        if round_record.status is not expected_round_status:
+            return None
+        if state.project_id != journal.project_id:
+            raise _IntegrityProblem(
+                "RuntimeProjectState belongs to another Project",
+            )
+        if state.last_project_generation < changeset.final_generation:
+            return None
+        if (
+            state.last_project_generation == changeset.final_generation
+            and state.last_project_etag != changeset.final_etag
+        ):
+            raise _IntegrityProblem(
+                "RuntimeProjectState final ETag conflicts with ChangeSet",
+            )
+        current = self._current_snapshot(project_id)
+        if (
+            current.generation == state.last_project_generation
+            and current.etag != state.last_project_etag
+        ):
+            raise _IntegrityProblem(
+                "RuntimeProjectState conflicts with current Project",
+            )
+        if (
+            round_record.review_policy is ReviewPolicy.REQUIRE_REVIEW
+            and changeset.changes
+            and round_record.status is TransactionStatus.PENDING_REVIEW
+        ):
+            # Proving the Review consistent needs the recovered business
+            # changes, i.e. the snapshots this path exists to leave unread.
+            return None
+        return TransactionRecoveryOutcome(
+            transaction_id=journal.transaction_id,
+            action=RecoveryAction.ALREADY_FINALIZED,
+            state_before=journal.state,
+            state_after=journal.state,
+        )
+
     def _recover_entry(
         self,
         project_id: str,
@@ -299,6 +592,10 @@ class ProjectCommitRecoveryCoordinator:
                 raise _IntegrityProblem(
                     "transaction entry must be a real directory",
                 )
+            if audit_ledger_enabled():
+                cached = self._ledger_hit(runtime_root, transaction_root)
+                if cached is not None:
+                    return cached
             journal_path = transaction_root / "journal.json"
             try:
                 journal_stat = journal_path.lstat()
@@ -327,6 +624,19 @@ class ProjectCommitRecoveryCoordinator:
             )
             probe_snapshot = probe_store.read_snapshot()
             probe_journal = probe_snapshot.value
+            if light_terminal_audit_enabled():
+                light = self._audit_terminal_inputs(
+                    project_id,
+                    runtime_root,
+                    transaction_root,
+                    probe_journal,
+                )
+                if light is not None:
+                    return self._ledger_record(
+                        runtime_root,
+                        transaction_root,
+                        light,
+                    )
             if probe_journal.state in (
                 CommitJournalState.ABORTED,
                 CommitJournalState.PROJECT_REPLACED,
@@ -380,17 +690,24 @@ class ProjectCommitRecoveryCoordinator:
                             value=promoted,
                         )
                         state_after = CommitJournalState.RUNTIME_FINALIZED
-                    return TransactionRecoveryOutcome(
-                        transaction_id=probe_journal.transaction_id,
-                        action=(
-                            RecoveryAction.SKIPPED_ABORTED
-                            if probe_journal.state
-                            is CommitJournalState.ABORTED
-                            else RecoveryAction.ALREADY_FINALIZED
+                    return self._ledger_record(
+                        runtime_root,
+                        transaction_root,
+                        TransactionRecoveryOutcome(
+                            transaction_id=probe_journal.transaction_id,
+                            action=(
+                                RecoveryAction.SKIPPED_ABORTED
+                                if probe_journal.state
+                                is CommitJournalState.ABORTED
+                                else RecoveryAction.ALREADY_FINALIZED
+                            ),
+                            state_before=probe_journal.state,
+                            state_after=state_after,
+                            detail=(
+                                "terminal transaction "
+                                "(frozen-model snapshots)"
+                            ),
                         ),
-                        state_before=probe_journal.state,
-                        state_after=state_after,
-                        detail="terminal transaction (frozen-model snapshots)",
                     )
 
             inputs = self._load_inputs(
@@ -401,14 +718,18 @@ class ProjectCommitRecoveryCoordinator:
             transaction_id = inputs.journal.transaction_id
             state_before = inputs.journal.state
             if state_before is CommitJournalState.ABORTED:
-                return TransactionRecoveryOutcome(
-                    transaction_id=transaction_id,
-                    action=RecoveryAction.SKIPPED_ABORTED,
-                    state_before=state_before,
-                    state_after=state_before,
+                return self._ledger_record(
+                    runtime_root,
+                    transaction_root,
+                    TransactionRecoveryOutcome(
+                        transaction_id=transaction_id,
+                        action=RecoveryAction.SKIPPED_ABORTED,
+                        state_before=state_before,
+                        state_after=state_before,
+                    ),
                 )
 
-            current = self.store.read(project_id)
+            current = self._current_snapshot(project_id)
             if state_before is CommitJournalState.PREPARED:
                 if inputs.journal.final_etag is None:
                     return self._abort_unpublished(inputs)
@@ -479,11 +800,15 @@ class ProjectCommitRecoveryCoordinator:
 
             if inputs.journal.state is CommitJournalState.RUNTIME_FINALIZED:
                 if self._runtime_metadata_complete(inputs, current):
-                    return TransactionRecoveryOutcome(
-                        transaction_id=transaction_id,
-                        action=RecoveryAction.ALREADY_FINALIZED,
-                        state_before=state_before,
-                        state_after=state_before,
+                    return self._ledger_record(
+                        runtime_root,
+                        transaction_root,
+                        TransactionRecoveryOutcome(
+                            transaction_id=transaction_id,
+                            action=RecoveryAction.ALREADY_FINALIZED,
+                            state_before=state_before,
+                            state_after=state_before,
+                        ),
                     )
                 if (
                     not inputs.journal.final_etag
@@ -1539,24 +1864,39 @@ def _same_changeset(left: RuntimeChangeSet, right: RuntimeChangeSet) -> bool:
     return left_data == right_data
 
 
-def _validate_changeset_identity(
+def _validate_changeset_provenance(
     changeset: RuntimeChangeSet,
-    inputs: _RecoveryInputs,
+    round_record: ChangeRoundRecord,
+    journal: ProjectCommitJournal,
 ) -> None:
+    """The ChangeSet's own fields against the journal and Round, no snapshots."""
+
     if (
-        changeset.round_id != inputs.round_record.round_id
-        or changeset.project_id != inputs.journal.project_id
-        or changeset.origin is not inputs.round_record.origin
-        or changeset.review_policy is not inputs.round_record.review_policy
-        or changeset.caused_by_request_id
-        != inputs.round_record.caused_by_request_id
+        changeset.round_id != round_record.round_id
+        or changeset.project_id != journal.project_id
+        or changeset.origin is not round_record.origin
+        or changeset.review_policy is not round_record.review_policy
+        or changeset.caused_by_request_id != round_record.caused_by_request_id
         or changeset.caused_by_message_seq
-        != inputs.round_record.caused_by_message_seq
-        or changeset.final_etag != inputs.journal.final_etag
+        != round_record.caused_by_message_seq
+        or changeset.final_etag != journal.final_etag
     ):
         raise _IntegrityProblem(
             "ChangeSet identity/provenance conflicts with journal",
         )
+    if not changeset.changes and changeset.base_etag != changeset.final_etag:
+        raise _IntegrityProblem("no-change ChangeSet must use one ETag")
+
+
+def _validate_changeset_identity(
+    changeset: RuntimeChangeSet,
+    inputs: _RecoveryInputs,
+) -> None:
+    _validate_changeset_provenance(
+        changeset,
+        inputs.round_record,
+        inputs.journal,
+    )
     if changeset.changes:
         # A stale but field-disjoint candidate may have been merged onto a
         # newer pre-publish Project.  The journal's base_etag is the caller's
@@ -1572,8 +1912,6 @@ def _validate_changeset_identity(
             raise _IntegrityProblem(
                 "ChangeSet base ETag conflicts with prepared publication",
             )
-    elif changeset.base_etag != changeset.final_etag:
-        raise _IntegrityProblem("no-change ChangeSet must use one ETag")
 
 
 def _same_project_changes(

@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import stat
 import threading
+import time
 from typing import Any
 
 from domain.enums import TERMINAL_TASK_STATUSES, TaskStatus
@@ -72,6 +73,35 @@ KEEP_FILE_NAMES = frozenset({"provider-tasks.jsonl"})
 BASELINE_FILE_NAME = ".storage-baseline.json"
 BASELINE_VERSION = 1
 
+# Pre-baseline history is reclaimed by default: a customer cannot shell into a
+# pod to press anything, and a sweep that waits for consent never collects.
+# What makes the sweeps safe is unchanged -- only a journal-declared terminal
+# transaction goes, the newest receipts stay inside the retention window,
+# QUARANTINED work is kept as evidence, and a terminal Task must be
+# quiet first.
+# Two ways to restore the old promise that an upgrade rewrites nothing: one env
+# var for a whole install, one marker per Project for a person's own choice.
+HISTORY_OPTOUT_FILE_NAME = ".storage-history-optout.json"
+KEEP_PROJECT_HISTORY_ENV = "CREATOR_STORAGE_KEEP_HISTORY"
+
+# A person confirms reclaiming one oversized Project by pressing the console's
+# button, which posts the on-demand route; this file is the receipt the sweeps
+# then honour.  Without it, a Project whose settled history is bigger than the
+# cap below is reported, not touched.
+RECLAIM_CONFIRMATION_FILE_NAME = ".storage-reclaim-confirmed.json"
+
+# Above this much settled history in one Project, the automatic pass steps back
+# and asks.  Measured on the field Project: 17 GB of receipts and scratch, i.e.
+# minutes of deletion and a rewrite nobody asked for yet.
+AUTO_RECLAIM_MAX_BYTES_ENV = "CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES"
+AUTO_RECLAIM_DEFAULT_MAX_BYTES = 4 * 1024 * 1024 * 1024
+
+# The conversation collapse keeps one compressed pre-pass copy of each
+# stream it rewrites, outside every Project directory, so nothing in the
+# per-Project accounting would ever show it.  It is reported because it
+# is the only storage this build adds rather than reclaims.
+ELISION_BACKUP_DIR_NAME = "elide-backups"
+
 # A terminal Task that quiet for less than this may still be finishing a
 # concurrent commit elsewhere, so the crash sweep waits it out.
 ORPHAN_RELEASE_GRACE = timedelta(minutes=15)
@@ -79,6 +109,11 @@ ORPHAN_RELEASE_GRACE = timedelta(minutes=15)
 TaskStore = Any
 
 _DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+
+# The keep-history switch is the opposite polarity of the feature switches: it
+# is off unless somebody asks for it, because its whole job is to restore a
+# protection the default no longer applies.
+_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 def scratch_release_enabled() -> bool:
@@ -109,6 +144,85 @@ class ScratchSweepSummary:
     released_directories: int = 0
     removed_files: int = 0
     removed_bytes: int = 0
+    stopped_early: bool = False
+    skipped_projects: int = 0
+    skipped_bytes: int = 0
+
+
+@dataclass(slots=True)
+class SweepBudget:
+    """How much one pass may take, so a huge tree cannot outlive the boot.
+
+    The sweep itself is a directory walk with a small working set, but deleting
+    tens of gigabytes across hundreds of Projects is still measured in minutes,
+    and a boot that waits those minutes is indistinguishable from a hang.  The
+    budget bounds one pass; what it could not reach waits for the next boot,
+    because a partially reclaimed tree is still a reclaimed tree.
+    """
+
+    max_bytes: int | None = None
+    deadline: float | None = None
+    consumed_bytes: int = 0
+    stopped_early: bool = False
+
+    def has_room(self) -> bool:
+        """Whether anything at all may still be deleted this pass."""
+
+        if (
+            self.max_bytes is not None
+            and self.consumed_bytes >= self.max_bytes
+        ):
+            self.stopped_early = True
+            return False
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            self.stopped_early = True
+            return False
+        return True
+
+    def may_spend(self, size: int) -> bool:
+        """Whether one known amount more fits, marking the pass short."""
+
+        over = (
+            self.max_bytes is not None
+            and self.consumed_bytes + size > self.max_bytes
+        )
+        if over:
+            self.stopped_early = True
+            return False
+        return self.has_room()
+
+    def charge(self, size: int) -> None:
+        self.consumed_bytes += size
+
+
+# One pass frees at most this much and takes at most this long; both are
+# overridable for an install that would rather wait than restart twice.
+SWEEP_MAX_BYTES_ENV = "CREATOR_STORAGE_SWEEP_MAX_BYTES"
+SWEEP_MAX_SECONDS_ENV = "CREATOR_STORAGE_SWEEP_MAX_SECONDS"
+SWEEP_DEFAULT_MAX_BYTES = 16 * 1024 * 1024 * 1024
+SWEEP_DEFAULT_MAX_SECONDS = 300.0
+
+
+def budget_from_environment(*, monotonic: float | None = None) -> SweepBudget:
+    """Build this pass's budget, so the caller can hand one to both sweeps."""
+
+    raw_bytes = os.environ.get(SWEEP_MAX_BYTES_ENV, "").strip()
+    try:
+        max_bytes = int(raw_bytes) if raw_bytes else SWEEP_DEFAULT_MAX_BYTES
+    except ValueError:
+        max_bytes = SWEEP_DEFAULT_MAX_BYTES
+    raw_seconds = os.environ.get(SWEEP_MAX_SECONDS_ENV, "").strip()
+    try:
+        max_seconds = (
+            float(raw_seconds) if raw_seconds else SWEEP_DEFAULT_MAX_SECONDS
+        )
+    except ValueError:
+        max_seconds = SWEEP_DEFAULT_MAX_SECONDS
+    started = time.monotonic() if monotonic is None else monotonic
+    return SweepBudget(
+        max_bytes=max_bytes if max_bytes > 0 else None,
+        deadline=(started + max_seconds) if max_seconds > 0 else None,
+    )
 
 
 _release_totals = ScratchReleaseResult()
@@ -551,6 +665,128 @@ def read_scratch_baseline(project_root: Path) -> datetime | None:
     return _parse_baseline(stored)
 
 
+def _history_optout_store(
+    project_root: Path,
+) -> AtomicJsonRecordStore[dict[str, Any]]:
+    return AtomicJsonRecordStore(
+        Path(project_root) / "runtime" / HISTORY_OPTOUT_FILE_NAME,
+        None,
+    )
+
+
+def read_history_optout(project_root: Path) -> datetime | None:
+    """When this Project chose to keep its pre-baseline history, if it ever
+    did."""
+
+    try:
+        store = _history_optout_store(Path(project_root))
+        stored = store.read_or_none()
+    except OSError:
+        return None
+    if not isinstance(stored, dict):
+        return None
+    raw = stored.get("keptSince")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def keep_project_history(
+    project_root: Path,
+    *,
+    now: datetime,
+) -> datetime:
+    """Record the choice to keep one Project's history, once."""
+
+    moment = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(timezone.utc)
+    store = _history_optout_store(Path(project_root))
+    existing = read_history_optout(project_root)
+    if existing is not None:
+        return existing
+    try:
+        store.try_create(
+            {"version": BASELINE_VERSION, "keptSince": moment.isoformat()},
+        )
+    except OSError as exc:
+        logger.warning(
+            "history keep choice cannot be recorded: %s (%s)",
+            store.path,
+            exc,
+        )
+        raise
+    return read_history_optout(project_root) or moment
+
+
+def _reclaim_confirmation_store(
+    project_root: Path,
+) -> AtomicJsonRecordStore[dict[str, Any]]:
+    return AtomicJsonRecordStore(
+        Path(project_root) / "runtime" / RECLAIM_CONFIRMATION_FILE_NAME,
+        None,
+    )
+
+
+def read_reclaim_confirmation(project_root: Path) -> datetime | None:
+    """When a person confirmed reclaiming this Project, if anyone ever did."""
+
+    try:
+        stored = _reclaim_confirmation_store(Path(project_root)).read_or_none()
+    except OSError:
+        return None
+    if not isinstance(stored, dict):
+        return None
+    raw = stored.get("confirmedAt")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def confirm_project_reclaim(project_root: Path, *, now: datetime) -> datetime:
+    """Record the confirmation once, keeping the first confirmed moment."""
+
+    moment = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(timezone.utc)
+    existing = read_reclaim_confirmation(project_root)
+    if existing is not None:
+        return existing
+    _reclaim_confirmation_store(Path(project_root)).try_create(
+        {"version": BASELINE_VERSION, "confirmedAt": moment.isoformat()},
+    )
+    return read_reclaim_confirmation(project_root) or moment
+
+
+def auto_reclaim_max_bytes() -> int:
+    """One Project's settled history above this is reported, not reclaimed."""
+
+    raw = os.environ.get(AUTO_RECLAIM_MAX_BYTES_ENV, "").strip()
+    try:
+        value = int(raw) if raw else AUTO_RECLAIM_DEFAULT_MAX_BYTES
+    except ValueError:
+        return AUTO_RECLAIM_DEFAULT_MAX_BYTES
+    return value if value > 0 else AUTO_RECLAIM_DEFAULT_MAX_BYTES
+
+
+def history_reclaim_kept(project_root: Path) -> bool:
+    """Whether this Project's pre-baseline history must be left alone.
+
+    The env switch is the fleet-wide emergency stop and the marker is a
+    person's choice for one Project; neither weakens any other rule, they only
+    restore the date gate that the default now ignores.
+    """
+
+    raw = os.environ.get(KEEP_PROJECT_HISTORY_ENV, "")
+    if raw.strip().casefold() in _ENABLED_VALUES:
+        return True
+    return read_history_optout(project_root) is not None
+
+
 def remember_scratch_baseline(
     project_root: Path,
     *,
@@ -618,11 +854,113 @@ def _scratch_directories(task_work: Path) -> list[Path]:
     ]
 
 
+def _releasable_now(
+    task: TaskRecord,
+    *,
+    baseline: datetime,
+    kept: bool,
+    moment: datetime,
+    grace: timedelta,
+) -> bool:
+    """Whether this Task's scratch may leave in this pass.
+
+    Terminal, quiet long enough, and -- unless the Project asked to keep its
+    history -- not older than the day it started being managed.
+    """
+
+    if not is_releasable_terminal_task(task):
+        return False
+    if kept and task.updated_at < baseline:
+        return False
+    return moment - task.updated_at >= grace
+
+
+def _projected_release_bytes(
+    tasks: Iterable[TaskRecord],
+    directories: dict[str, Path],
+    *,
+    baseline: datetime,
+    kept: bool,
+    moment: datetime,
+    grace: timedelta,
+) -> int:
+    """What releasing this Project's settled scratch would free.
+
+    The cap has to be judged before any unlink, and judging it must not cost
+    more than the stats the profile already pays for.
+    """
+
+    projected = 0
+    for task in tasks:
+        directory = directories.get(task.task_id)
+        if directory is None:
+            continue
+        if not _releasable_now(
+            task,
+            baseline=baseline,
+            kept=kept,
+            moment=moment,
+            grace=grace,
+        ):
+            continue
+        projected += _releasable_bytes(directory)
+    return projected
+
+
+def _until_budget_exhausted(
+    tasks: Iterable[TaskRecord],
+    budget: SweepBudget | None,
+) -> Iterator[TaskRecord]:
+    """Yield tasks until this pass's budget runs out, then stop quietly."""
+
+    for task in tasks:
+        if budget is not None and not budget.has_room():
+            return
+        yield task
+
+
+def _withheld_release_bytes(
+    project_root: Path,
+    tasks: Iterable[TaskRecord],
+    directories: dict[str, Path],
+    *,
+    baseline: datetime,
+    kept: bool,
+    moment: datetime,
+    grace: timedelta,
+    enforce_cap: bool,
+    cap: int,
+) -> int:
+    """The release this Project must wait on, or 0 when nothing withholds it.
+
+    Above the cap an automatic pass steps back and asks; a confirmation on the
+    Project, or a caller that passes ``enforce_cap=False`` because a person is
+    watching right now, lifts that.
+    """
+
+    if not enforce_cap:
+        return 0
+    if read_reclaim_confirmation(project_root) is not None:
+        return 0
+    projected = _projected_release_bytes(
+        tasks,
+        directories,
+        baseline=baseline,
+        kept=kept,
+        moment=moment,
+        grace=grace,
+    )
+    return projected if projected > cap else 0
+
+
 def release_orphaned_scratch(
     services: TaskStore,
     *,
     now: datetime | None = None,
     grace: timedelta = ORPHAN_RELEASE_GRACE,
+    project_ids: Iterable[str] | None = None,
+    budget: SweepBudget | None = None,
+    enforce_cap: bool = True,
 ) -> ScratchSweepSummary:
     """Collect the scratch a crash left behind after a Task already finished.
 
@@ -631,6 +969,13 @@ def release_orphaned_scratch(
     state after the Project baseline and has not been touched since.  The event
     path normally deletes these files long before a sweep runs, so the sweep
     exists only for the window where the process died mid-release.
+
+    ``project_ids`` scopes the sweep to named Projects -- what the on-demand
+    reclaim calls with when a person asks for their space back right now rather
+    than at the next boot.  A shared ``budget`` bounds the pass: the on-demand
+    reclaim runs without one, because a person pressed a button and expects an
+    answer now, while the maintenance pass must not outlive the boot that
+    started it.
     """
 
     moment = now or datetime.now(timezone.utc)
@@ -641,10 +986,20 @@ def release_orphaned_scratch(
     released_directories = 0
     removed_files = 0
     removed_bytes = 0
+    skipped_projects = 0
+    skipped_bytes = 0
+    cap = auto_reclaim_max_bytes()
     for project_id in services.projects.discover_project_ids():
+        if project_ids is not None and project_id not in set(project_ids):
+            continue
+        if budget is not None and not budget.has_room():
+            break
         projects += 1
         project_root = Path(services.projects.project_root(project_id))
         baseline = remember_scratch_baseline(project_root, now=moment)
+        # Opted-out Projects keep every byte that arrived before they started
+        # being managed; by default the date gate no longer protects them.
+        kept = history_reclaim_kept(project_root)
         task_work = project_root / "runtime" / "task-work"
         directories = {
             item.name: item for item in _scratch_directories(task_work)
@@ -660,26 +1015,56 @@ def release_orphaned_scratch(
                 exc_info=True,
             )
             continue
-        for task in tasks:
+        withheld = _withheld_release_bytes(
+            project_root,
+            tasks,
+            directories,
+            baseline=baseline,
+            kept=kept,
+            moment=moment,
+            grace=grace,
+            enforce_cap=enforce_cap,
+            cap=cap,
+        )
+        if withheld:
+            skipped_projects += 1
+            skipped_bytes += withheld
+            logger.warning(
+                "scratch reclaim withheld pending confirmation: "
+                "project=%s bytes=%s cap=%s (confirm through "
+                "POST /storage/projects/{id}/reclaim-history)",
+                project_id,
+                withheld,
+                cap,
+            )
+            continue
+        for task in _until_budget_exhausted(tasks, budget):
             directory = directories.get(task.task_id)
             if directory is None:
                 continue
-            if not is_releasable_terminal_task(task):
-                continue
-            if task.updated_at < baseline:
-                continue
-            if moment - task.updated_at < grace:
+            if not _releasable_now(
+                task,
+                baseline=baseline,
+                kept=kept,
+                moment=moment,
+                grace=grace,
+            ):
                 continue
             result = release_scratch_media(directory, reason="orphan-sweep")
             if result.removed_files:
                 released_directories += 1
                 removed_files += result.removed_files
                 removed_bytes += result.removed_bytes
+                if budget is not None:
+                    budget.charge(result.removed_bytes)
     return ScratchSweepSummary(
         projects=projects,
         released_directories=released_directories,
         removed_files=removed_files,
         removed_bytes=removed_bytes,
+        stopped_early=bool(budget is not None and budget.stopped_early),
+        skipped_projects=skipped_projects,
+        skipped_bytes=skipped_bytes,
     )
 
 
@@ -753,6 +1138,11 @@ def project_storage_profile(
     for project_id in services.projects.discover_project_ids():
         root = Path(services.projects.project_root(project_id))
         baseline = read_scratch_baseline(root)
+        kept_since = read_history_optout(root)
+        # The sweep judges releasability with the same flag, so the report and
+        # the sweep cannot disagree about what "settled history" means.
+        kept = history_reclaim_kept(root)
+        confirmed_at = read_reclaim_confirmation(root)
         try:
             finished = {
                 task.task_id: task
@@ -779,15 +1169,21 @@ def project_storage_profile(
             stamp = task.updated_at if task is not None else _utc(newest)
             if baseline is None or stamp < baseline:
                 measured["taskWorkLegacyBytes"] += size
-                continue
-            measured["taskWorkBytes"] += size
-            if (
-                task is not None
-                and is_releasable_terminal_task(task)
-                and moment - task.updated_at >= ORPHAN_RELEASE_GRACE
+            else:
+                measured["taskWorkBytes"] += size
+            if task is not None and _releasable_now(
+                task,
+                baseline=baseline or moment,
+                kept=kept,
+                moment=moment,
+                grace=ORPHAN_RELEASE_GRACE,
             ):
-                # What a release would actually take: the kept documents and
-                # non-media files stay in taskWorkBytes only.
+                # The same rule the sweep applies, so the number the console
+                # compares against the cap is the number the sweep would
+                # actually take.  Pre-baseline scratch is reclaimable history
+                # unless the Project asked to keep it; filing it as legacy
+                # here while the sweep released it left an oversized Project
+                # withheld with no confirm button anywhere.
                 measured["taskWorkReclaimableBytes"] += _releasable_bytes(
                     directory,
                 )
@@ -799,12 +1195,30 @@ def project_storage_profile(
                 measured["transactionsBytes"] += size
         if include_orphans:
             measured["orphanBytes"] = _orphan_bytes(services, project_id, root)
+        # What the automatic passes would take here if they were allowed: the
+        # console shows it next to a confirm button once it exceeds the cap.
+        # Imported late: transaction_gc imports this module at top level.
+        from services.project_files.transaction_gc import (
+            surplus_transaction_bytes,
+        )
+
+        pending_bytes = (
+            surplus_transaction_bytes(root)
+            + measured["taskWorkReclaimableBytes"]
+        )
         for key, value in measured.items():
             totals[key] += value
         projects.append(
             {
                 "projectId": project_id,
                 "baselineAt": baseline.isoformat() if baseline else None,
+                "historyKeptAt": (
+                    kept_since.isoformat() if kept_since else None
+                ),
+                "reclaimConfirmedAt": (
+                    confirmed_at.isoformat() if confirmed_at else None
+                ),
+                "pendingReclaimBytes": pending_bytes,
                 **measured,
             },
         )
@@ -815,9 +1229,27 @@ def project_storage_profile(
         "scratchReleaseEnabled": scratch_release_enabled(),
         "releasedFiles": released.removed_files,
         "releasedBytes": released.removed_bytes,
+        "elisionBackupBytes": _elision_backup_bytes(
+            Path(services.root),
+        ),
+        # The console compares each Project's pending bytes against this to
+        # decide whether the automatic pass stepped back and is waiting for a
+        # person, so the threshold travels with the report instead of being
+        # a constant somebody has to keep in sync.
+        "autoReclaimMaxBytes": auto_reclaim_max_bytes(),
         "totals": totals,
         "projects": projects,
     }
+
+
+def _elision_backup_bytes(data_root: Path) -> int:
+    """Bytes held by the collapse backups, which sit outside every Project."""
+
+    backup_root = data_root / ELISION_BACKUP_DIR_NAME
+    if not backup_root.is_dir() or is_link_path(backup_root):
+        return 0
+    size, _newest = _directory_bytes(backup_root)
+    return size
 
 
 def _utc(seconds: float) -> datetime:

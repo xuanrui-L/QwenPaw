@@ -166,8 +166,9 @@ def test_stale_project_snapshots_are_elided_from_the_continuation() -> None:
     A 50-element production run accumulated 18 full project.json echoes
     (2.09MB) in one Conversation and every model call failed with an
     input-length 400. Older echoes carry no information the model cannot
-    get from the latest snapshot, so they collapse to change receipts;
-    durable history keeps every byte.
+    get from the latest snapshot, so they collapse to change receipts; what
+    durable history keeps is the bounded view (see
+    ``test_durable_project_echo_is_the_bounded_view``).
     """
 
     from services.file_agent_runtime.driver import _continuation_message_text
@@ -214,6 +215,101 @@ def test_stale_project_snapshots_are_elided_from_the_continuation() -> None:
     assert "y" * 100 in rendered
     assert "把故事写完" in rendered
     assert "写好了" in rendered
+
+
+def _echo_payload() -> dict:
+    """A Project snapshot echo big the way a long-running project makes them."""
+
+    return {
+        "project": {
+            "project_id": PROJECT_ID,
+            "generation": 11,
+            "description": "x" * 200_000,
+            "timelines": {
+                "items": {
+                    "timeline:main": {
+                        "timeline_id": "timeline:main",
+                        "elements_by_id": {},
+                    },
+                    "snapshot:timeline:main:1": {
+                        "timeline_id": "snapshot:timeline:main:1",
+                        "name": "自动快照",
+                        "elements_by_id": {"a": "b" * 4000},
+                    },
+                },
+                "order": ["timeline:main", "snapshot:timeline:main:1"],
+            },
+        },
+        "generation": 11,
+        "etag": "etag-11",
+        "changedPointers": ["/description"],
+    }
+
+
+def test_durable_project_echo_is_the_bounded_view(monkeypatch) -> None:
+    # The echo used to be appended byte for byte, so the conversation kept
+    # every intermediate state of the Project forever: 96% of a 284 MB
+    # messages.jsonl, paid again on every page read. The durable record is now
+    # the same projection the model context already builds, so the identifiers
+    # survive and the frozen bodies are indexed instead of copied.
+    from services.file_agent_runtime.driver import (
+        _durable_project_echo,
+        tool_echo_receipt_enabled,
+    )
+
+    monkeypatch.delenv("CREATOR_TOOL_ECHO_RECEIPT", raising=False)
+    assert tool_echo_receipt_enabled()
+
+    payload = _echo_payload()
+    stored = _durable_project_echo(payload)
+
+    assert len(json.dumps(stored)) * 10 < len(json.dumps(payload))
+    # Bound, and said out loud: a reader can ask for the rest by pointer.
+    assert len(stored["project"]["description"]) < len(
+        payload["project"]["description"],
+    )
+    assert stored["projectView"]["partial"] is True
+    assert "/description" in stored["projectView"]["omittedPointers"]
+
+
+def test_durable_project_echo_keeps_the_identifiers_a_receipt_carries(
+    monkeypatch,
+) -> None:
+    from services.file_agent_runtime.driver import (
+        _durable_project_echo,
+        _project_snapshot_from_text,
+    )
+
+    monkeypatch.delenv("CREATOR_TOOL_ECHO_RECEIPT", raising=False)
+    stored = _durable_project_echo(_echo_payload())
+
+    assert stored["generation"] == 11
+    assert stored["etag"] == "etag-11"
+    assert stored["project"]["generation"] == 11
+    # Still recognizable as a Project snapshot, so a later echo can still
+    # collapse this record to a change receipt when the context is rebuilt.
+    assert _project_snapshot_from_text(json.dumps(stored)) is not None
+    # Frozen history is indexed, not materialized.
+    view = stored["projectView"]
+    assert [item["timelineId"] for item in view["historyTimelines"]] == [
+        "snapshot:timeline:main:1",
+    ]
+    assert (
+        "snapshot:timeline:main:1"
+        not in stored["project"]["timelines"]["items"]
+    )
+    assert "b" * 1000 not in json.dumps(stored, ensure_ascii=False)
+
+
+def test_durable_project_echo_can_be_kept_byte_for_byte(monkeypatch) -> None:
+    # What is persisted changed, so one env var has to restore the old record
+    # exactly -- no projection, no rewrite, no new code path.
+    from services.file_agent_runtime.driver import _durable_project_echo
+
+    monkeypatch.setenv("CREATOR_TOOL_ECHO_RECEIPT", "0")
+    payload = _echo_payload()
+
+    assert _durable_project_echo(payload) is payload
 
 
 def test_ai_edit_idempotency_can_be_scoped_to_one_model_tool_call() -> None:
@@ -623,6 +719,7 @@ def _edit_client(*, description: str):
             "ground_image_objects",
             "browser_use",
             "elements_at",
+            "confirm_prompt_sync",
             "import_script_asset",
             "delegate_to_agent",
             "request_workgraph_execution",
@@ -2117,7 +2214,10 @@ def test_feedback_keeps_admitted_media_alive_but_hard_stop_cancels_it(
     """A new user message must not abandon an unrelated paid image call."""
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="制作短剧")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="制作短剧",
+        )
         model_started = asyncio.Event()
         media_started = asyncio.Event()
         release_media = asyncio.Event()
@@ -3079,6 +3179,255 @@ def test_yolo_repeated_state_pauses_visibly_once_across_restart(
     assert driver.executions.list_tasks(PROJECT_ID) == []
 
 
+def _resume_once(driver, *, run_id, **kwargs):
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id=run_id,
+            **kwargs,
+        ),
+    )
+
+
+def _spy_message_reads(monkeypatch, driver):
+    calls = []
+    original = driver.sessions.list_messages
+
+    def spy(*args, **kwargs):
+        calls.append(args[1:])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(driver.sessions, "list_messages", spy)
+    return calls
+
+
+def test_fused_pause_memo_skips_the_history_reread_next_tick(
+    completion_resume_runtime,
+    monkeypatch,
+) -> None:
+    services, driver, _state = completion_resume_runtime
+    _queue_completion_resume(driver, run_id="run-first")
+    fused = _queue_completion_resume(driver, run_id="run-fuse")
+    notices = [
+        item for item in fused if item.source == "creator_execution_notice"
+    ]
+    assert len(notices) == 1
+    calls = _spy_message_reads(monkeypatch, driver)
+
+    _resume_once(driver, run_id="run-second-tick")
+
+    # Nothing moved, so the fused verdict is replayed from the memo: the tick
+    # must not rebuild a history whose answer it already has.
+    assert calls == []
+    assert [
+        item
+        for item in services.sessions.list_messages(
+            PROJECT_ID,
+            SESSION_ID,
+            limit=None,
+        )
+        if item.source == "creator_execution_notice"
+    ] == notices
+
+
+def test_fused_pause_memo_releases_when_a_human_message_lands(
+    completion_resume_runtime,
+    monkeypatch,
+) -> None:
+    services, driver, _state = completion_resume_runtime
+    _queue_completion_resume(driver, run_id="run-first")
+    _queue_completion_resume(driver, run_id="run-fuse")
+    _append_human_message(services, "把第一场的台词补齐")
+    calls = _spy_message_reads(monkeypatch, driver)
+
+    _resume_once(driver, run_id="run-after-human")
+
+    # A new message moved the head, so the fuse has to be re-decided against
+    # the real history -- the memo may not swallow a human re-arm.
+    assert calls
+
+
+def test_fused_pause_memo_releases_when_a_task_finishes_without_a_write(
+    completion_resume_runtime,
+    monkeypatch,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    _queue_completion_resume(driver, run_id="run-first")
+    _queue_completion_resume(driver, run_id="run-fuse")
+    # A media task completing is durable progress the Project generation never
+    # sees. The fuse reads it as a new DONE node, so the memo key must cover
+    # node statuses or a finished shot would stay paused forever.
+    state["nodes"].append(
+        WorkNode("visual:new", "visual", "新角色", WorkNodeStatus.DONE),
+    )
+    calls = _spy_message_reads(monkeypatch, driver)
+
+    _resume_once(driver, run_id="run-after-task")
+
+    assert calls
+
+
+def test_completion_resume_reuses_the_projection_it_was_given(
+    completion_resume_runtime,
+    monkeypatch,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    snapshot = services.projects.read(PROJECT_ID)
+    graph = WorkGraph(
+        nodes=tuple(state["nodes"]),
+        generation=state["generation"],
+    )
+    reads = []
+    derives = []
+    monkeypatch.setattr(
+        services.projects,
+        "read",
+        lambda _project_id: reads.append(_project_id) or snapshot,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: derives.append(1) or graph,
+    )
+
+    _resume_once(
+        driver,
+        run_id="run-tick",
+        snapshot=snapshot,
+        task_records=[],
+        graph=graph,
+    )
+
+    assert reads == []
+    assert derives == []
+    messages = services.sessions.list_messages(
+        PROJECT_ID,
+        SESSION_ID,
+        limit=None,
+    )
+    assert any(item.source == driver.YOLO_RESUME_SOURCE for item in messages)
+
+
+@pytest.fixture(name="prompt_contract_runtime")
+def _prompt_contract_runtime(tmp_path, monkeypatch):
+    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    state = {
+        "generation": snapshot.generation,
+        "nodes": [
+            WorkNode(
+                node_id="storyboard:ep1",
+                kind="storyboard",
+                label="第一场 · 分镜",
+                status=WorkNodeStatus.GATED,
+                missing=("分镜内容与提示词待同步",),
+                authored_text_gap=True,
+                prompt_sync_required=True,
+                dispatch_fingerprint="input-0",
+            ),
+        ],
+    }
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "manual",
+    )
+    monkeypatch.setattr(
+        services.projects,
+        "read",
+        lambda _project_id: replace(
+            snapshot,
+            generation=state["generation"],
+        ),
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: WorkGraph(
+            nodes=tuple(state["nodes"]),
+            generation=state["generation"],
+        ),
+    )
+    return services, driver, state
+
+
+def _append_human_message(services, text: str) -> int:
+    return services.sessions.append_message(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        role="user",
+        content_parts=[{"type": "text", "text": text}],
+        source="initial_creation",
+        channel=MessageChannel.COMPOSER,
+    ).message.message_seq
+
+
+def test_prompt_contract_resume_is_not_rearmed_by_an_unrelated_human_turn(
+    prompt_contract_runtime,
+) -> None:
+    services, driver, _state = prompt_contract_runtime
+    messages = _queue_completion_resume(driver, run_id="run-1")
+    resume = messages[-1]
+    assert resume.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    assert "分镜内容与提示词待同步" in resume.content_parts[0].text
+    assert "confirm_prompt_sync" in resume.content_parts[0].text
+    assert resume.metadata["actionableFingerprint"]
+    # The same gap inside one uninterrupted streak still trips the fuse.
+    paused = _queue_completion_resume(driver, run_id="run-2")
+    assert paused[-1].source == "creator_execution_notice"
+    assert (
+        paused[-1].metadata["executionPause"]["reason"]
+        == "no_committed_progress"
+    )
+    # A chat turn that wrote nothing must not re-arm the fuse: the identical
+    # instruction was already delivered and is still unanswered.
+    human_seq = _append_human_message(services, "你好")
+    settled = _queue_completion_resume(driver, run_id="run-3")
+    assert settled[-1].message_seq == human_seq
+    assert not any(
+        item.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+        and item.message_seq > human_seq
+        for item in settled
+    )
+
+
+def test_prompt_contract_resume_returns_after_any_committed_write(
+    prompt_contract_runtime,
+) -> None:
+    services, driver, state = prompt_contract_runtime
+    resume = _queue_completion_resume(driver, run_id="run-1")[-1]
+    _queue_completion_resume(driver, run_id="run-2")
+    human_seq = _append_human_message(services, "改一下结尾")
+    state["generation"] += 1
+    resumed = _queue_completion_resume(driver, run_id="run-3")
+    assert resumed[-1].message_seq > human_seq
+    assert resumed[-1].source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    assert (
+        resumed[-1].metadata["actionableFingerprint"]
+        == resume.metadata["actionableFingerprint"]
+    )
+
+
+def test_prompt_contract_resume_still_retries_a_transient_failure(
+    prompt_contract_runtime,
+) -> None:
+    services, driver, _state = prompt_contract_runtime
+    _queue_completion_resume(driver, run_id="run-1")
+    _queue_completion_resume(driver, run_id="run-2")
+    human_seq = _append_human_message(services, "你好")
+    retried = _queue_completion_resume(
+        driver,
+        run_id="run-3",
+        after_failure=True,
+    )
+    assert retried[-1].message_seq > human_seq
+    assert retried[-1].source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    assert "瞬态故障" in retried[-1].content_parts[0].text
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -3412,7 +3761,13 @@ def test_yolo_machine_only_work_stays_scheduler_owned(
 ) -> None:
     services, driver, state = completion_resume_runtime
     state["nodes"] = [
-        WorkNode("video:ep1", "video", "视频", status, command="r2v_generation"),
+        WorkNode(
+            "video:ep1",
+            "video",
+            "视频",
+            status,
+            command="r2v_generation",
+        ),
     ]
     before = services.sessions.list_messages(
         PROJECT_ID,
@@ -3862,9 +4217,9 @@ def test_yolo_does_not_resume_while_scheduler_owns_remaining_work(
         status=status,
         command="GENERATE_TIMELINE_SCRIPT",
         target_ref="timeline:main",
-        regeneration_of="old-script"
-        if status is WorkNodeStatus.STALE
-        else None,
+        regeneration_of=(
+            "old-script" if status is WorkNodeStatus.STALE else None
+        ),
     )
     monkeypatch.setattr(
         driver_module,
@@ -4221,7 +4576,9 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
                     SESSION_ID,
                     CONVERSATION_ID,
                     role="user",
-                    content_parts=[{"type": "text", "text": "旧分镜自动审阅结果"}],
+                    content_parts=[
+                        {"type": "text", "text": "旧分镜自动审阅结果"},
+                    ],
                     source="run_review_feedback",
                     channel=MessageChannel.RUNTIME,
                 )
@@ -5379,7 +5736,10 @@ def test_upload_joining_a_live_run_starts_understanding(
                         CONVERSATION_ID,
                         role="user",
                         content_parts=[
-                            {"type": "text", "text": "我刚上传了噜噜的参考素材"},
+                            {
+                                "type": "text",
+                                "text": "我刚上传了噜噜的参考素材",
+                            },
                         ],
                         source="user",
                         channel=MessageChannel.AGENTDOCK,
@@ -5415,3 +5775,139 @@ def test_upload_joining_a_live_run_starts_understanding(
         "本轮上传素材的理解已启动" in str(entry.get("content") or "")
         for entry in joined_turn
     )
+
+
+def _quiet_tick_driver(tmp_path):
+    """One idle Project whose every message is already consumed."""
+
+    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    session = services.sessions.get_project_session(PROJECT_ID)
+    services.sessions.mark_messages_consumed(
+        PROJECT_ID,
+        SESSION_ID,
+        through_seq=session.last_message_seq,
+        goal_id=GOAL_ID,
+    )
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    counts = {"messages": 0, "project_read": 0}
+    list_messages = driver.sessions.list_messages
+
+    def spy_messages(*args, **kwargs):
+        counts["messages"] += 1
+        return list_messages(*args, **kwargs)
+
+    driver.sessions.list_messages = spy_messages
+    read_project = services.projects.read
+
+    def spy_read(project_id):
+        counts["project_read"] += 1
+        return read_project(project_id)
+
+    services.projects.read = spy_read
+    return services, driver, counts
+
+
+def test_reconcile_skips_the_chain_while_nothing_durable_moved(
+    tmp_path,
+) -> None:
+    services, driver, counts = _quiet_tick_driver(tmp_path)
+
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    after_first = dict(counts)
+    assert after_first["messages"] > 0  # the chain really ran
+
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    assert counts == after_first  # quiet tick: no scan, no read, no derivation
+
+    # A new human request must be picked up on the very next tick, not after
+    # the quiet ceiling: the pointer moved, so the guard cannot swallow it.
+    services.sessions.admit_user_request(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        request_id="next",
+        client_message_id="next",
+        content_parts=[{"type": "text", "text": "再加一个镜头"}],
+        source="user",
+        channel=MessageChannel.COMPOSER,
+        classification=MessageClassification.MUTATION_INSTRUCTION,
+    )
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    assert counts["messages"] > after_first["messages"]
+
+
+def test_reconcile_skips_a_deliberately_parked_head(tmp_path) -> None:
+    """A parked head is a verdict, not a reason to re-scan every tick.
+
+    Every real Project here holds 3-21 unconsumed automated messages that
+    reconcile intentionally does not launch; re-deriving that "no" each tick
+    was the whole idle cost.
+    """
+
+    services, driver, counts = _quiet_tick_driver(tmp_path)
+    admitted = services.sessions.admit_user_request(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        request_id="parked",
+        client_message_id="parked",
+        content_parts=[{"type": "text", "text": "先别动这条"}],
+        source="user",
+        channel=MessageChannel.COMPOSER,
+        classification=MessageClassification.MUTATION_INSTRUCTION,
+    )
+    driver._blocked_heads[PROJECT_ID] = admitted.message.message_seq
+
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    settled = dict(counts)
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    assert counts == settled  # same head, same decision, no re-scan
+
+    # A second request moves the head, and the next tick must see it at once.
+    services.sessions.admit_user_request(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        request_id="newer",
+        client_message_id="newer",
+        content_parts=[{"type": "text", "text": "现在改这个"}],
+        source="user",
+        channel=MessageChannel.COMPOSER,
+        classification=MessageClassification.MUTATION_INSTRUCTION,
+    )
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    assert counts["messages"] > settled["messages"]
+
+
+def test_reconcile_quiet_window_expires(tmp_path) -> None:
+    _services, driver, counts = _quiet_tick_driver(tmp_path)
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    settled = dict(counts)
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    assert counts == settled
+
+    driver._RECONCILE_QUIET_CEILING_SECONDS = -1.0
+
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    assert counts["messages"] > settled["messages"]
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "RESUMING"])
+def test_reconcile_never_quiet_while_the_session_is_settling(
+    tmp_path,
+    status,
+) -> None:
+    from services.runtime_files.models import CreatorSessionStatus
+
+    services, driver, counts = _quiet_tick_driver(tmp_path)
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+    settled = dict(counts)
+    services.sessions.set_session_status(
+        PROJECT_ID,
+        SESSION_ID,
+        getattr(CreatorSessionStatus, status),
+    )
+
+    asyncio.run(driver._reconcile_project(PROJECT_ID))
+
+    assert counts["messages"] > settled["messages"]

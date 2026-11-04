@@ -68,6 +68,9 @@ else
 fi
 
 export QWENPAW_PORT="${QWENPAW_PORT:-8088}"
+# The image bundles the Chromium revision this build's playwright pins, so
+# HTML source understanding works out of the box; set 0 to keep the reader off.
+export CREATOR_DOC_READER_WEB_ENABLED="${CREATOR_DOC_READER_WEB_ENABLED:-1}"
 warn_if_auth_off_container_bind
 
 envsubst '${QWENPAW_PORT}' \

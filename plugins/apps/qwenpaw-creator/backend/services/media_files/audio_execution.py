@@ -28,9 +28,11 @@ from domain.errors import ConflictError, ValidationError
 from models import config as model_config
 from models import tts_model
 from models.tts_capabilities import require_capability
+from services.media_files import media_gate
 from services.project_files.assets import AssetAlreadyExists, AssetFileStore
 from services.project_files.commit import ProjectCommitError
 from services.project_files.facade import CreatorFileServices
+from services.observability import mem_probe
 from services.project_files.models import (
     CharacterVoice,
     IndexedFile,
@@ -523,7 +525,7 @@ def _extracted_video_audio_bytes(payload: bytes, *, suffix: str) -> bytes:
         output = Path(tmp) / "sample.wav"
         source.write_bytes(payload)
         try:
-            result = subprocess.run(
+            result = media_gate.run(
                 [
                     executable,
                     "-hide_banner",
@@ -559,7 +561,13 @@ def _extracted_video_audio_bytes(payload: bytes, *, suffix: str) -> bytes:
                 "视频音轨提取失败（该视频可能没有音轨）："
                 + (result.stderr or result.stdout or "unknown")[-300:],
             )
-        return output.read_bytes()
+        payload = output.read_bytes()
+        mem_probe.stage(
+            "audio.extracted_track_bytes",
+            name=output.name,
+            bytes=len(payload),
+        )
+        return payload
 
 
 def _sample_bytes_for_version(

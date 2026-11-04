@@ -759,15 +759,76 @@ class ProjectStore:
         ):
             raise UnsafeProjectPath("Project assets must be a real directory")
         resolved_assets = assets_root.resolve(strict=True)
+        # ``Path.resolve()`` walks every ancestor component, so doing it once
+        # per indexed file cost ~8 lstats per asset on every Project read --
+        # measured 2,500 lstats/second from the reconcile tick alone on a
+        # 166-asset Project.  Resolve each distinct parent once (a symlinked
+        # directory still lands outside) and only inspect the leaf itself.
+        resolved_parents: dict[Path, Path] = {assets_root: resolved_assets}
         for indexed in project.assets.files_by_id.values():
-            path = PurePosixPath(indexed.relative_uri)
-            candidate = project_root.joinpath(*path.parts)
+            candidate = project_root.joinpath(
+                *_lexical_asset_parts(indexed.relative_uri),
+            )
+            parent = candidate.parent
+            resolved_parent = resolved_parents.get(parent)
+            if resolved_parent is None:
+                resolved_parent = parent.resolve(strict=False)
+                resolved_parents[parent] = resolved_parent
             try:
-                candidate.resolve(strict=False).relative_to(resolved_assets)
-            except (OSError, ValueError) as exc:
+                resolved_parent.relative_to(resolved_assets)
+            except ValueError as exc:
                 raise UnsafeProjectPath(
                     f"Indexed file escapes Project assets: {indexed.relative_uri}",
                 ) from exc
+            try:
+                leaf_stat = candidate.lstat()
+            except FileNotFoundError:
+                # A leaf that is not on disk cannot escape anything, and the
+                # previous ``resolve(strict=False)`` accepted it the same way.
+                continue
+            except OSError as exc:
+                raise UnsafeProjectPath(
+                    f"Indexed file escapes Project assets: {indexed.relative_uri}",
+                ) from exc
+            if is_link_stat(leaf_stat):
+                # Only a real symlink needs the full walk to learn where it
+                # lands -- which is exactly the escape this check exists for.
+                try:
+                    candidate.resolve(strict=False).relative_to(
+                        resolved_assets,
+                    )
+                except (OSError, ValueError) as exc:
+                    raise UnsafeProjectPath(
+                        f"Indexed file escapes Project assets: "
+                        f"{indexed.relative_uri}",
+                    ) from exc
+
+
+def _lexical_asset_parts(relative_uri: str) -> tuple[str, ...]:
+    """Collapse ``.``/``..`` textually and require the result to stay in assets.
+
+    The Project schema already refuses traversal and absolute URIs, so this is
+    a second line of defense that costs no syscalls: a URI that normalizes back
+    inside the tree (``assets/sub/../artifacts/x``) keeps the same verdict the
+    old per-file ``Path.resolve()`` produced, while anything that leaves
+    ``assets`` is refused here instead of after a walk over every ancestor.
+    """
+
+    parts: list[str] = []
+    for part in PurePosixPath(relative_uri).parts:
+        if part in {"", ".", "/"}:
+            continue
+        if part == "..":
+            if not parts:
+                break
+            parts.pop()
+            continue
+        parts.append(part)
+    if not parts or parts[0] != "assets":
+        raise UnsafeProjectPath(
+            f"Indexed file escapes Project assets: {relative_uri}",
+        )
+    return tuple(parts)
 
 
 def _safe_project_id(value: str) -> str:

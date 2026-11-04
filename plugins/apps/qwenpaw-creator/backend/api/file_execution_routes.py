@@ -514,12 +514,19 @@ async def render_timeline(
         # Task that never exists. Pre-validate the execution plan
         # synchronously so structural problems (e.g. Overlay stacking the
         # local runner cannot handle) return 400 to the caller directly.
+        #
+        # The scene-loop gate is excluded: an expired scene lock is repaired
+        # by auto_review_stale_scenes inside execute_file_local_media_command,
+        # which runs after this precheck. Enforcing it here would answer
+        # every user-initiated export with 422 before that repair could ever
+        # run, so the export could only proceed through the Agent pipeline.
         await asyncio.to_thread(
             validate_local_media_execution,
             services,
             project_id=project_id,
             command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
             target_ref=target_ref,
+            enforce_scene_gate=False,
         )
 
         async def drive() -> None:

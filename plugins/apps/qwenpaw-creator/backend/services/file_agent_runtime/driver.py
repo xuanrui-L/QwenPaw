@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import mimetypes
+import os
 from pathlib import Path, PurePosixPath
 import secrets
 import shutil
@@ -145,7 +146,12 @@ from services.external_skills import (
     render_external_skills_context,
     view_skill as view_external_skill,
 )
-from services.observability import report_error, trace_event, traced_async
+from services.observability import (
+    mem_probe,
+    report_error,
+    trace_event,
+    traced_async,
+)
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
     CHARACTER_VOICE_TOOL_NAME,
@@ -215,7 +221,7 @@ from .production_status import (
     production_summary,
 )
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
-from .work_graph import WorkNodeStatus, derive_work_graph
+from .work_graph import WorkGraph, WorkNodeStatus, derive_work_graph
 from .model_context import compact_conversation_history
 from .workgraph_execution import (
     REQUEST_WORKGRAPH_EXECUTION,
@@ -1602,6 +1608,19 @@ class FileCreatorAgentRuntime:
         self._specialist_tasks: dict[str, dict[str, _SpecialistHandle]] = {}
         self._interrupt_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._blocked_heads: dict[str, int] = {}
+        # Last fused pause per Project: (conversation, generation, graph
+        # statuses, actionable fingerprint, message head seq).  A fuse verdict
+        # is a pure function of those five, so an unchanged tuple means the
+        # notice already persisted still stands -- the tick may skip the two
+        # full-history message reads and the duplicate Project read entirely.
+        # In-process only: a restart re-evaluates once and the persisted
+        # ``executionPauseKey`` dedupe keeps the visible notice singular.
+        self._auto_resume_pause_memo: dict[str, tuple[Any, ...]] = {}
+        # Per Project quiet-tick fingerprint: (monotonic time, signature).  Lets
+        # an idle Project cost a handful of stats per tick instead of a Project
+        # parse, a task scan and a work-graph derivation (§9.6 of
+        # docs/oom-triage.md: 13 Projects were 543 ms of that every 1.8 s).
+        self._reconcile_quiet: dict[str, tuple[float, Any]] = {}
         # Durable-interrupt stall tracking: project -> (run_id, first seen
         # monotonic time).  A RUNNING run with no local handle normally
         # belongs to another live process, but when that owner died before
@@ -2457,6 +2476,92 @@ class FileCreatorAgentRuntime:
         session = await self._converge_resolved_review(project_id, session)
         return session
 
+    # How long a Project may be treated as quiet before the reconcile chain is
+    # forced to run once more, even if every stamp below still matches.  The
+    # idle-notification escape valve ages on wall-clock
+    # (NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS = 120s), so a ceiling an order of
+    # magnitude smaller cannot delay it meaningfully, and it bounds any change
+    # this process cannot observe (a peer writing inside the tick window).
+    _RECONCILE_QUIET_CEILING_SECONDS = 15.0
+
+    def _durable_stamp(self, project_id: str, session_id: str) -> Any | None:
+        """Stat-only fingerprint of the durable state a tick would read.
+
+        An atomic replace-write renames into its parent directory, so the
+        parent's mtime already carries it; the two streams this path appends to
+        are statted by name because appending leaves the parent alone.
+        ``None`` means the Project cannot be fingerprinted and must never be
+        treated as quiet.
+        """
+
+        def stamp(path: Path) -> tuple[int, int] | None:
+            try:
+                info = path.stat()
+            except OSError:
+                return None
+            return (info.st_mtime_ns, info.st_size)
+
+        root = self.services.projects.project_root(project_id)
+        runtime = root / "runtime"
+        parts: list[Any] = [("project", stamp(root / "project.json"))]
+        try:
+            children = sorted(runtime.iterdir(), key=lambda item: item.name)
+        except OSError:
+            return None
+        for entry in children:
+            parts.append((entry.name, stamp(entry)))
+        session_dir = runtime / "sessions" / session_id
+        for name in ("session.json", "messages.jsonl"):
+            parts.append((f"sessions/{name}", stamp(session_dir / name)))
+        return parts
+
+    async def _reconcile_is_quiet(self, project_id: str, session: Any) -> bool:
+        """Return True when the whole reconcile chain would repeat itself.
+
+        Only three conditions veto the cache, because they are the ones time or
+        this process -- not the filesystem -- can change: a run launched here,
+        a Session holding a cross-process lease (the orphan grace ages on the
+        clock), and a Session still settling.  A parked head message is *not* a
+        veto: its identity is part of the signature, so the tick re-runs the
+        moment the head moves and can still skip while the verdict is
+        "deliberately not launching".
+        """
+
+        if self._active.get(project_id) is not None:
+            return False
+        if session.active_run_id is not None:
+            return False
+        if session.status is not CreatorSessionStatus.IDLE:
+            return False
+        durable = await asyncio.to_thread(
+            self._durable_stamp,
+            project_id,
+            session.session_id,
+        )
+        if durable is None:
+            self._reconcile_quiet.pop(project_id, None)
+            return False
+        signature = (
+            durable,
+            session.last_consumed_message_seq,
+            session.last_message_seq,
+            session.queued_user_message_count,
+            self._blocked_heads.get(project_id),
+            get_media_review_mode(),
+            get_image_model_name(),
+            get_video_model_name(),
+        )
+        now = time.monotonic()
+        remembered = self._reconcile_quiet.get(project_id)
+        if (
+            remembered is not None
+            and remembered[1] == signature
+            and now - remembered[0] < self._RECONCILE_QUIET_CEILING_SECONDS
+        ):
+            return True
+        self._reconcile_quiet[project_id] = (now, signature)
+        return False
+
     async def _reconcile_project(self, project_id: str) -> None:
         handle = self._active.get(project_id)
         if handle is not None and handle.task.done():
@@ -2478,6 +2583,11 @@ class FileCreatorAgentRuntime:
             handle,
         )
         if session is None:
+            return
+        if await self._reconcile_is_quiet(project_id, session):
+            # Nothing durable moved since the last projection: the pending
+            # scan, the outbox read and the work-graph derivation below would
+            # produce the same answer from the same bytes.
             return
         pending = await asyncio.to_thread(
             self.sessions.list_messages,
@@ -5005,6 +5115,11 @@ class FileCreatorAgentRuntime:
             for take in outcome.takes:
                 try:
                     video = take.video_path.read_bytes()
+                    mem_probe.stage(
+                        "live_operation.take_bytes",
+                        take_id=take.take_id,
+                        bytes=len(video),
+                    )
                 except OSError as exc:
                     issues.append(f"take_unreadable:{take.take_id}")
                     logger.warning(
@@ -8011,15 +8126,18 @@ class FileCreatorAgentRuntime:
         result: Mapping[str, Any],
         failed: bool = False,
     ) -> None:
-        raw_result = json.dumps(
-            result,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
         result_kind = _runtime_action_result_kind(
             tool_name,
             result,
             failed=failed,
+        )
+        stored_result: Mapping[str, Any] = result
+        if result_kind == _PROJECT_SNAPSHOT_RESULT_KIND:
+            stored_result = _durable_project_echo(result)
+        raw_result = json.dumps(
+            stored_result,
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         appended = await self._persist_session_append(
             f"{project_id}: tool result",
@@ -8146,32 +8264,34 @@ class FileCreatorAgentRuntime:
         it must neither wake the model nor reset the unattended resume fuse.
         Existing message.completed delivery also restores it after reconnect.
         """
-        messages = await asyncio.to_thread(
-            self.sessions.list_messages,
-            project_id,
-            session_id,
-            after_seq=0,
-            limit=None,
-        )
         automatic_sources = {
             self.YOLO_RESUME_SOURCE,
             self.PROMPT_CONTRACT_RESUME_SOURCE,
             self.MAINLINE_RESUME_SOURCE,
             NOTIFICATION_SOURCE,
         }
-        anchor = next(
-            (
-                item.message_seq
-                for item in reversed(messages)
-                if item.role == "user" and item.source not in automatic_sources
-            ),
-            0,
+        # Both questions here are tail questions -- the anchor is the newest
+        # human turn, and the dedupe asks whether this pause key was already
+        # filed.  Answering them from a full read cost the Session's entire
+        # stream (606 MB observed in the field) on exactly the Sessions that
+        # pause the most.
+        anchor_record = await asyncio.to_thread(
+            self.sessions.find_recent_message,
+            project_id,
+            session_id,
+            where=lambda item: item.role == "user"
+            and item.source not in automatic_sources,
         )
+        anchor = anchor_record.message_seq if anchor_record is not None else 0
         pause_key = f"{conversation_id}:{anchor}:{reason}"
-        if any(
-            item.metadata.get("executionPauseKey") == pause_key
-            for item in messages
-        ):
+        filed = await asyncio.to_thread(
+            self.sessions.find_recent_message,
+            project_id,
+            session_id,
+            where=lambda item: item.metadata.get("executionPauseKey")
+            == pause_key,
+        )
+        if filed is not None:
             return
         text = "自动创作已暂停，作品尚未完成。\n\n" + explanation
         if unfinished:
@@ -8217,6 +8337,9 @@ class FileCreatorAgentRuntime:
         conversation_id: str,
         run_id: str,
         after_failure: bool = False,
+        snapshot: Any | None = None,
+        task_records: Sequence[Any] | None = None,
+        graph: WorkGraph | None = None,
     ) -> None:
         """Return unfinished scheduler state to the main Agent.
 
@@ -8233,6 +8356,18 @@ class FileCreatorAgentRuntime:
         elements yet must still resume. Outside auto_approve such a failure
         still queues only the free prompt repair; paid continuation keeps
         waiting for a human.
+
+        The fuse below only counts resumes inside one uninterrupted runtime
+        streak, so a human message used to re-arm it: the same unchanged gap
+        came back right after any unrelated chat turn and the Agent re-read
+        the same shots again. Every resume therefore persists the fingerprint
+        of the gap it asked about plus the DONE set at that moment, and a
+        repeat is dropped while that fingerprint, the project generation and
+        the DONE set are all unchanged.
+        ``snapshot``/``task_records``/``graph`` let a caller that already paid
+        for this projection hand it over; the per-second reconcile tick derived
+        them microseconds earlier for the same Project, and re-deriving doubled
+        the cost of every fused resume.
         """
 
         from .manual_regeneration_hold import ManualRegenerationHoldStore
@@ -8252,25 +8387,30 @@ class FileCreatorAgentRuntime:
             # human decision settle before inferring missing follow-up work;
             # its normal review follow-up will resume the agent afterwards.
             return
-        try:
-            snapshot = await asyncio.to_thread(
-                self.services.projects.read,
-                project_id,
+        if snapshot is None:
+            try:
+                snapshot = await asyncio.to_thread(
+                    self.services.projects.read,
+                    project_id,
+                )
+            except Exception:  # pylint: disable=broad-except
+                return
+        if task_records is None:
+            try:
+                records = await asyncio.to_thread(
+                    self.executions.list_tasks,
+                    project_id,
+                )
+            except Exception:  # pylint: disable=broad-except
+                records = []
+        else:
+            records = list(task_records)
+        if graph is None:
+            graph = derive_work_graph(
+                snapshot.project,
+                tasks=records,
+                media_models=(get_image_model_name(), get_video_model_name()),
             )
-        except Exception:  # pylint: disable=broad-except
-            return
-        try:
-            records = await asyncio.to_thread(
-                self.executions.list_tasks,
-                project_id,
-            )
-        except Exception:  # pylint: disable=broad-except
-            records = []
-        graph = derive_work_graph(
-            snapshot.project,
-            tasks=records,
-            media_models=(get_image_model_name(), get_video_model_name()),
-        )
         unfinished_nodes = graph.unfinished()
         if not unfinished_nodes and not after_failure:
             return
@@ -8339,6 +8479,66 @@ class FileCreatorAgentRuntime:
             )
             reasons.append(f"{node.label}（{why}）")
         unfinished = [node.label for node in feedback_nodes]
+        actionable_fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    (
+                        node.node_id,
+                        node.status.value,
+                        sorted(node.missing),
+                        node.error,
+                        node.dispatch_fingerprint,
+                        node.regeneration_of,
+                    )
+                    for node in sorted(
+                        feedback_nodes,
+                        key=lambda node: node.node_id,
+                    )
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()[:32]
+        # A fuse verdict depends on exactly five things: this conversation, the
+        # Project generation, the graph's node statuses, the actionable
+        # fingerprint and the message head.  While none of them move the
+        # persisted notice still stands, so the tick must not rebuild a history
+        # whose answer it already has -- an idle fused Project was doing that
+        # ~28 times a minute (§10 of docs/oom-triage.md).  Statuses belong in
+        # the key because a media task can finish without a Project write: the
+        # DONE set is the progress signal and the generation alone would miss
+        # it.  A model-name change is the one input not covered here; it is
+        # reached only by a settings write, which also moves the head.
+        message_head = await asyncio.to_thread(
+            self.sessions.last_message_seq,
+            project_id,
+            session_id,
+        )
+        graph_digest = hashlib.sha256(
+            json.dumps(
+                [
+                    (
+                        node.node_id,
+                        node.status.value,
+                    )
+                    for node in sorted(
+                        graph.nodes,
+                        key=lambda node: node.node_id,
+                    )
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()[:16]
+        memo_key = (
+            conversation_id,
+            snapshot.generation,
+            graph_digest,
+            actionable_fingerprint,
+            message_head,
+        )
+        if self._auto_resume_pause_memo.get(project_id) == memo_key:
+            return
         messages = await asyncio.to_thread(
             self.sessions.list_messages,
             project_id,
@@ -8408,26 +8608,51 @@ class FileCreatorAgentRuntime:
             for node in graph.nodes
             if node.status is WorkNodeStatus.DONE
         }
-        actionable_fingerprint = hashlib.sha256(
-            json.dumps(
-                [
-                    (
-                        node.node_id,
-                        node.status.value,
-                        sorted(node.missing),
-                        node.error,
-                        node.dispatch_fingerprint,
-                        node.regeneration_of,
+        # A human turn used to be a full reset. The fingerprint covers exactly
+        # the nodes/missing/errors this resume text asks about, so an identical
+        # fingerprint on an unchanged project generation means the previous
+        # instruction is still unanswered — re-sending it only burns model
+        # turns. Any real write bumps the generation, any gate change moves the
+        # fingerprint and any new DONE node counts as progress, so the
+        # suppression releases itself. Transient failures bypass it: their
+        # resume died before it could act.
+        if not after_failure:
+            latest_resume = None
+            spans_human_turn = False
+            for item in reversed(messages):
+                if item.role != "user":
+                    continue
+                if item.source in {
+                    self.YOLO_RESUME_SOURCE,
+                    self.PROMPT_CONTRACT_RESUME_SOURCE,
+                }:
+                    latest_resume = item
+                    break
+                if item.source in {
+                    self.MAINLINE_RESUME_SOURCE,
+                    NOTIFICATION_SOURCE,
+                }:
+                    continue
+                spans_human_turn = True
+            if spans_human_turn and latest_resume is not None:
+                previous_done = set(
+                    latest_resume.metadata.get("doneNodeIdsAtResume") or (),
+                )
+                if (
+                    latest_resume.source == active_resume_source
+                    and latest_resume.metadata.get("projectGeneration")
+                    == snapshot.generation
+                    and latest_resume.metadata.get("actionableFingerprint")
+                    == actionable_fingerprint
+                    and not completed_now - previous_done
+                ):
+                    logger.info(
+                        "%s skipped for %s: gap unchanged since message %s",
+                        active_resume_source,
+                        project_id,
+                        latest_resume.message_seq,
                     )
-                    for node in sorted(
-                        feedback_nodes,
-                        key=lambda node: node.node_id,
-                    )
-                ],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-        ).hexdigest()[:32]
+                    return
         unproductive_resumes = resume_streak
         no_progress = False
         if checkpoint_valid:
@@ -8477,7 +8702,21 @@ class FileCreatorAgentRuntime:
                 explanation=pause_explanation,
                 unfinished=reasons,
             )
+            # Store the head the notice landed at (or the unchanged one it was
+            # deduped against) so the next tick can prove nothing moved.
+            self._auto_resume_pause_memo[project_id] = (
+                conversation_id,
+                snapshot.generation,
+                graph_digest,
+                actionable_fingerprint,
+                await asyncio.to_thread(
+                    self.sessions.last_message_seq,
+                    project_id,
+                    session_id,
+                ),
+            )
             return
+        self._auto_resume_pause_memo.pop(project_id, None)
         if after_failure and auto_approve:
             text = (
                 "【系统自动消息 · YOLO 持续执行】上一回合因瞬态故障中止"
@@ -8510,6 +8749,16 @@ class FileCreatorAgentRuntime:
                     + "\nR2V prompt 由你直接负责；请只修复上述"
                     " Project 字段并重新核对，保留已经完成的工作。"
                 )
+        if any(node.prompt_sync_required for node in feedback_nodes):
+            # The plan/prompt gate only clears through a real text edit or an
+            # explicit keep-current decision. Without naming that decision the
+            # model can only re-read the same shots until the resume fuse
+            # trips.
+            text += (
+                "\n若你已核对某个镜头的叙述与提示词，确认现有提示词仍然准确、"
+                "无需改写，请调用 confirm_prompt_sync（stage 指定 storyboard 或 "
+                "video）记录该结论；不要反复 read_project 复核同一镜头。"
+            )
         message_source = (
             self.YOLO_RESUME_SOURCE
             if auto_approve
@@ -8534,6 +8783,8 @@ class FileCreatorAgentRuntime:
             metadata={
                 "resumeAfterRunId": run_id,
                 "projectGeneration": snapshot.generation,
+                "actionableFingerprint": actionable_fingerprint,
+                "doneNodeIdsAtResume": sorted(completed_now),
                 "unfinishedElements": unfinished,
                 "modelRequiredNodes": [
                     node.node_id for node in feedback_nodes[:12]
@@ -8626,12 +8877,18 @@ class FileCreatorAgentRuntime:
                 return
         # Wake the scheduler to dispatch any READY nodes or retry preparations.
         self.work_scheduler.wake(project_id)
-        # Queue a YOLO resume for items requiring model intervention.
+        # Queue a YOLO resume for items requiring model intervention.  Hand it
+        # the projection this tick already paid for: re-reading the Project and
+        # re-deriving the graph made every fused Project cost two ticks' worth
+        # of work for the same bytes.
         await self._queue_yolo_completion_resume(
             project_id=project_id,
             session_id=session.session_id,
             conversation_id=last.conversation_id,
             run_id=last.run_id,
+            snapshot=snapshot,
+            task_records=task_records,
+            graph=graph,
         )
 
     async def _queue_mainline_resume(
@@ -8673,26 +8930,20 @@ class FileCreatorAgentRuntime:
             AgentRunStatus.FAILED,
         }:
             return
-        messages = await asyncio.to_thread(
-            self.sessions.list_messages,
+        queued = await asyncio.to_thread(
+            self.sessions.find_recent_message,
             project_id,
             session_id,
-            after_seq=0,
-            limit=None,
+            where=lambda item: item.source == self.MAINLINE_RESUME_SOURCE
+            and item.metadata.get("resumeAfterRunId") == intervention_run_id,
         )
-        if any(
-            item.source == self.MAINLINE_RESUME_SOURCE
-            and item.metadata.get("resumeAfterRunId") == intervention_run_id
-            for item in messages
-        ):
+        if queued is not None:
             return
-        mainline_request = next(
-            (
-                item
-                for item in messages
-                if item.message_seq == interrupted.caused_by_message_seq
-            ),
-            None,
+        mainline_request = await asyncio.to_thread(
+            self.sessions.message_at,
+            project_id,
+            session_id,
+            message_seq=interrupted.caused_by_message_seq or 0,
         )
         mainline_goal = (
             _message_text(mainline_request)
@@ -9638,6 +9889,43 @@ def _message_text(
 # changes to reconstruct current state. Durable Runtime history keeps every
 # original byte.
 _SNAPSHOT_SOURCE = "runtime_action_result"
+
+_TOOL_ECHO_DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def tool_echo_receipt_enabled() -> bool:
+    """Whether a durable Project echo stores the bounded view, not the bytes.
+
+    Every ``read_project`` / ``jq_project`` / ``patch_project`` result used to
+    be appended verbatim, so the conversation kept every intermediate state of
+    the Project forever (observed: 96% of a 284 MB ``messages.jsonl``, and the
+    page reader paid it on every open).  Nothing the model can still be shown
+    depends on that surplus: the wire context and the rebuilt history already
+    collapse these records with :func:`project_snapshot_view` and receipts.
+
+    This changes what is *persisted*, so it needs an emergency switch: set
+    ``CREATOR_TOOL_ECHO_RECEIPT=0`` to go back to byte-for-byte retention.
+    """
+
+    raw = os.environ.get("CREATOR_TOOL_ECHO_RECEIPT", "")
+    return raw.strip().casefold() not in _TOOL_ECHO_DISABLED_VALUES
+
+
+def _durable_project_echo(
+    result: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """The Project snapshot exactly as durable conversation history keeps it.
+
+    The projection is the one the ephemeral wire context already builds for the
+    newest snapshot: frozen history timelines get indexed instead of copied, and
+    the payload stays bounded.  Identifiers the metadata column carries
+    (generation, etag, changedPointers) survive untouched, and a later snapshot
+    still collapses this record to a receipt when the model context is rebuilt.
+    """
+
+    if not tool_echo_receipt_enabled():
+        return result
+    return project_snapshot_view(result)
 
 
 @dataclass(frozen=True)

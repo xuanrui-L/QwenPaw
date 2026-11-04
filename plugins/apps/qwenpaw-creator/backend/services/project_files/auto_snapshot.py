@@ -224,6 +224,50 @@ def restored_snapshot_timelines(
 _AUTO_SNAPSHOT_DESCRIPTION = "自动快照：修改前的时间轴副本"
 _SNAPSHOT_STAMP_FORMAT = "%Y-%m-%d %H:%M"
 _AUTO_SNAPSHOT_DEDUPE_WINDOW_SECONDS = 10 * 60
+# Auto-snapshots of one timeline kept after the newest one is minted.  The
+# dedupe window bounds how *fast* they accumulate; nothing bounded how *many*
+# ever survived, so a long-running project carried dozens of full timeline
+# copies inside project.json (observed: 4 of 5 timelines were snapshots, ~80%
+# of the document) and paid that cost on every read, diff and commit.
+_AUTO_SNAPSHOT_RETENTION = 10
+
+
+def _prune_auto_snapshots(
+    timelines_items: dict[str, Any],
+    timelines_order: list[str],
+    timeline_id: str,
+) -> list[str]:
+    """Drop this timeline's oldest auto-snapshots beyond the retention cap.
+
+    Returns the ids removed. Manual snapshots are exempt: the user created
+    those to keep, and this function has no authority to decide otherwise.
+
+    Snapshots are frozen copies that no live field points at -- prompt sync,
+    production stage, review bookkeeping and asset-reference validation all
+    skip the ``snapshot:`` namespace -- so removing one only removes history
+    the compare panel can no longer offer.
+    """
+    prefix = f"{_SNAPSHOT_PREFIX}{timeline_id}:"
+    versioned: list[tuple[int, str]] = []
+    for key, timeline in timelines_items.items():
+        if not key.startswith(prefix):
+            continue
+        if str(timeline.get("description", "")) != _AUTO_SNAPSHOT_DESCRIPTION:
+            continue
+        suffix = key[len(prefix) :]
+        if suffix.isdigit():
+            versioned.append((int(suffix), key))
+    if len(versioned) <= _AUTO_SNAPSHOT_RETENTION:
+        return []
+    versioned.sort()
+    removed = [key for _num, key in versioned[:-_AUTO_SNAPSHOT_RETENTION]]
+    for key in removed:
+        del timelines_items[key]
+    dropped = set(removed)
+    timelines_order[:] = [
+        item for item in timelines_order if item not in dropped
+    ]
+    return removed
 
 
 def _latest_auto_snapshot_age_seconds(
@@ -271,6 +315,11 @@ def auto_snapshot_timelines(
     auto-snapshot is younger than ten minutes is not snapshotted again, so
     an editing session leaves one pre-session baseline instead of one
     snapshot per commit.  Auto-snapshots are never themselves snapshotted.
+
+    Minting one also trims that timeline's auto-snapshots to the newest
+    :data:`_AUTO_SNAPSHOT_RETENTION`, oldest first, so the history held in
+    ``project.json`` stays bounded for the life of the project.  Manual
+    snapshots are never trimmed.
 
     The returned ids let the caller settle pending rollback marks with
     :func:`snapshot_restore_hold.settle_snapshot_restore` *after* the commit
@@ -352,5 +401,6 @@ def auto_snapshot_timelines(
         candidate_items[snapshot_id] = snapshot_timeline
         if snapshot_id not in candidate_order:
             candidate_order.append(snapshot_id)
+        _prune_auto_snapshots(candidate_items, candidate_order, timeline_id)
         snapshotted.append(timeline_id)
     return snapshotted

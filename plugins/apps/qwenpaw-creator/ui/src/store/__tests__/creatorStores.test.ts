@@ -1,7 +1,10 @@
 import { act, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CreatorEvent } from "@/contracts/creator";
-import { useCreatorSessionStore } from "@/store/creatorSessionStore";
+import {
+  REPLAY_WINDOW,
+  useCreatorSessionStore,
+} from "@/store/creatorSessionStore";
 import { installMockFetch } from "@/test/mockFetch";
 import {
   bootstrapRoutes,
@@ -170,6 +173,28 @@ describe("bounded frontend caches", () => {
     expect(store().events).toHaveLength(1);
     expect(store().lastEventSeq).toBe(7);
     expect(testEventSources()[0].url).toContain("events?after=7");
+  });
+
+  it("replays a bounded window off the durable head on a first view", async () => {
+    // A long-running Project wrote tens of thousands of events. Replaying from
+    // seq 0 streamed all of them just to land in a store that keeps the last
+    // EVENT_WINDOW, so the dock stayed on 「加载中」 through hundreds of
+    // commits. The window must be measured off the head the Session reports.
+    installMockFetch(
+      bootstrapRoutes({ session: { lastEventSeq: 10_000, status: "IDLE" } }),
+    );
+    await store().bootstrap("p1");
+    expect(testEventSources()[0].url).toContain(
+      `events?after=${10_000 - REPLAY_WINDOW}`,
+    );
+  });
+
+  it("still replays a short history from the beginning", async () => {
+    installMockFetch(
+      bootstrapRoutes({ session: { lastEventSeq: 7, status: "IDLE" } }),
+    );
+    await store().bootstrap("p1");
+    expect(testEventSources()[0].url).toContain("events?after=0");
   });
 
   it("folds a large durable SSE replay into one bounded store update", async () => {
