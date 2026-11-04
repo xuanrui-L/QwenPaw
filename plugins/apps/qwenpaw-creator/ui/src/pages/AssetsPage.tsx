@@ -1446,9 +1446,14 @@ export function GenerationPromptEditor({
         disabled={saving}
         onCancel={() => setEditOpen(false)}
         onDone={(next, addedReferenceIds) => {
-          setEditOpen(false);
-          if (next !== target.value || addedReferenceIds.length > 0)
-            void onSave(target, next, addedReferenceIds);
+          if (next === target.value && !addedReferenceIds.length) {
+            setEditOpen(false);
+            return;
+          }
+          // Preserve the modal draft when persistence or a CAS check fails.
+          void onSave(target, next, addedReferenceIds)
+            .then(() => setEditOpen(false))
+            .catch(() => {});
         }}
       />
     </div>
@@ -1643,6 +1648,11 @@ export default function AssetsPage() {
     assetsPageAlive.current = true;
     return () => {
       assetsPageAlive.current = false;
+      // Force-delete confirmation dialogs outlive navigation: a dialog
+      // opened on project P1 stays visible on P2 and sends P1's
+      // ?force=true. Destroy every modal this page owns on unmount so a
+      // stale confirmation never mutates a project the user left.
+      Modal.destroyAll();
     };
   }, []);
   const [filter, setFilter] = useState<FilterKey>("all");
@@ -1973,6 +1983,7 @@ export default function AssetsPage() {
           message.error(text, 6);
         };
         try {
+          if (!ownsScope()) return;
           await deleteSourceAssetVersion(id, versionId);
         } catch (error) {
           const references = assetInUseReferences(error);
@@ -1987,7 +1998,9 @@ export default function AssetsPage() {
             showAssetInUseBlocked(blocking, t);
             return;
           }
+          if (!ownsScope()) return;
           if (!(await confirmAssetForceDelete(references, t))) return;
+          if (!ownsScope()) return;
           try {
             await deleteSourceAssetVersion(id, versionId, { force: true });
           } catch (retryError) {

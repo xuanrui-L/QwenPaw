@@ -17,6 +17,7 @@ from api.dependencies import creator_error_handler, project_file_services
 from api.file_asset_routes import (
     _assert_supported_source_upload,
     _media_kind,
+    _media_kind_compatible,
     _reusable_source_version,
     _validate_public_remote_url,
     router,
@@ -1173,21 +1174,21 @@ def test_reusable_source_version_prefers_the_oldest_stored_match() -> None:
         },
     }
 
-    assert (
-        _reusable_source_version(
-            files=files,
-            versions=versions,
-            checksum="abc",
-        )
-        or {}
-    )["version_id"] == "version-old"
+    result = _reusable_source_version(
+        files=files,
+        versions=versions,
+        checksum="abc",
+    )
+    assert len(result) == 2  # version-url excluded (remote, no file_id)
+    assert result[0]["version_id"] == "version-old"
+    assert result[1]["version_id"] == "version-new"
     assert (
         _reusable_source_version(
             files=files,
             versions=versions,
             checksum="other",
         )
-        is None
+        == []
     )
 
 
@@ -1301,7 +1302,7 @@ def test_renamed_reupload_reuses_and_keeps_the_stored_name(
     version = next(
         iter(
             services.projects.read(
-                "project-1"
+                "project-1",
             ).project.assets.source_versions_by_id.values(),
         ),
     )
@@ -1347,3 +1348,124 @@ def test_deleted_asset_uploads_fresh_when_reuploaded(
         replay.json()["assetVersionId"],
     ]
     assert len(project.sources.sources.items) == 1
+
+
+class TestMediaKindCompatible:
+    def test_same_kind_is_compatible(self) -> None:
+        assert _media_kind_compatible(stored="image", uploaded="image") is True
+        assert _media_kind_compatible(stored="audio", uploaded="audio") is True
+        assert _media_kind_compatible(stored="video", uploaded="video") is True
+
+    def test_other_accepts_any_concrete_kind(self) -> None:
+        assert _media_kind_compatible(stored="other", uploaded="image") is True
+        assert _media_kind_compatible(stored="other", uploaded="audio") is True
+        assert _media_kind_compatible(stored="other", uploaded="video") is True
+        assert _media_kind_compatible(stored="other", uploaded="text") is True
+
+    def test_different_concrete_kinds_are_incompatible(self) -> None:
+        assert (
+            _media_kind_compatible(stored="image", uploaded="audio") is False
+        )
+        assert (
+            _media_kind_compatible(stored="audio", uploaded="video") is False
+        )
+        assert (
+            _media_kind_compatible(stored="video", uploaded="image") is False
+        )
+
+    def test_concrete_kind_rejects_other(self) -> None:
+        # A stored concrete kind must not be downgraded to the opaque fallback.
+        assert (
+            _media_kind_compatible(stored="image", uploaded="other") is False
+        )
+
+
+def test_reusable_source_version_filters_by_media_kind() -> None:
+    """A WAV upload must not match a version stored as image, even with the
+    same checksum — bytes alone do not turn an image into audio."""
+    files = {"f1": {}, "f2": {}}
+    versions = {
+        "v-image": {
+            "version_id": "v-image",
+            "checksum": "abc",
+            "file_id": "f1",
+            "media_kind": "image",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+        "v-audio": {
+            "version_id": "v-audio",
+            "checksum": "abc",
+            "file_id": "f2",
+            "media_kind": "audio",
+            "created_at": "2026-01-02T00:00:00+00:00",
+        },
+    }
+
+    # No filter: both match.
+    assert (
+        len(
+            _reusable_source_version(
+                files=files,
+                versions=versions,
+                checksum="abc",
+            ),
+        )
+        == 2
+    )
+
+    # Audio filter: only v-audio.
+    audio_matches = _reusable_source_version(
+        files=files,
+        versions=versions,
+        checksum="abc",
+        media_kind="audio",
+    )
+    assert len(audio_matches) == 1
+    assert audio_matches[0]["version_id"] == "v-audio"
+
+    # Image filter: only v-image.
+    image_matches = _reusable_source_version(
+        files=files,
+        versions=versions,
+        checksum="abc",
+        media_kind="image",
+    )
+    assert len(image_matches) == 1
+    assert image_matches[0]["version_id"] == "v-image"
+
+    # Unknown checksum: empty.
+    assert (
+        _reusable_source_version(
+            files=files,
+            versions=versions,
+            checksum="xyz",
+            media_kind="image",
+        )
+        == []
+    )
+
+
+def test_reusable_source_version_other_accepts_any() -> None:
+    """A version stored as 'other' (e.g. raw application/octet-stream) is a
+    valid candidate for any concrete kind upload — the stored row is upgraded.
+    """
+    files = {"f-raw": {}}
+    versions = {
+        "v-raw": {
+            "version_id": "v-raw",
+            "checksum": "abc",
+            "file_id": "f-raw",
+            "media_kind": "other",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+    }
+
+    for kind in ("image", "audio", "video", "document", "text"):
+        matches = _reusable_source_version(
+            files=files,
+            versions=versions,
+            checksum="abc",
+            media_kind=kind,
+        )
+        assert len(matches) == 1, f"kind={kind} should match 'other'"
+        assert matches[0]["version_id"] == "v-raw"

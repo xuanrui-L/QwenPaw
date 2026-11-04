@@ -607,9 +607,18 @@ class ProjectStore:
             )
             if timeline_refs:
                 # force path: every reference left is detachable.
-                updated_project = self._detach_timeline_references(
+                (
+                    updated_project,
+                    affected_timeline_ids,
+                    affected_element_ids,
+                ) = self._detach_timeline_references(
                     updated_project,
                     version_id,
+                )
+                updated_project = self._mark_force_delete_impacts(
+                    updated_project,
+                    affected_timeline_ids,
+                    affected_element_ids,
                 )
 
             # Determine which file_ids are no longer referenced by any
@@ -896,14 +905,20 @@ class ProjectStore:
         self,
         project: Project,
         version_id: str,
-    ) -> Project:
+    ) -> tuple[Project, set[str], set[str]]:
         """Clear every detachable timeline reference to a deleted version.
 
         Snapshot timelines are walked too: a frozen pointer to bytes that are
         about to disappear would let a later rollback restore an Element whose
         asset is already gone, so history loses this one input rather than
         becoming permanently unrestorable.
+
+        Returns the updated Project together with the sets of timeline and
+        element ids whose content changed, so the caller can derive the edit
+        impact (stale flags on rendered outputs) from the cleared references.
         """
+        affected_timeline_ids: set[str] = set()
+        affected_element_ids: set[str] = set()
         timeline_updates: dict = {}
         for timeline_id, timeline in project.timelines.items.items():
             element_updates: dict = {}
@@ -911,7 +926,9 @@ class ProjectStore:
                 detached = self._detach_element_references(element, version_id)
                 if detached is not None:
                     element_updates[element_id] = detached
+                    affected_element_ids.add(element_id)
             if element_updates:
+                affected_timeline_ids.add(timeline_id)
                 # Element ids stay untouched, so the collection identity check
                 # in EntityCollection keeps holding after the swap.
                 timeline_updates[timeline_id] = timeline.model_copy(
@@ -923,14 +940,98 @@ class ProjectStore:
                     },
                 )
         if not timeline_updates:
+            return project, set(), set()
+        return (
+            project.model_copy(
+                update={
+                    "timelines": project.timelines.model_copy(
+                        update={
+                            "items": {
+                                **project.timelines.items,
+                                **timeline_updates,
+                            },
+                        },
+                    ),
+                },
+            ),
+            affected_timeline_ids,
+            affected_element_ids,
+        )
+
+    @staticmethod
+    def _mark_force_delete_impacts(
+        project: Project,
+        affected_timeline_ids: set[str],
+        affected_element_ids: set[str],
+    ) -> Project:
+        """Mark rendered outputs stale after force-clearing source references.
+
+        Detaching a source version from timeline elements changes the creative
+        material those elements and their timelines represent, so the Project's
+        previously selected final renders no longer describe the current state.
+        This method marks every affected final_video and element-level output
+        artifact version as ``stale`` so ``derive_work_graph`` correctly reports
+        compose as STALE / READY instead of DONE.
+        """
+        if not affected_timeline_ids and not affected_element_ids:
             return project
+
+        artifact_slots = project.assets.artifact_slots_by_id
+        artifact_versions = project.assets.artifact_versions_by_id
+        invalidated_version_ids: set[str] = set()
+
+        # Timeline-level: the final cut of every touched timeline is stale.
+        for timeline_id in affected_timeline_ids:
+            for slot_id, slot in artifact_slots.items():
+                if (
+                    slot.owner_ref == timeline_id
+                    and slot.kind == "final_video"
+                    and slot.selected_version_id is not None
+                ):
+                    version = artifact_versions.get(
+                        slot.selected_version_id,
+                    )
+                    if version is not None and not version.stale:
+                        invalidated_version_ids.add(
+                            slot.selected_version_id,
+                        )
+
+        # Element-level: regeneration outputs of every cleared element.
+        for element_id in affected_element_ids:
+            for slot_id in (
+                f"element:{element_id}:storyboard",
+                f"element:{element_id}:video",
+                f"element:{element_id}:main",
+            ):
+                slot = artifact_slots.get(slot_id)
+                if slot is not None and slot.selected_version_id is not None:
+                    version = artifact_versions.get(
+                        slot.selected_version_id,
+                    )
+                    if version is not None and not version.stale:
+                        invalidated_version_ids.add(
+                            slot.selected_version_id,
+                        )
+
+        if not invalidated_version_ids:
+            return project
+
+        updated_versions: dict[str, Any] = {}
+        for vid in invalidated_version_ids:
+            version = artifact_versions[vid]
+            updated_versions[vid] = version.model_copy(
+                update={
+                    "stale": True,
+                    "stale_reason": "素材已删除，需要重新生成",
+                },
+            )
         return project.model_copy(
             update={
-                "timelines": project.timelines.model_copy(
+                "assets": project.assets.model_copy(
                     update={
-                        "items": {
-                            **project.timelines.items,
-                            **timeline_updates,
+                        "artifact_versions_by_id": {
+                            **artifact_versions,
+                            **updated_versions,
                         },
                     },
                 ),
