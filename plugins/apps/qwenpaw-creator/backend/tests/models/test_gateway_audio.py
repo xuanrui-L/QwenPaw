@@ -317,7 +317,7 @@ def test_gateway_transcription_omits_the_oss_resolve_header(
     result = asyncio.run(asr_model.transcribe("https://example.com/line.wav"))
 
     assert [segment.text for segment in result.segments] == [
-        "欢迎使用阿里云。"
+        "欢迎使用阿里云。",
     ]
     sent = route.calls.last.request
     assert "x-dashscope-ossresourceresolve" not in {

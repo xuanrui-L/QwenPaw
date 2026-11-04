@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# pylint: disable=protected-access
+# pylint: disable=protected-access,unused-argument
 """The reuse key of a narrated asset must name the voice that was spoken.
 
 ``execute_file_tts_command`` looks for an already synthesized version of the

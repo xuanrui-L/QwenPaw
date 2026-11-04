@@ -12,7 +12,6 @@ import pytest
 
 from models import config as model_config
 from models import tts_model
-from utils.exceptions import ModelError
 from models.tts_capabilities import (
     DEFAULT_TTS_MODEL,
     capability_for,
@@ -20,6 +19,7 @@ from models.tts_capabilities import (
     require_capability,
     supported_models,
 )
+from utils.exceptions import ModelError
 
 
 def _fake_post(captured: dict, response: dict):
@@ -342,8 +342,6 @@ def test_abnormal_close_normalizes_to_provider_error(
 
     import websocket
 
-    from utils.exceptions import ModelError
-
     def make_exc():
         if failure == "close_frame_race":
             return AttributeError(
@@ -381,8 +379,6 @@ def test_handshake_rejection_maps_status_to_retryability(
     429/5xx stay retryable."""
 
     import websocket
-
-    from utils.exceptions import ModelError
 
     class _Synth(_FakeSynthesizerBase):
         def streaming_call(self, text) -> None:
