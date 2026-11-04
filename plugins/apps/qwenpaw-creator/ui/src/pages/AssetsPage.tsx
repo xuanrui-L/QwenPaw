@@ -235,12 +235,24 @@ function assetInUseBlockedItem(ref: AssetInUseReference, t: Translate): string {
   });
 }
 
-/** Ask for the force retry, naming every reference the delete will clear. */
+let forceDialogActive = false;
+
+/** Ask for the force retry, naming every reference the delete will clear.
+ *
+ * Only one force dialog may be visible at a time: a late 409 racing a
+ * prior cancel must never re-open the confirmation the user already
+ * dismissed. */
 function confirmAssetForceDelete(
   references: AssetInUseReference[],
   t: Translate,
 ): Promise<boolean> {
+  if (forceDialogActive) return Promise.resolve(false);
+  forceDialogActive = true;
   return new Promise((resolve) => {
+    const done = (value: boolean) => {
+      forceDialogActive = false;
+      resolve(value);
+    };
     Modal.confirm({
       title: t("assets.deleteInUseTitle"),
       content: (
@@ -263,8 +275,8 @@ function confirmAssetForceDelete(
       okText: t("assets.deleteInUseOk"),
       okType: "danger",
       cancelText: t("common.cancel"),
-      onOk: () => resolve(true),
-      onCancel: () => resolve(false),
+      onOk: () => done(true),
+      onCancel: () => done(false),
     });
   });
 }

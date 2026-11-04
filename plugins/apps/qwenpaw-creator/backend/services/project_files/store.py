@@ -980,11 +980,13 @@ class ProjectStore:
         artifact_versions = project.assets.artifact_versions_by_id
         invalidated_version_ids: set[str] = set()
 
-        # Timeline-level: the final cut of every touched timeline is stale.
+        # Timeline-level: the final cut of every touched timeline is
+        # stale.  The artifact slot owner_ref is f"timeline:{timeline_id}"
+        # (matching edit_impact._mark_timeline_render_stale).
         for timeline_id in affected_timeline_ids:
             for slot_id, slot in artifact_slots.items():
                 if (
-                    slot.owner_ref == timeline_id
+                    slot.owner_ref == f"timeline:{timeline_id}"
                     and slot.kind == "final_video"
                     and slot.selected_version_id is not None
                 ):

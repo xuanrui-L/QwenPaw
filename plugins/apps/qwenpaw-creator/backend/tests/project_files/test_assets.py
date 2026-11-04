@@ -1279,9 +1279,9 @@ def test_force_delete_marks_final_video_and_element_outputs_stale(
 
     # Add artifact slots and versions that represent completed renders.
     final_slot = ArtifactSlot(
-        slot_id="timeline:main:render",
+        slot_id="timeline:timeline:main:render",
         kind="final_video",
-        owner_ref="timeline:main",
+        owner_ref="timeline:timeline:main",
         version_ids=["final-v1"],
         selected_version_id="final-v1",
     )
@@ -1294,9 +1294,9 @@ def test_force_delete_marks_final_video_and_element_outputs_stale(
     )
     final_version = ArtifactVersion(
         version_id="final-v1",
-        slot_id="timeline:main:render",
+        slot_id="timeline:timeline:main:render",
         kind="final_video",
-        owner_ref="timeline:main",
+        owner_ref="timeline:timeline:main",
         name="最终成片",
         file_id="file-frame",
         checksum=frame.sha256,
