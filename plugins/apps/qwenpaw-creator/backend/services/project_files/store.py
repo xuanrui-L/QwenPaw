@@ -19,7 +19,12 @@ from typing import Any, Final
 from uuid import uuid4
 
 from pydantic import ValidationError
-from domain.errors import BadRequestError, ConflictError, NotFoundError
+from domain.errors import (
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    SourceAssetInUseError,
+)
 from services.runtime_files.atomic_store import (
     atomic_replace_path,
     fsync_directory as runtime_fsync_directory,
@@ -32,12 +37,15 @@ from utils.logger import setup_logger
 from .models import (
     ArtifactVersionRenderSource,
     AudioCreation,
+    EditCreation,
     I2VCreation,
     OverlayCreation,
     Project,
     R2VCreation,
     S2VCreation,
     SourceVersionRenderSource,
+    Timeline,
+    TimelineElement,
 )
 from .archive import write_project_archive
 from .serialization import (
@@ -136,6 +144,54 @@ _COVER_ARTIFACT_KINDS: Final = ("r2v_storyboard_image", "visual_asset_image")
 # Editing Projects usually own no still at all, so a rendered cut or an uploaded
 # clip supplies the cover through a keyframe instead of staying empty.
 _COVER_VIDEO_ARTIFACT_KINDS: Final = ("final_video", "element_video")
+
+_SNAPSHOT_TIMELINE_PREFIX: Final = "snapshot:"
+
+
+def _timeline_reference_record(
+    timeline: Timeline,
+    element: TimelineElement,
+    ref_kind: str,
+    *,
+    detachable: bool,
+) -> dict[str, Any]:
+    """Describe one blocking timeline reference for ``ASSET_IN_USE`` details.
+
+    ``pointer`` reproduces the historical English message fragment exactly
+    (snapshot references keep their ``<snapshot timeline id>/`` prefix), so
+    log scrapers and existing assertions keep matching while the UI reads the
+    named fields instead of parsing internal ids out of a sentence.
+    """
+
+    is_snapshot = timeline.timeline_id.startswith(_SNAPSHOT_TIMELINE_PREFIX)
+    return {
+        "timelineId": timeline.timeline_id,
+        "timelineName": timeline.name or timeline.title or timeline.timeline_id,
+        "isSnapshot": is_snapshot,
+        "elementId": element.element_id,
+        "elementLabel": element.label
+        or element.element_id.removeprefix("elem:"),
+        "creationType": element.creation.type,
+        "refKind": ref_kind,
+        "detachable": detachable,
+        "pointer": (
+            f"{timeline.timeline_id}/" if is_snapshot else ""
+        )
+        + f"{ref_kind}:{element.element_id}",
+    }
+
+
+def _asset_in_use_message(
+    version_id: str,
+    references: list[dict[str, Any]],
+) -> str:
+    """The historical conflict sentence built from structured references."""
+
+    return (
+        f"Cannot delete source asset version {version_id}: "
+        f"actively used in timeline by "
+        f"{[reference['pointer'] for reference in references]}"
+    )
 
 
 def _cover_reference(project: Project) -> tuple[str, str] | None:
@@ -432,6 +488,7 @@ class ProjectStore:
         self,
         project_id: str,
         version_id: str,
+        force: bool = False,
     ) -> ProjectSnapshot:
         """Remove a source asset version and its unreferenced files.
 
@@ -458,6 +515,16 @@ class ProjectStore:
         - SourceIntelligenceVersion → deleted alongside the source version
         - CharacterVoice.sample_source_version_id → cleared to None
         - VisualVariant / CastLineup refs → version removed from list
+
+        ``force=True`` additionally clears the *detachable* timeline references
+        (first frame, digital-human inputs, storyboard/overlay references and
+        plain render sources) instead of refusing, so an asset that a shot
+        still points at can be dropped. Snapshot timelines are cleared too,
+        which is the honest cost: rolling that snapshot back afterwards
+        restores the Element without this input. Audio and Edit Elements are
+        never half-detached — their schema requires the exact version — so a
+        force delete over them still fails with ``ASSET_IN_USE`` and the user
+        has to delete the Element first.
         """
         safe_id = _safe_project_id(project_id)
 
@@ -473,10 +540,20 @@ class ProjectStore:
             # Check for timeline-level references that block deletion
             timeline_refs = self._find_timeline_references(project, version_id)
             if timeline_refs:
-                raise ConflictError(
-                    f"Cannot delete source asset version {version_id}: "
-                    f"actively used in timeline by {timeline_refs}",
-                )
+                # Without force every reference blocks; with force only the
+                # references no Element can survive without do. Half-clearing
+                # an audio or Edit Element would persist an invalid Project.
+                blocking = timeline_refs if not force else [
+                    ref for ref in timeline_refs if not ref["detachable"]
+                ]
+                if blocking:
+                    raise SourceAssetInUseError(
+                        _asset_in_use_message(version_id, blocking),
+                        details={
+                            "versionId": version_id,
+                            "timelineReferences": blocking,
+                        },
+                    )
 
             version = project.assets.source_versions_by_id[version_id]
             candidate_file_ids: list[str] = []
@@ -525,6 +602,12 @@ class ProjectStore:
                 updated_project,
                 version_id,
             )
+            if timeline_refs:
+                # force path: every reference left is detachable.
+                updated_project = self._detach_timeline_references(
+                    updated_project,
+                    version_id,
+                )
 
             # Determine which file_ids are no longer referenced by any
             # remaining metadata and can be deleted from disk.
@@ -668,22 +751,43 @@ class ProjectStore:
         self,
         project: Project,
         version_id: str,
-    ) -> list[str]:
+    ) -> list[dict[str, Any]]:
         """Find timeline-level references that block deletion.
 
-        Returns a list of reference descriptions for timeline elements that
-        actively use the given source version. If non-empty, deletion should
-        be blocked to prevent data corruption. Snapshot timelines count too
-        (see ``remove_source_asset_version``), and their descriptions are
-        prefixed with the snapshot timeline id so a conflict explains which
-        piece of history is holding the asset.
-        """
-        references: list[str] = []
-        for timeline_id, timeline in project.timelines.items.items():
-            is_snapshot = timeline_id.startswith("snapshot:")
-            scope = f"{timeline_id}/" if is_snapshot else ""
+        Returns one record per timeline Element that actively uses the given
+        source version. If non-empty, deletion should be blocked to prevent
+        data corruption. Snapshot timelines count too (see
+        ``remove_source_asset_version``), and their records carry the snapshot
+        timeline id so a conflict explains which piece of history is holding
+        the asset.
 
-            for element_id, element in timeline.elements_by_id.items():
+        ``detachable`` separates what a force delete may clear in place from
+        what it may not: an Edit Element must keep a source-range
+        ``render_source`` and an audio Element must keep the exact version on
+        both ``creation`` and ``render_source`` (``Project._validate_graph``
+        enforces all three), so only deleting the Element frees those bytes.
+        A text-free overlay joins them once this version is its only payload:
+        ``OverlayCreation`` itself requires ``text``, a ``prompt`` or a
+        reference version, so clearing it would leave a Project that cannot be
+        written back and the asset would become permanently undeletable.
+        """
+        references: list[dict[str, Any]] = []
+        for timeline in project.timelines.items.values():
+            for element in timeline.elements_by_id.values():
+                creation = element.creation
+                pinned = isinstance(creation, (AudioCreation, EditCreation))
+                if not pinned and isinstance(creation, OverlayCreation):
+                    pinned = not (
+                        creation.text.strip()
+                        or creation.prompt.strip()
+                        or any(
+                            version_id != reference
+                            for reference in (
+                                creation.reference_version_ids or []
+                            )
+                        )
+                    )
+
                 # Check render_source (SourceVersionRenderSource only)
                 render_source = element.render_source
                 if (
@@ -694,28 +798,49 @@ class ProjectStore:
                     )
                     and render_source.version_id == version_id
                 ):
-                    references.append(f"{scope}render-source:{element_id}")
+                    references.append(
+                        _timeline_reference_record(
+                            timeline,
+                            element,
+                            "render-source",
+                            detachable=not pinned,
+                        ),
+                    )
 
-                creation = element.creation
                 # R2VCreation references
                 if isinstance(creation, R2VCreation):
                     if version_id in (
                         creation.storyboard_reference_version_ids or []
                     ):
                         references.append(
-                            f"{scope}r2v-storyboard-ref:{element_id}",
+                            _timeline_reference_record(
+                                timeline,
+                                element,
+                                "r2v-storyboard-ref",
+                                detachable=True,
+                            ),
                         )
                     if version_id in (
                         creation.video_reference_version_ids or []
                     ):
                         references.append(
-                            f"{scope}r2v-video-ref:{element_id}",
+                            _timeline_reference_record(
+                                timeline,
+                                element,
+                                "r2v-video-ref",
+                                detachable=True,
+                            ),
                         )
                 # I2VCreation reference
                 elif isinstance(creation, I2VCreation):
                     if creation.first_frame_version_id == version_id:
                         references.append(
-                            f"{scope}i2v-first-frame:{element_id}",
+                            _timeline_reference_record(
+                                timeline,
+                                element,
+                                "i2v-first-frame",
+                                detachable=True,
+                            ),
                         )
                 # S2VCreation inputs are consumed directly by r2v_execution
                 # without ever being copied into an owned version, so dropping
@@ -723,26 +848,164 @@ class ProjectStore:
                 elif isinstance(creation, S2VCreation):
                     if creation.portrait_version_id == version_id:
                         references.append(
-                            f"{scope}s2v-portrait:{element_id}",
+                            _timeline_reference_record(
+                                timeline,
+                                element,
+                                "s2v-portrait",
+                                detachable=True,
+                            ),
                         )
                     if creation.audio_version_id == version_id:
                         references.append(
-                            f"{scope}s2v-drive-audio:{element_id}",
+                            _timeline_reference_record(
+                                timeline,
+                                element,
+                                "s2v-drive-audio",
+                                detachable=True,
+                            ),
                         )
                 # OverlayCreation references
                 elif isinstance(creation, OverlayCreation):
                     if version_id in (creation.reference_version_ids or []):
                         references.append(
-                            f"{scope}overlay-ref:{element_id}",
+                            _timeline_reference_record(
+                                timeline,
+                                element,
+                                "overlay-ref",
+                                detachable=not pinned,
+                            ),
                         )
                 # AudioCreation references
                 elif isinstance(creation, AudioCreation):
                     if creation.source_asset_version_id == version_id:
                         references.append(
-                            f"{scope}audio-source:{element_id}",
+                            _timeline_reference_record(
+                                timeline,
+                                element,
+                                "audio-source",
+                                detachable=False,
+                            ),
                         )
 
         return references
+
+    def _detach_timeline_references(
+        self,
+        project: Project,
+        version_id: str,
+    ) -> Project:
+        """Clear every detachable timeline reference to a deleted version.
+
+        Snapshot timelines are walked too: a frozen pointer to bytes that are
+        about to disappear would let a later rollback restore an Element whose
+        asset is already gone, so history loses this one input rather than
+        becoming permanently unrestorable.
+        """
+        timeline_updates: dict = {}
+        for timeline_id, timeline in project.timelines.items.items():
+            element_updates: dict = {}
+            for element_id, element in timeline.elements_by_id.items():
+                detached = self._detach_element_references(element, version_id)
+                if detached is not None:
+                    element_updates[element_id] = detached
+            if element_updates:
+                # Element ids stay untouched, so the collection identity check
+                # in EntityCollection keeps holding after the swap.
+                timeline_updates[timeline_id] = timeline.model_copy(
+                    update={
+                        "elements_by_id": {
+                            **timeline.elements_by_id,
+                            **element_updates,
+                        },
+                    },
+                )
+        if not timeline_updates:
+            return project
+        return project.model_copy(
+            update={
+                "timelines": project.timelines.model_copy(
+                    update={
+                        "items": {
+                            **project.timelines.items,
+                            **timeline_updates,
+                        },
+                    },
+                ),
+            },
+        )
+
+    @staticmethod
+    def _detach_element_references(
+        element: TimelineElement,
+        version_id: str,
+    ) -> TimelineElement | None:
+        """Return *element* with this source version cleared, or None.
+
+        Only ever called for detachable references: audio and Edit Elements are
+        refused before reaching here because their schema requires the version.
+        """
+        creation = element.creation
+        updates: dict[str, Any] = {}
+
+        render_source = element.render_source
+        if (
+            isinstance(render_source, SourceVersionRenderSource)
+            and not isinstance(render_source, ArtifactVersionRenderSource)
+            and render_source.version_id == version_id
+            and not isinstance(creation, (AudioCreation, EditCreation))
+        ):
+            updates["render_source"] = None
+
+        if isinstance(creation, R2VCreation):
+            for field_name in (
+                "storyboard_reference_version_ids",
+                "video_reference_version_ids",
+            ):
+                refs = list(getattr(creation, field_name) or [])
+                if version_id in refs:
+                    creation = creation.model_copy(
+                        update={
+                            field_name: [r for r in refs if r != version_id],
+                        },
+                    )
+        elif isinstance(creation, I2VCreation):
+            if creation.first_frame_version_id == version_id:
+                creation = creation.model_copy(
+                    update={"first_frame_version_id": None},
+                )
+        elif isinstance(creation, S2VCreation):
+            s2v_updates: dict[str, Any] = {}
+            if creation.portrait_version_id == version_id:
+                s2v_updates["portrait_version_id"] = None
+            if creation.audio_version_id == version_id:
+                s2v_updates["audio_version_id"] = None
+            if s2v_updates:
+                creation = creation.model_copy(update=s2v_updates)
+        elif isinstance(creation, OverlayCreation):
+            refs = list(creation.reference_version_ids or [])
+            if version_id in refs:
+                remaining = [r for r in refs if r != version_id]
+                keeps_payload = bool(
+                    remaining
+                    or creation.text.strip()
+                    or creation.prompt.strip(),
+                )
+                if keeps_payload:
+                    creation = creation.model_copy(
+                        update={"reference_version_ids": remaining},
+                    )
+                # Otherwise this version is the whole payload of a text-free
+                # overlay and the reference stays: the caller refused the force
+                # delete above, and silently dropping the Element's content
+                # would be the worse failure.
+        # AudioCreation.source_asset_version_id is a required EntityId: this
+        # Element is never detached, so nothing is cleared here.
+
+        if creation is not element.creation:
+            updates["creation"] = creation
+        if not updates:
+            return None
+        return element.model_copy(update=updates)
 
     def _detach_source_version_refs(
         self,

@@ -165,13 +165,21 @@ export function downloadSourceCache(
   );
 }
 
-/** Delete an uploaded source asset version. */
+/** Delete an uploaded source asset version.
+ *
+ * `force` asks the backend to detach the timeline references an element can
+ * survive without instead of answering 409 ASSET_IN_USE; audio and edit
+ * elements still refuse until the caller deletes them.
+ */
 export function deleteSourceAssetVersion(
   projectId: string,
   versionId: string,
+  options?: { force?: boolean },
 ): Promise<void> {
   return creatorRequest(
-    `${assetsPath(projectId)}/${encodeURIComponent(versionId)}`,
+    `${assetsPath(projectId)}/${encodeURIComponent(versionId)}${
+      options?.force ? "?force=true" : ""
+    }`,
     { method: "DELETE" },
   );
 }

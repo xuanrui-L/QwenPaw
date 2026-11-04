@@ -78,9 +78,18 @@ CONVERSATION_ID = "conversation-1"
 GOAL_ID = "goal-1"
 
 
-def _png_bytes_for_grounding() -> bytes:
+def _png_bytes_for_grounding(variant: int = 0) -> bytes:
+    """One tiny valid PNG. ``variant`` changes the bytes.
+
+    Ingest deduplicates by content, so a batch that is supposed to represent
+    several distinct uploads must not reuse one payload.
+    """
+
     output = io.BytesIO()
-    Image.new("RGB", (16, 12), color="white").save(output, format="PNG")
+    Image.new("RGB", (16 + variant, 12), color="white").save(
+        output,
+        format="PNG",
+    )
     return output.getvalue()
 
 
@@ -5733,7 +5742,7 @@ def test_batched_upload_refs_delegate_one_run_per_target(
             inputs=[
                 _AssetInput(
                     name=f"img-{index}.png",
-                    content=_png_bytes_for_grounding(),
+                    content=_png_bytes_for_grounding(index),
                     media_type="image/png",
                 )
                 for index in range(3)
@@ -5817,7 +5826,7 @@ def test_upload_joining_a_live_run_starts_understanding(
             inputs=[
                 _AssetInput(
                     name=f"voice-ref-{index}.png",
-                    content=_png_bytes_for_grounding(),
+                    content=_png_bytes_for_grounding(index),
                     media_type="image/png",
                 )
                 for index in range(upload_count)
