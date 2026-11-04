@@ -235,22 +235,23 @@ function assetInUseBlockedItem(ref: AssetInUseReference, t: Translate): string {
   });
 }
 
-let forceDialogActive = false;
-
 /** Ask for the force retry, naming every reference the delete will clear.
  *
  * Only one force dialog may be visible at a time: a late 409 racing a
  * prior cancel must never re-open the confirmation the user already
- * dismissed. */
+ * dismissed.  The guard ref is owned by the page instance so navigation
+ * (and the matching ``Modal.destroyAll``) releases it even when Ant
+ * Design's imperative ``Modal.confirm`` never fires ``onCancel``. */
 function confirmAssetForceDelete(
   references: AssetInUseReference[],
   t: Translate,
+  forceActiveRef: React.MutableRefObject<boolean>,
 ): Promise<boolean> {
-  if (forceDialogActive) return Promise.resolve(false);
-  forceDialogActive = true;
+  if (forceActiveRef.current) return Promise.resolve(false);
+  forceActiveRef.current = true;
   return new Promise((resolve) => {
     const done = (value: boolean) => {
-      forceDialogActive = false;
+      forceActiveRef.current = false;
       resolve(value);
     };
     Modal.confirm({
@@ -1656,10 +1657,20 @@ export default function AssetsPage() {
   const liveSelectedAsset = useRef<string | null>(query.get("asset"));
   liveSelectedAsset.current = query.get("asset");
   const assetsPageAlive = useRef(true);
+  // A force-delete dialog opened while the user navigates away is destroyed
+  // by the cleanup Modal.destroyAll() below, but Ant Design's imperative
+  // Modal.confirm never calls onCancel in that path.  Own the guard ref here
+  // so the page instance lifecycle frees it regardless of how the dialog
+  // disappeared.
+  const forceDialogRef = useRef(false);
   useEffect(() => {
     assetsPageAlive.current = true;
     return () => {
       assetsPageAlive.current = false;
+      // Release the force-dialog guard so the next visit to this page
+      // (or any other project) can open a fresh confirmation.  The
+      // pending promise below settles with false, preventing a leak.
+      forceDialogRef.current = false;
       // Force-delete confirmation dialogs outlive navigation: a dialog
       // opened on project P1 stays visible on P2 and sends P1's
       // ?force=true. Destroy every modal this page owns on unmount so a
@@ -2011,7 +2022,8 @@ export default function AssetsPage() {
             return;
           }
           if (!ownsScope()) return;
-          if (!(await confirmAssetForceDelete(references, t))) return;
+          if (!(await confirmAssetForceDelete(references, t, forceDialogRef)))
+            return;
           if (!ownsScope()) return;
           try {
             await deleteSourceAssetVersion(id, versionId, { force: true });
