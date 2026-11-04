@@ -28,15 +28,23 @@ try:
     from qwenpaw.agents.utils.media_token_estimate import (
         estimate_data_url_tokens as _host_estimate_data_url_tokens,
     )
+    from qwenpaw.providers.context_windows import (
+        resolve_context_window as _host_resolve_context_window,
+    )
 
     _HOST_CONTEXT_ESTIMATOR_AVAILABLE = True
+    _HOST_CONTEXT_WINDOW_AVAILABLE = True
 except ImportError:  # pragma: no cover - standalone plugin installs
     _host_count_text_tokens = None
     _host_estimate_data_url_tokens = None
+    _host_resolve_context_window = None
     _HOST_CONTEXT_ESTIMATOR_AVAILABLE = False
+    _HOST_CONTEXT_WINDOW_AVAILABLE = False
 
-# A conservative serialized-input guard, not a claimed tokenizer count or
-# provider context-window size. Leave room for SDK formatting and output.
+# A transport safety floor — not the primary gate when a token window is
+# resolved. The actual guard is the input token budget from
+# ``context_window()``, whose byte equivalent can be far larger; this
+# constant stops a single request from growing without bound.
 MODEL_INPUT_BYTES = 384 * 1024
 HISTORY_BYTES = 128 * 1024
 
@@ -88,11 +96,42 @@ def _media_clamp_ratio() -> float:
 
 MEDIA_OBSERVATION_DEGRADE_ENV = "CREATOR_MEDIA_OBSERVATION_DEGRADE_ENABLED"
 
-# The input window a token budget can be measured against. A model class in
-# the SDK carries a default that has nothing to do with whichever model is
-# configured here, so the only accepted source is one an operator wrote down:
-# undeclared means the byte guard stays the sole limit.
+# The input window a token budget can be measured against.  Resolution
+# prefers an operator-declared value, then the host catalog (same
+# precedence the platform scroll follows), then gives up — no window
+# means the byte transport floor stays the sole limit.
 MODEL_CONTEXT_TOKENS_ENV = "CREATOR_MODEL_CONTEXT_TOKENS"
+
+
+def context_window(model_name: str | None = None) -> int | None:
+    """The input-context window for this deployment, or ``None``.
+
+    Resolution order (matches the platform scroll):
+
+    1. ``CREATOR_MODEL_CONTEXT_TOKENS`` env — explicit override wins.
+    2. Host catalog via ``resolve_context_window(model_name)`` — same
+       values the platform uses for its own token budgeting.
+    3. ``None`` — the server-side guard stays off and lets the byte
+       transport floor (``MODEL_INPUT_BYTES``) remain the only limit.
+    """
+    raw = (os.environ.get(MODEL_CONTEXT_TOKENS_ENV) or "").strip()
+    if raw:
+        try:
+            tokens = int(raw)
+        except ValueError:
+            tokens = 0
+        if tokens > 0:
+            return tokens
+    if model_name and _HOST_CONTEXT_WINDOW_AVAILABLE:
+        # Use the same catalog the platform scroll reads.  An explicit
+        # configure=False would value a local-serving Ollama provider
+        # whose actual runtime window is deployment-specific, but
+        # Creator always routes through a managed model endpoint.
+        return _host_resolve_context_window(
+            model_name,
+            use_catalog=True,
+        )
+    return None
 
 
 def declared_context_tokens() -> int | None:
@@ -101,15 +140,11 @@ def declared_context_tokens() -> int | None:
     Read per call, like the other knobs, so a restart-free change stays
     possible in tests and a value of 0 or junk means "not declared" rather
     than a budget that refuses every request.
+
+    Deprecated: prefer ``context_window(model_name)``, which also reads
+    the host catalog and matches the platform scroll's resolution order.
     """
-    raw = (os.environ.get(MODEL_CONTEXT_TOKENS_ENV) or "").strip()
-    if not raw:
-        return None
-    try:
-        tokens = int(raw)
-    except ValueError:
-        return None
-    return tokens if tokens > 0 else None
+    return context_window(model_name=None)
 
 
 def media_observation_degrade_enabled() -> bool:
@@ -1148,8 +1183,9 @@ def prepare_model_messages(
             return True
         # Bytes miss the mistake in both directions: a screenshot is megabytes
         # of Base64 for a few thousand vision tokens, while dense text is the
-        # reverse. The declared window is the second guard, and it stays off
-        # until an operator states it (see ``declared_context_tokens``).
+        # reverse. The token window resolved via ``context_window()`` is the
+        # second guard; when available it is the primary rejection criterion,
+        # with the byte transport floor acting only as a safety ceiling.
         return max_tokens is not None and (
             estimate_input_tokens(request_payload()) > max_tokens
         )

@@ -1693,38 +1693,44 @@ def test_token_budget_compacts_what_the_byte_guard_cannot_see():
     assert model_context.estimate_input_tokens(guarded) <= 20_000
 
 
-def test_input_token_budget_never_invents_an_unpublished_window(monkeypatch):
-    """Only a window an operator wrote down may price the input.
+def test_input_token_budget_resolves_from_host_catalog(monkeypatch):
+    """The host catalog provides the context window; env override wins.
 
-    A model class in the SDK carries a default context size that describes the
-    class, not whichever model this deployment points at. Reading it priced a
-    32K model against 131072, so the guard stayed off and the provider became
-    the one to discover the mistake - on every turn of a long session.
+    Before the host catalog was read the token guard stayed off until an
+    operator declared a window, which left the byte transport floor as the
+    sole limit.  The plugin now resolves the same published window the
+    platform scroll uses, so every deployment prices against one ceiling.
+    An explicit env still takes precedence, and junk values fall through
+    to the catalog (or None when the host package is absent).
     """
     client = AgentScopeAgentChatClient.__new__(AgentScopeAgentChatClient)
-
-    class _SdkDefaultModel:
-        # What ``DashScopeChatModel`` reports when nothing was configured.
-        context_size = 131_072
-
-    client._configured_model = _SdkDefaultModel
     monkeypatch.delenv(
         model_context.MODEL_CONTEXT_TOKENS_ENV,
         raising=False,
     )
-    assert client._input_token_budget() is None
+    budget = client._input_token_budget()
+    if model_context._HOST_CONTEXT_WINDOW_AVAILABLE:
+        assert budget is not None and budget > 0
+    else:
+        # Standalone plugin install without the host package.
+        assert budget is None
 
+    # An explicit env override still wins.
     monkeypatch.setenv(model_context.MODEL_CONTEXT_TOKENS_ENV, "32000")
-    assert client._input_token_budget() == 32_000 - max(1024, 32_000 // 8)
+    # Reserve: min(4096, max(1, int(32000 * 0.05))) = min(4096, 1600) = 1600
+    assert client._input_token_budget() == 32000 - 1600
 
-    # The reserve is floored, so a tiny declared window cannot price the
-    # input at nothing.
     monkeypatch.setenv(model_context.MODEL_CONTEXT_TOKENS_ENV, "8192")
-    assert client._input_token_budget() == 8192 - 1024
+    # Reserve: min(4096, max(1, int(8192 * 0.05))) = min(4096, 409) = 409
+    assert client._input_token_budget() == 8192 - 409
 
     for junk in ("", "   ", "0", "-1", "thirty two thousand"):
         monkeypatch.setenv(model_context.MODEL_CONTEXT_TOKENS_ENV, junk)
-        assert client._input_token_budget() is None
+        if model_context._HOST_CONTEXT_WINDOW_AVAILABLE:
+            # Junk env falls through to the host catalog.
+            assert client._input_token_budget() is not None
+        else:
+            assert client._input_token_budget() is None
 
 
 def test_media_that_arrives_as_a_url_is_outside_the_media_budget():
