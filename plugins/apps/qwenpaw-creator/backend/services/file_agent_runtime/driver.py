@@ -6074,6 +6074,12 @@ class FileCreatorAgentRuntime:
         there would otherwise leave a QUEUED/RUNNING_MODEL run with no owner at
         all: the worker was never spawned, and a DELETE that found the
         registration had already deferred the terminal outcome to it.
+
+        A DELETE's interrupt/stop can cancel the admission while it is inside
+        this cleanup.  Without ``uncancel`` + ``asyncio.shield`` the terminal
+        writes could be aborted, stranding the record in RUNNING_MODEL after
+        the registration is already discarded — the same pattern as
+        ``_settle_cancellation_shielded``.
         """
 
         if not self.services.projects.project_path(project_id).is_file():
@@ -6094,37 +6100,59 @@ class FileCreatorAgentRuntime:
             # outcome and event stay untouched.
             return
         summary = f"{type(error).__name__}: {error}"
-        try:
-            await asyncio.to_thread(
-                self.executions.transition_specialist_run,
-                project_id,
-                specialist_run_id,
-                expected_status=current.status,
-                status=SpecialistRunStatus.FAILED,
-                updates={
-                    "final_marker": "FAILED",
-                    "final_summary_text": summary,
-                },
-            )
-        except ExecutionStateConflict:
-            # Whoever moved it to a terminal state concurrently owns the
-            # outcome and the event.
-            return
-        try:
-            await self._event(
-                project_id,
-                session_id,
-                "subagent.failed",
-                parent_run_id,
-                request,
-                {**common, "error": summary},
-            )
-        except Exception:  # noqa: BLE001 - status already terminal
-            logger.exception(
-                "specialist admission failure event failed: project=%s run=%s",
-                project_id,
-                specialist_run_id,
-            )
+
+        async def _settle() -> None:
+            try:
+                await asyncio.to_thread(
+                    self.executions.transition_specialist_run,
+                    project_id,
+                    specialist_run_id,
+                    expected_status=current.status,
+                    status=SpecialistRunStatus.FAILED,
+                    updates={
+                        "final_marker": "FAILED",
+                        "final_summary_text": summary,
+                    },
+                )
+            except ExecutionStateConflict:
+                # Whoever moved it to a terminal state concurrently owns the
+                # outcome and the event.
+                return
+            try:
+                await self._event(
+                    project_id,
+                    session_id,
+                    "subagent.failed",
+                    parent_run_id,
+                    request,
+                    {**common, "error": summary},
+                )
+            except Exception:  # noqa: BLE001 - status already terminal
+                logger.exception(
+                    "specialist admission failure event failed: project=%s run=%s",
+                    project_id,
+                    specialist_run_id,
+                )
+
+        settle = asyncio.create_task(
+            _settle(),
+            name=("creator-specialist-failed:" f"{project_id}:{specialist_run_id}"),
+        )
+        self._specialist_cleanup_tasks.add(settle)
+        settle.add_done_callback(
+            self._specialist_cleanup_tasks.discard,
+        )
+        # Python 3.11+: catching CancelledError does not reset the
+        # cancellation flag — the next await (even inside asyncio.shield)
+        # immediately re-raises it.  Uncancel here so that shield can
+        # establish the connection and wait for the finalizer to complete.
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            current_task.uncancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            # Cancelled again: the shielded finalizer keeps going on
+            # its own, which is exactly the point.
+            await asyncio.shield(settle)
 
     async def _notify_specialist_terminal(
         self,
