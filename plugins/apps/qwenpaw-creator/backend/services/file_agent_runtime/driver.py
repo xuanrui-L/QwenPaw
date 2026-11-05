@@ -284,8 +284,11 @@ def _remove_live_operation_scratch(
         return
     cleanup_path = scratch_root / operation_run_id
     resolved_cleanup = cleanup_path.resolve(strict=False)
-    if resolved_cleanup == scratch_root or not resolved_cleanup.is_relative_to(
-        scratch_root,
+    if (
+        resolved_cleanup == scratch_root
+        or not resolved_cleanup.is_relative_to(
+            scratch_root,
+        )
     ):
         logger.error(
             "refusing live-operation cleanup outside scratch root: %s",
@@ -483,7 +486,9 @@ def _nested_tool_payload(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
 # argument JSON under 4KB; the advisory fires at 2x that guidance so the
 # diagnosis surfaces payloads that ignored the instruction.
 JQ_PROJECT_ARGUMENT_SIZE_GUIDANCE_BYTES = 4 * 1024
-JQ_PROJECT_LARGE_ARGUMENT_ADVISORY_BYTES = 2 * JQ_PROJECT_ARGUMENT_SIZE_GUIDANCE_BYTES
+JQ_PROJECT_LARGE_ARGUMENT_ADVISORY_BYTES = (
+    2 * JQ_PROJECT_ARGUMENT_SIZE_GUIDANCE_BYTES
+)
 TOOL_ARGUMENT_PROGRESS_BYTES = 1024
 MAX_PERSISTED_RAW_TOOL_ARGUMENT_BYTES = 256 * 1024
 
@@ -795,7 +800,11 @@ def _grounding_extension(path: Path, media_type: str) -> str:
     if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
         return suffix
     guessed = mimetypes.guess_extension(media_type)
-    return guessed if guessed in {".jpg", ".jpeg", ".png", ".webp", ".gif"} else ".img"
+    return (
+        guessed
+        if guessed in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+        else ".img"
+    )
 
 
 def _grounding_local_path(source: Mapping[str, Any]) -> Path | None:
@@ -838,7 +847,9 @@ def _object_grounding_version_ref(value: str) -> tuple[str, str] | None:
     identity = unquote(parsed.netloc)
     if "@" not in identity:
         expected_prefix = (
-            "asset-version-" if parsed.scheme == "asset" else "artifact-version-"
+            "asset-version-"
+            if parsed.scheme == "asset"
+            else "artifact-version-"
         )
         return (
             (parsed.scheme, identity)
@@ -925,7 +936,9 @@ def _object_grounding_tool_manifest() -> dict[str, Any]:
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 1000,
-                        "description": ("要检测的对象，例如 all cats、the red car、画面中的所有人。"),
+                        "description": (
+                            "要检测的对象，例如 all cats、the red car、画面中的所有人。"
+                        ),
                     },
                     "returnImage": {
                         "type": "boolean",
@@ -978,7 +991,8 @@ def _browser_use_tool_manifest() -> dict[str, Any]:
                         "type": "string",
                         "minLength": 1,
                         "description": (
-                            "模块级 async Python；`Browser` 与 `recorder` " "已在作用域内。"
+                            "模块级 async Python；`Browser` 与 `recorder` "
+                            "已在作用域内。"
                         ),
                     },
                 },
@@ -1024,7 +1038,8 @@ def _computer_use_tool_manifest() -> dict[str, Any]:
                         "type": "string",
                         "minLength": 1,
                         "description": (
-                            "模块级 async Python；`desktop` 与 `recorder` " "已在作用域内。"
+                            "模块级 async Python；`desktop` 与 `recorder` "
+                            "已在作用域内。"
                         ),
                     },
                 },
@@ -1231,7 +1246,8 @@ class MalformedJqProjectArguments(FileAgentRuntimeError):
             )
         if diagnosis.unexpected_top_level:
             details.append(
-                "unexpected top-level " + ", ".join(diagnosis.unexpected_top_level),
+                "unexpected top-level "
+                + ", ".join(diagnosis.unexpected_top_level),
             )
         if diagnosis.json_repair_applied:
             details.append(
@@ -1284,7 +1300,8 @@ class MalformedJqProjectArguments(FileAgentRuntimeError):
             )
         if self.repeated_payload:
             recovery = (
-                "The same malformed payload was repeated. Do not resend it. " + recovery
+                "The same malformed payload was repeated. Do not resend it. "
+                + recovery
             )
         return {
             "ok": False,
@@ -1360,7 +1377,8 @@ def _jq_project_argument_diagnosis(
         if key in arguments and not isinstance(arguments[key], Mapping):
             invalid.append(key)
     if isinstance(arguments.get("stringArgs"), Mapping) and any(
-        not isinstance(value, str) for value in arguments["stringArgs"].values()
+        not isinstance(value, str)
+        for value in arguments["stringArgs"].values()
     ):
         invalid.append("stringArgs")
     unexpected = tuple(sorted(set(arguments) - allowed))
@@ -1372,7 +1390,9 @@ def _jq_project_argument_diagnosis(
         separators=(",", ":"),
     ).encode("utf-8")
     program = arguments.get("program")
-    program_bytes = len(program.encode("utf-8")) if isinstance(program, str) else 0
+    program_bytes = (
+        len(program.encode("utf-8")) if isinstance(program, str) else 0
+    )
     json_args = arguments.get("jsonArgs")
     json_args_bytes = (
         len(
@@ -1576,7 +1596,9 @@ class FileCreatorAgentRuntime:
         injected_model_client = model_client is not None
         self.model_client = model_client or AgentScopeAgentChatClient()
         self.source_model_client = source_model_client or (
-            self.model_client if injected_model_client else AgentScopeVlmChatClient()
+            self.model_client
+            if injected_model_client
+            else AgentScopeVlmChatClient()
         )
         self.poll_interval_seconds = poll_interval_seconds
         self.max_model_turns = max_model_turns
@@ -2302,7 +2324,9 @@ class FileCreatorAgentRuntime:
                     status=SpecialistRunStatus.FAILED,
                     updates={
                         "final_marker": "FAILED",
-                        "final_summary_text": ("specialist run orphaned by restart"),
+                        "final_summary_text": (
+                            "specialist run orphaned by restart"
+                        ),
                     },
                 )
             except Exception:  # pylint: disable=broad-except
@@ -2558,7 +2582,8 @@ class FileCreatorAgentRuntime:
         if session.active_run_id is not None and handle is None:
             interrupted = any(
                 item.review_boundary is not None
-                and item.review_boundary.interrupted_run_id == session.active_run_id
+                and item.review_boundary.interrupted_run_id
+                == session.active_run_id
                 for item in user_messages
             )
             if interrupted:
@@ -3028,7 +3053,9 @@ class FileCreatorAgentRuntime:
                     session_id=session.session_id,
                     conversation_id=message.conversation_id,
                     intervention_run_id=run_id,
-                    interrupted_run_id=(context.review_boundary.interrupted_run_id),
+                    interrupted_run_id=(
+                        context.review_boundary.interrupted_run_id
+                    ),
                 )
             elif not needs_review:
                 # Unattended (YOLO) projects treat a succeeded mainline as a
@@ -3255,7 +3282,10 @@ class FileCreatorAgentRuntime:
                 intelligence = project.assets.intelligence_versions_by_id.get(
                     source.current_intelligence_version_id,
                 )
-                if intelligence and intelligence.source_asset_version_id == version_id:
+                if (
+                    intelligence
+                    and intelligence.source_asset_version_id == version_id
+                ):
                     continue
             else:
                 source_id = f"source:{uuid4().hex}"
@@ -3289,7 +3319,9 @@ class FileCreatorAgentRuntime:
                     project_id=project_id,
                     session_id=session_id,
                     parent_run_id=run_id,
-                    parent_action_id=(f"uploads-{request.message_seq}-{index}"),
+                    parent_action_id=(
+                        f"uploads-{request.message_seq}-{index}"
+                    ),
                     epoch=epoch,
                     request=request,
                     tools=tools,
@@ -3448,7 +3480,8 @@ class FileCreatorAgentRuntime:
                     break
                 if item.message_seq > revision_seq and (
                     item.review_boundary is not None
-                    or item.source in {"run_review_feedback", "render_review_feedback"}
+                    or item.source
+                    in {"run_review_feedback", "render_review_feedback"}
                 ):
                     break
                 if (
@@ -3490,13 +3523,15 @@ class FileCreatorAgentRuntime:
                     # Every incoming message reaches this loop separately.
                     # No batch_tail here: the following messages start their
                     # own delegations without merging independent requests.
-                    joined_activity = await self._start_attached_source_understanding(
-                        project_id=project_id,
-                        session_id=session_id,
-                        run_id=run_id,
-                        epoch=epoch,
-                        request=item,
-                        tools=tools,
+                    joined_activity = (
+                        await self._start_attached_source_understanding(
+                            project_id=project_id,
+                            session_id=session_id,
+                            run_id=run_id,
+                            epoch=epoch,
+                            request=item,
+                            tools=tools,
+                        )
                     )
                     if joined_activity:
                         messages.append(
@@ -3578,7 +3613,9 @@ class FileCreatorAgentRuntime:
                         "providerChunkCount": state.provider_chunk_count,
                         "complete": complete,
                         "stage": (
-                            "arguments_complete" if complete else "assembling_arguments"
+                            "arguments_complete"
+                            if complete
+                            else "assembling_arguments"
                         ),
                     },
                 )
@@ -3651,7 +3688,9 @@ class FileCreatorAgentRuntime:
                     project_id,
                 )
                 pending_ids = {review.review_id for review in pending}
-                review_ids = [item for item in review_ids if item in pending_ids]
+                review_ids = [
+                    item for item in review_ids if item in pending_ids
+                ]
             if not turn.tool_calls and review_ids:
                 canonical_summary = _agent_waiting_review_summary(
                     waiting_review_summary,
@@ -3774,7 +3813,8 @@ class FileCreatorAgentRuntime:
                         if not diagnosis.safe_to_execute:
                             malformed_jq_attempts = next_attempt
                             repeated_payload = (
-                                diagnosis.fingerprint in malformed_jq_fingerprints
+                                diagnosis.fingerprint
+                                in malformed_jq_fingerprints
                             )
                             malformed_jq_fingerprints.add(
                                 diagnosis.fingerprint,
@@ -3926,9 +3966,11 @@ class FileCreatorAgentRuntime:
                             exc.attempt > MAX_MALFORMED_JQ_PROJECT_RETRIES
                         )
                     else:
-                        failure_fingerprint = _deterministic_tool_failure_fingerprint(
-                            call,
-                            exc,
+                        failure_fingerprint = (
+                            _deterministic_tool_failure_fingerprint(
+                                call,
+                                exc,
+                            )
                         )
                         if failure_fingerprint is not None:
                             failure_count = (
@@ -4026,7 +4068,10 @@ class FileCreatorAgentRuntime:
                         "arguments; the run stopped instead of starting "
                         "another model turn",
                     )
-            if turn_number == effective_max_turns and not finalization_turn_added:
+            if (
+                turn_number == effective_max_turns
+                and not finalization_turn_added
+            ):
                 # A healthy last-budget tool result used to be followed by an
                 # immediate run failure, before the model could observe the
                 # result and conclude. Grant exactly one non-runaway recovery
@@ -4207,21 +4252,23 @@ class FileCreatorAgentRuntime:
                     and get_execution_authorization_mode()
                     != EXECUTION_AUTHORIZATION_ALLOW_ALL
                 ):
-                    authorization_id = await self._await_execution_authorization(
-                        project_id=project_id,
-                        session_id=session_id,
-                        parent_run_id=run_id,
-                        specialist_run_id=run_id,
-                        round_id=round_id,
-                        fence=fence,
-                        request=request,
-                        common=common,
-                        call_id=call_id,
-                        spec=plan.spec,
-                        arguments=approval_arguments,
-                        tools=tools,
-                        park_specialist_run=False,
-                        reopen_terminal=False,
+                    authorization_id = (
+                        await self._await_execution_authorization(
+                            project_id=project_id,
+                            session_id=session_id,
+                            parent_run_id=run_id,
+                            specialist_run_id=run_id,
+                            round_id=round_id,
+                            fence=fence,
+                            request=request,
+                            common=common,
+                            call_id=call_id,
+                            spec=plan.spec,
+                            arguments=approval_arguments,
+                            tools=tools,
+                            park_specialist_run=False,
+                            reopen_terminal=False,
+                        )
                     )
                     identity["executionAuthorizationId"] = authorization_id
                     authorization = await asyncio.to_thread(
@@ -4273,7 +4320,8 @@ class FileCreatorAgentRuntime:
                     (
                         task
                         for task in tasks
-                        if key in (task.idempotency_key, task.caused_by_request_id)
+                        if key
+                        in (task.idempotency_key, task.caused_by_request_id)
                     ),
                     None,
                 )
@@ -4357,14 +4405,18 @@ class FileCreatorAgentRuntime:
                         target_ref=current_node.target_ref,
                         arguments=dict(current_node.dispatch_arguments),
                         idempotency_key=key,
-                        expected_object_versions=(f"project:{fresh.etag}:work-graph",),
+                        expected_object_versions=(
+                            f"project:{fresh.etag}:work-graph",
+                        ),
                     )
                 else:
                     execution = self.work_scheduler.dispatch_node(
                         project_id,
                         current_node,
                         dispatch_fingerprint,
-                        expected_object_versions=(f"project:{fresh.etag}:work-graph",),
+                        expected_object_versions=(
+                            f"project:{fresh.etag}:work-graph",
+                        ),
                     )
                 from .manual_regeneration_hold import automatic_node
 
@@ -4373,10 +4425,12 @@ class FileCreatorAgentRuntime:
                     project_id,
                     current_node.node_id,
                 ):
-                    result = await self.work_scheduler.await_admitted_execution(
-                        project_id,
-                        current_node.node_id,
-                        execution,
+                    result = (
+                        await self.work_scheduler.await_admitted_execution(
+                            project_id,
+                            current_node.node_id,
+                            execution,
+                        )
                     )
                 task_id = getattr(result, "task_id", None)
                 if task_id is None and isinstance(result, Mapping):
@@ -4537,7 +4591,8 @@ class FileCreatorAgentRuntime:
         }
         if (
             spec.requires_execution_authorization
-            and get_execution_authorization_mode() != EXECUTION_AUTHORIZATION_ALLOW_ALL
+            and get_execution_authorization_mode()
+            != EXECUTION_AUTHORIZATION_ALLOW_ALL
         ):
             await self._await_execution_authorization(
                 project_id=project_id,
@@ -4909,7 +4964,9 @@ class FileCreatorAgentRuntime:
                 "output": outcome.output,
                 "capability": computer_use_status(),
                 "takes": [item.as_dict() for item in published["takes"]],
-                "screenshots": [item.as_dict() for item in published["screenshots"]],
+                "screenshots": [
+                    item.as_dict() for item in published["screenshots"]
+                ],
             }
             if outcome.result_repr:
                 response["result"] = outcome.result_repr
@@ -4977,9 +5034,13 @@ class FileCreatorAgentRuntime:
                 "status": "success",
                 "output": outcome.output,
                 "takes": [item.as_dict() for item in published["takes"]],
-                "screenshots": [item.as_dict() for item in published["screenshots"]],
+                "screenshots": [
+                    item.as_dict() for item in published["screenshots"]
+                ],
             }
-            observation_only = not response["takes"] and not response["screenshots"]
+            observation_only = (
+                not response["takes"] and not response["screenshots"]
+            )
             response["observationOnly"] = observation_only
             response["completionEligible"] = not observation_only
             if outcome.result_repr:
@@ -5178,7 +5239,9 @@ class FileCreatorAgentRuntime:
                 continue
             source["workspace_ref"] = entry["workspace_ref"]
             source["assetVersionRef"] = entry["workspace_ref"]
-            source["source_asset_version_id"] = entry["source_asset_version_id"]
+            source["source_asset_version_id"] = entry[
+                "source_asset_version_id"
+            ]
             source["logical_asset_id"] = entry["logical_asset_id"]
             source["indexed_file_id"] = entry["file_id"]
         context_lines = [
@@ -5290,7 +5353,8 @@ class FileCreatorAgentRuntime:
                     version_id=version_id,
                     logical_asset_id=logical_asset_id,
                     name=str(
-                        raw_source.get("title") or f"Grounding visual {index + 1}",
+                        raw_source.get("title")
+                        or f"Grounding visual {index + 1}",
                     )[:160],
                     file_id=file_id,
                     checksum=checksum,
@@ -5468,7 +5532,9 @@ class FileCreatorAgentRuntime:
             record.metadata.get("originSource") or "",
         )
         origin_message_id = str(
-            record.metadata.get("originMessageId") or record.caused_by_message_id or "",
+            record.metadata.get("originMessageId")
+            or record.caused_by_message_id
+            or "",
         )
         if not origin_source or not origin_message_id:
             return request.source, request.message_id
@@ -5520,7 +5586,8 @@ class FileCreatorAgentRuntime:
                 for record in prior_runs
                 if (
                     record.caused_by_message_id == origin_message_id
-                    or record.metadata.get("originMessageId") == origin_message_id
+                    or record.metadata.get("originMessageId")
+                    == origin_message_id
                 )
                 and (
                     record.status is SpecialistRunStatus.SUCCEEDED
@@ -5652,7 +5719,9 @@ class FileCreatorAgentRuntime:
         # otherwise find no handle and settle the run through the durable
         # CAS, after which admission would still go on spawning a worker
         # that pays the model for work nobody wants any more.
-        self._specialist_tasks.setdefault(project_id, {})[specialist_run_id] = handle
+        self._specialist_tasks.setdefault(project_id, {})[
+            specialist_run_id
+        ] = handle
         spawned = False
 
         async def _settle_revoked(*, announce: bool) -> dict[str, Any]:
@@ -6035,7 +6104,10 @@ class FileCreatorAgentRuntime:
                 request=request,
                 common=common,
             ),
-            name=(f"creator-specialist-cancelled:{project_id}:" f"{specialist_run_id}"),
+            name=(
+                f"creator-specialist-cancelled:{project_id}:"
+                f"{specialist_run_id}"
+            ),
         )
         self._specialist_cleanup_tasks.add(finalize)
         finalize.add_done_callback(
@@ -6136,7 +6208,10 @@ class FileCreatorAgentRuntime:
 
         settle = asyncio.create_task(
             _settle(),
-            name=("creator-specialist-failed:" f"{project_id}:{specialist_run_id}"),
+            name=(
+                "creator-specialist-failed:"
+                f"{project_id}:{specialist_run_id}"
+            ),
         )
         self._specialist_cleanup_tasks.add(settle)
         settle.add_done_callback(
@@ -6175,7 +6250,8 @@ class FileCreatorAgentRuntime:
             "WAITING_REVIEW": "[WAITING_REVIEW]",
         }.get(status, f"[{status}]")
         lines = [
-            f"Specialist 终态 {marker}：{role_name} 对 " f"{'、'.join(target_refs)} 的委派已结束。",
+            f"Specialist 终态 {marker}：{role_name} 对 "
+            f"{'、'.join(target_refs)} 的委派已结束。",
         ]
         if summary:
             lines.append(f"摘要：{summary}")
@@ -6275,12 +6351,16 @@ class FileCreatorAgentRuntime:
             include_project_readers = len(identity_facts) != len(
                 delegated.target_refs,
             ) or any(
-                fact["intelligenceMatchesSelectedVersion"] for fact in identity_facts
+                fact["intelligenceMatchesSelectedVersion"]
+                for fact in identity_facts
             )
             runtime_media_facts = []
             for part in native_media_parts:
                 video = part.get("video_url")
-                if isinstance(video, Mapping) and video.get("durationMs") is not None:
+                if (
+                    isinstance(video, Mapping)
+                    and video.get("durationMs") is not None
+                ):
                     runtime_media_facts.append(
                         {
                             "assetVersionId": video.get("versionId"),
@@ -6315,10 +6395,13 @@ class FileCreatorAgentRuntime:
                     "或要求直接开剪时不重复询问。"
                 )
             elif execution_mode == "delegated":
-                user_text += "委派模式：不要中途询问方向或确认，自主完成 edit_plan " "与剪辑，决策写进 edit_plan 即可。"
+                user_text += (
+                    "委派模式：不要中途询问方向或确认，自主完成 edit_plan " "与剪辑，决策写进 edit_plan 即可。"
+                )
             elif execution_mode == "fine_tuning":
                 user_text += (
-                    "微调模式：用户在迭代已交付成片。只确认本次改动范围，" "不重新提方向；修改波及的场景需重新 review_scene。"
+                    "微调模式：用户在迭代已交付成片。只确认本次改动范围，"
+                    "不重新提方向；修改波及的场景需重新 review_scene。"
                 )
             live_editing_context = await asyncio.to_thread(
                 _live_operation_editing_context,
@@ -6709,7 +6792,9 @@ class FileCreatorAgentRuntime:
                         "runId": specialist_run_id,
                         "role": role_name,
                         "status": (
-                            "WAITING_REVIEW" if waiting_for_review else status.value
+                            "WAITING_REVIEW"
+                            if waiting_for_review
+                            else status.value
                         ),
                         "waitingReview": waiting_for_review,
                         "summary": summary,
@@ -6783,7 +6868,8 @@ class FileCreatorAgentRuntime:
                         if not diagnosis.safe_to_execute:
                             malformed_jq_attempts = next_attempt
                             repeated_payload = (
-                                diagnosis.fingerprint in malformed_jq_fingerprints
+                                diagnosis.fingerprint
+                                in malformed_jq_fingerprints
                             )
                             malformed_jq_fingerprints.add(
                                 diagnosis.fingerprint,
@@ -6871,9 +6957,11 @@ class FileCreatorAgentRuntime:
                         )
                     else:
                         failed = True
-                        failure_fingerprint = _deterministic_tool_failure_fingerprint(
-                            call,
-                            exc,
+                        failure_fingerprint = (
+                            _deterministic_tool_failure_fingerprint(
+                                call,
+                                exc,
+                            )
                         )
                         if failure_fingerprint is not None:
                             failure_count = (
@@ -7002,7 +7090,9 @@ class FileCreatorAgentRuntime:
                         frame_content = [
                             {
                                 "type": "text",
-                                "text": ("视频帧图注入失败，请基于工具返回的" f"摘要继续或缩小窗口重试：{exc}"),
+                                "text": (
+                                    "视频帧图注入失败，请基于工具返回的" f"摘要继续或缩小窗口重试：{exc}"
+                                ),
                             },
                         ]
                     if frame_parts:
@@ -7281,13 +7371,16 @@ class FileCreatorAgentRuntime:
                 project_id=project_id,
                 target_ref=inner_target_ref,
                 arguments=(
-                    inner_arguments if isinstance(inner_arguments, Mapping) else {}
+                    inner_arguments
+                    if isinstance(inner_arguments, Mapping)
+                    else {}
                 ),
             )
         if (
             spec is not None
             and spec.requires_execution_authorization
-            and get_execution_authorization_mode() != EXECUTION_AUTHORIZATION_ALLOW_ALL
+            and get_execution_authorization_mode()
+            != EXECUTION_AUTHORIZATION_ALLOW_ALL
         ):
             authorization_id = await self._await_execution_authorization(
                 project_id=project_id,
@@ -7596,7 +7689,9 @@ class FileCreatorAgentRuntime:
                     {
                         **dict(common),
                         "authorizationId": authorization.authorization_id,
-                        "authorizationToken": (authorization.authorization_token),
+                        "authorizationToken": (
+                            authorization.authorization_token
+                        ),
                         "checkpointPhase": phase,
                         "operation": authorization.operation,
                         "summary": authorization.summary,
@@ -7629,7 +7724,10 @@ class FileCreatorAgentRuntime:
                     call_id,
                     authorization.status.value,
                 )
-            if authorization.status is not ExecutionAuthorizationStatus.APPROVED:
+            if (
+                authorization.status
+                is not ExecutionAuthorizationStatus.APPROVED
+            ):
                 raise CreationCheckpointBlocked(phase, authorization.status)
             if phase == "script":
                 latest = await asyncio.to_thread(
@@ -7806,7 +7904,9 @@ class FileCreatorAgentRuntime:
                         self.executions.transition_specialist_run,
                         project_id,
                         specialist_run_id,
-                        expected_status=(SpecialistRunStatus.WAITING_AUTHORIZATION),
+                        expected_status=(
+                            SpecialistRunStatus.WAITING_AUTHORIZATION
+                        ),
                         status=SpecialistRunStatus.RUNNING_MODEL,
                     )
         await self._event(
@@ -7965,8 +8065,10 @@ class FileCreatorAgentRuntime:
             ):
                 renewed_by_user = (
                     request.source in {"user", "review_rejection_feedback"}
-                    and request.message_seq > (record.caused_by_message_seq or 0)
-                    and request.created_at > (record.decided_at or record.created_at)
+                    and request.message_seq
+                    > (record.caused_by_message_seq or 0)
+                    and request.created_at
+                    > (record.decided_at or record.created_at)
                 )
                 if not reopen_terminal and not renewed_by_user:
                     raise ExecutionAuthorizationBlocked(record)
@@ -7974,7 +8076,10 @@ class FileCreatorAgentRuntime:
                 continue
             existing = record
             saved = (record.decision or {}).get("savedPrompt")
-            if record.status is ExecutionAuthorizationStatus.APPROVED and saved:
+            if (
+                record.status is ExecutionAuthorizationStatus.APPROVED
+                and saved
+            ):
                 from services.project_files.approved_prompt import (
                     saved_prompt_is_current,
                 )
@@ -8408,7 +8513,10 @@ class FileCreatorAgentRuntime:
             # Goal instead. CANCELLED/FAILED goals stay reusable — an
             # AgentDock interrupt deliberately resumes its cancelled
             # mainline under the same Goal identity.
-            if goal is not None and goal.status is not CreatorGoalStatus.COMPLETED:
+            if (
+                goal is not None
+                and goal.status is not CreatorGoalStatus.COMPLETED
+            ):
                 return goal, False
         created = await asyncio.to_thread(
             self.sessions.create_goal,
@@ -8469,7 +8577,8 @@ class FileCreatorAgentRuntime:
         )
         pause_key = f"{conversation_id}:{anchor}:{reason}"
         if any(
-            item.metadata.get("executionPauseKey") == pause_key for item in messages
+            item.metadata.get("executionPauseKey") == pause_key
+            for item in messages
         ):
             return
         text = "自动创作已暂停，作品尚未完成。\n\n" + explanation
@@ -8580,7 +8689,8 @@ class FileCreatorAgentRuntime:
         prompt_required = tuple(
             node
             for node in model_required
-            if node.kind in {"visual", "storyboard", "video"} and node.authored_text_gap
+            if node.kind in {"visual", "storyboard", "video"}
+            and node.authored_text_gap
         )
         if not auto_approve and not prompt_required:
             return
@@ -8676,7 +8786,9 @@ class FileCreatorAgentRuntime:
                 previous = item.metadata.get("completionCheckpoint")
                 if isinstance(previous, dict) and previous.get("version") == 1:
                     ids = previous.get("completedNodeIds")
-                    if isinstance(ids, list) and all(isinstance(i, str) for i in ids):
+                    if isinstance(ids, list) and all(
+                        isinstance(i, str) for i in ids
+                    ):
                         completed_before.update(ids)
                 continue
             if item.source in {
@@ -8700,7 +8812,9 @@ class FileCreatorAgentRuntime:
             and previous["unproductiveResumes"] >= 0
         )
         completed_now = {
-            node.node_id for node in graph.nodes if node.status is WorkNodeStatus.DONE
+            node.node_id
+            for node in graph.nodes
+            if node.status is WorkNodeStatus.DONE
         }
         actionable_fingerprint = hashlib.sha256(
             json.dumps(
@@ -8736,7 +8850,8 @@ class FileCreatorAgentRuntime:
         elif last_resume is not None:
             # Legacy resumes have no DONE evidence; retain their persisted fuse.
             no_progress = (
-                last_resume.metadata.get("projectGeneration") == snapshot.generation
+                last_resume.metadata.get("projectGeneration")
+                == snapshot.generation
             )
         checkpoint = {
             "version": 1,
@@ -8793,7 +8908,9 @@ class FileCreatorAgentRuntime:
                     + "\n请针对上述环节修复结构、补全 prompt 或调整参数；不要重复已完成的工作。"
                 )
             else:
-                opening = "上一回合因瞬态故障中止（如模型空响应或传输抖动）" if after_failure else "主线回合已结束"
+                opening = (
+                    "上一回合因瞬态故障中止（如模型空响应或传输抖动）" if after_failure else "主线回合已结束"
+                )
                 text = (
                     f"【系统自动消息 · Prompt 合同修复】{opening}，但调度器"
                     "发现以下非空/台词合同缺口，因此没有提交任何对应的付费媒体任务：\n"
@@ -8826,8 +8943,14 @@ class FileCreatorAgentRuntime:
                 "resumeAfterRunId": run_id,
                 "projectGeneration": snapshot.generation,
                 "unfinishedElements": unfinished,
-                "modelRequiredNodes": [node.node_id for node in feedback_nodes[:12]],
-                **({"completionCheckpoint": checkpoint} if auto_approve else {}),
+                "modelRequiredNodes": [
+                    node.node_id for node in feedback_nodes[:12]
+                ],
+                **(
+                    {"completionCheckpoint": checkpoint}
+                    if auto_approve
+                    else {}
+                ),
             },
         )
         await self.notifications.settle_resume(
@@ -8837,7 +8960,11 @@ class FileCreatorAgentRuntime:
         await self._event(
             project_id,
             session_id,
-            ("agent.yolo.resumed" if auto_approve else "agent.prompt_contract.resumed"),
+            (
+                "agent.yolo.resumed"
+                if auto_approve
+                else "agent.prompt_contract.resumed"
+            ),
             run_id,
             appended.message,
             {
@@ -8976,7 +9103,9 @@ class FileCreatorAgentRuntime:
             None,
         )
         mainline_goal = (
-            _message_text(mainline_request) if mainline_request is not None else ""
+            _message_text(mainline_request)
+            if mainline_request is not None
+            else ""
         )
         # Never assert that the intervention is resolved: when the branch
         # run ended by asking the user a question, claiming “已处理完成”
@@ -9141,7 +9270,9 @@ class FileCreatorAgentRuntime:
     ) -> None:
         handle = self._active.get(project_id)
         superseded = bool(
-            handle is not None and handle.run_id == run_id and handle.superseded,
+            handle is not None
+            and handle.run_id == run_id
+            and handle.superseded,
         )
         try:
             await asyncio.to_thread(
@@ -9162,7 +9293,9 @@ class FileCreatorAgentRuntime:
                         "code": (
                             "SUPERSEDED"
                             if superseded
-                            else ("SHUTDOWN" if self._stopping else "INTERRUPTED")
+                            else (
+                                "SHUTDOWN" if self._stopping else "INTERRUPTED"
+                            )
                         ),
                         "message": (
                             "Run superseded by an AgentDock request"
@@ -9447,7 +9580,8 @@ class FileCreatorAgentRuntime:
             except LockTimeoutError as exc:
                 if attempt == attempts:
                     logger.error(
-                        "terminal persistence gave up (%s) after %d " "attempts: %s",
+                        "terminal persistence gave up (%s) after %d "
+                        "attempts: %s",
                         description,
                         attempts,
                         exc,
@@ -9628,7 +9762,8 @@ class FileCreatorAgentRuntime:
                 if attempt == attempts:
                     raise
                 logger.warning(
-                    "session append lock contention (attempt %d/%d) " "(%s); retrying",
+                    "session append lock contention (attempt %d/%d) "
+                    "(%s); retrying",
                     attempt,
                     attempts,
                     description,
@@ -9742,7 +9877,9 @@ def _artifact_selection_note(
         )
     version = project.assets.artifact_versions_by_id.get(version_id)
     indexed = (
-        project.assets.files_by_id.get(version.file_id) if version is not None else None
+        project.assets.files_by_id.get(version.file_id)
+        if version is not None
+        else None
     )
     if indexed is None:
         return None
@@ -9843,7 +9980,9 @@ def _message_text(
             )
     refs = message.metadata.get("assetVersionRefs")
     if isinstance(refs, list):
-        exact_refs = [str(value).strip() for value in refs if str(value).strip()]
+        exact_refs = [
+            str(value).strip() for value in refs if str(value).strip()
+        ]
         if exact_refs:
             chunks.append(
                 "本轮已入库素材（本轮消息附件的 exact AssetVersion refs，"
@@ -10039,7 +10178,9 @@ def _elide_stale_snapshots(
 ) -> dict[int, str]:
     """Map message seq to a receipt for each superseded snapshot."""
 
-    snapshots: list[tuple[CreatorMessageRecord, _ProjectSnapshotEnvelope, str]] = []
+    snapshots: list[
+        tuple[CreatorMessageRecord, _ProjectSnapshotEnvelope, str]
+    ] = []
     for item in prior_context:
         if item.role != "tool" or item.source != _SNAPSHOT_SOURCE:
             continue
@@ -10259,7 +10400,8 @@ def _require_source_intelligence_associations(
         )
         if (
             intelligence is None
-            or intelligence.source_asset_version_id != source.selected_asset_version_id
+            or intelligence.source_asset_version_id
+            != source.selected_asset_version_id
         ):
             raise FileAgentRuntimeError(
                 "Source Intelligence selection does not match the current Source version "
@@ -10705,7 +10847,11 @@ def _authorization_summary(
             # video_edit follows its input video, so name the source of the
             # number the price is computed from.
             parts.append(
-                (f"{duration}秒（按输入视频计费）" if mode == "video_edit" else f"{duration}秒"),
+                (
+                    f"{duration}秒（按输入视频计费）"
+                    if mode == "video_edit"
+                    else f"{duration}秒"
+                ),
             )
         resolution = tool_arguments.get("resolution")
         if resolution:
