@@ -55,6 +55,32 @@ def _endpoint(base_url: str, suffix: str) -> str:
 
 _FUN_ASR_TRANSCRIPTION_SUFFIX = "services/audio/asr/transcription"
 
+
+def asr_route(model_name: str, provider: str) -> str:
+    """The transport :func:`transcribe` uses for one configured model.
+
+    Single source of truth, shared with the connection probe in
+    :mod:`api.model_routes` so a test can never green-light a route
+    production does not call. ``provider`` only selects whisper; every
+    other decision is the model name's, exactly as in ``transcribe``.
+    """
+    if (provider or "").casefold() == "whisper":
+        return "whisper"
+    if _is_qwen_multimodal_asr(model_name or ""):
+        return "qwen3-asr"
+    return "fun-asr"
+
+
+def is_qwen_audio_asr_model(model_name: str) -> bool:
+    """True for the Token Plan ASR family (``qwen-audio-3.0-asr-flash``).
+
+    It speaks the same multimodal-generation endpoint as qwen3-asr but
+    rejects ``result_format=message`` (400), answers ``output.text`` and
+    takes ``format``/``sample_rate`` instead.
+    """
+    return (model_name or "").casefold().startswith("qwen-audio")
+
+
 # Provider verdicts meaning "the audio simply contains no speech"; they
 # arrive as task/subtask failure codes but describe the footage, not an
 # infrastructure fault.
@@ -196,6 +222,21 @@ async def _upload_asr_reference(
     model proxy answers 401 to the policy API that mints one and needs its
     own upload route instead.
     """
+    # A Token Plan key has no local-audio channel at all, each alternative
+    # measured: the public dashscope upload API answers it 401, the plan host
+    # serves no /api/v1/uploads (404), and the plan's multimodal-generation
+    # ASR answers a Base64 data URL with an empty 400 while transcribing the
+    # same clip fine from a public HTTP(S) URL (200). Refuse with guidance
+    # instead of letting the shared decision point pick a transport the
+    # gateway rejects; public URLs pass through ``_fun_asr_file_url``.
+    if config.is_token_plan_endpoint(config.get_asr_base_url()):
+        raise ValueError(
+            "Token Plan 语音识别端点没有本地音频通道：实测其 ASR 接口接受"
+            "公网音频 URL（200）但拒绝 Base64 内联（400），且套餐没有上传"
+            "路由（公网 dashscope 上传对 sk-sp- 返回 401，plan 主机无 "
+            "/api/v1/uploads）。请把音频放到公网 HTTP(S) URL，或把 ASR 模"
+            "型切到百炼直连端点后再用本地音频。",
+        )
     return await upload_reference_file_for_provider(
         path,
         api_key=api_key,
@@ -917,10 +958,19 @@ async def _qwen3_transcribe_url(
     model: str,
     file_url: str,
 ) -> list[str]:
-    parameters: dict[str, Any] = {"result_format": "message"}
-    language = config.get_asr_language().strip()
-    if language:
-        parameters["asr_options"] = {"language": language}
+    if is_qwen_audio_asr_model(model):
+        # qwen-audio-3.0-asr-flash (Token Plan) rejects
+        # result_format=message with a 400 and answers output.text;
+        # it takes format/sample_rate instead.
+        parameters: dict[str, Any] = {
+            "format": "wav",
+            "sample_rate": "16000",
+        }
+    else:
+        parameters = {"result_format": "message"}
+        language = config.get_asr_language().strip()
+        if language:
+            parameters["asr_options"] = {"language": language}
     payload = {
         "model": model,
         "input": {

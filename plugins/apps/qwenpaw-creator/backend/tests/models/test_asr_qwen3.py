@@ -37,10 +37,6 @@ def _bind_qwen3(monkeypatch, *, language: str = "") -> None:
         "get_asr_base_url",
         lambda: "https://asr.example/api/v1/services/audio/asr/transcription",
     )
-    # Pinned: the protocol decides both the endpoint prefix and whether a
-    # local chunk is uploaded as oss:// or through a provider media route,
-    # so a developer's persisted config must not be able to move these.
-    monkeypatch.setattr(config, "get_asr_protocol", lambda: "")
 
 
 def _bind_single_chunk(
@@ -58,8 +54,8 @@ def _bind_single_chunk(
         lambda _s: duration_ms,
     )
 
-    async def fake_file_url(_media_url, key, model):
-        assert (key, model) == ("asr-key", "qwen3-asr-flash")
+    async def fake_file_url(_media_url, _key, _model):
+        assert (_key, _model) == ("asr-key", "qwen3-asr-flash")
         return "oss://dashscope-instant/audio.mp3"
 
     monkeypatch.setattr(asr_model, "_fun_asr_file_url", fake_file_url)
@@ -101,6 +97,76 @@ def test_transcribe_dispatches_qwen3_models_to_new_branch(monkeypatch) -> None:
     result = asyncio.run(asr_model.transcribe("https://cdn.test/a.mp3"))
     assert observed["url"] == "https://cdn.test/a.mp3"
     assert result.model == "qwen3-asr-flash"
+
+
+def test_transcribe_dispatches_qwen_audio_to_multimodal(monkeypatch) -> None:
+    """Token Plan's qwen-audio-3.0-asr-flash routes to the multimodal branch,
+    not the fun-asr transcription/file_urls path."""
+    monkeypatch.setattr(config, "get_asr_provider", lambda: "fun-asr")
+    monkeypatch.setattr(
+        config,
+        "get_asr_model_name",
+        lambda: "qwen-audio-3.0-asr-flash",
+    )
+    observed = {}
+
+    async def fake_qwen3(media_url: str) -> ASRResult:
+        observed["url"] = media_url
+        return ASRResult("fun-asr", "qwen-audio-3.0-asr-flash", ())
+
+    monkeypatch.setattr(asr_model, "_qwen3_asr", fake_qwen3)
+    asyncio.run(asr_model.transcribe("https://cdn.test/a.mp3"))
+    assert observed["url"] == "https://cdn.test/a.mp3"
+
+
+@respx.mock
+def test_qwen_audio_asr_uses_format_params_and_text_output(
+    monkeypatch,
+) -> None:
+    """qwen-audio-3.0-asr-flash rejects result_format=message (400), so it
+    posts format/sample_rate and reads the cumulative output.text."""
+    monkeypatch.setattr(config, "get_asr_api_key", lambda: "asr-key")
+    monkeypatch.setattr(
+        config,
+        "get_asr_model_name",
+        lambda: "qwen-audio-3.0-asr-flash",
+    )
+    monkeypatch.setattr(config, "get_asr_provider", lambda: "fun-asr")
+    monkeypatch.setattr(config, "get_asr_language", lambda: "")
+    monkeypatch.setattr(config, "get_asr_timeout_seconds", lambda: 30)
+    monkeypatch.setattr(
+        config,
+        "get_asr_base_url",
+        lambda: "https://asr.example/api/v1/services/audio/asr/transcription",
+    )
+    monkeypatch.setattr(asr_model, "_probe_duration_ms", lambda _s: 10_000)
+
+    async def fake_file_url(_media_url, _key, _model):
+        return "https://cdn.test/a.mp3"
+
+    monkeypatch.setattr(asr_model, "_fun_asr_file_url", fake_file_url)
+    route = respx.post(ENDPOINT).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output": {
+                    "text": "你好世界",
+                    "sentence": {
+                        "text": "你好世界",
+                        "begin_time": 0,
+                        "end_time": 1000,
+                    },
+                },
+                "request_id": "req-1",
+            },
+        ),
+    )
+    result = asyncio.run(asr_model._qwen3_asr("https://cdn.test/a.mp3"))
+    assert result.model == "qwen-audio-3.0-asr-flash"
+    assert [seg.text for seg in result.segments] == ["你好世界"]
+    body = json.loads(route.calls.last.request.content)
+    assert body["model"] == "qwen-audio-3.0-asr-flash"
+    assert body["parameters"] == {"format": "wav", "sample_rate": "16000"}
 
 
 @respx.mock
@@ -161,12 +227,16 @@ def test_qwen3_chunking_applies_cumulative_offsets(
         lambda *_args: chunks,
     )
 
-    async def fake_upload(path, *, api_key, model_name, media_type, **kwargs):
+    async def fake_upload(
+        path,
+        *,
+        api_key,
+        model_name,
+        media_type,
+        **_provider,
+    ):
         assert (api_key, model_name) == ("asr-key", "qwen3-asr-flash")
         assert media_type == "audio/mpeg"
-        # A Bailian base keeps the model-bound temporary upload: oss:// is
-        # only resolvable there, and the header that resolves it is sent.
-        assert kwargs["protocol"] == ""
         return f"oss://dashscope-instant/{path.name}"
 
     monkeypatch.setattr(
@@ -450,3 +520,40 @@ def test_whisper_posts_extracted_audio_and_normalizes_chunk_offsets(
         }
         for item in requests
     )
+
+
+def test_asr_upload_token_plan_refuses_local_audio(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A Token Plan key has no channel for local audio, each alternative
+    measured: public dashscope uploads answer sk-sp- 401, the plan host
+    serves no /api/v1/uploads, and the plan's multimodal-generation ASR
+    answers a Base64 data URL with an empty 400 while transcribing the same
+    clip from a public HTTP(S) URL (200). Refuse with guidance instead of
+    letting the shared transport decision pick one the gateway rejects."""
+    clip = tmp_path / "audio.wav"
+    clip.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+    monkeypatch.setattr(
+        config,
+        "get_asr_base_url",
+        lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
+    )
+
+    async def refuse_upload(*args, **kwargs):
+        raise AssertionError("Token Plan audio reached a upload transport")
+
+    monkeypatch.setattr(
+        asr_model,
+        "upload_reference_file_for_provider",
+        refuse_upload,
+    )
+    with pytest.raises(ValueError, match="公网"):
+        asyncio.run(
+            asr_model._upload_asr_reference(
+                clip,
+                api_key="sk-sp-test",
+                model="qwen-audio-3.0-asr-flash",
+                media_type="audio/wav",
+            ),
+        )
