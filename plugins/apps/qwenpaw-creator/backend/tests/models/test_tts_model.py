@@ -522,3 +522,35 @@ def test_deletion_is_routed_by_the_bound_model(
         assert payload["input"]["action"] == "delete_voice"
     else:
         assert payload["input"]["action"] == "delete"
+
+
+def test_websocket_synthesis_follows_token_plan_endpoint(monkeypatch) -> None:
+    """Token Plan keys are rejected by the public dashscope websocket host
+    (measured 401), so _synthesize_over_websocket must repoint the SDK at the
+    plan's own websocket endpoint when the configured base is Token Plan."""
+    import dashscope
+    from dashscope.audio import tts_v2
+    from utils.exceptions import ModelError
+
+    monkeypatch.setattr(tts_v2, "SpeechSynthesizer", _FakeSynthesizerBase)
+    monkeypatch.setattr(tts_model.config, "get_tts_timeout_seconds", lambda: 0)
+    monkeypatch.setattr(
+        tts_model.config,
+        "get_tts_base_url",
+        lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
+    )
+    monkeypatch.setattr(
+        dashscope,
+        "base_websocket_api_url",
+        "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+    )
+    with pytest.raises(ModelError):
+        tts_model._synthesize_over_websocket(
+            model="qwen-audio-3.0-tts-plus",
+            voice="longanhuan_v3.6",
+            text="\u4f60\u597d",
+            api_key="sk-sp-test",
+        )
+    assert dashscope.base_websocket_api_url == (
+        "wss://token-plan.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
+    )

@@ -227,6 +227,7 @@ def _synthesize_over_websocket(
     text: str,
     api_key: str,
     speech_rate: float = 1.0,
+    base_url: str | None = None,
 ) -> tuple[bytes, str]:
     """Stream one utterance from the CosyVoice family over WebSocket.
 
@@ -268,6 +269,19 @@ def _synthesize_over_websocket(
             pass
 
     dashscope.api_key = api_key
+    # The SDK defaults to the public dashscope websocket host, which rejects a
+    # Token Plan sk-sp- key (measured 401). When the configured base is Token
+    # Plan, point the SDK at the plan's own websocket endpoint so the plan's
+    # Qwen-Audio and CosyVoice voices reach the right gateway.
+    tts_base = base_url or config.get_tts_base_url()
+    if config.is_token_plan_endpoint(tts_base):
+        host = urlparse(
+            tts_base if "://" in tts_base else f"//{tts_base}",
+        ).hostname
+        if host:
+            dashscope.base_websocket_api_url = (
+                f"wss://{host}/api-ws/v1/inference"
+            )
     synthesizer = SpeechSynthesizer(
         model=model,
         voice=voice,
