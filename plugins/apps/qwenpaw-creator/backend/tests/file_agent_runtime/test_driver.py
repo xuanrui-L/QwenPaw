@@ -1454,7 +1454,6 @@ def test_a_proven_unfittable_input_is_not_resumed_automatically(
     assert [run.status.value for run in runs] == ["FAILED"]
 
 
-
 def test_initial_creation_runs_auto_fix_tool_loop_without_review(
     tmp_path,
     monkeypatch,
