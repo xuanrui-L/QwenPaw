@@ -220,6 +220,35 @@ def _websocket_handshake_status(
     return status, retryable
 
 
+def _websocket_endpoint(base_url: str | None) -> str:
+    """The websocket endpoint this one synthesis call should use.
+
+    ``dashscope.base_websocket_api_url`` is process-global and the SDK reads it
+    when a ``SpeechSynthesizer`` is constructed, so writing it for a Token Plan
+    call would leave every later synthesis pointed at that host: a failed,
+    never-saved ``/models/test`` probe is enough, and the next Bailian call
+    would then hand its saved key and script to the probe endpoint. Binding the
+    URL per instance keeps the choice local to this call, which is what the
+    SDK's own ``url`` parameter is for.
+
+    Token Plan rejects the public dashscope websocket host outright (measured
+    401 for an ``sk-sp-`` key) and serves ``/api-ws/v1/inference`` on its own
+    host; every other configured base keeps the SDK default.
+    """
+    # Lazy import, matching the synthesis call below: the SDK is only needed
+    # once a websocket voice is actually being driven.
+    import dashscope
+
+    default = dashscope.base_websocket_api_url
+    tts_base = base_url or config.get_tts_base_url()
+    if not config.is_token_plan_endpoint(tts_base):
+        return default
+    host = urlparse(
+        tts_base if "://" in tts_base else f"//{tts_base}",
+    ).hostname
+    return f"wss://{host}/api-ws/v1/inference" if host else default
+
+
 def _synthesize_over_websocket(
     *,
     model: str,
@@ -269,25 +298,13 @@ def _synthesize_over_websocket(
             pass
 
     dashscope.api_key = api_key
-    # The SDK defaults to the public dashscope websocket host, which rejects a
-    # Token Plan sk-sp- key (measured 401). When the configured base is Token
-    # Plan, point the SDK at the plan's own websocket endpoint so the plan's
-    # Qwen-Audio and CosyVoice voices reach the right gateway.
-    tts_base = base_url or config.get_tts_base_url()
-    if config.is_token_plan_endpoint(tts_base):
-        host = urlparse(
-            tts_base if "://" in tts_base else f"//{tts_base}",
-        ).hostname
-        if host:
-            dashscope.base_websocket_api_url = (
-                f"wss://{host}/api-ws/v1/inference"
-            )
     synthesizer = SpeechSynthesizer(
         model=model,
         voice=voice,
         format=AudioFormat.MP3_24000HZ_MONO_256KBPS,
         speech_rate=speech_rate,
         callback=_Collector(),
+        url=_websocket_endpoint(base_url),
     )
     try:
         synthesizer.streaming_call(text)
