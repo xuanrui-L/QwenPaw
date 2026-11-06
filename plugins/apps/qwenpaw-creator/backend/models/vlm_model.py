@@ -188,18 +188,28 @@ def _inline_payload(path: Path, fallback_mime: str) -> tuple[str, bytes]:
     """Return ``(mime, bytes)`` for *path*, downscaled to fit the budget."""
     max_bytes = model_config.get_vlm_max_inline_bytes()
     size = path.stat().st_size
+    mime = _mime_for_path(path, fallback_mime)
     if size <= max_bytes:
-        return _mime_for_path(path, fallback_mime), path.read_bytes()
+        return mime, path.read_bytes()
+    over_budget = ModelError(
+        f"VLM local media inline size limit exceeded: {path.name} is "
+        f"{size} bytes, limit is {max_bytes}. A non-DashScope provider "
+        "inlines media as Base64 and cannot fetch a DashScope OSS URL; "
+        "raise VLM_MAX_INLINE_BYTES, shorten or downscale the source, "
+        "or point the VLM at a DashScope endpoint.",
+        model_name=model_config.get_vlm_model_name(),
+    )
+    # Only an image can come back smaller from the ladder, and finding that
+    # out costs reading the whole file. Refuse a non-image on its declared
+    # type alone: an oversized clip would otherwise be pulled into RAM in
+    # full just to produce this same error, defeating the budget it is
+    # supposed to enforce. ``Image.open()`` used to give this refusal for
+    # free by failing on the header before the payload was read.
+    if not mime.startswith("image/"):
+        raise over_budget
     downscaled = _downscale_image_to_budget(path, max_bytes)
     if downscaled is None:
-        raise ModelError(
-            f"VLM local media inline size limit exceeded: {path.name} is "
-            f"{size} bytes, limit is {max_bytes}. A non-DashScope provider "
-            "inlines media as Base64 and cannot fetch a DashScope OSS URL; "
-            "raise VLM_MAX_INLINE_BYTES, shorten or downscale the source, "
-            "or point the VLM at a DashScope endpoint.",
-            model_name=model_config.get_vlm_model_name(),
-        )
+        raise over_budget
     logger.info(
         "inlined %s as a downscaled JPEG: %d bytes exceeds the %d-byte VLM "
         "inline budget, re-encoded to %d bytes",
