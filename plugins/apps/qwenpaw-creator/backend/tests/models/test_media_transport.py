@@ -1046,3 +1046,53 @@ def test_unguarded_production_upload_still_resolves_on_its_own(
     assert "Host" not in observed["kwargs"]["headers"]
     # One client per upload, with redirects left on for the proxy's own path.
     assert observed["client_kwargs"]["follow_redirects"] is True
+
+
+def test_oversized_local_video_is_refused_before_its_bytes_are_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """An over-budget non-image is refused on its declared type alone.
+
+    Only an image can come back smaller from the downscaling ladder, and
+    finding that out costs reading the whole file: measured against the merge
+    base, a 128MiB clip peaked at ~134MB of Python allocations before raising
+    the very same refusal, which defeats the budget that exists to bound
+    inline memory. ``read_bytes`` is patched to record every call, so this
+    fails again the moment the payload is pulled in first.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    from utils.exceptions import ModelError
+
+    video = tmp_path / "clip.mp4"
+    video.touch()
+    os.truncate(video, 64 * 1024 * 1024)  # sparse: size without the bytes
+    monkeypatch.setattr(
+        vlm_model.model_config,
+        "get_vlm_max_inline_bytes",
+        lambda: 1024,
+    )
+    reads: list[str] = []
+    real_read_bytes = _Path.read_bytes
+
+    def record_read(self, *args, **kwargs):
+        reads.append(self.name)
+        return real_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(_Path, "read_bytes", record_read)
+
+    with pytest.raises(ModelError, match="inline size limit exceeded"):
+        asyncio.run(
+            vlm_model.transport_local_media_url(
+                video,
+                api_key="vlm-key",
+                model_name="qwen-vl-max",
+                media_type="video/mp4",
+                base_url="https://openai-compatible.example/v1",
+                protocol="\u81ea\u5b9a\u4e49",
+            ),
+        )
+
+    assert not reads

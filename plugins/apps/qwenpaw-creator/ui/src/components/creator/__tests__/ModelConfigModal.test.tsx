@@ -792,3 +792,38 @@ describe("ModelConfigModal OpenCode support", () => {
     ).toBeUndefined();
   });
 });
+
+describe("ttsModelChoices on Token Plan", () => {
+  const models = [
+    "qwen-audio-3.0-tts-plus",
+    "qwen-audio-3.0-tts-flash",
+    "cosyvoice-v3.5-plus",
+  ].map((model) => ({
+    model,
+    label: model,
+    family: "cosyvoice",
+    transport: "websocket",
+    systemVoices: ["longanlingxin"],
+    supportsDesign: true,
+    providers: ["bailian", "gateway"],
+  })) as unknown as TtsModelCapability[];
+
+  it("narrows Token Plan to the plan's documented synthesis model", () => {
+    // The plan's model table lists exactly one speech-synthesis model; the
+    // others here are Bailian-direct models the plan gateway answers
+    // "Model not exist" for.
+    expect(
+      ttsModelChoices("Aliyun Token Plan", models).map((o) => o.model),
+    ).toEqual(["qwen-audio-3.0-tts-plus"]);
+  });
+
+  it("keeps the capability table where the protocol has no roster", () => {
+    expect(
+      ttsModelChoices("DashScope（百炼）", models).map((o) => o.model),
+    ).toEqual([
+      "qwen-audio-3.0-tts-plus",
+      "qwen-audio-3.0-tts-flash",
+      "cosyvoice-v3.5-plus",
+    ]);
+  });
+});
