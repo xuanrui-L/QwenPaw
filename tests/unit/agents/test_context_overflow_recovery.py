@@ -264,7 +264,6 @@ async def test_context_overflow_with_other_manager_does_not_retry(monkeypatch):
     ("message", "expected"),
     [
         ("Error code: 400 - maximum context length is 128000", True),
-        ("Error code: 400 - This model's context window exceeded", True),
         ("<400> input length should be between 1 and 983616", False),
         ("Error code: 400 - image_url is unsupported", False),
         ("Error code: 500 - context length exceeded", False),

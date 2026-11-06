@@ -2608,25 +2608,156 @@ def test_a_server_side_failure_is_not_read_as_a_too_long_refusal(message):
     reason="the platform package is optional for standalone plugin installs",
 )
 def test_overflow_recovery_is_the_platform_function():
-    """The boundary is imported, not reimplemented.
+    """The retry boundary is imported, not reimplemented.
 
-    A second overflow boundary in the plugin is a second place where "one
-    retry" and "never replay output" can disagree with the platform.
+    A second recovery boundary in the plugin would be a second place where
+    "one retry" and "never replay output" can disagree with the platform.
+    Only ``call_with_overflow_recovery`` is delegated; the marker list and
+    the classifier stay plugin-local so enabling compression does not have
+    to patch the host package (see ``test_local_classifier_recognizes_...
+    ``).
     """
-    from qwenpaw.agents.context.overflow_recovery import (
-        CONTEXT_OVERFLOW_MARKERS as host_markers,
-    )
     from qwenpaw.agents.context.overflow_recovery import (
         call_with_overflow_recovery as host_call,
     )
-    from qwenpaw.agents.context.overflow_recovery import (
-        is_context_overflow_error as host_classify,
-    )
 
     assert model_client._HOST_OVERFLOW_RECOVERY_AVAILABLE
-    assert model_client.CONTEXT_OVERFLOW_MARKERS is host_markers
     assert model_client.call_with_overflow_recovery is host_call
-    assert model_client.is_context_overflow_error is host_classify
+
+
+def test_local_classifier_recognizes_provider_token_group_refusal():
+    """A sentence only the plugin's group scan can catch, asserted on the
+    consumer path.
+
+    The fallback inside ``is_context_length_error`` matches single markers;
+    this refusal has no single marker from that list, so a green here
+    proves the classifier itself (not the fallback) is wired in.
+    """
+
+    class _GatewayRefusal(Exception):
+        pass
+
+    refusal = _GatewayRefusal(
+        "Error code: 400 - The input token count (290000) exceeds the "
+        "maximum number of tokens allowed by the model",
+    )
+    assert model_client.is_context_overflow_error(refusal)
+    assert is_context_length_error(refusal)
+
+
+def test_local_classifier_keeps_non_overflow_400s_out_of_recovery():
+    """A 400 that isn't an overflow must not trigger the retry — malformed
+    tool schemas, unsupported parameters, and media errors all keep their
+    existing handling.
+    """
+
+    class _NonOverflow(Exception):
+        pass
+
+    assert not model_client.is_context_overflow_error(
+        _NonOverflow("Error code: 400 - image_url is unsupported"),
+    )
+    assert not model_client.is_context_overflow_error(
+        _NonOverflow("Error code: 500 - context length exceeded"),
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 400 - maximum context length is 128000",
+        "Error code: 400 - range of input length is [1, 983616]",
+        "Error code: 400 - context_length_exceeded for prompt",
+        "Error code: 400 - prompt is too long: 132k tokens",
+        "Error code: 400 - too many input tokens in this request",
+        "Error code: 400 - the provided tokens (51200) exceeds the "
+        "available context size limit",
+        "Error code: 400 - the input token count exceeds the maximum "
+        "number of tokens allowed",
+        "Error code: 400 - the input token count is more than the model "
+        "only supports up to 32k",
+    ],
+)
+def test_plugin_classifier_is_a_superset_of_the_host_inline(message):
+    """The host keeps an inline copy of the marker list inside
+    ``react_agent._is_context_overflow_error``; the plugin's list must be
+    at least as wide.  Otherwise a refusal the host would recover from
+    slips past the Creator retry path, which is exactly the drift the
+    previous superset identity used to prevent.
+    The host inline lives in ``react_agent``, which is a third optional
+    import next to ``overflow_recovery`` and ``providers.error_utils``.
+    Use ``importorskip`` (not ``_HOST_OVERFLOW_RECOVERY_AVAILABLE``) so the
+    guard reflects what the test actually depends on.
+    """
+    QwenPawAgent = pytest.importorskip(
+        "qwenpaw.agents.react_agent",
+    ).QwenPawAgent
+
+    exc = Exception(message)
+    # Plugin must accept every provider refusal we've actually seen,
+    # regardless of whether the current host inline recognizes it.
+    # Without this, a host that narrows (e.g. dev/interactive-video drops
+    # the tokens/exceeds group) makes the ``if host`` clause a no-op.
+    assert model_client.is_context_overflow_error(exc), (
+        f"plugin no longer accepts {message!r}",
+    )
+    if QwenPawAgent._is_context_overflow_error(exc):
+        assert model_client.is_context_overflow_error(exc), (
+            f"host accepts {message!r} but the plugin dropped it",
+        )
+
+
+def test_local_extract_status_code_matches_host_shapes():
+    """The plugin keeps its own reader for standalone installs.  Every
+    shape the host ``extract_status_code`` understands has to be handled
+    here too, or a plugin running without the platform package misses
+    the 400 gate on gateway-wrapped refusals.
+    """
+
+    class _Int(Exception):
+        status_code = 400
+
+    class _String(Exception):
+        code = "413"
+
+    class _Response(Exception):
+        class _R:
+            status = 422
+
+        response = _R()
+
+    class _Streaming(Exception):
+        pass
+
+    assert model_client._local_extract_status_code(_Int()) == 400
+    assert model_client._local_extract_status_code(_String()) == 413
+    assert model_client._local_extract_status_code(_Response()) == 422
+    assert (
+        model_client._local_extract_status_code(
+            _Streaming(
+                "Streaming response failed: [400] - the input token count "
+                "exceeds the maximum number of tokens allowed",
+            ),
+        )
+        == 400
+    )
+
+
+def test_local_classifier_accepts_streaming_wrapped_group_refusal():
+    """End-to-end: a streaming ``[400]`` refusal carrying only a group
+    phrase must still trip the classifier.  The single-marker fallback in
+    ``is_context_length_error`` cannot catch this shape alone, so a green
+    here proves the plugin's own status reader is wired up.
+    """
+
+    class _Streaming(Exception):
+        pass
+
+    refusal = _Streaming(
+        "Streaming response failed: [400] - the input token count (290000) "
+        "exceeds the maximum number of tokens allowed by the model",
+    )
+    assert model_client.is_context_overflow_error(refusal)
 
 
 def test_turning_demotion_off_declines_the_provider_overflow_too(monkeypatch):

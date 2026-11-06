@@ -63,31 +63,18 @@ from .model_context import (
 )
 
 try:
-    # The platform already owns the boundary "the provider said this input was
-    # too long": one attempt, one retry, and a refusal to replay output the
-    # model already spoke. Consuming that boundary keeps the plugin from
-    # growing a second, drifting notion of an overflow.
+    # The platform owns the recovery boundary (one attempt, one retry, and a
+    # refusal to replay output the model already spoke).  The plugin imports
+    # only that boundary; the marker list and the classifier that feeds it
+    # stay on this side of the plugin boundary so enabling compression never
+    # has to patch the host package.
     from qwenpaw.agents.context.overflow_recovery import (
-        CONTEXT_OVERFLOW_MARKERS,
         call_with_overflow_recovery,
-        is_context_overflow_error,
     )
 
     _HOST_OVERFLOW_RECOVERY_AVAILABLE = True
 except ImportError:  # pragma: no cover - standalone plugin installs
-    CONTEXT_OVERFLOW_MARKERS = (
-        "input length should be",
-        "context_length_exceeded",
-        "maximum context length",
-        "context window exceeded",
-        "prompt is too long",
-    )
     _HOST_OVERFLOW_RECOVERY_AVAILABLE = False
-
-    def is_context_overflow_error(exc: Exception) -> bool:
-        """Provider-side overflow is not classifiable without the host."""
-        del exc
-        return False
 
     async def call_with_overflow_recovery(
         call_model: Callable[..., Awaitable[Any]],
@@ -104,6 +91,99 @@ except ImportError:  # pragma: no cover - standalone plugin installs
             return await call_model(**kwargs)
         except Exception as exc:
             return await recover(exc)
+
+
+# Gateway streaming wrappers render the HTTP status inside brackets
+# (``Streaming response failed: [400] ...``) instead of ``Error code: 400``.
+# The host's ``extract_status_code`` matches this shape; the plugin-local
+# fallback has to as well, or a standalone install silently misses the
+# overflow signal on group-only phrases.
+_STREAMING_ERROR_STATUS_RE = re.compile(
+    r"Streaming response failed:\s*\[(\d{3})\]",
+)
+
+
+def _local_extract_status_code(exc: Exception) -> Any:
+    """Plugin-local reader for the HTTP status the classifier gates on.
+
+    Covers every provider refusal shape we've actually seen: SDK attribute
+    lookups (int or digit string), ``response.status*``, streaming
+    ``[NNN]`` wrappers, and the module's own body regex as last resort.
+    """
+    for attr in ("status_code", "status", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    response = getattr(exc, "response", None)
+    if response is not None:
+        for attr in ("status_code", "status"):
+            value = getattr(response, attr, None)
+            if isinstance(value, int):
+                return value
+    streaming = _STREAMING_ERROR_STATUS_RE.search(str(exc))
+    if streaming is not None:
+        return int(streaming.group(1))
+    return _provider_http_status(exc)
+
+
+# ``providers.error_utils`` is a separate host module.  Keep its availability
+# independent of ``overflow_recovery`` so a future rename on one side does
+# not silently flip the other capability off.
+try:
+    from qwenpaw.providers.error_utils import (
+        extract_status_code as _host_extract_status_code,
+    )
+except ImportError:
+    _host_extract_status_code = _local_extract_status_code
+
+
+# Plugin-owned classification of "the provider said this input was too
+# long".  ``react_agent._is_context_overflow_error`` keeps the platform's
+# own copy; this list is what the recovery boundary checks before it asks
+# the host to retry.  The extra phrases (compared with the platform copy)
+# cover gateway bodies that wrap the original refusal without a structured
+# status code, which the host's inline path cannot see.
+CONTEXT_OVERFLOW_MARKERS: tuple[str, ...] = (
+    "range of input length",
+    "context length exceeded",
+    "context_length_exceeded",
+    "maximum context length",
+    "maximum context window",
+    "context window exceeded",
+    "max input length",
+    "input length should be",
+    "input is too long",
+    "prompt is too long",
+    "prompt too long",
+    "too many input tokens",
+)
+_CONTEXT_OVERFLOW_MARKER_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("tokens", "exceeds the available context size"),
+    (
+        "input token count",
+        "exceeds the maximum number of tokens allowed",
+    ),
+    (
+        "input token count",
+        "model only supports up to",
+    ),
+)
+
+
+def is_context_overflow_error(exc: Exception) -> bool:
+    """Return whether *exc* is a provider refusal for an oversized input."""
+    status = _host_extract_status_code(exc)
+    error_str = str(exc).lower()
+    if status != 400 and "error code: 400" not in error_str:
+        return False
+    if any(marker in error_str for marker in CONTEXT_OVERFLOW_MARKERS):
+        return True
+    return any(
+        all(marker in error_str for marker in marker_group)
+        for marker_group in _CONTEXT_OVERFLOW_MARKER_GROUPS
+    )
 
 
 logger = setup_logger("creator.model_client")
@@ -267,13 +347,13 @@ def is_rate_limit_error(exc: Exception) -> bool:
 def is_context_length_error(exc: Exception) -> bool:
     """Whether the provider refused this input for being too long.
 
-    The platform's classifier answers first, so a refusal it already
-    recognises cannot be argued with here. This plugin has to survive
-    gateways that answer 413/422 (or only leak text, no status at all)
-    where the SDK path answers a bare 400, so those cases are widened with
-    the platform's own marker list rather than a second list.
+    The plugin-owned classifier answers first so a refusal already on the
+    marker list cannot be argued with here.  This plugin also has to
+    survive gateways that answer 413/422 (or only leak text, no status at
+    all) where the SDK path answers a bare 400, so those cases widen via
+    the same marker list rather than a second list.
     """
-    if _HOST_OVERFLOW_RECOVERY_AVAILABLE and is_context_overflow_error(exc):
+    if is_context_overflow_error(exc):
         return True
     if _provider_http_status(exc) not in (None, 400, 413, 422):
         return False
