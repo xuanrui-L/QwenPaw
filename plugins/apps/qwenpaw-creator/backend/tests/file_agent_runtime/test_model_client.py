@@ -435,6 +435,63 @@ def test_resuming_from_a_sent_turn_never_pins_a_second_project_view():
     assert generations == sorted(set(generations))
 
 
+def test_second_compression_on_plain_text_result_keeps_the_carried_view():
+    """A second compaction triggered by a non-snapshot tool result must not
+    drop the only surviving project view.
+
+    Reproduce the review finding: multiple ``read_project`` calls compact
+    into a carried view; the next turn answers with a plain text tool
+    result (no ``project`` payload). Pre-fix, the loop strips every
+    ``is_carried_project_view`` row and then skips re-attaching because
+    ``carried_snapshot`` is ``None`` — the model continues with no project
+    state. Post-fix, the strip only runs when there is a replacement.
+    """
+    budget = 16 * 1024
+    sent_1 = prepare_model_messages(
+        _project_view_wire(6),
+        [],
+        max_bytes=budget,
+    )
+    first_views = _carried_views(sent_1)
+    assert len(first_views) == 1
+    gen_1 = json.loads(
+        first_views[0]["content"].partition("=")[2],
+    )["generation"]
+
+    # One plain text tool exchange — big enough to reopen the loop, but
+    # its result is not a project snapshot.
+    follow_up = [
+        {
+            "role": "assistant",
+            "content": "check_media",
+            "tool_calls": [
+                AgentToolCall(
+                    call_id="plain-1",
+                    name="check_media",
+                    arguments={},
+                ).history_dict(),
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "plain-1",
+            "content": "x" * (budget + 4096),
+        },
+    ]
+    sent_2 = prepare_model_messages(
+        list(sent_1) + follow_up,
+        [],
+        max_bytes=budget,
+    )
+    views = _carried_views(sent_2)
+    assert len(views) == 1, (
+        "the newest project view must survive a second compression "
+        "triggered by a non-snapshot tool result"
+    )
+    gen_2 = json.loads(views[0]["content"].partition("=")[2])["generation"]
+    assert gen_2 == gen_1
+
+
 def test_the_carried_view_is_recognized_after_it_leaves_the_compactor():
     """A view survives as its prefix alone, and that is what identifies it.
 
@@ -1677,6 +1734,56 @@ def test_input_token_budget_resolves_from_host_catalog(monkeypatch):
             assert client._input_token_budget() is not None
         else:
             assert client._input_token_budget() is None
+
+
+def test_vlm_budget_is_priced_against_the_vlm_catalog_entry(monkeypatch):
+    """The VLM client has to resolve its own model name when computing
+    the token window.
+
+    The catalog reports a much larger context for VLM models (e.g. a
+    1,000,000 window for the multimodal tier vs. 126,976 for the text
+    tier).  If ``_input_token_budget`` reads the text name on a VLM
+    client, a 12-4K-frame turn (~142k vision tokens) collapses to recall
+    pointers even though the actual VLM window has room for them.  A
+    reverse mismatch admits input the VLM cannot accept.
+    """
+    seen: list[str] = []
+
+    def _fake_context_window(model_name: str | None = None) -> int:
+        seen.append(str(model_name))
+        # Reserve math on a 126,976 window yields 122,880; on 1,000,000 it
+        # yields 995,904.  The two numbers differ enough that a wrong
+        # lookup is visible in the resolved budget alone.
+        return 126_976 if model_name == "qwen-plus" else 1_000_000
+
+    monkeypatch.delenv(
+        model_context.MODEL_CONTEXT_TOKENS_ENV,
+        raising=False,
+    )
+    monkeypatch.setattr(model_client, "context_window", _fake_context_window)
+    monkeypatch.setattr(
+        model_client.model_config,
+        "get_text_model_name",
+        lambda: "qwen-plus",
+    )
+    monkeypatch.setattr(
+        model_client.model_config,
+        "get_vlm_model_name",
+        lambda: "qwen3.7-plus",
+    )
+
+    text_client = AgentScopeAgentChatClient.__new__(AgentScopeAgentChatClient)
+    vlm_client = AgentScopeVlmChatClient.__new__(AgentScopeVlmChatClient)
+
+    text_budget = text_client._input_token_budget()
+    vlm_budget = vlm_client._input_token_budget()
+
+    assert seen == ["qwen-plus", "qwen3.7-plus"]
+    # Text: 126,976 - min(4096, 6348) = 126,976 - 4096 = 122,880.
+    assert text_budget == 122_880
+    # VLM: 1,000,000 - min(4096, 50,000) = 1,000,000 - 4096 = 995,904.
+    assert vlm_budget == 995_904
+    assert vlm_budget > text_budget
 
 
 def test_media_that_arrives_as_a_url_is_outside_the_media_budget():
