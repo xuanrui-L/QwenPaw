@@ -1114,6 +1114,33 @@ def _snapshot_supersedes(
     )
 
 
+def _carried_view_snapshot(
+    result: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    """Parse the newest carried project view an earlier compaction reattached.
+
+    When the tool scan above finds no snapshot, the run is resuming from
+    a shape the prior turn sent back. Without this fallback the loop below
+    would strip the only survivor and skip re-attaching it because
+    ``carried_snapshot`` stayed ``None``, leaving the model without project
+    state (the reviewer's second-compression path).
+    """
+    for item in reversed(list(result)):
+        if not is_carried_project_view(item):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str):
+            continue
+        if not content.startswith(PROJECT_MODEL_VIEW_PREFIX):
+            continue
+        payload = _snapshot_content(
+            content[len(PROJECT_MODEL_VIEW_PREFIX) :],
+        )
+        if payload:
+            return payload
+    return None
+
+
 # Preserve complete protocol groups throughout each compaction stage.
 # pylint: disable-next=too-many-branches
 def prepare_model_messages(
@@ -1164,20 +1191,7 @@ def prepare_model_messages(
     # Fall back to parsing the newest carried view so the guard at the
     # eviction site has something to compare against.
     if latest_snapshot is None:
-        for item in reversed(result):
-            if not is_carried_project_view(item):
-                continue
-            content = item.get("content")
-            if not isinstance(content, str):
-                continue
-            if not content.startswith(PROJECT_MODEL_VIEW_PREFIX):
-                continue
-            payload = _snapshot_content(
-                content[len(PROJECT_MODEL_VIEW_PREFIX) :],
-            )
-            if payload:
-                latest_snapshot = payload
-                break
+        latest_snapshot = _carried_view_snapshot(result)
 
     # A prior-run snapshot must not be pinned alongside its replacement.
     # That duplicate can evict the script, skills and references just read,
