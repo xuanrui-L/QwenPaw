@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -33,6 +34,8 @@ from services.file_agent_runtime.driver import (
     _tool_call_transport_metadata,
 )
 from services.file_agent_runtime import driver as driver_module
+from services.file_agent_runtime import media_vault
+from services.file_agent_runtime.model_client import ModelContextUnfitError
 from services.file_agent_runtime.prompts import render_creator_system_prompt
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
@@ -64,6 +67,7 @@ from services.runtime_files.execution_models import (
     ExecutionAuthorizationStatus,
 )
 from services.specialist_tools import SpecialistToolResult
+from services.workspace.content_store import ContentStore
 
 pytestmark = pytest.mark.unit
 
@@ -609,6 +613,7 @@ def _edit_client(*, description: str):
             "patch_project",
             "ground_prompt_context",
             "ground_image_objects",
+            "recall_media",
             "browser_use",
             "elements_at",
             "import_script_asset",
@@ -1306,6 +1311,57 @@ def test_repeated_malformed_jq_project_arguments_stop_after_two_retries(
         True,
     ]
     assert "Do not resend it" in errors[-1]["recovery"]
+
+
+def test_a_proven_unfittable_input_is_not_resumed_automatically(
+    tmp_path,
+) -> None:
+    """An input the client proved it cannot shrink waits for a human.
+
+    The resume fuse bounds how often a parked run is re-entered, not whether
+    it is worth trying: re-sending bytes the same window already refused buys
+    a second copy of one error message at the price of a full model call, at
+    3am, unattended. Every other model fault keeps the retry a transient fault
+    can still profit from.
+    """
+    calls: list[int] = []
+
+    async def callback(_messages, _tools):
+        calls.append(1)
+        raise ModelContextUnfitError(
+            "模型必要输入仍超过单次上下文预算；真人附件未移动。",
+        )
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="Create the project plan",
+        )
+        driver = _driver(services, callback)
+        resumes: list[bool] = []
+        original_resume = driver._queue_yolo_completion_resume
+
+        async def record_resume(*args, **kwargs):
+            resumes.append(bool(kwargs.get("after_failure")))
+            return await original_resume(*args, **kwargs)
+
+        driver._queue_yolo_completion_resume = record_resume
+        await _run_to_idle(driver, services, error=True)
+        session = services.sessions.get_project_session(PROJECT_ID)
+        runs = driver.runs.list(PROJECT_ID)
+        await driver.stop()
+        return session, runs, resumes
+
+    session, runs, resumes = asyncio.run(scenario())
+
+    assert calls == [1]
+    assert session.error is not None
+    assert session.error["code"] == "MODEL_CONTEXT_UNFIT"
+    assert session.error["retryable"] is False
+    assert "真人附件未移动" in session.error["message"]
+    # The failure path never asked for a resume, so nothing re-enters the run.
+    assert resumes == []
+    assert [run.status.value for run in runs] == ["FAILED"]
 
 
 def test_initial_creation_runs_auto_fix_tool_loop_without_review(
@@ -5388,3 +5444,137 @@ def test_upload_joining_a_live_run_starts_understanding(
         "本轮上传素材的理解已启动" in str(entry.get("content") or "")
         for entry in joined_turn
     )
+
+
+def test_recalled_media_arrives_after_its_own_tool_group(
+    tmp_path,
+    monkeypatch,
+):
+    """The recalled bytes ride behind the tool result, never inside its group.
+
+    ``recall_media`` answers with JSON text, so the restored payload has to
+    reach the provider as native media on a user turn. The loop publishes that
+    turn after the whole assistant turn has been answered: a user row placed
+    before a tool result leaves the provider an unanswered tool_calls message,
+    and compaction can then never pair the group up to drop it again.
+    """
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    payload = _png_bytes_for_grounding()
+    digest = media_vault.store_data_url(
+        "data:image/png;base64," + base64.b64encode(payload).decode(),
+        store=ContentStore(tmp_path.resolve()),
+    )
+
+    seen: list[list[dict]] = []
+    turn = 0
+
+    async def callback(messages, tools):
+        del tools
+        nonlocal turn
+        turn += 1
+        seen.append([dict(item) for item in messages])
+        if turn == 1:
+            return _tool_turn(
+                call_id="recall-1",
+                name="recall_media",
+                arguments={"handles": [digest]},
+            )
+        if turn == 2:
+            return _read_call("read-1")
+        return AgentModelTurn(content="已取回参考图，继续。")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="取回之前移出的参考图，然后继续。",
+        )
+        driver = _driver(services, CallbackAgentChatClient(callback))
+        await _run_to_idle(driver, services)
+        await driver.stop()
+
+    asyncio.run(scenario())
+
+    assert turn == 3
+    # The recalled user row follows the tool result it belongs to; it is never
+    # published before that result, and never held back past the next turn.
+    assert [item["role"] for item in seen[1]][-3:] == [
+        "assistant",
+        "tool",
+        "user",
+    ]
+    assert [item["role"] for item in seen[2]][-5:] == [
+        "assistant",
+        "tool",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    recalled = seen[1][-1]
+    assert recalled["source"] == driver_module.MEDIA_RECALL_SOURCE
+    assert [part["type"] for part in recalled["content"]][-1] == "image_url"
+    restored = recalled["content"][-1]["image_url"]["url"]
+    assert base64.b64decode(restored.split(";base64,", 1)[1]) == payload
+
+
+def test_the_next_turn_resumes_from_the_shape_that_was_sent(tmp_path):
+    """A recovery rewrites the request, and the run has to remember that.
+
+    The demotion ladder moves media out of the message list it was handed and
+    answers from the rewritten one. Left holding the original, the next turn of
+    the same run puts the refused bytes straight back and pays for the refusal
+    again, which is how one oversized upload turned into a loop of them.
+
+    The durable record is deliberately not what is asserted here: a person's
+    upload stays on disk exactly as sent, and only the ephemeral wire context
+    follows what the model actually read.
+    """
+    seen: list[list[dict]] = []
+    turn = 0
+    sent_shape = [
+        {"role": "system", "content": "本轮实际发送的上下文"},
+        {
+            "role": "user",
+            "source": "user",
+            "messageSeq": 3,
+            "content": [{"type": "text", "text": "句柄取代了内联图片"}],
+        },
+    ]
+
+    async def callback(messages, tools):
+        del tools
+        nonlocal turn
+        turn += 1
+        seen.append([dict(item) for item in messages])
+        if turn == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="read-1",
+                        name="read_project",
+                        arguments={"projectId": PROJECT_ID},
+                    ),
+                ),
+                sent_messages=list(sent_shape),
+            )
+        return AgentModelTurn(content="已按降级后的上下文继续。")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="按这张参考图改分镜。",
+        )
+        driver = _driver(services, CallbackAgentChatClient(callback))
+        await _run_to_idle(driver, services)
+        await driver.stop()
+
+    asyncio.run(scenario())
+
+    assert turn == 2
+    # The second turn starts from the request the client answered, not from the
+    # one the run assembled before the refusal.
+    assert [item["content"] for item in seen[1]][:2] == [
+        sent_shape[0]["content"],
+        sent_shape[1]["content"],
+    ]
+    # and it still carries the tool exchange this turn produced.
+    assert [item["role"] for item in seen[1]][-2:] == ["assistant", "tool"]

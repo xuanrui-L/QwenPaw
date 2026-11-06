@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=protected-access
 """Benign trailing closers execute the lossless prefix instead of failing.
 
 Reproduces the 2026-08 production case: a 4.4KB streamed tool-call
@@ -8,12 +9,16 @@ was provably lossless.
 """
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
 
 import pytest
 
 from services.file_agent_runtime.model_client import _parse_tool_arguments
 from services.file_agent_runtime.driver import _unfinished_video_element_ids
+from services.file_agent_runtime import driver as driver_module
+from services.file_agent_runtime import model_context
 from services.project_files.models import (
     ArtifactSlot,
     ElementLocation,
@@ -250,3 +255,53 @@ def test_message_text_appends_selection_notes(tmp_path):
     # 不带 project 上下文时保持旧行为：只透传结构化 JSON。
     rendered_plain = _message_text(message)
     assert "[选区上下文" not in rendered_plain
+
+
+# The local names the driver hands inline media to the provider on.
+_MEDIA_ROW_VARIABLES = frozenset(
+    {"user_content", "frame_content", "page_content"},
+)
+
+
+def _media_user_rows() -> list[tuple[str, bool]]:
+    """Every user row literal in the driver that carries media parts."""
+    tree = ast.parse(
+        Path(driver_module.__file__).read_text(encoding="utf-8"),
+    )
+    rows: list[tuple[str, bool]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        fields: dict[str, ast.expr] = {
+            key.value: value
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        role = fields.get("role")
+        content = fields.get("content")
+        if not isinstance(role, ast.Constant) or role.value != "user":
+            continue
+        if (
+            isinstance(content, ast.Name)
+            and content.id in _MEDIA_ROW_VARIABLES
+        ):
+            rows.append((content.id, "source" in fields))
+    return rows
+
+
+def test_media_bearing_user_rows_say_the_runtime_observed_them():
+    """Inline media rides the user role, so the stamp is the only tell.
+
+    The provider's protocol refuses media on a tool row, which leaves the
+    demotion ladder no way to separate a frame a reader tool sampled from a
+    picture a person uploaded except by the source the driver wrote on the
+    row. An unstamped row is traded as an attachment, and the record then
+    reports a loss the runtime never had to take.
+    """
+    rows = _media_user_rows()
+
+    assert {name for name, _stamped in rows} == set(_MEDIA_ROW_VARIABLES)
+    assert [name for name, stamped in rows if not stamped] == []
+    assert model_context.MEDIA_OBSERVATION_SOURCE in (
+        model_context._AUTOMATED_HISTORY_SOURCES
+    )

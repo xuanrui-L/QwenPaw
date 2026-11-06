@@ -171,6 +171,7 @@ from utils.paths import media_task_scope
 from utils.paths import media_url_for
 from utils.paths import unique_task_work_path
 
+from . import media_vault
 from .checkpoints import (
     CHECKPOINT_PROVIDER,
     checkpoint_authorization_id,
@@ -190,6 +191,7 @@ from .model_client import (
     AgentStreamCallbackPassthrough,
     AgentModelTurn,
     DEFAULT_MODEL_TURN_TIMEOUT_SECONDS as _DEFAULT_MODEL_TURN_TIMEOUT_SECONDS,
+    ModelContextUnfitError,
     RateLimitExhaustedError,
     RateLimitRetryNotice,
     AgentScopeAgentChatClient,
@@ -219,7 +221,12 @@ from .production_status import (
 )
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
 from .work_graph import WorkNodeStatus, derive_work_graph
-from .model_context import compact_conversation_history
+from .model_context import (
+    MEDIA_OBSERVATION_SOURCE,
+    MEDIA_RECALL_SOURCE,
+    compact_conversation_history,
+    estimate_input_tokens,
+)
 from .workgraph_execution import (
     REQUEST_WORKGRAPH_EXECUTION,
     parse_request_targets,
@@ -319,9 +326,14 @@ _BILLING_SENSITIVE_ARGUMENTS = ("durationSeconds", "resolution", "mode")
 
 GROUND_PROMPT_CONTEXT_TOOL_NAME = "ground_prompt_context"
 OBJECT_GROUNDING_TOOL_NAME = "ground_image_objects"
+RECALL_MEDIA_TOOL_NAME = "recall_media"
 BROWSER_USE_TOOL_NAME = "browser_use"
 COMPUTER_USE_TOOL_NAME = "computer_use"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
+# Restoring a block larger than this would only trade one budget failure for
+# another, and the pointer already records what the bytes were.
+MAX_RECALL_MEDIA_BYTES = 16 * 1024 * 1024
+MAX_RECALL_MEDIA_HANDLES = 4
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
 # Planning turns that emit a full Element structure in one response can
@@ -955,6 +967,49 @@ def _object_grounding_tool_manifest() -> dict[str, Any]:
     }
 
 
+def _recall_media_tool_manifest() -> dict[str, Any]:
+    """Describe the pointer the context guard leaves behind can be answered.
+
+    The guard promises a demoted block stays readable; this tool is that
+    promise, so a model that needs to look again asks for the handle instead
+    of guessing at what the screenshot showed.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": RECALL_MEDIA_TOOL_NAME,
+            "description": (
+                "取回被上下文预算移出本次请求的内联媒体原件。媒体块被降级时，"
+                "原位置留下一条指针说明，形如 "
+                "[inline media left this context: image/jpeg, ... "
+                "handle=sha256:<64位摘要>]；确认现在仍需要看到它时，把该句柄"
+                "传进来（带或不带 sha256: 前缀都可以，一次最多 4 个），原件会"
+                "作为原生媒体重新送达本轮。指针说明已随所在消息一并被压缩掉时"
+                "无法召回，请重新运行产出该媒体的工具。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "projectId": {"type": "string", "minLength": 1},
+                    "handles": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": MAX_RECALL_MEDIA_HANDLES,
+                        "description": "指针说明中的 sha256 句柄。",
+                        "items": {
+                            "type": "string",
+                            "minLength": 8,
+                            "maxLength": 80,
+                        },
+                    },
+                },
+                "required": ["projectId", "handles"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _browser_use_tool_manifest() -> dict[str, Any]:
     """Describe the live-operation tool the way the host browser tool does.
 
@@ -1064,6 +1119,9 @@ def _creator_agent_tool_manifest(
     if get_web_grounding_enabled():
         manifest.append(_ground_prompt_context_tool_manifest())
     manifest.append(_object_grounding_tool_manifest())
+    # Every turn that demotes media leaves pointers behind; the model needs the
+    # way back on any turn, so this one is never behind a feature switch.
+    manifest.append(_recall_media_tool_manifest())
     if get_live_operation_enabled():
         manifest.append(_browser_use_tool_manifest())
     if get_computer_use_enabled():
@@ -1677,7 +1735,7 @@ class FileCreatorAgentRuntime:
         """Bound one provider turn; max_model_turns cannot stop a hung turn."""
 
         try:
-            return await asyncio.wait_for(
+            turn = await asyncio.wait_for(
                 client.complete(
                     messages=messages,
                     tools=tools,
@@ -1693,6 +1751,15 @@ class FileCreatorAgentRuntime:
                 f"{label} model turn exceeded "
                 f"{self.model_turn_timeout_seconds:g} seconds",
             ) from exc
+        sent = getattr(turn, "sent_messages", None)
+        if isinstance(sent, list) and sent:
+            # Adopt the shape this turn actually sent, in place, so the next
+            # turn of the same run cannot put back the media the demotion
+            # ladder already moved out and re-prove the refusal with another
+            # burned call. The durable records are untouched: this list is the
+            # ephemeral wire context, and the model has already answered it.
+            messages[:] = sent
+        return turn
 
     @property
     def started(self) -> bool:
@@ -3123,6 +3190,28 @@ class FileCreatorAgentRuntime:
                 retryable=False,
             )
             self._blocked_heads[project_id] = message.message_seq
+        except ModelContextUnfitError as exc:
+            # The client already proved no smaller version of this request
+            # exists, so an automatic resume would re-send the same bytes and
+            # pay for another model call to reproduce one error message. The
+            # run waits here until a shorter input arrives.
+            logger.error(
+                "Agent run %s failed — input too large with nothing left to "
+                "give up: %s",
+                run_id,
+                exc,
+            )
+            await self._fail_run(
+                project_id,
+                session.session_id,
+                goal.goal_id,
+                run_id,
+                message,
+                code="MODEL_CONTEXT_UNFIT",
+                message_text=str(exc),
+                retryable=False,
+            )
+            self._blocked_heads[project_id] = message.message_seq
         except RateLimitExhaustedError as exc:
             logger.error(
                 "Agent run %s failed — model rate limit exhausted after "
@@ -3736,6 +3825,7 @@ class FileCreatorAgentRuntime:
                     consumed_message_seq=input_cursor,
                 )
 
+            recalled_parts: list[dict[str, Any]] = []
             for call in turn.tool_calls:
                 tool_call_count += 1
                 if call.name == REQUEST_WORKGRAPH_EXECUTION:
@@ -3875,6 +3965,10 @@ class FileCreatorAgentRuntime:
                             request=request,
                             arguments=call.arguments,
                         )
+                    elif call.name == RECALL_MEDIA_TOOL_NAME:
+                        result = await self._run_recall_media(
+                            arguments=call.arguments,
+                        )
                     elif call.name == BROWSER_USE_TOOL_NAME:
                         result = await self._run_browser_use(
                             request=request,
@@ -4003,6 +4097,20 @@ class FileCreatorAgentRuntime:
                         "failed": tool_failed,
                     },
                 )
+                if call.name == RECALL_MEDIA_TOOL_NAME and not tool_failed:
+                    # The tool result is JSON text, which no provider reads as
+                    # an image. The recalled bytes have to arrive the same way
+                    # any other media does: native parts on a user turn. That
+                    # turn is held until every tool result of this assistant
+                    # turn has been appended, because a user row wedged between
+                    # two tool results splits the group: the provider sees an
+                    # unanswered tool_calls message, and compaction can never
+                    # pair the group up to drop it again.
+                    recalled_parts.extend(
+                        await self._recalled_media_content(
+                            result=result,
+                        ),
+                    )
                 if (
                     call.name == REQUEST_WORKGRAPH_EXECUTION
                     and not tool_failed
@@ -4059,6 +4167,14 @@ class FileCreatorAgentRuntime:
                         "arguments; the run stopped instead of starting "
                         "another model turn",
                     )
+            if recalled_parts:
+                messages.append(
+                    {
+                        "role": "user",
+                        "source": MEDIA_RECALL_SOURCE,
+                        "content": recalled_parts,
+                    },
+                )
             if (
                 turn_number == effective_max_turns
                 and not finalization_turn_added
@@ -4864,6 +4980,141 @@ class FileCreatorAgentRuntime:
                 suffix=".png",
             )
         return response
+
+    async def _run_recall_media(
+        self,
+        *,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Look one pointer up in the media vault, by its content digest.
+
+        A fetch, not a search: the handle already names the exact bytes, so
+        Creator adds no retrieval index of its own over them. A handle nobody
+        stored is reported as missing rather than guessed at, because a
+        confidently wrong image costs the run more than the pointer it
+        replaced.
+        """
+        raw = arguments.get("handles")
+        if (
+            not isinstance(raw, list)
+            or not 1 <= len(raw) <= MAX_RECALL_MEDIA_HANDLES
+        ):
+            raise FileAgentRuntimeError(
+                "recall_media requires 1 to "
+                f"{MAX_RECALL_MEDIA_HANDLES} handles",
+            )
+        recalled: list[dict[str, Any]] = []
+        missing: list[str] = []
+        too_large: list[str] = []
+        for value in raw:
+            handle = media_vault.normalize_handle(str(value or ""))
+            if not media_vault.looks_like_digest(handle):
+                missing.append(str(value or ""))
+                continue
+            loaded = await asyncio.to_thread(
+                media_vault.load_by_handle,
+                handle,
+            )
+            if loaded is None:
+                missing.append(handle)
+                continue
+            url, decoded_bytes = loaded
+            if decoded_bytes > MAX_RECALL_MEDIA_BYTES:
+                too_large.append(handle)
+                continue
+            recalled.append(
+                {
+                    "handle": handle,
+                    "mime": url[5:].partition(";")[0],
+                    "decodedBytes": decoded_bytes,
+                    "estimatedTokens": estimate_input_tokens(url),
+                },
+            )
+        if not recalled:
+            raise FileAgentRuntimeError(
+                "recall_media found no restorable bytes for these handles; "
+                "their pointer may predate the vault. Re-run the tool that "
+                "produced the media to observe it again.",
+            )
+        response: dict[str, Any] = {
+            "ok": True,
+            "status": "success",
+            "recalled": recalled,
+            "note": "原件已作为原生媒体随本工具结果后的用户消息送达。",
+        }
+        if missing:
+            response["missing"] = missing
+        if too_large:
+            response["tooLarge"] = too_large
+        return response
+
+    async def _recalled_media_content(
+        self,
+        *,
+        result: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Turn recalled handles into the native parts a provider can read.
+
+        The bytes are read a second time on purpose: the durable tool result
+        keeps handles and sizes, never a megabyte of Base64 nobody asked to
+        store twice.
+        """
+        parts: list[dict[str, Any]] = []
+        for entry in result.get("recalled") or []:
+            if not isinstance(entry, Mapping):
+                continue
+            handle = str(entry.get("handle") or "")
+            mime = str(entry.get("mime") or "")
+            loaded = await asyncio.to_thread(
+                media_vault.load_by_handle,
+                handle,
+                mime=mime,
+            )
+            if loaded is None:
+                parts.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"句柄 {handle[:12]} 的原件已不可读，" "请重新运行产出该媒体的工具。"
+                        ),
+                    },
+                )
+                continue
+            url, decoded_bytes = loaded
+            family = mime.split("/", maxsplit=1)[0]
+            if family not in {"image", "video"}:
+                # Only these part shapes reach the current providers as media.
+                # Anything else stays a pointer: describing what cannot be
+                # shown beats pretending the model looked at it.
+                parts.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"句柄 {handle[:12]}（{mime or '未知类型'}，"
+                            f"{decoded_bytes} 字节）已存档可取回，"
+                            "但当前模型通道不能直接展示该类型；"
+                            "请改用读取该素材的工具。"
+                        ),
+                    },
+                )
+                continue
+            part_type = "image_url" if family == "image" else "video_url"
+            parts.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"以下是句柄 {handle[:12]}（{mime}，"
+                        f"{decoded_bytes} 字节）的原件。"
+                    ),
+                },
+            )
+            parts.append(
+                {
+                    "type": part_type,
+                    part_type: {"url": url, "mediaType": mime},
+                },
+            )
+        return parts
 
     async def _run_computer_use(
         self,
@@ -6393,7 +6644,14 @@ class FileCreatorAgentRuntime:
         )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": user_content},
+            {
+                "role": "user",
+                # The native parts here are the Project's own files, which any
+                # reader tool can show again: a runtime observation, not an
+                # upload, so the first rung of the demotion ladder may trade it.
+                "source": MEDIA_OBSERVATION_SOURCE,
+                "content": user_content,
+            },
         ]
         tool_manifest = list(
             self.specialist_tools.manifest_for(
@@ -6402,6 +6660,13 @@ class FileCreatorAgentRuntime:
                 include_project_readers=include_project_readers,
             ),
         )
+        # The demotion ladder runs inside ``source_model_client.complete``
+        # below, so specialist turns can leave ``Call recall_media with
+        # that handle`` pointers even when the role never sees the main
+        # manifest. Expose the tool unconditionally; without it a demoted
+        # frame is unrecoverable and the model continues on a caption
+        # instead of the image.
+        tool_manifest.append(_recall_media_tool_manifest())
         tool_call_count = 0
         review_ids: list[str] = []
         malformed_jq_attempts = 0
@@ -6842,24 +7107,38 @@ class FileCreatorAgentRuntime:
                         raise FileAgentRuntimeError(
                             "specialist tool call attempted another Project",
                         )
-                    result = await self._invoke_specialist_tool(
-                        project_id=project_id,
-                        session_id=session_id,
-                        parent_run_id=parent_run_id,
-                        specialist_run_id=specialist_run_id,
-                        round_id=round_id,
-                        role=role,
-                        admitted_target_refs=delegated.target_refs,
-                        fence=fence,
-                        request=request,
-                        common=common,
-                        call_id=call.call_id,
-                        assistant_message_id=message_id,
-                        provider_message_id=turn.provider_message_id,
-                        name=call.name,
-                        arguments=call.arguments,
-                        tools=tools,
-                    )
+                    if call.name == RECALL_MEDIA_TOOL_NAME:
+                        # The demotion ladder inside
+                        # ``source_model_client.complete`` hands the
+                        # specialist a pointer whose promise is only
+                        # kept by the driver's own vault lookup; the
+                        # role-scoped registry has no such tool and
+                        # would raise ValidationError. Route the call
+                        # directly to the shared handler so the same
+                        # handle semantics and byte cap apply to
+                        # specialists and the main agent.
+                        result = await self._run_recall_media(
+                            arguments=call.arguments,
+                        )
+                    else:
+                        result = await self._invoke_specialist_tool(
+                            project_id=project_id,
+                            session_id=session_id,
+                            parent_run_id=parent_run_id,
+                            specialist_run_id=specialist_run_id,
+                            round_id=round_id,
+                            role=role,
+                            admitted_target_refs=delegated.target_refs,
+                            fence=fence,
+                            request=request,
+                            common=common,
+                            call_id=call.call_id,
+                            assistant_message_id=message_id,
+                            provider_message_id=turn.provider_message_id,
+                            name=call.name,
+                            arguments=call.arguments,
+                            tools=tools,
+                        )
                     review_id = result.get("reviewId")
                     if (
                         isinstance(review_id, str)
@@ -7013,6 +7292,45 @@ class FileCreatorAgentRuntime:
                         "failed": failed,
                     },
                 )
+                if call.name == RECALL_MEDIA_TOOL_NAME and not failed:
+                    # A JSON text tool result is invisible to the model
+                    # as media. The recalled bytes have to arrive the
+                    # same way any other native observation does — as a
+                    # user turn carrying image/video parts. Held until
+                    # after the tool result row is appended so the
+                    # assistant/tool group never splits.
+                    recall_parts = await self._recalled_media_content(
+                        result=result,
+                    )
+                    if recall_parts:
+                        recall_content = [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "以下是 recall_media 取回的原生媒体，" "内容与降级前一致。"
+                                ),
+                            },
+                            *recall_parts,
+                        ]
+                        await asyncio.to_thread(
+                            self.executions.append_specialist_message,
+                            project_id,
+                            specialist_run_id,
+                            message_id=(f"specialist-message-{uuid4().hex}"),
+                            role="user",
+                            content_parts=recall_content,
+                            metadata={
+                                "parentActionId": parent_action_id,
+                                "recalledMediaForToolCallId": call.call_id,
+                            },
+                        )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "source": MEDIA_OBSERVATION_SOURCE,
+                                "content": recall_content,
+                            },
+                        )
                 if (
                     call.name in _VIDEO_FRAME_TOOL_NAMES
                     and not failed
@@ -7077,7 +7395,11 @@ class FileCreatorAgentRuntime:
                             },
                         )
                         messages.append(
-                            {"role": "user", "content": frame_content},
+                            {
+                                "role": "user",
+                                "source": MEDIA_OBSERVATION_SOURCE,
+                                "content": frame_content,
+                            },
                         )
                 if call.name == "read_document" and not failed:
                     # Rendered pages enter the VLM context as native images
@@ -7123,7 +7445,11 @@ class FileCreatorAgentRuntime:
                             },
                         )
                         messages.append(
-                            {"role": "user", "content": page_content},
+                            {
+                                "role": "user",
+                                "source": MEDIA_OBSERVATION_SOURCE,
+                                "content": page_content,
+                            },
                         )
                 if waiting_review is not None:
                     target_ref = str(
