@@ -1157,6 +1157,28 @@ def prepare_model_messages(
         if isinstance(content, str):
             item["content"] = parts[0]["text"]
 
+    # ``latest_snapshot`` is normally seeded from the tool scan above.  When
+    # the caller resumes from a compressed shape (a carried view the prior
+    # turn reattached) the run may have no tool snapshot at all, and the
+    # loop below would then strip the only survivor without a replacement.
+    # Fall back to parsing the newest carried view so the guard at the
+    # eviction site has something to compare against.
+    if latest_snapshot is None:
+        for item in reversed(result):
+            if not is_carried_project_view(item):
+                continue
+            content = item.get("content")
+            if not isinstance(content, str):
+                continue
+            if not content.startswith(PROJECT_MODEL_VIEW_PREFIX):
+                continue
+            payload = _snapshot_content(
+                content[len(PROJECT_MODEL_VIEW_PREFIX) :],
+            )
+            if payload:
+                latest_snapshot = payload
+                break
+
     # A prior-run snapshot must not be pinned alongside its replacement.
     # That duplicate can evict the script, skills and references just read,
     # trapping long productions in repeated reconstruction instead of work.
@@ -1229,9 +1251,16 @@ def prepare_model_messages(
         del result[start:end]
         # Keep only the newest carried view, and count it in the next check.
         # A previous turn's view reaches here too, because a run may resume
-        # from the shape it last sent instead of rebuilding from durable rows.
-        result = [item for item in result if not is_carried_project_view(item)]
+        # from the shape it last sent instead of rebuilding from durable
+        # rows.  Strip it only when this iteration has a replacement to
+        # attach; otherwise the newest view is the one already on the list
+        # and evicting it would leave the model without any project state
+        # (the reviewer's "second compression triggered by a plain text
+        # tool result" path).
         if carried_snapshot:
+            result = [
+                item for item in result if not is_carried_project_view(item)
+            ]
             result.append(
                 {
                     "role": "user",
