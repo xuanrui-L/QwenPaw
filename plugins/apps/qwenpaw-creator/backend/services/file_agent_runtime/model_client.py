@@ -1217,15 +1217,29 @@ class AgentScopeAgentChatClient:
             self._configuration = configuration
         return self.model
 
+    def _budget_model_name(self) -> str:
+        """Model name used to resolve the token window for this client.
+
+        The base client issues requests through the text model, so the
+        default is the text model name.  ``AgentScopeVlmChatClient``
+        overrides this: VLM and text catalogs can carry different context
+        windows, and pricing a VLM turn against the text window either
+        demotes media that would have fitted or admits input the VLM
+        actually cannot take.
+        """
+        return model_config.get_text_model_name()
+
     def _input_token_budget(self) -> int | None:
         """Input ceiling for this deployment's model context window.
 
         Resolves the window from the same host catalog the platform scroll
-        reads, so the plugin never prices against a different ceiling.  When
-        no window is available the byte transport floor stays the sole limit.
+        reads, so the plugin never prices against a different ceiling.  The
+        name is taken from ``_budget_model_name`` so a VLM turn is measured
+        against the VLM window.  When no window is available the byte
+        transport floor stays the sole limit.
         """
         context_size = context_window(
-            model_config.get_text_model_name(),
+            self._budget_model_name(),
         )
         if context_size is None:
             return None
@@ -2364,6 +2378,16 @@ class AgentScopeVlmChatClient(AgentScopeAgentChatClient):
     ``vlm`` section of ``model_config.json`` via
     ``model_config.get_vlm_protocol()``.
     """
+
+    def _budget_model_name(self) -> str:
+        """Bind the token budget to the VLM catalog entry, not the text one.
+
+        ``_configured_model`` picks up ``get_vlm_model_name()`` at request
+        time; the budget has to read the same name or a wide-window VLM
+        pays for a narrow text model (real case: 12 4K PNGs at 142k tokens
+        against qwen-plus' 126,976 while qwen3.7-plus offers 1,000,000).
+        """
+        return (model_config.get_vlm_model_name() or "qwen3.7-plus").strip()
 
     def _configured_model(self) -> ChatModelBase:
         if self._injected:

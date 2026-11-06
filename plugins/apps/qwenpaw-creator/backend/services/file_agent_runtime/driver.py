@@ -6703,6 +6703,13 @@ class FileCreatorAgentRuntime:
                 include_project_readers=include_project_readers,
             ),
         )
+        # The demotion ladder runs inside ``source_model_client.complete``
+        # below, so specialist turns can leave ``Call recall_media with
+        # that handle`` pointers even when the role never sees the main
+        # manifest. Expose the tool unconditionally; without it a demoted
+        # frame is unrecoverable and the model continues on a caption
+        # instead of the image.
+        tool_manifest.append(_recall_media_tool_manifest())
         tool_call_count = 0
         review_ids: list[str] = []
         malformed_jq_attempts = 0
@@ -7143,24 +7150,38 @@ class FileCreatorAgentRuntime:
                         raise FileAgentRuntimeError(
                             "specialist tool call attempted another Project",
                         )
-                    result = await self._invoke_specialist_tool(
-                        project_id=project_id,
-                        session_id=session_id,
-                        parent_run_id=parent_run_id,
-                        specialist_run_id=specialist_run_id,
-                        round_id=round_id,
-                        role=role,
-                        admitted_target_refs=delegated.target_refs,
-                        fence=fence,
-                        request=request,
-                        common=common,
-                        call_id=call.call_id,
-                        assistant_message_id=message_id,
-                        provider_message_id=turn.provider_message_id,
-                        name=call.name,
-                        arguments=call.arguments,
-                        tools=tools,
-                    )
+                    if call.name == RECALL_MEDIA_TOOL_NAME:
+                        # The demotion ladder inside
+                        # ``source_model_client.complete`` hands the
+                        # specialist a pointer whose promise is only
+                        # kept by the driver's own vault lookup; the
+                        # role-scoped registry has no such tool and
+                        # would raise ValidationError. Route the call
+                        # directly to the shared handler so the same
+                        # handle semantics and byte cap apply to
+                        # specialists and the main agent.
+                        result = await self._run_recall_media(
+                            arguments=call.arguments,
+                        )
+                    else:
+                        result = await self._invoke_specialist_tool(
+                            project_id=project_id,
+                            session_id=session_id,
+                            parent_run_id=parent_run_id,
+                            specialist_run_id=specialist_run_id,
+                            round_id=round_id,
+                            role=role,
+                            admitted_target_refs=delegated.target_refs,
+                            fence=fence,
+                            request=request,
+                            common=common,
+                            call_id=call.call_id,
+                            assistant_message_id=message_id,
+                            provider_message_id=turn.provider_message_id,
+                            name=call.name,
+                            arguments=call.arguments,
+                            tools=tools,
+                        )
                     review_id = result.get("reviewId")
                     if (
                         isinstance(review_id, str)
@@ -7314,6 +7335,45 @@ class FileCreatorAgentRuntime:
                         "failed": failed,
                     },
                 )
+                if call.name == RECALL_MEDIA_TOOL_NAME and not failed:
+                    # A JSON text tool result is invisible to the model
+                    # as media. The recalled bytes have to arrive the
+                    # same way any other native observation does — as a
+                    # user turn carrying image/video parts. Held until
+                    # after the tool result row is appended so the
+                    # assistant/tool group never splits.
+                    recall_parts = await self._recalled_media_content(
+                        result=result,
+                    )
+                    if recall_parts:
+                        recall_content = [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "以下是 recall_media 取回的原生媒体，" "内容与降级前一致。"
+                                ),
+                            },
+                            *recall_parts,
+                        ]
+                        await asyncio.to_thread(
+                            self.executions.append_specialist_message,
+                            project_id,
+                            specialist_run_id,
+                            message_id=(f"specialist-message-{uuid4().hex}"),
+                            role="user",
+                            content_parts=recall_content,
+                            metadata={
+                                "parentActionId": parent_action_id,
+                                "recalledMediaForToolCallId": call.call_id,
+                            },
+                        )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "source": MEDIA_OBSERVATION_SOURCE,
+                                "content": recall_content,
+                            },
+                        )
                 if (
                     call.name in _VIDEO_FRAME_TOOL_NAMES
                     and not failed

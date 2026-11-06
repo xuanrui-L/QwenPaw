@@ -363,3 +363,46 @@ def test_a_missing_type_does_not_answer_for_the_stored_bytes(tmp_path):
     assert loaded is not None
     assert loaded[0].startswith("data:image/png;base64,")
     assert loaded[1] == len(_PNG_BYTES)
+
+
+def test_the_specialist_turn_can_answer_a_demoted_pointer():
+    """Regression on review finding ② (specialist cannot call recall_media).
+
+    The demotion ladder runs inside ``source_model_client.complete``, so
+    a specialist turn ends up with a "Call recall_media with that handle"
+    pointer. Before the wiring below, the pointer was unactionable:
+    ``FileSpecialistToolRegistry.manifest_for`` never listed the tool and
+    ``specialist_tools.invoke`` raised
+    ``ValidationError: Specialist manifest 不存在工具: recall_media``.
+
+    A full delegate-loop test needs a Project plus a mocked VLM client;
+    these source anchors are cheap and would fire on any refactor that
+    drops one of the three required pieces.
+    """
+    import inspect
+
+    source = inspect.getsource(driver_module.FileCreatorAgentRuntime)
+
+    # (a) The tool has to appear on the manifest the model sees, otherwise
+    #     the pointer the demoter wrote is a promise the tool list denies.
+    assert "tool_manifest.append(_recall_media_tool_manifest())" in source
+
+    # (b) The dispatch must reach the shared handler without falling into
+    #     ``specialist_tools.invoke``, which is where the ValidationError
+    #     used to raise.  The branch lives in the delegate loop body.
+    assert (
+        "if call.name == RECALL_MEDIA_TOOL_NAME:" in source
+    ), "specialist loop must short-circuit recall_media"
+    # Two call sites: one for the main agent, one added here for the
+    # specialist loop.  A count check catches a refactor that quietly
+    # removes only the specialist branch.
+    assert (
+        source.count("result = await self._run_recall_media(") == 2
+    ), "both main and specialist loops must route recall_media to the handler"
+
+    # (c) The bytes must arrive as native media on a user turn, not as a
+    #     JSON blob in the tool result — no provider reads an image out
+    #     of a text field.  The injection keys on this metadata tag.
+    assert (
+        '"recalledMediaForToolCallId": call.call_id' in source
+    ), "specialist loop must inject recalled media as native parts"
