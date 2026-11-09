@@ -253,6 +253,53 @@ def test_media_bearing_automatic_history_is_elided_under_budget():
     assert [item.get("source") for item in result[1:]] == ["initial_goal"]
 
 
+def test_elided_turns_stay_recallable_by_seq():
+    """A cut must stay an archive, not a hole nothing can read back.
+
+    Reverse guard for the platform-scroll reuse: before it, compaction left
+    only ``elidedMessageCount`` — an integer the model could not act on, so
+    an early goal or decision that scrolled out was silently forgotten. Now
+    the dropped turns are named by ``messageSeq`` oldest-first with a recall
+    pointer, and the durable originals stay fetchable by ``recall_history``.
+    """
+    history = [
+        {
+            "role": "user",
+            "source": "initial_goal",
+            "messageSeq": 1,
+            "content": [{"type": "text", "text": "保留全部六集与对白"}],
+        },
+    ]
+    for index in range(6):
+        history.append(
+            {
+                "role": "assistant",
+                "source": "run_review_feedback",
+                "messageSeq": 10 + index,
+                "content": [
+                    {"type": "text", "text": f"review-{index} " + "x" * 4096},
+                ],
+            },
+        )
+
+    result = compact_conversation_history(history, max_bytes=4096)
+
+    elision = result[0]
+    assert elision["source"] == "context_compaction"
+    assert elision["elidedMessageCount"] > 0
+    assert "archivedHistoryMap" in elision
+    assert "recall_history" in elision["archivedHistoryMap"]
+    lo, hi = elision["recoverableSeqRange"]
+    assert lo <= hi
+    listed = [
+        int(line.split(" . ")[0])
+        for line in elision["archivedHistoryMap"].splitlines()
+        if " . \u27e6" in line
+    ]
+    assert listed == sorted(listed)
+    assert listed[0] == lo and listed[-1] == hi
+
+
 @pytest.mark.parametrize(
     ("project_id", "generation", "superseded"),
     [
