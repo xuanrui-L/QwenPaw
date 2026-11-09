@@ -743,6 +743,42 @@ def _migrate_v8_to_v9(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[8] = _migrate_v8_to_v9
 
 
+def _migrate_v9_to_v10(document: dict[str, Any]) -> dict[str, Any]:
+    """v9 -> v10: stamp ``caption_role`` on overlay Elements.
+
+    Legacy overlays with non-empty ``text`` (caption cards) that lack a
+    ``caption_role`` default to ``"dialogue"``.  Text-free overlays
+    (decorations / media stickers) stay untouched.
+    """
+
+    timelines = document.get("timelines")
+    items = timelines.get("items") if isinstance(timelines, dict) else None
+    if isinstance(items, dict):
+        for timeline in items.values():
+            if not isinstance(timeline, dict):
+                continue
+            elements = timeline.get("elements_by_id")
+            if not isinstance(elements, dict):
+                continue
+            for element in elements.values():
+                if not isinstance(element, dict):
+                    continue
+                creation = element.get("creation")
+                if (
+                    isinstance(creation, dict)
+                    and creation.get("type") == "overlay"
+                    and "caption_role" not in creation
+                ):
+                    text = creation.get("text", "")
+                    if text and str(text).strip():
+                        creation["caption_role"] = "dialogue"
+    document["schema_version"] = 10
+    return document
+
+
+PROJECT_MIGRATIONS[9] = _migrate_v9_to_v10
+
+
 def _repair_v9_missing_audio_roles(document: dict[str, Any]) -> dict[str, Any]:
     """Same-version repair: stamp audio roles on pre-merge v9 documents.
 

@@ -28,7 +28,6 @@ from services.project_files.models import (
     VisualVariant,
 )
 
-
 pytestmark = pytest.mark.unit
 
 
@@ -115,7 +114,7 @@ def test_project_new_has_complete_valid_defaults_and_utc_time():
         now=datetime(2026, 7, 15, 16, 0, tzinfo=timezone.utc),
     )
 
-    assert project.schema_version == 9
+    assert project.schema_version == 10
     assert project.generation == 0
     assert project.created_at.tzinfo == timezone.utc
     assert project.timelines.order == ["timeline:main"]
@@ -263,7 +262,7 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
 
     migrated = load_project_document(raw)
 
-    assert migrated.schema_version == 9
+    assert migrated.schema_version == 10
     assert migrated.settings.production_stage == "media"
     assert migrated.settings.script_approval_fingerprint is None
     assert migrated.visual.entities.items[
@@ -273,7 +272,7 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
         # Pinned against the current schema dump: bump when Project gains
         # fields, the mechanism under test is that migration-added fields
         # stay out of the source-document hash.
-        "sha256:5d6659287df0be110f7427ee70303554ca5e09a79eda324ae9dbdc48b4fa76c9"
+        "sha256:5a9fe92811428be63795170b0e7b263c72adc4c4b77e9194c15cab2f1ea5c999"
     )
     assert project_document_etag(raw, project=migrated) != project_etag(
         migrated,

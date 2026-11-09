@@ -14,11 +14,88 @@ MOTION_TEMPLATE_VERSION = 1
 CAPTION_TEMPLATE_VERSION = 2
 DEFAULT_CAPTION_LOCATION = {
     "x": 0.5,
-    "y": 0.86,
-    "width": 0.8,
-    "height": 0.18,
+    "y": 0.88,
+    "width": 0.72,
+    "height": 0.14,
     "anchor_x": 0.5,
     "anchor_y": 0.5,
+}
+# Preset locations for each caption_role.  The dialogue entry is
+# intentionally identical to DEFAULT_CAPTION_LOCATION so legacy callers
+# that look up locations by role get a consistent result.
+CAPTION_ROLE_LOCATIONS: dict[str, dict[str, object]] = {
+    # 对白字幕 — 电影标准底部居中，留出安全边距（画面 72% 宽，底边距 12%）
+    "dialogue": {
+        "x": 0.50,
+        "y": 0.88,
+        "width": 0.72,
+        "height": 0.14,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+    },
+    # 旁白/内心独白 — 较对话更靠下、更窄，配合斜体样式形成视觉区分
+    "narration": {
+        "x": 0.50,
+        "y": 0.90,
+        "width": 0.65,
+        "height": 0.12,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+    },
+    # 开场片名 — 黄金比例位置（约 38.2% 处），居中，留给片名呼吸空间
+    "opening_title": {
+        "x": 0.50,
+        "y": 0.33,
+        "width": 0.60,
+        "height": 0.20,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+    },
+    # 开场演职员 — 画面下部居中，小型字体；电影惯例：下三分之一处
+    "opening_credit": {
+        "x": 0.50,
+        "y": 0.80,
+        "width": 0.55,
+        "height": 0.06,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+    },
+    # 片尾致谢 — 底部居中，预留滚动空间；电影惯例：从底部向上滚动
+    "ending_credit": {
+        "x": 0.50,
+        "y": 0.95,
+        "width": 0.65,
+        "height": 0.30,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+    },
+    # 地点/时间标注 — 左下角，小字；参考"巴黎，1942"、"三年前"等电影惯用位置
+    "location": {
+        "x": 0.06,
+        "y": 0.88,
+        "width": 0.35,
+        "height": 0.08,
+        "anchor_x": 0.0,
+        "anchor_y": 1.0,
+    },
+    # 章节标题 — 顶部居中，参考电影幕间/段落卡（如《布达佩斯大饭店》章节卡）
+    "chapter": {
+        "x": 0.50,
+        "y": 0.10,
+        "width": 0.55,
+        "height": 0.10,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+    },
+    # 访谈要点摘要 — 顶部区域，纪录片事实卡风格；"同理顶部"
+    "interview_summary": {
+        "x": 0.50,
+        "y": 0.08,
+        "width": 0.75,
+        "height": 0.12,
+        "anchor_x": 0.5,
+        "anchor_y": 0.5,
+    },
 }
 SUPPORTED_MOTIFS = frozenset(
     {
@@ -88,7 +165,7 @@ def render_caption_template(
 html,body{{width:100%;height:100%;margin:0;background:transparent;overflow:hidden}}
 *{{box-sizing:border-box}}
 .stage{{position:absolute;inset:6%;display:flex;align-items:center;justify-content:center}}
-.words{{width:100%;margin:0;color:#fff;font-family:"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;font-size:{font};font-weight:600;line-height:1.35;text-align:center;word-break:normal;overflow-wrap:break-word;text-wrap:balance;text-shadow:0 .025em .05em #000d,0 .04em .14em #000b;animation:appear .14s linear both}}
+.words{{width:100%;margin:0;color:#fff;font-family:"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;font-size:{font};font-weight:600;line-height:1.35;text-align:center;word-break:normal;overflow-wrap:break-word;line-break:strict;text-shadow:0 .025em .05em #000d,0 .04em .14em #000b;animation:appear .14s linear both}}
 @keyframes appear{{from{{opacity:.72}}to{{opacity:1}}}}
 </style></head><body><div class="stage" data-motion-template-version="{CAPTION_TEMPLATE_VERSION}" data-motion-motif="caption_card" data-caption-style="plain" data-motion-exit="none"><div class="words">{safe_text}</div></div></body></html>"""
 
@@ -208,6 +285,7 @@ _MOTIFS: dict[str, tuple[str, str]] = {
 
 
 __all__ = [
+    "CAPTION_ROLE_LOCATIONS",
     "MOTION_TEMPLATE_VERSION",
     "SUPPORTED_EMOTIONS",
     "SUPPORTED_ENTRANCES",

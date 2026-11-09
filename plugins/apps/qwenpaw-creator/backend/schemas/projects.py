@@ -67,6 +67,10 @@ class ProjectCreateRequest(StrictModel):
     resolution: str = "720P"
     content_type: str | None = Field(None, alias="contentType")
     template_id: str | None = Field(None, alias="templateId")
+    subtitle_policy: Literal["auto", "on", "off"] | None = Field(
+        None,
+        alias="subtitlePolicy",
+    )
     execution_preauthorization: ExecutionPreauthorizationPolicy | None = Field(
         None,
         alias="executionPreauthorization",

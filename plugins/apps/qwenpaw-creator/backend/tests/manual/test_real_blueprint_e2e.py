@@ -140,7 +140,7 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
     # 2. Snapshot must already be schema v9 with narrative fields.
     snapshot = _snapshot(client, project_id)
     project = snapshot["project"] if "project" in snapshot else snapshot
-    assert project["schema_version"] == 9
+    assert project["schema_version"] == 10
     assert project["narrative_edges"] == []
     primary_id = project["timelines"]["order"][0]
 
