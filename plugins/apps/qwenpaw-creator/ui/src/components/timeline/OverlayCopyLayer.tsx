@@ -348,9 +348,13 @@ export function PlainCaption({
   // centre. Still a timing and placement hint, not a pixel copy of the render.
   const isTopEdge = role === "chapter" || role === "interview_summary";
   const isLeftEdge = role === "location";
+  // Narration is distinguished by width only (backend preset 0.65). The
+  // caption renderer takes no role at all, so every role renders upright --
+  // an italic hint here would promise styling the cut never delivers.
+  const isNarrow = role === "narration";
   const onTopEdge = isTitle || isTopEdge;
   const fontSize = Math.round((stageWidth / 1280) * (isTitle ? 48 : 26));
-  const maxW = Math.round(stageWidth * (isTitle ? 0.7 : 0.8));
+  const maxW = Math.round(stageWidth * (isTitle ? 0.7 : isNarrow ? 0.65 : 0.8));
   const padding = Math.round(fontSize * 0.35);
   const lines = wrapGreedy(text, fontSize, maxW - padding * 2);
   const lh = lineHeightOf(fontSize);
@@ -399,10 +403,7 @@ export function PlainCaption({
             fill="#ffffff"
             stroke="#000000"
             strokeWidth={Math.max(1, Math.round(fontSize * 0.05))}
-            style={{
-              paintOrder: "stroke",
-              fontStyle: role === "narration" ? "italic" : "normal",
-            }}
+            style={{ paintOrder: "stroke" }}
           >
             {line}
           </text>

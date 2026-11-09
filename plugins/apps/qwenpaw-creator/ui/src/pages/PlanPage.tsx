@@ -22,6 +22,7 @@ import { useTimelineStore } from "@/store/timelineStore";
 import { renderTimeline } from "@/api/creator";
 import { toggleSubtitles } from "@/api/creator";
 import {
+  isSubtitleOverlay,
   overlayContentKind,
   resolveTimelineRender,
   selectPrimaryTimeline,
@@ -142,19 +143,26 @@ export default function PlanPage() {
     : 1;
   const clampedPlayheadTick = Math.min(playheadTick, displayDurationTick);
 
-  // Subtitle element stats for the toolbar toggle button
+  // Subtitle element stats for the toolbar toggle button.  The count has to
+  // follow the same predicate the backend toggle applies, or the button would
+  // advertise a number of subtitles it never touches: a pet-OS bubble carries
+  // no caption_role and is not a subtitle.
   const subtitleStats = useMemo(() => {
     if (!timeline) return { count: 0, enabledCount: 0 };
     let count = 0;
     let enabledCount = 0;
+    const contentType = project?.settings.content_type;
     for (const element of Object.values(timeline.elements_by_id)) {
-      if (element.creation.type === "overlay" && element.creation.text.trim()) {
+      if (
+        element.creation.type === "overlay" &&
+        isSubtitleOverlay(element.creation, contentType)
+      ) {
         count++;
         if (element.enabled) enabledCount++;
       }
     }
     return { count, enabledCount };
-  }, [timeline]);
+  }, [project, timeline]);
   const hasSubtitles = subtitleStats.count > 0;
   const subtitlesAllEnabled =
     subtitleStats.enabledCount === subtitleStats.count;

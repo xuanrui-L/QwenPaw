@@ -190,6 +190,14 @@ def specialist_system_prompt(
                     if target_duration is not None
                     else "null"
                 ),
+                # The director's per-content-type rules each demand a caption
+                # card, so it has to be told the project's subtitle policy or it
+                # silently overrules the delegator's "off" default.
+                "subtitle_policy": (
+                    project.settings.subtitle_policy
+                    if project is not None
+                    else "off"
+                ),
             },
         )
     rendered = render_file_agent_prompt(_ROLE_PROMPT_IDS[role], **values)

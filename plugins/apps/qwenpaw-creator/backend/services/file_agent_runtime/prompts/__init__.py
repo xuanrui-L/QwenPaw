@@ -59,6 +59,7 @@ FILE_AGENT_PROMPT_SPECS = {
             "workspace_schema",
             "content_type",
             "target_duration_seconds",
+            "subtitle_policy",
             "tts_guidance",
         ),
     )
