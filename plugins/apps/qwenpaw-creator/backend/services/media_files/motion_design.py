@@ -114,6 +114,7 @@ from services.project_files.models import (
     Timeline,
     TimelineElement,
     TimelineSpan,
+    is_subtitle_overlay,
     motion_document_file_id,
 )
 from services.project_files.remote_cache import resolve_remote_cache
@@ -575,6 +576,8 @@ def _validate_caption_location(
     location: ElementLocation,
     text: str,
     canvas_size: tuple[int, int],
+    *,
+    check_safe_area: bool = True,
 ) -> None:
     """Reject caption boxes that cannot produce a readable horizontal card.
 
@@ -588,6 +591,14 @@ def _validate_caption_location(
     reaches 0.97, clears every size floor, and still burns the bottom of the
     card into the frame edge.  Judging the geometry only inside
     ``caption_layout_error`` left that box perfectly legal.
+
+    ``check_safe_area`` keeps that rule scoped to subtitles.  A pet-OS bubble
+    box describes the whole speech-bubble layer (the prompt teaches a tall
+    right-edge box such as ``x=0.90, width=0.18``) and the bubble renderer
+    lays its tail and padding out on its own, so the subtitle safe area is not
+    its contract; callers pass ``False`` for anything the subtitle predicate
+    does not claim, leaving bubbles under the size floors only, exactly as
+    before this gate existed.
     """
 
     error = caption_layout_error(
@@ -597,6 +608,8 @@ def _validate_caption_location(
     )
     if error is not None:
         raise ValidationError(error)
+    if not check_safe_area:
+        return
     mapping = location.model_dump(mode="json")
     if caption_box_out_of_safe_area(mapping):
         left, top, right, bottom = caption_box_edges(mapping)
@@ -1976,6 +1989,14 @@ async def design_motion_overlays(
         generic = ElementLocation(**DEFAULT_CAPTION_LOCATION)
         if generic != candidates[0]:
             candidates.append(generic)
+        # Only subtitles are gated against the safe area; see
+        # ``_validate_caption_location``.
+        subtitle = is_subtitle_overlay(
+            text=creation.text,
+            vibe=creation.vibe,
+            caption_role=creation.caption_role,
+            content_type=project.settings.content_type,
+        )
         chosen: ElementLocation | None = None
         for candidate in candidates:
             try:
@@ -1983,6 +2004,7 @@ async def design_motion_overlays(
                     candidate,
                     creation.text,
                     canvas_size,
+                    check_safe_area=subtitle,
                 )
             except ValidationError:
                 continue

@@ -283,6 +283,52 @@ class TestMotionDesignSafety:
             (1280, 720),
         )
 
+    def test_safe_area_gate_skips_overlays_that_are_not_subtitles(
+        self,
+    ) -> None:
+        """气泡卡片走自己的排版，不能被子幕安全区条款误伤。
+
+        The prompt teaches the pet-OS bubble a tall right-edge box that
+        describes the whole speech-bubble layer, not a subtitle line, and the
+        bubble renderer lays out its tail and padding by itself.  So the
+        subtitle safe area is not its contract: the same out-of-safe-area box
+        a subtitle is rejected for has to stay acceptable once the caller
+        says the overlay is not a subtitle.
+        """
+        bubble = ElementLocation(
+            x=0.90,
+            y=0.86,
+            width=0.30,
+            height=0.20,
+            anchor_x=0.5,
+            anchor_y=0.5,
+        )
+        with pytest.raises(ValidationError, match="安全区"):
+            _validate_caption_location(bubble, "本喵要发光", (1280, 720))
+        _validate_caption_location(
+            bubble,
+            "本喵要发光",
+            (1280, 720),
+            check_safe_area=False,
+        )
+        # The exemption is scoped to the safe area only: the size floors that
+        # already governed bubbles keep rejecting the prompt's own 0.18-wide
+        # box, so nothing about bubble behaviour shifts with this gate.
+        with pytest.raises(ValidationError, match="太窄"):
+            _validate_caption_location(
+                ElementLocation(
+                    x=0.90,
+                    y=0.29,
+                    width=0.18,
+                    height=0.53,
+                    anchor_x=0.5,
+                    anchor_y=0.5,
+                ),
+                "本喵要发光",
+                (1280, 720),
+                check_safe_area=False,
+            )
+
     def test_documented_copy_budget_fits_the_preset_it_promises(self) -> None:
         """A prompt ceiling the preset cannot hold silently clips words.
 
