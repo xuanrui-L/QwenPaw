@@ -63,6 +63,8 @@ export default function HeroComposerCard() {
     setAspectRatio,
     selectedTemplateId,
     setSelectedTemplateId,
+    subtitlePolicy,
+    setSubtitlePolicy,
     attachments,
     addFiles,
     addUrl,
@@ -111,6 +113,14 @@ export default function HeroComposerCard() {
       listItem: "!text-sm !text-[var(--color-text-primary)]",
     },
   } as const;
+
+  // The pill always reads "字幕" and keeps the neutral pill look of its
+  // neighbours; only the leading dot carries the state (green = 自动).
+  const subtitleAuto = subtitlePolicy === "auto";
+  const subtitleHints: Record<string, string> = {
+    auto: t("home.subtitlePolicyAutoHint"),
+    off: t("home.subtitlePolicyOffHint"),
+  };
 
   return (
     <div
@@ -376,6 +386,48 @@ export default function HeroComposerCard() {
               className="!h-8 !w-auto min-w-[84px] !rounded-full !bg-[rgba(43,27,0,0.04)] dark:!bg-white/5"
               classNames={pillSelectClassNames}
             />
+            <Tooltip title={t("home.subtitlePolicyTip")}>
+              <Select
+                aria-label={t("home.subtitlePolicy")}
+                size="small"
+                value={subtitlePolicy}
+                onChange={setSubtitlePolicy}
+                options={[
+                  {
+                    value: "auto",
+                    label: t("home.subtitlePolicyAuto"),
+                  },
+                  { value: "off", label: t("home.subtitlePolicyOff") },
+                ]}
+                labelRender={() => (
+                  <span className="inline-flex items-center justify-center gap-1">
+                    <span
+                      aria-hidden
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        subtitleAuto
+                          ? "bg-[var(--color-success)]"
+                          : "bg-[var(--color-text-tertiary)]"
+                      }`}
+                    />
+                    {t("home.subtitlePolicy")}
+                  </span>
+                )}
+                optionRender={(option) => (
+                  <span className="flex flex-col gap-0.5 py-0.5 text-left">
+                    <span className="!text-xs !font-semibold !text-[var(--color-text-primary)]">
+                      {option.data.label}
+                    </span>
+                    <span className="!text-[11px] !font-normal !text-[var(--color-text-tertiary)]">
+                      {subtitleHints[String(option.data.value ?? "")]}
+                    </span>
+                  </span>
+                )}
+                popupMatchSelectWidth={false}
+                variant="borderless"
+                className="!h-8 !w-auto min-w-[80px] !rounded-full !bg-[rgba(43,27,0,0.04)] dark:!bg-white/5"
+                classNames={pillSelectClassNames}
+              />
+            </Tooltip>
           </>
         )}
 

@@ -280,6 +280,16 @@ export interface MotionGraphicDocument extends ProjectJsonRecord {
   intensity?: number;
 }
 
+export type CaptionRole =
+  | "dialogue"
+  | "narration"
+  | "opening_title"
+  | "opening_credit"
+  | "ending_credit"
+  | "location"
+  | "chapter"
+  | "interview_summary";
+
 export interface OverlayCreationDocument extends ProjectJsonRecord {
   type: "overlay";
   // The overlay role derives from data: non-empty text = caption card;
@@ -287,6 +297,7 @@ export interface OverlayCreationDocument extends ProjectJsonRecord {
   // reference their payload through the element's render_source.
   text: string;
   vibe: string;
+  caption_role?: CaptionRole | null;
   prompt: string;
   reference_version_ids: string[];
   motion?: MotionGraphicDocument | null;

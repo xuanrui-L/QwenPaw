@@ -124,6 +124,36 @@ function niceScaleStep(secondsValue: number): number {
   return nice * power;
 }
 
+const CAPTION_ROLE_LABEL: Record<string, string> = {
+  dialogue: "/",
+  narration: "VO",
+  opening_title: "T",
+  opening_credit: "★",
+  ending_credit: "End",
+  location: "📍",
+  chapter: "§",
+  interview_summary: "Σ",
+};
+
+function CaptionRoleTag({
+  element,
+  trackType,
+}: {
+  element: TimelineElementDocument;
+  trackType: TimelineTrackType | null;
+}) {
+  if (trackType !== "subtitle") return null;
+  const creation = element.creation;
+  if (creation.type !== "overlay") return null;
+  const role = creation.caption_role;
+  if (!role || !CAPTION_ROLE_LABEL[role]) return null;
+  return (
+    <span className="pointer-events-none truncate whitespace-nowrap text-[8px] font-medium opacity-50">
+      {CAPTION_ROLE_LABEL[role]}
+    </span>
+  );
+}
+
 interface BlockDragState {
   pointerId: number;
   elementId: string;
@@ -881,6 +911,7 @@ export default function TimelineTracks({
               )}
               {element.label || t("timeline.timelineContent")}
             </span>
+            <CaptionRoleTag element={element} trackType={trackType} />
             <span className="pointer-events-none truncate whitespace-nowrap text-[9px] font-medium opacity-75">
               {seconds(element.span.start_tick, timeline.ticks_per_second)}s –{" "}
               {seconds(

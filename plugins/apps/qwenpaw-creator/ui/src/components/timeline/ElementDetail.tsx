@@ -5,6 +5,8 @@ import i18n from "@/i18n";
 import {
   ArrowUpRight,
   Box,
+  Captions,
+  CaptionsOff,
   Clock3,
   Film,
   Layers3,
@@ -52,6 +54,11 @@ interface ElementDetailProps {
   onClose: () => void;
   onChange: (mutator: (element: TimelineElementDocument) => void) => void;
   onApply: () => void;
+  /** Persist a caption show/hide toggle immediately (bypasses the draft). */
+  onToggleSubtitleEnabled?: (
+    element: TimelineElementDocument,
+    enabled: boolean,
+  ) => void;
   onDiscard: () => void;
   onAcceptConflicts: () => void;
   onOpenWorkbench: (element: TimelineElementDocument) => void;
@@ -331,6 +338,7 @@ export default function ElementDetail({
   onClose,
   onChange,
   onApply,
+  onToggleSubtitleEnabled,
   onDiscard,
   onAcceptConflicts,
   onOpenWorkbench,
@@ -435,6 +443,8 @@ export default function ElementDetail({
     creation.type === "t2v" ||
     creation.type === "i2v" ||
     creation.type === "s2v";
+  const isSubtitleOverlay =
+    creation.type === "overlay" && creation.text.trim().length > 0;
   const spanStart = sec(element.span.start_tick, timeline.ticks_per_second);
   const spanEnd = sec(
     element.span.start_tick + element.span.duration_tick,
@@ -508,7 +518,7 @@ export default function ElementDetail({
     <section
       data-element-detail={element.element_id}
       data-onboarding-id="element-detail"
-      className={`flex min-h-0 flex-col overflow-hidden bg-[var(--color-bg-primary)] ${
+      className={`@container flex min-h-0 flex-col overflow-hidden bg-[var(--color-bg-primary)] ${
         frameless
           ? ""
           : "rounded-xl border border-[var(--color-border)] shadow-sm"
@@ -573,6 +583,44 @@ export default function ElementDetail({
                 <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-tertiary)]">
                   {t("elementDetail.disabled")}
                 </span>
+              )}
+              {isSubtitleOverlay && (
+                <button
+                  type="button"
+                  title={
+                    element.enabled
+                      ? t("elementDetail.disableSubtitle")
+                      : t("elementDetail.enableSubtitle")
+                  }
+                  disabled={applying}
+                  onClick={() => {
+                    const next = !element.enabled;
+                    if (onToggleSubtitleEnabled) {
+                      onToggleSubtitleEnabled(element, next);
+                      return;
+                    }
+                    onChange((draft) => {
+                      draft.enabled = next;
+                    });
+                    onApply();
+                  }}
+                  className={`flex h-6 shrink-0 items-center gap-1 rounded-full px-2 text-[10px] font-semibold transition ${
+                    element.enabled
+                      ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]"
+                      : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                  }`}
+                >
+                  {element.enabled ? (
+                    <CaptionsOff className="h-3 w-3" />
+                  ) : (
+                    <Captions className="h-3 w-3" />
+                  )}
+                  <span className="@max-[399px]:hidden">
+                    {element.enabled
+                      ? t("elementDetail.disableSubtitle")
+                      : t("elementDetail.enableSubtitle")}
+                  </span>
+                </button>
               )}
               <button
                 type="button"
