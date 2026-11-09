@@ -33,6 +33,7 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import {
   TRANSITION_KIND_LABEL,
   classifyElementTrack,
+  isSubtitleOverlay as isCaptionSubtitle,
   resolveElementVisualMeta,
 } from "@/selectors/timelineElementSelectors";
 import { presentPromptEntityNames } from "@/lib/promptEntityNames";
@@ -445,6 +446,12 @@ export default function ElementDetail({
     creation.type === "s2v";
   const isSubtitleOverlay =
     creation.type === "overlay" && creation.text.trim().length > 0;
+  // Captions are placed by dragging on the timeline and always ride above
+  // the picture, so the subtitle editor drops the numeric time/layer
+  // fields; other overlays (pet-OS bubbles, stickers…) keep them.
+  const showsTimeLayerEditors =
+    creation.type !== "overlay" ||
+    !isCaptionSubtitle(creation, project.settings.content_type);
   const spanStart = sec(element.span.start_tick, timeline.ticks_per_second);
   const spanEnd = sec(
     element.span.start_tick + element.span.duration_tick,
@@ -891,72 +898,80 @@ export default function ElementDetail({
           </summary>
           <div className="space-y-4 pt-3">
             <section className="rounded-xl border border-[var(--color-border)] p-3">
-              <div className="mb-3">
-                <h4 className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
-                  <Clock3 className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-                  {t("elementDetail.timeAndLayer")}
-                </h4>
-              </div>
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
-                <label>
-                  <FieldLabel>{t("elementDetail.startTime")}</FieldLabel>
-                  <InputNumber
-                    className="w-full"
-                    min={0}
-                    step={0.1}
-                    disabled={applying}
-                    value={sec(
-                      element.span.start_tick,
-                      timeline.ticks_per_second,
-                    )}
-                    onChange={(value) => {
-                      if (value == null) return;
-                      onChange((draft) => {
-                        draft.span.start_tick = Math.round(
-                          Number(value) * timeline.ticks_per_second,
-                        );
-                      });
-                    }}
-                  />
-                </label>
-                <label>
-                  <FieldLabel>{t("elementDetail.durationLabel")}</FieldLabel>
-                  <InputNumber
-                    className="w-full"
-                    min={1 / timeline.ticks_per_second}
-                    step={0.1}
-                    disabled={applying}
-                    value={sec(
-                      element.span.duration_tick,
-                      timeline.ticks_per_second,
-                    )}
-                    onChange={(value) => {
-                      if (value == null) return;
-                      onChange((draft) => {
-                        draft.span.duration_tick = Math.max(
-                          1,
-                          Math.round(Number(value) * timeline.ticks_per_second),
-                        );
-                      });
-                    }}
-                  />
-                </label>
-                <label>
-                  <FieldLabel>{t("elementDetail.zIndex")}</FieldLabel>
-                  <InputNumber
-                    className="w-full"
-                    disabled={applying}
-                    value={element.z_index}
-                    onChange={(value) =>
-                      value != null &&
-                      onChange((draft) => {
-                        draft.z_index = Number(value);
-                      })
-                    }
-                  />
-                </label>
-              </div>
-              <div className="mt-3">
+              {!showsTimeLayerEditors && (
+                <>
+                  <div className="mb-3">
+                    <h4 className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
+                      <Clock3 className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+                      {t("elementDetail.timeAndLayer")}
+                    </h4>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+                    <label>
+                      <FieldLabel>{t("elementDetail.startTime")}</FieldLabel>
+                      <InputNumber
+                        className="w-full"
+                        min={0}
+                        step={0.1}
+                        disabled={applying}
+                        value={sec(
+                          element.span.start_tick,
+                          timeline.ticks_per_second,
+                        )}
+                        onChange={(value) => {
+                          if (value == null) return;
+                          onChange((draft) => {
+                            draft.span.start_tick = Math.round(
+                              Number(value) * timeline.ticks_per_second,
+                            );
+                          });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <FieldLabel>
+                        {t("elementDetail.durationLabel")}
+                      </FieldLabel>
+                      <InputNumber
+                        className="w-full"
+                        min={1 / timeline.ticks_per_second}
+                        step={0.1}
+                        disabled={applying}
+                        value={sec(
+                          element.span.duration_tick,
+                          timeline.ticks_per_second,
+                        )}
+                        onChange={(value) => {
+                          if (value == null) return;
+                          onChange((draft) => {
+                            draft.span.duration_tick = Math.max(
+                              1,
+                              Math.round(
+                                Number(value) * timeline.ticks_per_second,
+                              ),
+                            );
+                          });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <FieldLabel>{t("elementDetail.zIndex")}</FieldLabel>
+                      <InputNumber
+                        className="w-full"
+                        disabled={applying}
+                        value={element.z_index}
+                        onChange={(value) =>
+                          value != null &&
+                          onChange((draft) => {
+                            draft.z_index = Number(value);
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                </>
+              )}
+              <div className={showsTimeLayerEditors ? "mt-3" : ""}>
                 <TextField
                   label={t("elementDetail.nameLabel")}
                   value={element.label}
