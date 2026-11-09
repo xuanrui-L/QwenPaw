@@ -354,7 +354,8 @@ export function PlainCaption({
   const isNarrow = role === "narration";
   const onTopEdge = isTitle || isTopEdge;
   const fontSize = Math.round((stageWidth / 1280) * (isTitle ? 48 : 26));
-  const maxW = Math.round(stageWidth * (isTitle ? 0.7 : isNarrow ? 0.65 : 0.8));
+  const widthFactor = isTitle ? 0.7 : isNarrow ? 0.65 : 0.8;
+  const maxW = Math.round(stageWidth * widthFactor);
   const padding = Math.round(fontSize * 0.35);
   const lines = wrapGreedy(text, fontSize, maxW - padding * 2);
   const lh = lineHeightOf(fontSize);
