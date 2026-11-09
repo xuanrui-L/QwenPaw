@@ -1,15 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { message, Modal, Tooltip } from "antd";
-import {
-  Bookmark,
-  Captions,
-  CaptionsOff,
-  FileText,
-  Info,
-  Loader2,
-  RefreshCw,
-  X,
-} from "lucide-react";
+import { Bookmark, FileText, Info, Loader2, RefreshCw, X } from "lucide-react";
 import { MenuUnfoldOutlined } from "@ant-design/icons";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -186,6 +177,18 @@ export default function PlanPage() {
       setSubtitleToggling(false);
     }
   }, [id, subtitlesAllEnabled, pollOnce, t]);
+
+  // The switch lives in the timeline itself (the subtitle lane's row header),
+  // so the page only hands down what it knows best: whether every subtitle is
+  // currently on, how many the backend toggle will reach, and the action.
+  const subtitleToggle = hasSubtitles
+    ? {
+        enabled: subtitlesAllEnabled,
+        count: subtitleStats.count,
+        busy: subtitleToggling,
+        onToggle: () => void handleToggleSubtitles(),
+      }
+    : undefined;
 
   // A single caption is toggled through a direct one-operation patch instead of
   // the element draft: the draft derives its operations from React state, so
@@ -872,51 +875,6 @@ export default function PlanPage() {
               <Bookmark className="h-3.5 w-3.5" />
               {t("home.saveAsTemplate")}
             </button>
-            {hasSubtitles && (
-              <Tooltip
-                title={
-                  subtitlesAllEnabled
-                    ? t("plan.subtitleRemove")
-                    : t("plan.subtitleAdd")
-                }
-              >
-                <button
-                  type="button"
-                  data-subtitle-toggle
-                  disabled={subtitleToggling}
-                  onClick={() => void handleToggleSubtitles()}
-                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
-                    subtitleToggling
-                      ? "cursor-not-allowed opacity-70"
-                      : subtitlesAllEnabled
-                      ? "border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-accent)] hover:border-[var(--color-accent)]"
-                      : "border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
-                  }`}
-                >
-                  {subtitleToggling ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : subtitlesAllEnabled ? (
-                    <CaptionsOff className="h-3.5 w-3.5" />
-                  ) : (
-                    <Captions className="h-3.5 w-3.5" />
-                  )}
-                  <span className="@max-[559px]:hidden">
-                    {subtitlesAllEnabled
-                      ? t("plan.subtitleRemove")
-                      : t("plan.subtitleAdd")}
-                  </span>
-                  <span
-                    className={`ml-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[9px] font-bold leading-none ${
-                      subtitlesAllEnabled
-                        ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
-                        : "bg-[var(--color-text-tertiary)]/20 text-[var(--color-text-tertiary)]"
-                    }`}
-                  >
-                    {subtitleStats.count}
-                  </span>
-                </button>
-              </Tooltip>
-            )}
             <button
               type="button"
               data-open-blueprint
@@ -956,6 +914,7 @@ export default function PlanPage() {
                 selectedElementId={selectedElementId}
                 previewOpen={comparePreviewOpen}
                 tasks={tasks}
+                subtitleToggle={subtitleToggle}
                 onPreviewOpenChange={setComparePreviewOpen}
                 onPlayheadChange={(tick) =>
                   movePlayhead(Math.max(0, Math.min(displayDurationTick, tick)))
@@ -1037,6 +996,7 @@ export default function PlanPage() {
             selectedElementId={selectedElementId}
             previewOpen
             tasks={tasks}
+            subtitleToggle={subtitleToggle}
             onPreviewOpenChange={() => {}}
             onPlayheadChange={(tick) =>
               movePlayhead(Math.max(0, Math.min(displayDurationTick, tick)))
