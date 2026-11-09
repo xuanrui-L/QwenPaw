@@ -5579,3 +5579,75 @@ def test_the_next_turn_resumes_from_the_shape_that_was_sent(tmp_path):
     ]
     # and it still carries the tool exchange this turn produced.
     assert [item["role"] for item in seen[1]][-2:] == ["assistant", "tool"]
+
+
+def test_plan_continuation_summary_round_trips_and_fails_closed(
+    monkeypatch,
+) -> None:
+    """The summary is really produced from the archived slice, not a no-op.
+
+    Wiring checks only prove the call exists; this drives the real host
+    library end to end (build prompt -> model -> parse -> validate) so a
+    regression that quietly made the planner always return "" would surface,
+    and confirms an unusable reply is dropped rather than injected.
+    """
+    if not driver_module._HOST_CONTINUATION_SUMMARY_AVAILABLE:
+        pytest.skip("host continuation_summary library not importable")
+    monkeypatch.delenv("CREATOR_CONTINUATION_SUMMARY_ENABLED", raising=False)
+
+    # Enough droppable runtime history to force real archival (over the
+    # 128KB default history budget).
+    prior_context = [
+        _record(
+            seq,
+            role="tool",
+            source="runtime_action_result",
+            text=f"review marker {seq} " + "z" * 3000,
+        )
+        for seq in range(1, 60)
+    ]
+
+    class _Harness:
+        _plan_continuation_summary = (
+            FileCreatorAgentRuntime._plan_continuation_summary
+        )
+        _complete_model_turn = FileCreatorAgentRuntime._complete_model_turn
+        model_turn_timeout_seconds = 30
+
+        def __init__(self, client) -> None:
+            self.model_client = client
+
+    markdown = (
+        "## Active Task\nContinue the episode plan.\nStatus: in_progress\n\n"
+        "## Current State\n- Six episodes are locked.\n\n"
+        "## Constraints\n- Keep all dialogue.\n\n"
+        "## Decisions\n- Use the vertical format.\n\n"
+        "## Open Work\n- Render the title card.\n"
+    )
+
+    async def _scenario() -> tuple[str, list]:
+        seen_tools: list[list] = []
+
+        async def summarize(messages, tools):
+            seen_tools.append(tools)
+            return AgentModelTurn(content=markdown)
+
+        good = await _Harness(
+            CallbackAgentChatClient(summarize),
+        )._plan_continuation_summary(prior_context)
+        return good, seen_tools[0]
+
+    summary, tools = asyncio.run(_scenario())
+    assert tools == [], "the summary turn must not offer tools"
+    assert "archived task state" in summary
+    assert "Continue the episode plan." in summary
+
+    async def _fail_closed() -> str:
+        async def junk(messages, tools):
+            return AgentModelTurn(content="this is not a summary")
+
+        return await _Harness(
+            CallbackAgentChatClient(junk),
+        )._plan_continuation_summary(prior_context)
+
+    assert asyncio.run(_fail_closed()) == ""

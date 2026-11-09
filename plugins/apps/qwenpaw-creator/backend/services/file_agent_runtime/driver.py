@@ -225,8 +225,33 @@ from .model_context import (
     MEDIA_OBSERVATION_SOURCE,
     MEDIA_RECALL_SOURCE,
     compact_conversation_history,
+    continuation_summary_enabled,
     estimate_input_tokens,
+    plan_history_compaction,
+    render_archived_evidence,
 )
+
+try:  # pragma: no cover - the plugin runs inside the host install
+    # The platform scroll already knows how to ask a model for a plain-Markdown
+    # continuation summary and how to validate the answer locally, failing
+    # closed. Reusing that library keeps Creator's archived-state shape
+    # identical to the host's instead of inventing a parallel prompt.
+    from qwenpaw.agents.context.scroll.continuation_summary import (
+        build_update_prompt as _host_build_update_prompt,
+    )
+    from qwenpaw.agents.context.scroll.continuation_summary import (
+        parse_plain_markdown as _host_parse_plain_markdown,
+    )
+    from qwenpaw.agents.context.scroll.continuation_summary import (
+        validate_summary_quality as _host_validate_summary_quality,
+    )
+
+    _HOST_CONTINUATION_SUMMARY_AVAILABLE = True
+except ImportError:  # pragma: no cover - standalone plugin installs
+    _host_build_update_prompt = None
+    _host_parse_plain_markdown = None
+    _host_validate_summary_quality = None
+    _HOST_CONTINUATION_SUMMARY_AVAILABLE = False
 from .workgraph_execution import (
     REQUEST_WORKGRAPH_EXECUTION,
     parse_request_targets,
@@ -1822,6 +1847,87 @@ class FileCreatorAgentRuntime:
             # ephemeral wire context, and the model has already answered it.
             messages[:] = sent
         return turn
+
+    async def _plan_continuation_summary(
+        self,
+        prior_context: list[CreatorMessageRecord],
+    ) -> str:
+        """Ask the model for one prose state cache over the turns compaction
+        is about to archive.
+
+        This mirrors the platform scroll's continuation summary — a bounded,
+        plain-Markdown snapshot of what the archived middle decided and still
+        owes, so the model reads coherent state rather than only a seq map. It
+        is regenerated from durable history on every compaction (Creator keeps
+        no cross-run summary) and is strictly fail-closed: a missing host
+        library, a turned-off knob, nothing actually archived, an empty or
+        invalid reply, or any provider error leaves the recall map alone.
+        """
+        if (
+            not prior_context
+            or not _HOST_CONTINUATION_SUMMARY_AVAILABLE
+            or not continuation_summary_enabled()
+        ):
+            return ""
+        try:
+            _compacted, archived = plan_history_compaction(
+                _build_continuation_history(prior_context),
+            )
+            if not archived:
+                return ""
+            evidence, (lo, hi) = render_archived_evidence(archived)
+            if not evidence or lo is None or hi is None:
+                return ""
+            prompt = _host_build_update_prompt(
+                mode="initial",
+                previous=None,
+                archived_context=evidence,
+                covered_seq=(lo, hi),
+                language="zh",
+            )
+            turn = await self._complete_model_turn(
+                self.model_client,
+                label="Creator Continuation Summary",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你负责更新一份紧凑的 continuation summary。严格遵"
+                            "循指定的 Markdown headings，并使用中文填写自然语"
+                            "言内容。"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                tools=[],
+                on_text_delta=None,
+                on_thinking_delta=None,
+                on_tool_call_delta=None,
+            )
+            parsed = _host_parse_plain_markdown(
+                turn.content or "",
+                covered_seq=(lo, hi),
+            )
+            if parsed is None:
+                return ""
+            existing_seqs = {
+                int(item["seq"])
+                for item in archived
+                if isinstance(item.get("seq"), int)
+            }
+            if _host_validate_summary_quality(
+                parsed,
+                evidence_text=evidence,
+                existing_seqs=existing_seqs,
+            ):
+                # Fails closed: an unsupported identifier or a dangling
+                # pointer means the summary cannot be trusted, so fall back to
+                # the recall map instead of injecting a plausible fabrication.
+                return ""
+            return parsed.render_background(include_envelope=False)
+        except Exception:  # pylint: disable=broad-except
+            # The summary is pure relief — it may never break or block a run.
+            return ""
 
     @property
     def started(self) -> bool:
@@ -3517,6 +3623,13 @@ class FileCreatorAgentRuntime:
             snapshot_project: Project | None = snapshot.project
         except Exception:  # pylint: disable=broad-except
             snapshot_project = None
+        # Ask for a continuation summary over the turns about to be archived
+        # before the history view is serialized. Fail-closed and off the
+        # critical contract path: it returns "" unless compaction actually
+        # drops turns, so short histories never pay the extra model turn.
+        continuation_summary = await self._plan_continuation_summary(
+            prior_context,
+        )
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
@@ -3540,6 +3653,7 @@ class FileCreatorAgentRuntime:
                         else None
                     ),
                     batch_tail=batch_tail,
+                    continuation_summary=continuation_summary,
                 ),
             },
         ]
@@ -10742,45 +10856,18 @@ def _compact_wire_project_snapshots(messages: list[dict[str, Any]]) -> None:
         message["content"] = updated_content
 
 
-def _continuation_message_text(
-    request: CreatorMessageRecord,
+def _build_continuation_history(
     prior_context: list[CreatorMessageRecord],
-    *,
-    project: Project | None = None,
-    project_root: Path | None = None,
-    batch_tail: list[CreatorMessageRecord] | None = None,
-) -> str:
-    """Carry one durable AgentDock Conversation into the next Agent run."""
+) -> list[dict[str, Any]]:
+    """Materialize durable prior turns into the compaction input shape.
 
-    current = _message_text(
-        request,
-        project=project,
-        project_root=project_root,
-    )
-    if batch_tail:
-        batch_payload = [
-            {
-                "messageSeq": item.message_seq,
-                "source": item.source,
-                "text": _message_text(item),
-                "metadata": dict(item.metadata),
-            }
-            for item in batch_tail
-        ]
-        current += (
-            "\n\n以下 RUNTIME_NOTIFICATIONS_BATCH 是与本请求一并送达的后续"
-            "Runtime 自动消息（已合并进本回合，处理完本回合即视为处理完毕）：\n"
-            "RUNTIME_NOTIFICATIONS_BATCH="
-            + json.dumps(
-                batch_payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        )
-    if not prior_context:
-        return current
+    Pulled out of ``_continuation_message_text`` so the async summary planner
+    can walk the very same view the serialized history uses: if the two ever
+    disagreed about what a turn looked like, the summary would describe turns
+    the model never receives.
+    """
     snapshot_receipts = _elide_stale_snapshots(prior_context)
-    history = [
+    return [
         {
             "messageSeq": item.message_seq,
             "role": item.role,
@@ -10817,7 +10904,51 @@ def _continuation_message_text(
         }
         for item in prior_context
     ]
-    history = compact_conversation_history(history)
+
+
+def _continuation_message_text(
+    request: CreatorMessageRecord,
+    prior_context: list[CreatorMessageRecord],
+    *,
+    project: Project | None = None,
+    project_root: Path | None = None,
+    batch_tail: list[CreatorMessageRecord] | None = None,
+    continuation_summary: str = "",
+) -> str:
+    """Carry one durable AgentDock Conversation into the next Agent run."""
+
+    current = _message_text(
+        request,
+        project=project,
+        project_root=project_root,
+    )
+    if batch_tail:
+        batch_payload = [
+            {
+                "messageSeq": item.message_seq,
+                "source": item.source,
+                "text": _message_text(item),
+                "metadata": dict(item.metadata),
+            }
+            for item in batch_tail
+        ]
+        current += (
+            "\n\n以下 RUNTIME_NOTIFICATIONS_BATCH 是与本请求一并送达的后续"
+            "Runtime 自动消息（已合并进本回合，处理完本回合即视为处理完毕）：\n"
+            "RUNTIME_NOTIFICATIONS_BATCH="
+            + json.dumps(
+                batch_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    if not prior_context:
+        return current
+    history = _build_continuation_history(prior_context)
+    history = compact_conversation_history(
+        history,
+        continuation_summary=continuation_summary,
+    )
     return (
         "以下 CONVERSATION_HISTORY_JSON 是同一 AgentDock Conversation 在本轮之前"
         "持久化上下文的有界视图，早期回执可能省略，项目历史按需读取。请继承用户目标与约束；"

@@ -424,7 +424,7 @@ def test_text_history_is_archived_and_recallable_not_just_cut():
         driver_module._creator_agent_tool_manifest,
     )
     context_source = inspect.getsource(
-        driver_module.compact_conversation_history,
+        driver_module.plan_history_compaction,
     )
 
     # (a) Elision now names the dropped turns by seq instead of a bare
@@ -451,3 +451,41 @@ def test_text_history_is_archived_and_recallable_not_just_cut():
     assert (
         "async def _run_recall_history(" in runtime_source
     ), "the handler must live on the runtime"
+
+
+def test_continuation_summary_is_wired_and_fail_closed():
+    """Reverse guard for the platform scroll's fourth relief lever.
+
+    The prose continuation summary reuses the host library and rides beside
+    the recall map, but it costs a model turn, so two properties must hold: it
+    is genuinely generated from the archived slice and injected into the
+    compaction marker, and it can never break a run. A refactor that quietly
+    drops the call, or lets a provider error escape, fails here.
+    """
+    import inspect
+
+    module_source = inspect.getsource(driver_module)
+    runtime_source = inspect.getsource(driver_module.FileCreatorAgentRuntime)
+    text_source = inspect.getsource(driver_module._continuation_message_text)
+    summary_source = inspect.getsource(
+        driver_module.FileCreatorAgentRuntime._plan_continuation_summary,
+    )
+    context_source = inspect.getsource(
+        driver_module.compact_conversation_history,
+    )
+
+    # (a) The host library is imported behind a guard, so a standalone plugin
+    #     install degrades to recall-only instead of failing to import.
+    assert "_HOST_CONTINUATION_SUMMARY_AVAILABLE" in module_source
+
+    # (b) The planner runs, is awaited from the loop, and its result reaches
+    #     the serialized history through the compaction helper.
+    assert "async def _plan_continuation_summary(" in runtime_source
+    assert "await self._plan_continuation_summary(" in runtime_source
+    assert "continuation_summary=continuation_summary" in text_source
+
+    # (c) Fail-closed: any error yields empty relief, and the summary only
+    #     ever lands on a real ``context_compaction`` marker.
+    assert "except Exception" in summary_source
+    assert 'return ""' in summary_source
+    assert "continuationSummary" in context_source
