@@ -26,6 +26,8 @@ from services.project_files.models import (
     TimelineSpan,
     VisualEntity,
     VisualVariant,
+    is_pet_content_type,
+    is_subtitle_overlay,
 )
 
 pytestmark = pytest.mark.unit
@@ -380,3 +382,57 @@ def test_visual_style_anchor_cycles_are_rejected_at_commit():
     ]
     with pytest.raises(ValueError, match="form a cycle"):
         Project.model_validate(project.model_dump(mode="json"))
+
+
+def test_pet_content_type_accepts_both_spellings():
+    """The launch form writes ``pet_video``, the composer writes ``pets``.
+
+    Classification must accept both or every UI-created pet project would
+    have its OS bubbles counted as subtitles; the styling side keeps its own
+    narrower check on purpose, so this is the only place the pair is stated.
+    """
+
+    assert is_pet_content_type("pets")
+    assert is_pet_content_type("pet_video")
+    assert not is_pet_content_type("short_drama")
+    assert not is_pet_content_type(None)
+
+
+@pytest.mark.parametrize(
+    ("text", "vibe", "caption_role", "content_type", "expected"),
+    [
+        # An empty card is a decoration, never a subtitle.
+        ("", "chill", "dialogue", "short_drama", False),
+        # A declared role wins even inside a pet project: the author asked
+        # for a subtitle card, not a bubble.
+        ("台词", "chill", "dialogue", "pet_video", True),
+        # The pet-OS bubble leaves its role empty and gets a dedicated
+        # layout, so bulk subtitle work must not claim it.
+        ("本喵要发光", "chill", None, "pet_video", False),
+        ("本喵要发光", "chill", None, "pets", False),
+        # A migrated interview summary keeps its vibe tag but is a subtitle.
+        ("五年增长了十二倍", "summary", None, "pets", True),
+        # A blank role stored while caption_role was still a free string is
+        # not a declaration, and matches how the styling path reads the role.
+        ("本喵要发光", "chill", "", "pets", False),
+        ("这句要烧进成片", "chill", "", "short_drama", True),
+        # Ordinary dramatic copy with no role is still a subtitle.
+        ("那句台词", "chill", None, "short_drama", True),
+    ],
+)
+def test_subtitle_predicate_is_the_single_classification(
+    text: str,
+    vibe: str,
+    caption_role: str | None,
+    content_type: str | None,
+    expected: bool,
+):
+    assert (
+        is_subtitle_overlay(
+            text=text,
+            vibe=vibe,
+            caption_role=caption_role,
+            content_type=content_type,
+        )
+        is expected
+    )

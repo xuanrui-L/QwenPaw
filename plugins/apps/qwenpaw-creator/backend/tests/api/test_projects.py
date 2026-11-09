@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from pathlib import Path
 
+from services.project_files.facade import creator_file_services
 from services.project_files.json_pointer import hash_json_value
 from services.project_files.models import Project
 from services.runtime_files import ProjectRuntimeSessionStore
@@ -421,3 +423,202 @@ def test_snapshot_polling_during_edits_never_returns_busy(app, run_scenario):
     assert edit_statuses == [200] * 10
     assert {status for loop in poll_statuses for status in loop} == {200}
     assert final.json()["project"]["name"] == "Edited 9"
+
+
+def test_project_create_keeps_the_subtitle_policy_off_unless_asked(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """No subtitle is the default on every side of the wire.
+
+    The model default, the create route's ``or "off"`` and the launch form
+    must agree; a silent drift would start burning captions into cuts that
+    users never asked for.
+    """
+
+    async def scenario(client):
+        omitted = await client.post(
+            "/projects",
+            json=_create_payload("policy-omitted", "默认策略"),
+        )
+        explicit_off = await client.post(
+            "/projects",
+            json=_create_payload(
+                "policy-explicit-off",
+                "显式关闭",
+                subtitlePolicy="off",
+            ),
+        )
+        auto = await client.post(
+            "/projects",
+            json=_create_payload(
+                "policy-auto",
+                "智能策略",
+                subtitlePolicy="auto",
+            ),
+        )
+        return omitted, explicit_off, auto
+
+    omitted, explicit_off, auto = run_scenario(app, scenario)
+
+    def policy(response) -> str:
+        project = Project.model_validate_json(
+            (
+                api_runtime_root
+                / response.json()["projectId"]
+                / "project.json"
+            ).read_text(encoding="utf-8"),
+        )
+        return project.settings.subtitle_policy
+
+    assert policy(omitted) == "off"
+    assert policy(explicit_off) == "off"
+    assert policy(auto) == "auto"
+
+
+def _overlay_element(
+    element_id: str,
+    *,
+    text: str,
+    vibe: str = "chill",
+    caption_role: str | None = None,
+    enabled: bool = True,
+    prompt: str = "",
+) -> dict:
+    creation = {
+        "type": "overlay",
+        "text": text,
+        "vibe": vibe,
+        "prompt": prompt,
+    }
+    if caption_role is not None:
+        creation["caption_role"] = caption_role
+    return {
+        "element_id": element_id,
+        "label": element_id,
+        "enabled": enabled,
+        "span": {"start_tick": 0, "duration_tick": 2000},
+        "creation": creation,
+        # Every visual Element needs a box; this one sits inside the caption
+        # safe area so the toggle test is not accidentally about geometry.
+        "location": {
+            "x": 0.5,
+            "y": 0.86,
+            "width": 0.8,
+            "height": 0.18,
+            "anchor_x": 0.5,
+            "anchor_y": 0.5,
+        },
+    }
+
+
+def test_subtitle_toggle_follows_the_subtitle_definition(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """The batch switch claims subtitles and nothing else.
+
+    A pet-OS bubble carries no caption_role on purpose, so it keeps its
+    dedicated layout and must stay visible when the user hides subtitles.
+    The final cut bakes captions in, so even a switch that changes nothing
+    still refreshes the render instead of leaving the old burn-in standing.
+    """
+
+    async def scenario(client):
+        created = await client.post(
+            "/projects",
+            json=_create_payload(
+                "toggle-project",
+                "字幕开关",
+                contentType="pet_video",
+            ),
+        )
+        project_id = created.json()["projectId"]
+        services = creator_file_services(api_runtime_root)
+        snapshot = services.projects.read(project_id)
+        candidate = snapshot.project.model_dump(mode="json")
+        candidate["timelines"]["items"]["timeline:main"]["elements_by_id"] = {
+            "caption": _overlay_element(
+                "caption",
+                text="这句要烧进成片",
+                caption_role="dialogue",
+            ),
+            "bubble": _overlay_element("bubble", text="本喵要发光"),
+            "decoration": _overlay_element(
+                "decoration",
+                text="",
+                prompt="呼应台词的装饰动效",
+            ),
+        }
+        # One selected final render, not stale, so the switch's only way to
+        # reach the cut is the impact pass.
+        checksum = hashlib.sha256(b"final").hexdigest()
+        root = api_runtime_root / project_id
+        (root / "assets").mkdir(exist_ok=True)
+        (root / "assets/final.mp4").write_bytes(b"final")
+        candidate["assets"]["files_by_id"]["final-file"] = {
+            "file_id": "final-file",
+            "kind": "artifact_payload",
+            "relative_uri": "assets/final.mp4",
+            "sha256": checksum,
+            "size_bytes": 5,
+            "media_type": "video/mp4",
+            "created_at": "2026-09-17T00:00:00Z",
+        }
+        candidate["assets"]["artifact_slots_by_id"][
+            "timeline:timeline:main:render"
+        ] = {
+            "slot_id": "timeline:timeline:main:render",
+            "kind": "final_video",
+            "owner_ref": "timeline:timeline:main",
+            "version_ids": ["final"],
+            "selected_version_id": "final",
+        }
+        candidate["assets"]["artifact_versions_by_id"]["final"] = {
+            "version_id": "final",
+            "name": "final",
+            "slot_id": "timeline:timeline:main:render",
+            "kind": "final_video",
+            "owner_ref": "timeline:timeline:main",
+            "file_id": "final-file",
+            "checksum": checksum,
+            "based_on_generation": 0,
+            "stale": False,
+            "stale_reason": None,
+            "created_at": "2026-09-17T00:00:00Z",
+        }
+        await services.commit_candidate(
+            base=snapshot,
+            candidate=candidate,
+            origin="frontend_edit",
+            review_policy="auto_fix",
+        )
+        url = f"/projects/{project_id}/subtitles/toggle"
+        no_op = await client.patch(url, json={"enabled": True})
+        hidden = await client.patch(url, json={"enabled": False})
+        return project_id, no_op, hidden
+
+    project_id, no_op, hidden = run_scenario(app, scenario)
+    project_path = api_runtime_root / project_id / "project.json"
+
+    def stored() -> Project:
+        return Project.model_validate_json(
+            project_path.read_text(encoding="utf-8"),
+        )
+
+    # Every subtitle is already enabled, so this switch changes no Element.
+    assert no_op.status_code == 200
+    assert no_op.json()["toggled"] == 0
+    assert stored().assets.artifact_versions_by_id["final"].stale is True
+
+    assert hidden.status_code == 200
+    assert hidden.json()["toggled"] == 1
+    elements = stored().timelines.items["timeline:main"].elements_by_id
+    assert elements["caption"].enabled is False
+    # The bubble and the text-free decoration are not subtitles.
+    assert elements["bubble"].enabled is True
+    assert elements["decoration"].enabled is True
+    # A switch is not a policy edit.
+    assert stored().settings.subtitle_policy == "off"
