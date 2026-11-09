@@ -406,3 +406,48 @@ def test_the_specialist_turn_can_answer_a_demoted_pointer():
     assert (
         '"recalledMediaForToolCallId": call.call_id' in source
     ), "specialist loop must inject recalled media as native parts"
+
+
+def test_text_history_is_archived_and_recallable_not_just_cut():
+    """Regression on the platform-scroll reuse for text history.
+
+    The complaint was that compaction only pruned text history — leaving a
+    bare ``elidedMessageCount`` with no way back — instead of archiving it
+    with a recallable handle the way the platform scroll does. Three pieces
+    have to stay wired: the durable map is emitted at elision, the tool is
+    on every manifest, and both loops route the call to the shared handler.
+    """
+    import inspect
+
+    runtime_source = inspect.getsource(driver_module.FileCreatorAgentRuntime)
+    manifest_source = inspect.getsource(
+        driver_module._creator_agent_tool_manifest,
+    )
+    context_source = inspect.getsource(
+        driver_module.compact_conversation_history,
+    )
+
+    # (a) Elision now names the dropped turns by seq instead of a bare
+    #     count, so the archived originals stay addressable.
+    assert "archivedHistoryMap" in context_source
+    assert "recoverableSeqRange" in context_source
+
+    # (b) The recall tool is exposed on the main manifest (never behind a
+    #     feature switch) and on the specialist delegate manifest.
+    assert (
+        "manifest.append(_recall_history_tool_manifest())" in manifest_source
+    )
+    assert (
+        "tool_manifest.append(_recall_history_tool_manifest())"
+        in runtime_source
+    )
+
+    # (c) Both dispatch sites route recall_history to the shared handler
+    #     rather than into the role-scoped registry, which has no such tool
+    #     and would raise ValidationError.
+    assert (
+        runtime_source.count("result = await self._run_recall_history(") == 2
+    ), "both main and specialist loops must route recall_history"
+    assert (
+        "async def _run_recall_history(" in runtime_source
+    ), "the handler must live on the runtime"

@@ -978,6 +978,68 @@ def is_carried_project_view(message: Mapping[str, Any]) -> bool:
     )
 
 
+# An elided turn is only gone from the live window; its record stays
+# durable in the session store, addressable by ``messageSeq``. The map below
+# mirrors the platform eviction index: it tells the model *what* was dropped
+# and *which seq* to recall it by, instead of leaving a bare count that no
+# one can act on. Rendering stays local and bounded so the map itself can
+# never re-inflate the budget it was built to relieve.
+_ARCHIVED_HEADLINE_CHARS = 120
+_ARCHIVED_INDEX_MAX_LINES = 24
+
+
+def _record_headline(item: Mapping[str, Any]) -> str:
+    """One bounded line naming what an elided turn was about."""
+    content = item.get("content")
+    text = ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, Mapping) and isinstance(part.get("text"), str):
+                text = part["text"]
+                break
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        role = str(item.get("role") or "message")
+        source = str(item.get("source") or "")
+        collapsed = f"{role} {source}".strip()
+    return collapsed[:_ARCHIVED_HEADLINE_CHARS]
+
+
+def _render_archived_index(
+    archived: Sequence[Mapping[str, Any]],
+) -> tuple[str, int | None, int | None]:
+    """Render dropped turns into a recallable ``seq . headline`` map.
+
+    Turns without a durable ``messageSeq`` (unit-test fixtures) carry no
+    address, so they are skipped: the map only lists what recall can
+    actually fetch back, never a pointer to nothing.
+    """
+    addressable = [
+        item for item in archived if isinstance(item.get("seq"), int)
+    ]
+    if not addressable:
+        return "", None, None
+    seqs = [int(item["seq"]) for item in addressable]
+    lo, hi = min(seqs), max(seqs)
+    lines: list[str] = []
+    shown = addressable
+    if len(shown) > _ARCHIVED_INDEX_MAX_LINES:
+        overflow = len(shown) - _ARCHIVED_INDEX_MAX_LINES + 1
+        early_hi = seqs[overflow - 1]
+        lines.append(
+            f"{lo}-{early_hi} ... ({overflow} older turns "
+            "archived; recall by seq)",
+        )
+        shown = shown[overflow:]
+    for item in shown:
+        lines.append(
+            f"{item['seq']} . " f"\u27e6{_record_headline(item)}\u27e7",
+        )
+    return "\n".join(lines), lo, hi
+
+
 def compact_conversation_history(
     history: list[dict[str, Any]],
     *,
@@ -1016,6 +1078,7 @@ def compact_conversation_history(
     # a long production exceed the hard budget even after all tools are gone.
     # The current request/notification batch is outside this history view.
     removed = 0
+    archived: list[dict[str, Any]] = []
     # Relief is a plain sum over list items and an elided slot contributes
     # zero, so carry it across the loop instead of re-walking every message
     # on each pass; json_bytes stays the loop's only full traversal, exactly
@@ -1032,15 +1095,38 @@ def compact_conversation_history(
             max_tokens is None or estimate_input_tokens(result) <= max_tokens
         ):
             break
+        seq = item.get("messageSeq")
+        archived.append(
+            {
+                "seq": seq if isinstance(seq, int) else None,
+                "role": item.get("role"),
+                "source": item.get("source"),
+                "content": item.get("content"),
+            },
+        )
         result[index] = None
         relief -= _inline_media_relief(item, budget_bytes=max_bytes)
         removed += 1
+    elision: dict[str, Any] = {
+        "role": "system",
+        "source": "context_compaction",
+        "elidedMessageCount": removed,
+    }
+    history_map, seq_lo, seq_hi = _render_archived_index(archived)
+    if history_map:
+        # The dropped turns are not gone: they stay durable in the session
+        # store under the seqs listed here. Point the model at the same
+        # recall entry the platform uses, so an elided goal or decision can
+        # be read back instead of silently forgotten.
+        elision["archivedHistoryMap"] = (
+            "[context compressed] the turns below left the live window but "
+            "remain durable by messageSeq; read them back with "
+            'recall_history(op="expand", lo=..., hi=...) or '
+            'op="search". Oldest first.\n' + history_map
+        )
+        elision["recoverableSeqRange"] = [seq_lo, seq_hi]
     return [
-        {
-            "role": "system",
-            "source": "context_compaction",
-            "elidedMessageCount": removed,
-        },
+        elision,
         *(item for item in result if item is not None),
     ]
 

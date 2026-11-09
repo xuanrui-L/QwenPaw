@@ -637,6 +637,7 @@ def _edit_client(*, description: str):
             "ground_prompt_context",
             "ground_image_objects",
             "recall_media",
+            "recall_history",
             "browser_use",
             "elements_at",
             "import_script_asset",
