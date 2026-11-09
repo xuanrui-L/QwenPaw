@@ -125,7 +125,7 @@ def _location_number(
     key: str,
     default: float,
 ) -> float:
-    """Read one normalized location field, falling back to the model default."""
+    """Read one location field, falling back to the model default."""
 
     try:
         return float(location.get(key, default))

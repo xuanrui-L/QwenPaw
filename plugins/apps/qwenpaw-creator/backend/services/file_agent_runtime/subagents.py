@@ -191,8 +191,9 @@ def specialist_system_prompt(
                     else "null"
                 ),
                 # The director's per-content-type rules each demand a caption
-                # card, so it has to be told the project's subtitle policy or it
-                # silently overrules the delegator's "off" default.
+                # card, so it has to be told the project's subtitle policy;
+                # otherwise it silently overrules the delegator's "off"
+                # default.
                 "subtitle_policy": (
                     project.settings.subtitle_policy
                     if project is not None
