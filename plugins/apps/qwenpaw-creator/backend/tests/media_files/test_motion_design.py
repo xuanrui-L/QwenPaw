@@ -169,6 +169,74 @@ class TestMotionDesignSafety:
             (1280, 720),
         )
 
+    # Each caption_role is documented in the agent prompt with the kind of
+    # text it carries, so its preset has to render that text rather than an
+    # arbitrary sample.  These budgets are the documented worst case.
+    _ROLE_TEXTS = {
+        "dialogue": [
+            "让画面自己讲故事\nLet the picture tell its story",
+            "那天晚上他站在门口很久什么都没有说",
+        ],
+        "narration": [
+            "让画面自己讲故事\nLet the picture tell its story",
+            "后来的很多年里，我常常想起那个下午",
+        ],
+        "opening_title": ["星河入梦", "星河入梦·第一幕"],
+        "opening_credit": ["导演 张三\n编剧 李四", "主演 王五 赵六"],
+        "ending_credit": ["感谢\n联合出品 星辰影业\n特别鸣谢 各位观众"],
+        "location": ["巴黎，1942", "三年后"],
+        "chapter": ["第二章 雨夜告别", "幕间"],
+        "interview_summary": [
+            "让画面自己讲故事\nLet the picture tell its story",
+            "这座城市的光伏装机量在五年内增长了十二倍",
+        ],
+    }
+    _CAPTION_CANVASES = [(1280, 720), (3840, 2160), (854, 480), (1080, 1920)]
+
+    @pytest.mark.parametrize("role", sorted(_ROLE_TEXTS))
+    def test_caption_role_preset_renders_its_documented_text(
+        self,
+        role: str,
+    ) -> None:
+        """A box the renderer rejects silently clips words in the cut.
+
+        Compose only logs a rejected caption geometry and keeps going, so
+        this is the layer that catches an illegal preset before it ships.
+        """
+        from services.media_files.motion_templates import (
+            CAPTION_ROLE_LOCATIONS,
+        )
+
+        assert role in CAPTION_ROLE_LOCATIONS, f"{role} 没有预设"
+        location = ElementLocation(**CAPTION_ROLE_LOCATIONS[role])
+        for canvas in self._CAPTION_CANVASES:
+            for text in self._ROLE_TEXTS[role]:
+                _validate_caption_location(location, text, canvas)
+
+    def test_caption_role_presets_stay_inside_the_safe_area(self) -> None:
+        """An off-canvas caption is unreadable no matter how the box is sized."""
+        from services.media_files.motion_templates import (
+            CAPTION_ROLE_LOCATIONS,
+        )
+
+        for role, preset in CAPTION_ROLE_LOCATIONS.items():
+            location = ElementLocation(**preset)
+            left = location.x - location.anchor_x * location.width
+            top = location.y - location.anchor_y * location.height
+            assert left >= 0.04, f"{role} 左边越界 {left:.3f}"
+            assert top >= 0.04, f"{role} 顶边越界 {top:.3f}"
+            assert left + location.width <= 0.96, f"{role} 右边越界"
+            assert top + location.height <= 0.96, f"{role} 底边越界"
+
+    def test_caption_roles_cover_every_prompted_value(self) -> None:
+        """A role the model can write but the preset table lacks would fall
+        through to the generic box, silently undoing the layout intent."""
+        from services.media_files.motion_templates import (
+            CAPTION_ROLE_LOCATIONS,
+        )
+
+        assert set(CAPTION_ROLE_LOCATIONS) == set(self._ROLE_TEXTS)
+
     def test_active_or_embedded_content_is_rejected(self) -> None:
         html = (
             "<html><body><iframe src='file:///etc/passwd'>"

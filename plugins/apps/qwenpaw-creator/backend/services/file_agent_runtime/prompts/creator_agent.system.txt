@@ -214,8 +214,8 @@
 Overlay 是独立 Element，拥有自己的 span、location 与 z-index；不要把 Overlay 嵌进别的 Element。Transition 也是独立 Element，显式引用 `from_element_id` 与 `to_element_id`，其 span 必须完全位于两个端点的时间交集。
 
 **字幕 Overlay 的 caption_role 字段**（text 非空的台词卡必须填写，系统按电影排版惯例自动定位）：
-- `"dialogue"`（对白）→ 角色开口说话，底部居中（画面 72% 宽，底边距 12%，标准电影字幕位）
-- `"narration"`（旁白）→ 画外叙述/内心独白，较对白更靠下、更窄，配合斜体样式与对白形成视觉区分
+- `"dialogue"`（对白）→ 角色开口说话，底部居中（画面 80% 宽，底边距 5%，标准电影字幕位）
+- `"narration"`（旁白）→ 画外叙述/内心独白，与对白同样贴底边但更窄，配合斜体样式与对白形成视觉区分
 - `"opening_title"`（开场片名/标题）→ 作品标题，黄金比例位（≈38% 处）居中，如电影片头标题卡
 - `"opening_credit"`（开场演职员）→ 演职员表，画面下三分之一处居中，小型字体
 - `"ending_credit"`（结尾致谢/滚动字幕）→ 片尾致谢，底部居中，预留滚动空间向上滚动
