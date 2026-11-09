@@ -39,6 +39,7 @@ def _find_cjk_font() -> str | None:
     windows_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
     candidates = [
         "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/STHeiti Medium.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -47,7 +48,39 @@ def _find_cjk_font() -> str | None:
         str(windows_fonts / "msyh.ttc"),
         str(windows_fonts / "msjh.ttc"),
     ]
-    return next((path for path in candidates if Path(path).exists()), None)
+    existing = [path for path in candidates if Path(path).exists()]
+    for path in existing:
+        if _punctuation_hugs_baseline(path):
+            return path
+    # A face with centred punctuation still reads; the PIL default bitmap
+    # font does not, so never fall through to None when a CJK face exists.
+    return existing[0] if existing else None
+
+
+def _punctuation_hugs_baseline(font_path: str, size: int = 48) -> bool:
+    """Reject CJK faces whose full-width punctuation floats mid-em.
+
+    Some bundled faces (STHeiti on recent macOS) set the ink of ``，。、``
+    at the vertical middle of the em box instead of hugging the baseline,
+    which burns subtitles whose commas sit at mid-line height next to the
+    hanzi. Quotes fail the opposite way: ``“`` belongs at the top of the em,
+    so a face that centres it drops the quote to mid-line too. Check both
+    edges against a hanzi glyph: correct faces carry the comma down to (or
+    past) the hanzi's descent and lift the quote up to the hanzi's ascent,
+    centred faces stop short on whichever edge the glyph should hug.
+    """
+
+    from PIL import ImageFont
+
+    try:
+        font = ImageFont.truetype(font_path, size)
+        comma = font.getbbox("，")
+        quote = font.getbbox("“")
+        hanzi = font.getbbox("你")
+    except OSError:
+        return False
+    tolerance = max(1, round(size * 0.06))
+    return comma[3] >= hanzi[3] - tolerance and quote[1] <= hanzi[1] + tolerance
 
 
 def _placement_values(
