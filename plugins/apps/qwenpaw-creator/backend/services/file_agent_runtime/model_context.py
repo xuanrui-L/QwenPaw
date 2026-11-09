@@ -200,6 +200,36 @@ def _data_url_charge(
     return max(floor, min(charge, ceiling))
 
 
+def _data_url_relief_in_text(
+    text: str,
+    *,
+    budget_bytes: int = MODEL_INPUT_BYTES,
+) -> int:
+    """Relief for every base64 data URL buried inside one string.
+
+    Detected with the same ``_DATA_URL_PATTERN`` the demotion walk uses, so
+    a payload priced as media here is exactly a payload the ladder may
+    retire there - whether it sits under a ``url`` key or inside a JSON tool
+    answer. The ``";base64,"`` gate is what keeps the whole-history walk
+    cheap: ordinary conversation text drops out on a single substring test
+    instead of a regex pass over every megabyte of a serialized script.
+    """
+    if ";base64," not in text:
+        return 0
+    relief = 0
+    for match in _DATA_URL_PATTERN.finditer(text):
+        url = match.group(0)
+        # A base64 payload is ASCII by construction, so the character count
+        # is the byte count. Only the hand-edited exception pays for an
+        # encode, which would otherwise copy the payload a second time.
+        raw = len(url) if url.isascii() else len(url.encode("utf-8"))
+        relief += max(
+            0,
+            raw - _data_url_charge(url, budget_bytes=budget_bytes),
+        )
+    return relief
+
+
 def _inline_media_relief(
     node: Any,
     *,
@@ -208,43 +238,22 @@ def _inline_media_relief(
     """Bytes the naive JSON count over-charges for inline media parts.
 
     Subtracted from ``json_bytes`` so both measurements agree on what one
-    image or clip actually costs the provider.
+    image or clip actually costs the provider. Media is detected with the
+    same pattern ``_demote_in_node`` strips on, so nothing that can leave
+    the history is still billed at full text length - including the base64
+    embedded in a plain string, which the old ``url``-key-only walk priced
+    as text even though the ladder retired it.
     """
-    if node is None or isinstance(node, str):
-        # Neither can carry relief, and this runs over the whole history of
-        # every context estimate.
+    if node is None:
         return 0
+    if isinstance(node, str):
+        return _data_url_relief_in_text(node, budget_bytes=budget_bytes)
     if isinstance(node, dict):
-        relief = 0
-        for key, value in node.items():
-            if (
-                key == "url"
-                and isinstance(value, str)
-                and value.startswith("data:")
-            ):
-                # A data URL is ASCII by construction, so the character
-                # count is the byte count. Only the hand-edited exception
-                # pays for an encode, which would otherwise copy every
-                # megabyte of the payload a second time just to measure it.
-                raw = (
-                    len(value)
-                    if value.isascii()
-                    else len(value.encode("utf-8"))
-                )
-                relief += max(
-                    0,
-                    raw - _data_url_charge(value, budget_bytes=budget_bytes),
-                )
-            elif isinstance(value, (dict, list)):
-                # Only a mapping or a sequence can lead to a ``url`` key, so a
-                # plain string of the history is not worth a call: a context
-                # estimate walks the whole conversation on every turn.
-                relief += _inline_media_relief(
-                    value,
-                    budget_bytes=budget_bytes,
-                )
-        return relief
-    if isinstance(node, list):
+        return sum(
+            _inline_media_relief(value, budget_bytes=budget_bytes)
+            for value in node.values()
+        )
+    if isinstance(node, (list, tuple)):
         return sum(
             _inline_media_relief(item, budget_bytes=budget_bytes)
             for item in node
