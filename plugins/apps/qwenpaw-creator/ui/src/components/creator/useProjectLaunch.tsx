@@ -442,6 +442,11 @@ export function useProjectLaunch(options?: {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(
     null,
   );
+  // Captions are opt-in: a new project starts without them so the first cut
+  // is never surprised by burned-in text the user did not ask for.
+  const [subtitlePolicy, setSubtitlePolicy] = useState<"auto" | "on" | "off">(
+    "off",
+  );
   const [attachments, setAttachments] = useState<AttachmentDraft[]>(() =>
     (initialValues?.sourceUrls ?? []).map((url) => ({
       kind: "url" as const,
@@ -654,6 +659,7 @@ export function useProjectLaunch(options?: {
         aspectRatio,
         contentType: isVideoEdit ? contentType : null,
         templateId: selectedTemplateId ?? undefined,
+        subtitlePolicy,
         // With no assets, let Project creation persist the first Goal and
         // message atomically.  This avoids an observable IDLE Project between
         // navigation and the follow-up /messages request.
@@ -748,6 +754,8 @@ export function useProjectLaunch(options?: {
     setAspectRatio,
     selectedTemplateId,
     setSelectedTemplateId,
+    subtitlePolicy,
+    setSubtitlePolicy,
     attachments,
     addFiles,
     addUrl,

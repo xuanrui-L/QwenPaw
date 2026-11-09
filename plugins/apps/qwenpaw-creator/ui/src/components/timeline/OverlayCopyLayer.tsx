@@ -325,3 +325,79 @@ export function InterviewSummaryBox({
     </div>
   );
 }
+
+/** Simple text caption preview for dialogue / narration / opening-title /
+ * location captions. Shows a subtle text-only indicator so the author can
+ * verify timing and position in the live preview.  Does not try to replicate
+ * the exact backend render — it is a lightweight in-timeline hint. */
+export function PlainCaption({
+  text,
+  stageWidth,
+  role,
+}: {
+  text: string;
+  stageWidth: number;
+  role?: string | null;
+}) {
+  if (stageWidth < 4) return null;
+  const isTitle = role === "opening_title";
+  const fontSize = Math.round((stageWidth / 1280) * (isTitle ? 48 : 26));
+  const maxW = Math.round(stageWidth * (isTitle ? 0.7 : 0.8));
+  const padding = Math.round(fontSize * 0.35);
+  const lines = wrapGreedy(text, fontSize, maxW - padding * 2);
+  const lh = lineHeightOf(fontSize);
+  const textH = lines.length * lh - 2;
+  const boxW = Math.min(
+    Math.max(...lines.map((l) => measureWidth(l, fontSize)), 1) + padding * 2,
+    maxW,
+  );
+  const boxH = textH + padding * 2;
+  return (
+    <div
+      data-overlay-copy="plain"
+      className="pointer-events-none flex h-full w-full items-center justify-center"
+      style={
+        isTitle
+          ? { alignItems: "flex-start", paddingTop: "25%" }
+          : { alignItems: "flex-end", paddingBottom: "8%" }
+      }
+    >
+      <svg
+        viewBox={`0 0 ${boxW} ${boxH}`}
+        width={boxW}
+        height={boxH}
+        aria-hidden
+      >
+        {!isTitle && (
+          <rect
+            x={0}
+            y={0}
+            width={boxW - 1}
+            height={boxH - 1}
+            rx={Math.round(Math.min(boxW, boxH) * 0.1)}
+            fill="rgba(0,0,0,0.45)"
+          />
+        )}
+        {lines.map((line, index) => (
+          <text
+            key={index}
+            x={boxW / 2}
+            y={padding + index * lh + fontSize * 0.86}
+            textAnchor="middle"
+            fontSize={fontSize}
+            fontFamily={CJK_FONT_STACK}
+            fill="#ffffff"
+            stroke="#000000"
+            strokeWidth={Math.max(1, Math.round(fontSize * 0.05))}
+            style={{
+              paintOrder: "stroke",
+              fontStyle: role === "narration" ? "italic" : "normal",
+            }}
+          >
+            {line}
+          </text>
+        ))}
+      </svg>
+    </div>
+  );
+}

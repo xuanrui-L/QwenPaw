@@ -12,6 +12,7 @@ export interface ProjectCreateRequest {
   resolution: string;
   contentType?: string | null;
   templateId?: string;
+  subtitlePolicy?: "auto" | "on" | "off";
   /** Optional atomic bootstrap goal persisted in the file Runtime aggregate. */
   initialGoal?: string;
 }

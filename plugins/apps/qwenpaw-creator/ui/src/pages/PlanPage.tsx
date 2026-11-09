@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { message, Modal, Tooltip } from "antd";
-import { Bookmark, FileText, Info, Loader2, RefreshCw, X } from "lucide-react";
+import {
+  Bookmark,
+  Captions,
+  CaptionsOff,
+  FileText,
+  Info,
+  Loader2,
+  RefreshCw,
+  X,
+} from "lucide-react";
 import { MenuUnfoldOutlined } from "@ant-design/icons";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -11,6 +20,7 @@ import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { renderTimeline } from "@/api/creator";
+import { toggleSubtitles } from "@/api/creator";
 import {
   overlayContentKind,
   resolveTimelineRender,
@@ -21,6 +31,7 @@ import {
 import { resolveElementPlayback } from "@/selectors/elementPlaybackSelectors";
 import { useReviewFieldFocus } from "@/routing/reviewFocus";
 import { useProjectDraft } from "@/lib/useProjectDraft";
+import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { startVisiblePolling } from "@/lib/visiblePolling";
 import { useNarrowWorkspace } from "@/lib/useNarrowWorkspace";
 import TimelineCanvas from "@/components/timeline/TimelineCanvas";
@@ -104,6 +115,7 @@ export default function PlanPage() {
   >(null);
   const [composeFailed, setComposeFailed] = useState(false);
   const [saveAsTemplateOpen, setSaveAsTemplateOpen] = useState(false);
+  const [subtitleToggling, setSubtitleToggling] = useState(false);
   const [comparePreviewOpen, setComparePreviewOpen] = useState(true);
   const composeAttemptedGeneration = useRef<number | null>(null);
   const hadPendingReviews = useRef(false);
@@ -129,6 +141,86 @@ export default function PlanPage() {
       )
     : 1;
   const clampedPlayheadTick = Math.min(playheadTick, displayDurationTick);
+
+  // Subtitle element stats for the toolbar toggle button
+  const subtitleStats = useMemo(() => {
+    if (!timeline) return { count: 0, enabledCount: 0 };
+    let count = 0;
+    let enabledCount = 0;
+    for (const element of Object.values(timeline.elements_by_id)) {
+      if (element.creation.type === "overlay" && element.creation.text.trim()) {
+        count++;
+        if (element.enabled) enabledCount++;
+      }
+    }
+    return { count, enabledCount };
+  }, [timeline]);
+  const hasSubtitles = subtitleStats.count > 0;
+  const subtitlesAllEnabled =
+    subtitleStats.enabledCount === subtitleStats.count;
+
+  const handleToggleSubtitles = useCallback(async () => {
+    setSubtitleToggling(true);
+    try {
+      await toggleSubtitles(id, !subtitlesAllEnabled);
+      await pollOnce(id);
+      message.success(
+        subtitlesAllEnabled ? t("plan.subtitleRemove") : t("plan.subtitleAdd"),
+      );
+      message.info(t("plan.subtitleToggleRecompose"), 4);
+    } catch (error) {
+      message.error(
+        t("plan.subtitleToggleFailed", {
+          detail: (error as Error).message,
+        }),
+      );
+    } finally {
+      setSubtitleToggling(false);
+    }
+  }, [id, subtitlesAllEnabled, pollOnce, t]);
+
+  // A single caption is toggled through a direct one-operation patch instead of
+  // the element draft: the draft derives its operations from React state, so
+  // applying it in the same tick as the mutation would submit nothing.
+  const handleToggleElementSubtitle = useCallback(
+    async (element: TimelineElementDocument, enabled: boolean) => {
+      const timelineId = timeline?.timeline_id;
+      if (!timelineId) return;
+      const before =
+        timeline?.elements_by_id[element.element_id]?.enabled ?? true;
+      if (before === enabled) return;
+      try {
+        await patchProject(id, [
+          {
+            op: "replace",
+            path: projectJsonPointer(
+              "timelines",
+              "items",
+              timelineId,
+              "elements_by_id",
+              element.element_id,
+              "enabled",
+            ),
+            before,
+            value: enabled,
+          },
+        ]);
+        await pollOnce(id);
+        message.success(
+          enabled ? t("plan.subtitleAdd") : t("plan.subtitleRemove"),
+        );
+        message.info(t("plan.subtitleToggleRecompose"), 4);
+      } catch (error) {
+        message.error(
+          t("plan.subtitleToggleFailed", {
+            detail: (error as Error).message,
+          }),
+        );
+      }
+    },
+    [id, timeline, patchProject, pollOnce, t],
+  );
+
   // Any playhead motion (transport keys, scrub, playback, seeks) returns the
   // panel to follow mode so it can never describe a stale selection.
   const movePlayhead = useCallback((tick: number) => {
@@ -621,6 +713,9 @@ export default function PlanPage() {
         })
       }
       onApply={() => void applyElementDraft()}
+      onToggleSubtitleEnabled={(element, enabled) =>
+        void handleToggleElementSubtitle(element, enabled)
+      }
       onDiscard={elementDraft.discard}
       onAcceptConflicts={elementDraft.acceptConflicts}
       onOpenWorkbench={openElementWorkbench}
@@ -769,6 +864,51 @@ export default function PlanPage() {
               <Bookmark className="h-3.5 w-3.5" />
               {t("home.saveAsTemplate")}
             </button>
+            {hasSubtitles && (
+              <Tooltip
+                title={
+                  subtitlesAllEnabled
+                    ? t("plan.subtitleRemove")
+                    : t("plan.subtitleAdd")
+                }
+              >
+                <button
+                  type="button"
+                  data-subtitle-toggle
+                  disabled={subtitleToggling}
+                  onClick={() => void handleToggleSubtitles()}
+                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                    subtitleToggling
+                      ? "cursor-not-allowed opacity-70"
+                      : subtitlesAllEnabled
+                      ? "border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-accent)] hover:border-[var(--color-accent)]"
+                      : "border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)]"
+                  }`}
+                >
+                  {subtitleToggling ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : subtitlesAllEnabled ? (
+                    <CaptionsOff className="h-3.5 w-3.5" />
+                  ) : (
+                    <Captions className="h-3.5 w-3.5" />
+                  )}
+                  <span className="@max-[559px]:hidden">
+                    {subtitlesAllEnabled
+                      ? t("plan.subtitleRemove")
+                      : t("plan.subtitleAdd")}
+                  </span>
+                  <span
+                    className={`ml-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[9px] font-bold leading-none ${
+                      subtitlesAllEnabled
+                        ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
+                        : "bg-[var(--color-text-tertiary)]/20 text-[var(--color-text-tertiary)]"
+                    }`}
+                  >
+                    {subtitleStats.count}
+                  </span>
+                </button>
+              </Tooltip>
+            )}
             <button
               type="button"
               data-open-blueprint

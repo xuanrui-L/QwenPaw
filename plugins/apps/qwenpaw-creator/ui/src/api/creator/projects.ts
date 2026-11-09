@@ -295,3 +295,24 @@ export function getR2VReferenceOrder(
     )}/r2v-references${stage === "storyboard" ? "?stage=storyboard" : ""}`,
   );
 }
+
+export interface SubtitleToggleResult {
+  ok: boolean;
+  generation: number;
+  toggled: number;
+  enabled: boolean;
+}
+
+/** Batch enable or disable all subtitle overlay elements. */
+export function toggleSubtitles(
+  projectId: string,
+  enabled: boolean,
+): Promise<SubtitleToggleResult> {
+  return creatorRequest(
+    `/projects/${encodeURIComponent(projectId)}/subtitles/toggle`,
+    {
+      method: "PATCH",
+      body: jsonBody({ enabled }),
+    },
+  );
+}

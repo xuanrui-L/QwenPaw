@@ -30,7 +30,10 @@ import {
   overlayContentKind,
   resolveElementVisualMeta,
 } from "@/selectors/timelineElementSelectors";
-import { PetOsBubble } from "@/components/timeline/OverlayCopyLayer";
+import {
+  PetOsBubble,
+  PlainCaption,
+} from "@/components/timeline/OverlayCopyLayer";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 
@@ -212,23 +215,41 @@ function TextOverlayLayer({
 }) {
   const { element } = layer;
   if (element.creation.type !== "overlay") return null;
+  const creation = element.creation;
+  const hasText = creation.text?.trim();
+  if (!hasText) return null;
   // Pet-OS bubble (with animal emoji) is only used when the project
-  // content_type is "pets"; otherwise subtitle boxes are not rendered.
+  // content_type is "pets".
   const isPetOs =
-    element.creation.vibe !== "summary" &&
-    element.creation.overlay_kind !== "interview_summary" &&
+    creation.vibe !== "summary" &&
+    creation.overlay_kind !== "interview_summary" &&
     contentType === "pets";
-  if (!isPetOs) return null;
+  if (isPetOs) {
+    return (
+      <div
+        data-live-text-overlay={element.element_id}
+        className="absolute"
+        style={locationBoxStyle(element.location)}
+      >
+        <PetOsBubble
+          text={creation.text}
+          vibe={creation.vibe}
+          stageWidth={stageWidth}
+        />
+      </div>
+    );
+  }
+  // For ordinary dialogue/narration/title/location captions show a
+  // subtle text preview so authors can verify timing and placement.
   return (
     <div
       data-live-text-overlay={element.element_id}
-      className="absolute"
-      style={locationBoxStyle(element.location)}
+      className="absolute inset-0 pointer-events-none"
     >
-      <PetOsBubble
-        text={element.creation.text}
-        vibe={element.creation.vibe}
+      <PlainCaption
+        text={creation.text}
         stageWidth={stageWidth}
+        role={creation.caption_role}
       />
     </div>
   );
