@@ -326,10 +326,11 @@ export function InterviewSummaryBox({
   );
 }
 
-/** Simple text caption preview for dialogue / narration / opening-title /
- * location captions. Shows a subtle text-only indicator so the author can
- * verify timing and position in the live preview.  Does not try to replicate
- * the exact backend render — it is a lightweight in-timeline hint. */
+/** Simple text caption preview for the caption_role values. Shows a subtle
+ * text-only indicator placed like the backend preset for that role, so the
+ * author can verify timing and placement in the live preview.  Does not try
+ * to replicate the exact backend render — it is a lightweight in-timeline
+ * hint. */
 export function PlainCaption({
   text,
   stageWidth,
@@ -341,6 +342,13 @@ export function PlainCaption({
 }) {
   if (stageWidth < 4) return null;
   const isTitle = role === "opening_title";
+  // Mirror the backend caption_role placement so the hint does not contradict
+  // the cut: chapter cards and interview facts pin the top edge, location
+  // labels pin the bottom-left corner, and ordinary speech hugs the bottom
+  // centre. Still a timing and placement hint, not a pixel copy of the render.
+  const isTopEdge = role === "chapter" || role === "interview_summary";
+  const isLeftEdge = role === "location";
+  const onTopEdge = isTitle || isTopEdge;
   const fontSize = Math.round((stageWidth / 1280) * (isTitle ? 48 : 26));
   const maxW = Math.round(stageWidth * (isTitle ? 0.7 : 0.8));
   const padding = Math.round(fontSize * 0.35);
@@ -356,11 +364,13 @@ export function PlainCaption({
     <div
       data-overlay-copy="plain"
       className="pointer-events-none flex h-full w-full items-center justify-center"
-      style={
-        isTitle
-          ? { alignItems: "flex-start", paddingTop: "25%" }
-          : { alignItems: "flex-end", paddingBottom: "8%" }
-      }
+      style={{
+        alignItems: onTopEdge ? "flex-start" : "flex-end",
+        paddingTop: isTitle ? "25%" : isTopEdge ? "6%" : undefined,
+        paddingBottom: onTopEdge ? undefined : "5%",
+        justifyContent: isLeftEdge ? "flex-start" : undefined,
+        paddingLeft: isLeftEdge ? "6%" : undefined,
+      }}
     >
       <svg
         viewBox={`0 0 ${boxW} ${boxH}`}

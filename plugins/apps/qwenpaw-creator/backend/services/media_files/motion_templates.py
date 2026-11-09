@@ -45,7 +45,7 @@ CAPTION_ROLE_LOCATIONS: dict[str, dict[str, object]] = {
         "x": 0.50,
         "y": 0.95,
         "width": 0.65,
-        "height": 0.17,
+        "height": 0.18,
         "anchor_x": 0.5,
         "anchor_y": 1.0,
     },
