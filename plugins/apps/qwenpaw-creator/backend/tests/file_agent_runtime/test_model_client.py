@@ -1599,40 +1599,50 @@ def test_model_retry_recovery_reports_real_cause_and_backoff(
     assert sleeps == [delay for delay in delays if delay]
 
 
-def test_inline_media_relief_does_not_walk_plain_strings(monkeypatch):
-    """A string cannot lead to a data URL, so it must not cost a call.
+def test_inline_media_relief_gates_plain_text_but_prices_embedded_base64(
+    monkeypatch,
+):
+    """Text drops out on a substring test; buried media is priced as media.
 
-    The estimate runs over the whole history on every turn, and the walk used
-    to descend into every string it passed — including the megabytes of a
-    serialized script — to return zero each time.
+    The estimate walks the whole history every turn, so descending into
+    strings is only safe when ordinary text is rejected without touching
+    the regex. And a base64 payload hidden in a string is something the
+    demotion walk retires, so it must not be billed at full text length -
+    the inconsistency this replaced.
     """
+    charges: list[str] = []
+    original_charge = model_context._data_url_charge
 
-    original = model_context._inline_media_relief
-    visited: list = []
+    def spy(url, *, budget_bytes=model_context.MODEL_INPUT_BYTES):
+        charges.append(url)
+        return original_charge(url, budget_bytes=budget_bytes)
 
-    def counting(node, *, budget_bytes=model_context.MODEL_INPUT_BYTES):
-        visited.append(node)
-        return original(node, budget_bytes=budget_bytes)
+    monkeypatch.setattr(model_context, "_data_url_charge", spy)
 
-    monkeypatch.setattr(model_context, "_inline_media_relief", counting)
-    history = [
+    # Pure conversation text: relief is zero and the pricing regex never
+    # even runs, so a megabyte serialized script costs one substring check.
+    text_history = [
         {"role": "user", "content": "beat sheet " * 4000},
         {
             "role": "assistant",
             "content": [{"type": "text", "text": "notes " * 4000}],
         },
     ]
+    assert _inline_media_relief(text_history) == 0
+    assert charges == []
 
-    assert counting(history) == 0
-    assert [node for node in visited if isinstance(node, str)] == []
-
-    # What the walk is for still works: a data URL under a ``url`` key.
+    # The gap this closes: a data URL buried in a string is now priced the
+    # same as the identical URL under a ``url`` key - i.e. the same set the
+    # demotion walk would strip.
     encoded = base64.b64encode(b"\x00" * (256 * 1024)).decode()
-    media = {
-        "type": "image_url",
-        "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
-    }
-    assert original([{"role": "user", "content": [media]}]) > 0
+    url = f"data:image/jpeg;base64,{encoded}"
+    embedded = _inline_media_relief(
+        [{"role": "user", "content": f"tool answer: {url}"}],
+    )
+    keyed = _inline_media_relief(
+        [{"role": "user", "content": {"url": url}}],
+    )
+    assert embedded == keyed > 0
 
 
 def test_one_huge_screenshot_can_no_longer_refuse_its_own_request():
@@ -1702,14 +1712,14 @@ def test_derived_inline_media_demotes_to_a_pointer_and_spares_human_input():
 
 
 def test_media_inside_a_serialized_string_is_counted_as_the_media_it_is():
-    """The census has to agree with what the demotion is allowed to strip.
+    """Census, demotion and the byte estimate now agree on embedded media.
 
-    Only a ``url`` key was walked, so a payload a tool answered as plain text
-    was billed at its full Base64 length, reported as no inline media at all,
-    and left where a demotion that rewrites every string it passes would have
-    traded it. The byte estimate still declines to scan plain strings - it runs
-    over the whole history on every turn - so this is about what a refusal can
-    name, not about what a request pays.
+    A payload a tool answered as plain text used to be billed at its full
+    Base64 length and reported as no inline media, even though the demotion
+    walk rewrites every string it passes and would happily trade it. The
+    byte estimate now walks strings with the same pattern demotion uses, so
+    a payload that can leave the history is priced as the media it is -
+    which is both what a refusal can name and what a request pays.
     """
     encoded = base64.b64encode(b"\x00" * (2 * 1024 * 1024)).decode()
     data_url = f"data:image/jpeg;base64,{encoded}"
@@ -1749,9 +1759,14 @@ def test_media_inside_a_serialized_string_is_counted_as_the_media_it_is():
     info = caught.value.diagnostics
     assert info["media_block_count"] == 2
     assert info["media_blocks"][0]["mime"] == "image/jpeg"
-    # What the request pays is deliberately unchanged: no relief is taken for a
-    # payload riding in a string, so the refusal still bills its full length.
-    assert info["used_bytes"] == info["raw_bytes"]
+    # The embedded payload is now billed as the same media charge the census
+    # reports and the ladder would retire, not at full Base64 text length:
+    # relief equals (raw url length - one media charge) for each part.
+    charge = model_context._data_url_charge(data_url, budget_bytes=16 * 1024)
+    assert info["used_bytes"] < info["raw_bytes"]
+    assert info["used_bytes"] == info["raw_bytes"] - 2 * (
+        len(data_url) - charge
+    )
 
 
 def test_budget_failure_names_the_blocks_that_overflowed():
