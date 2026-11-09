@@ -87,6 +87,8 @@ from services.media_files.motion_templates import (
     SUPPORTED_MOTIFS,
     SUPPORTED_THEMES,
     SUPPORTED_VARIANTS,
+    caption_box_edges,
+    caption_box_out_of_safe_area,
     render_caption_template,
     render_decoration_template,
 )
@@ -580,6 +582,12 @@ def _validate_caption_location(
     very narrow, tall viewport can still force CJK copy into a vertical stack
     and let decorative children cover it.  Keep the outer geometry suitable
     for subtitles before spending a browser render attempt.
+
+    The safe-area rule is enforced here as well because the prompt used to
+    teach a handwritten ``y=0.88, height=0.18`` centre-anchored box: that
+    reaches 0.97, clears every size floor, and still burns the bottom of the
+    card into the frame edge.  Judging the geometry only inside
+    ``caption_layout_error`` left that box perfectly legal.
     """
 
     error = caption_layout_error(
@@ -589,6 +597,16 @@ def _validate_caption_location(
     )
     if error is not None:
         raise ValidationError(error)
+    mapping = location.model_dump(mode="json")
+    if caption_box_out_of_safe_area(mapping):
+        left, top, right, bottom = caption_box_edges(mapping)
+        raise ValidationError(
+            "字幕位置框超出安全区："
+            f"左 {left:.3f}、上 {top:.3f}、右 {right:.3f}、下 {bottom:.3f}，"
+            "四边必须完整落在 0.04–0.96 之内。"
+            "请填写 caption_role 交系统贴边落位，"
+            "不要手写会顶到画面边缘的 location。",
+        )
 
 
 def _validated_design(

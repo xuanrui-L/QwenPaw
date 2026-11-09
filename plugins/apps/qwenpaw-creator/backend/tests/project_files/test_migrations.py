@@ -385,3 +385,139 @@ def test_v8_to_v9_adds_narrative_fields() -> None:
     assert timeline.title == ""
     assert timeline.synopsis == ""
     assert timeline.planned_duration_seconds is None
+
+
+def _caption_element(
+    element_id: str,
+    *,
+    text: str = "那天晚上他站在门口很久",
+    vibe: str = "chill",
+    caption_role: str | None = "dialogue",
+    location: dict | None = None,
+) -> dict:
+    creation: dict = {"text": text, "vibe": vibe}
+    if caption_role is not None:
+        creation["caption_role"] = caption_role
+    element = _overlay_element(creation, element_id=element_id)
+    if location is not None:
+        element["location"] = location
+    return element
+
+
+def _raw_with_elements(
+    *elements: dict,
+    schema_version: int = 9,
+    content_type: str | None = None,
+) -> dict:
+    raw = _raw_project()
+    raw["schema_version"] = schema_version
+    raw["settings"]["content_type"] = content_type
+    for element in elements:
+        _install(raw, element)
+    return raw
+
+
+def _elements_of(migrated: dict) -> dict:
+    return migrated["timelines"]["items"]["timeline:main"]["elements_by_id"]
+
+
+# The box the prompt used to teach: it clears every size floor and still
+# reaches 0.97, so its last line is burnt into the frame edge.
+_BURNT_IN_LOCATION = {
+    "x": 0.5,
+    "y": 0.88,
+    "width": 0.8,
+    "height": 0.18,
+    "anchor_x": 0.5,
+    "anchor_y": 0.5,
+}
+
+
+def test_v9_to_v10_leaves_the_pet_os_bubble_without_a_caption_role() -> None:
+    """A stamped role would drag the bubble to the subtitle position.
+
+    The prompts tell the author to leave ``caption_role`` empty precisely
+    because the bubble uses its own layout, so the stamping must not claim
+    it.  ``vibe="summary"`` is the interview presentation and stays a
+    subtitle even inside a pet project.
+    """
+
+    raw = _raw_with_elements(
+        _caption_element("bubble", caption_role=None),
+        _caption_element("summary", caption_role=None, vibe="summary"),
+        content_type="pet_video",
+    )
+
+    migrated = migrate_project_document(raw)
+
+    elements = _elements_of(migrated)
+    assert "caption_role" not in elements["bubble"]["creation"]
+    assert elements["summary"]["creation"]["caption_role"] == "dialogue"
+
+
+def test_caption_location_repair_only_touches_boxes_outside_the_safe_area():
+    """Existing projects must not keep burning captions into the frame edge.
+
+    Nothing re-reads a stored location on load, so this repair is the only
+    path that fixes an already-written box.  A conforming box and a pet-OS
+    bubble are left byte-identical.
+    """
+    from services.media_files.motion_templates import CAPTION_ROLE_LOCATIONS
+
+    legal = dict(CAPTION_ROLE_LOCATIONS["chapter"])
+    raw = _raw_with_elements(
+        _caption_element("burnt", location=dict(_BURNT_IN_LOCATION)),
+        _caption_element("legal", caption_role="chapter", location=legal),
+        _caption_element(
+            "bubble",
+            caption_role=None,
+            location={
+                "x": 0.90,
+                "y": 0.29,
+                "width": 0.18,
+                "height": 0.53,
+                "anchor_x": 0.5,
+                "anchor_y": 0.5,
+            },
+        ),
+        schema_version=10,
+        content_type="pet_video",
+    )
+
+    migrated = migrate_project_document(raw)
+
+    elements = _elements_of(migrated)
+    assert elements["burnt"]["location"] == CAPTION_ROLE_LOCATIONS["dialogue"]
+    assert elements["legal"]["location"] == legal
+    assert elements["bubble"]["location"]["y"] == 0.29
+    # Idempotent: a second load must not move anything again.
+    assert migrate_project_document(migrated) == migrated
+
+
+def test_caption_location_repair_keeps_full_canvas_captions() -> None:
+    """The informal-launch template authors a whole-frame caption box.
+
+    That geometry is exempt from the safe-area rule at design time as well,
+    so the repair must not rewrite it onto the subtitle preset.
+    """
+
+    raw = _raw_with_elements(
+        _caption_element(
+            "full",
+            location={
+                "x": 0.5,
+                "y": 0.5,
+                "width": 1,
+                "height": 1,
+                "anchor_x": 0.5,
+                "anchor_y": 0.5,
+            },
+        ),
+        schema_version=10,
+    )
+
+    migrated = migrate_project_document(raw)
+
+    element = _elements_of(migrated)["full"]
+    assert element["location"]["width"] == 1
+    assert element["location"]["height"] == 1

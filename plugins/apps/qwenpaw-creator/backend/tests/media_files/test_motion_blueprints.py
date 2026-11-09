@@ -20,6 +20,7 @@ from services.media_files.motion_blueprints import (
     validated_frame_window,
 )
 from services.media_files.motion_design import _validated_design
+from services.media_files.motion_templates import DEFAULT_CAPTION_LOCATION
 
 
 class TestBlueprintRendering:
@@ -117,14 +118,11 @@ class TestBlueprintRendering:
 
 
 class TestBlueprintDesignValidation:
-    _LOCATION = {
-        "x": 0.5,
-        "y": 0.88,
-        "width": 0.8,
-        "height": 0.18,
-        "anchor_x": 0.5,
-        "anchor_y": 0.5,
-    }
+    # Design validation now gates the caption box against the 0.04/0.96 safe
+    # area, so the fixture has to be a box the product would actually accept.
+    # The hand-written 0.88/0.18 centre-anchored version reached 0.97 and was
+    # exactly the burnt-into-the-frame-edge geometry the gate exists to stop.
+    _LOCATION = dict(DEFAULT_CAPTION_LOCATION)
 
     def test_caption_blueprint_route_validates(self, stub_gsap_vendor) -> None:
         design = _validated_design(

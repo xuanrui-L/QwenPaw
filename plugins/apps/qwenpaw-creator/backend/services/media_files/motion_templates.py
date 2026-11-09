@@ -8,7 +8,9 @@ from __future__ import annotations
 from html import escape
 import math
 import re
+from collections.abc import Mapping
 import unicodedata
+from typing import Any
 
 MOTION_TEMPLATE_VERSION = 1
 CAPTION_TEMPLATE_VERSION = 2
@@ -23,8 +25,9 @@ DEFAULT_CAPTION_LOCATION = {
 # Preset locations for each caption_role.  Every entry must clear the
 # compose-time validator ``caption_layout_error`` for the text length its own
 # role is documented to carry, and must stay inside the 0.04/0.96 safe area on
-# landscape and portrait canvases alike.  The renderer only logs a rejected
-# caption box, so a preset that fails here clips words in the finished video.
+# landscape and portrait canvases alike.  Compose only logs a rejected caption
+# box and then re-renders the whole card in the generic subtitle geometry, so a
+# preset that fails here silently throws the role's layout away.
 #
 # A role that hugs a frame edge pins that edge through ``anchor_y`` rather
 # than centering the box: a centered box grows both ways, and the height two
@@ -40,7 +43,8 @@ CAPTION_ROLE_LOCATIONS: dict[str, dict[str, object]] = {
         "anchor_x": 0.5,
         "anchor_y": 1.0,
     },
-    # 旁白/内心独白 — 与对白同样贴底边，但更窄，配合斜体样式形成视觉区分
+    # 旁白/内心独白 — 与对白同样贴底边，但宽度更窄（65%）以形成视觉区分；
+    # 排版仍是正体，渲染器不区分 caption_role
     "narration": {
         "x": 0.50,
         "y": 0.95,
@@ -104,6 +108,81 @@ CAPTION_ROLE_LOCATIONS: dict[str, dict[str, object]] = {
         "anchor_y": 0.0,
     },
 }
+# A caption box must also stay inside this normalized safe area.  The
+# compose-time validator only checks the width floor, the box aspect ratio and
+# the height floor, so a handwritten box such as ``y=0.88, height=0.18`` with a
+# centre anchor still passes at 0.97 and burns the last line of the card into
+# the frame edge.  The design-time gate and the load-time repair both read
+# these numbers, so the preset table and any authored box are judged alike.
+CAPTION_SAFE_AREA_EDGES = (0.04, 0.04, 0.96, 0.96)
+# Some presets sit exactly on the 0.96 line by construction, so the check needs
+# a float tolerance or the guard would reject its own table.
+CAPTION_SAFE_AREA_EPSILON = 1e-9
+
+
+def _location_number(
+    location: Mapping[str, Any],
+    key: str,
+    default: float,
+) -> float:
+    """Read one normalized location field, falling back to the model default."""
+
+    try:
+        return float(location.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def caption_box_edges(
+    location: Mapping[str, Any],
+) -> tuple[float, float, float, float]:
+    """Return left, top, right and bottom of a normalized location box.
+
+    ``x``/``y`` is the anchor point and ``anchor_x``/``anchor_y`` select which
+    point of the box sits there, so the edges follow the same arithmetic the
+    renderer uses.  Missing keys fall back to the ElementLocation defaults.
+    """
+
+    width = _location_number(location, "width", 1.0)
+    height = _location_number(location, "height", 1.0)
+    left = (
+        _location_number(location, "x", 0.5)
+        - _location_number(
+            location,
+            "anchor_x",
+            0.5,
+        )
+        * width
+    )
+    top = (
+        _location_number(location, "y", 0.5)
+        - _location_number(
+            location,
+            "anchor_y",
+            0.5,
+        )
+        * height
+    )
+    return left, top, left + width, top + height
+
+
+def caption_box_out_of_safe_area(
+    location: Mapping[str, Any],
+    *,
+    epsilon: float = CAPTION_SAFE_AREA_EPSILON,
+) -> bool:
+    """Whether a caption box reaches outside the caption safe area."""
+
+    safe_left, safe_top, safe_right, safe_bottom = CAPTION_SAFE_AREA_EDGES
+    left, top, right, bottom = caption_box_edges(location)
+    return (
+        left < safe_left - epsilon
+        or top < safe_top - epsilon
+        or right > safe_right + epsilon
+        or bottom > safe_bottom + epsilon
+    )
+
+
 SUPPORTED_MOTIFS = frozenset(
     {
         "paw_trail",
@@ -293,6 +372,7 @@ _MOTIFS: dict[str, tuple[str, str]] = {
 
 __all__ = [
     "CAPTION_ROLE_LOCATIONS",
+    "CAPTION_SAFE_AREA_EDGES",
     "MOTION_TEMPLATE_VERSION",
     "SUPPORTED_EMOTIONS",
     "SUPPORTED_ENTRANCES",
@@ -300,5 +380,7 @@ __all__ = [
     "SUPPORTED_MOTIFS",
     "SUPPORTED_THEMES",
     "SUPPORTED_VARIANTS",
+    "caption_box_edges",
+    "caption_box_out_of_safe_area",
     "render_decoration_template",
 ]

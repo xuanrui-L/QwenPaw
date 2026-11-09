@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,7 @@ from services.media_files.local_execution import (
     LocalMediaInput,
 )
 from services.media_files.motion_design import (
+    _design_canvas_size,
     _repair_common_html_slips,
     _select_decoration_ids,
     _validated_design,
@@ -191,7 +193,21 @@ class TestMotionDesignSafety:
             "这座城市的光伏装机量在五年内增长了十二倍",
         ],
     }
-    _CAPTION_CANVASES = [(1280, 720), (3840, 2160), (854, 480), (1080, 1920)]
+    # The guard has to sample the canvases the design path can actually hand
+    # it.  ``_design_canvas_size`` only ever uses a 720 or 1080 short side, so
+    # a hand-written 4K row tested a geometry that never reaches this code.
+    _CAPTION_CANVASES = [
+        _design_canvas_size(
+            SimpleNamespace(
+                settings=SimpleNamespace(
+                    aspect_ratio=ratio,
+                    resolution=resolution,
+                ),
+            ),
+        )
+        for ratio in ("16:9", "9:16", "1:1", "4:5")
+        for resolution in ("1280x720", "1920x1080")
+    ]
 
     @pytest.mark.parametrize("role", sorted(_ROLE_TEXTS))
     def test_caption_role_preset_renders_its_documented_text(
@@ -216,25 +232,74 @@ class TestMotionDesignSafety:
     def test_caption_role_presets_stay_inside_the_safe_area(self) -> None:
         """An off-canvas caption is unreadable no matter how the box is sized.
 
-        The validator has no safe-area rule, so this invariant lives only
-        here.  The epsilon keeps it honest about floating point: some presets
-        sit exactly on the 0.96 line by construction.
+        The preset table and the validator now read the same numbers, so this
+        guard proves the table the gate judges is self-consistent: some
+        presets sit exactly on the 0.96 line by construction.
+        """
+        from services.media_files.motion_templates import (
+            CAPTION_ROLE_LOCATIONS,
+            CAPTION_SAFE_AREA_EDGES,
+            caption_box_edges,
+            caption_box_out_of_safe_area,
+        )
+
+        safe_left, safe_top, safe_right, safe_bottom = CAPTION_SAFE_AREA_EDGES
+        for role, preset in CAPTION_ROLE_LOCATIONS.items():
+            assert not caption_box_out_of_safe_area(preset), f"{role} 越出安全区"
+            left, top, right, bottom = caption_box_edges(preset)
+            assert left >= safe_left, f"{role} 左边越界 {left:.3f}"
+            assert top >= safe_top, f"{role} 顶边越界 {top:.3f}"
+            assert right <= safe_right, f"{role} 右边越界 {right:.3f}"
+            assert bottom <= safe_bottom, f"{role} 底边越界 {bottom:.3f}"
+
+    def test_caption_box_outside_the_safe_area_is_rejected(self) -> None:
+        """The size floors alone leave the frame-edge box perfectly legal.
+
+        The prompt used to teach exactly this box: 0.18 high with a centre
+        anchor reaches 0.97 and burns the last line into the frame edge, so
+        the gate has to reject it by name instead of only warning about it
+        in a comment.
         """
         from services.media_files.motion_templates import (
             CAPTION_ROLE_LOCATIONS,
         )
 
-        epsilon = 1e-9
-        for role, preset in CAPTION_ROLE_LOCATIONS.items():
-            location = ElementLocation(**preset)
-            left = location.x - location.anchor_x * location.width
-            top = location.y - location.anchor_y * location.height
-            assert left >= 0.04 - epsilon, f"{role} 左边越界 {left:.3f}"
-            assert top >= 0.04 - epsilon, f"{role} 顶边越界 {top:.3f}"
-            right = left + location.width
-            bottom = top + location.height
-            assert right <= 0.96 + epsilon, f"{role} 右边越界 {right:.3f}"
-            assert bottom <= 0.96 + epsilon, f"{role} 底边越界 {bottom:.3f}"
+        burnt = ElementLocation(
+            x=0.5,
+            y=0.88,
+            width=0.8,
+            height=0.18,
+            anchor_x=0.5,
+            anchor_y=0.5,
+        )
+        text = "那天晚上他站在门口很久什么都没有说"
+        with pytest.raises(ValidationError, match="安全区"):
+            _validate_caption_location(burnt, text, (1280, 720))
+        # The role preset that replaces it stays legal on the same canvas, so
+        # the gate cannot reject its own table.
+        _validate_caption_location(
+            ElementLocation(**CAPTION_ROLE_LOCATIONS["dialogue"]),
+            text,
+            (1280, 720),
+        )
+
+    def test_documented_copy_budget_fits_the_preset_it_promises(self) -> None:
+        """A prompt ceiling the preset cannot hold silently clips words.
+
+        The director prompt caps an interview summary at 30 CJK characters,
+        so 30 must be legal on that box.  The documented margin is thin (the
+        preset holds 33), which is exactly why it is pinned here.
+        """
+        from services.media_files.motion_templates import (
+            CAPTION_ROLE_LOCATIONS,
+        )
+
+        preset = ElementLocation(
+            **CAPTION_ROLE_LOCATIONS["interview_summary"],
+        )
+        _validate_caption_location(preset, "访谈要点摘要" * 5, (1280, 720))
+        with pytest.raises(ValidationError, match="height"):
+            _validate_caption_location(preset, "访" * 40, (1280, 720))
 
     def test_caption_roles_cover_every_prompted_value(self) -> None:
         """A role the model can write but the preset table lacks would fall

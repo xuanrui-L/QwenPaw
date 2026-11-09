@@ -63,8 +63,10 @@ from services.project_files.json_pointer import escape_pointer_token
 from services.project_files.assets import AssetFileStore
 from services.project_files.models import (
     ExecutionPreauthorization,
+    OverlayCreation,
     Project,
     ProjectSettings,
+    is_subtitle_overlay,
 )
 from services.project_files.store import (
     InvalidProjectId,
@@ -575,27 +577,34 @@ async def toggle_subtitles(
     request: SubtitleToggleRequest,
     services: CreatorFileServices = Depends(project_file_services),
 ):
-    """Batch enable or disable all subtitle overlay elements."""
+    """Batch enable or disable all subtitle overlay elements.
+
+    ``is_subtitle_overlay`` is the single definition of what counts as a
+    subtitle here, so a pet-OS bubble (which the prompts keep free of
+    ``caption_role`` on purpose) is never hidden by the toolbar toggle.
+    """
 
     def operation() -> dict[str, Any]:
         snapshot = services.projects.read(project_id)
         base = snapshot.project.model_dump(mode="json")
         candidate = snapshot.project.model_dump(mode="json")
+        content_type = snapshot.project.settings.content_type
         updated_count = 0
         changed: list[str] = []
         captions: list[str] = []
-        timelines = candidate.get("timelines", {}).get("items", {})
-        for timeline_id, timeline in timelines.items():
+        for timeline_id, timeline in snapshot.project.timelines.items.items():
             # Rolled-back copies are frozen; the work graph never reads them.
             if str(timeline_id).startswith("snapshot:"):
                 continue
-            elements = timeline.get("elements_by_id", {})
-            for element_id, element in elements.items():
-                creation = element.get("creation", {})
-                if not (
-                    creation.get("type") == "overlay"
-                    and isinstance(creation.get("text"), str)
-                    and creation["text"].strip()
+            for element_id, element in timeline.elements_by_id.items():
+                creation = element.creation
+                if not isinstance(creation, OverlayCreation):
+                    continue
+                if not is_subtitle_overlay(
+                    text=creation.text,
+                    vibe=creation.vibe,
+                    caption_role=creation.caption_role,
+                    content_type=content_type,
                 ):
                     continue
                 pointer = (
@@ -605,9 +614,11 @@ async def toggle_subtitles(
                     f"{escape_pointer_token(str(element_id))}/enabled"
                 )
                 captions.append(pointer)
-                if bool(element.get("enabled", True)) == request.enabled:
+                if bool(element.enabled) == request.enabled:
                     continue
-                element["enabled"] = request.enabled
+                candidate["timelines"]["items"][timeline_id]["elements_by_id"][
+                    element_id
+                ]["enabled"] = request.enabled
                 updated_count += 1
                 changed.append(pointer)
         # The final cut bakes captions in, so a toggle has to flag the render

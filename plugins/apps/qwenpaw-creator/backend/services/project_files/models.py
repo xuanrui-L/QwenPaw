@@ -1084,6 +1084,60 @@ def overlay_role(creation: OverlayCreation) -> str:
     return "caption" if creation.text.strip() else "decoration"
 
 
+# The launch form writes ``pet_video`` (ui CONTENT_TYPE_OPTIONS) while the
+# motion palettes and the composer's bubble styling spell the same idea
+# ``pets``.  Classification has to accept both, otherwise every pet project
+# started from the UI would have its OS bubbles counted as subtitles.  The
+# styling side deliberately keeps its own narrower ``pets`` check: switching
+# a project from the interview card to the comic bubble would re-render
+# frames that already exist, which is a separate decision from defining what
+# a subtitle is.
+_PET_CONTENT_TYPES = frozenset({"pets", "pet_video"})
+
+
+def is_pet_content_type(content_type: str | None) -> bool:
+    """Whether ``content_type`` marks pet footage, accepting both spellings."""
+
+    return content_type in _PET_CONTENT_TYPES
+
+
+def is_pet_os_bubble(*, vibe: str, content_type: str | None) -> bool:
+    """Pet-OS first-person bubble rather than a subtitle card.
+
+    ``vibe="summary"`` is the migrated interview summary and stays a
+    subtitle even inside a pet project.
+    """
+
+    return is_pet_content_type(content_type) and vibe != "summary"
+
+
+def is_subtitle_overlay(
+    *,
+    text: str,
+    vibe: str,
+    caption_role: str | None,
+    content_type: str | None,
+) -> bool:
+    """Single source of truth for ``this overlay is a subtitle``.
+
+    Non-empty ``text`` is what turns an overlay into a caption card, and a
+    filled-in ``caption_role`` is the author declaring one.  A blank role is
+    not a declaration: the current model cannot store one (the field is a
+    ``Literal | None``), but legacy documents written while ``caption_role``
+    was a free string can carry ``""``, and the styling path already reads the
+    role by truthiness.  The pet-OS bubble is excluded on purpose: the prompts
+    tell the author to leave its ``caption_role`` empty and give it a dedicated
+    layout, so bulk subtitle work (the toolbar toggle, the v9->v10 stamping)
+    must never claim it.
+    """
+
+    if not (text or "").strip():
+        return False
+    if caption_role:
+        return True
+    return not is_pet_os_bubble(vibe=vibe, content_type=content_type)
+
+
 class TransitionCreation(StrictModel):
     """A time-bounded effect between two explicit Element endpoints."""
 
@@ -2503,5 +2557,8 @@ __all__ = [
     "VisualDevelopment",
     "VisualEntity",
     "VisualVariant",
+    "is_pet_content_type",
+    "is_pet_os_bubble",
+    "is_subtitle_overlay",
     "OverlayCreation",
 ]
