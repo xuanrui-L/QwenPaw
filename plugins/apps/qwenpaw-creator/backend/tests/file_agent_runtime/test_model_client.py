@@ -289,17 +289,70 @@ def test_elided_turns_stay_recallable_by_seq():
     elision = result[0]
     assert elision["source"] == "context_compaction"
     assert elision["elidedMessageCount"] > 0
-    assert "archivedHistoryMap" in elision
-    assert "recall_history" in elision["archivedHistoryMap"]
+    map_text = elision["archivedHistoryMap"]
+    assert "[context compressed]" in map_text
+    assert "recall_history" in map_text
     lo, hi = elision["recoverableSeqRange"]
     assert lo <= hi
+    # The reused platform EvictionIndex lists each evicted turn as
+    # ``· seq N  ⟦headline⟧``: oldest tier first, oldest turn first within a
+    # tier. Parse those lines (block headers use ``[seq a–b]`` and are
+    # deliberately skipped) to prove the ordering and endpoints survive.
+    marker = "\u00b7 seq "
     listed = [
-        int(line.split(" . ")[0])
-        for line in elision["archivedHistoryMap"].splitlines()
-        if " . \u27e6" in line
+        int(line.split(marker)[1].split()[0].split("\u2013")[0])
+        for line in map_text.splitlines()
+        if marker in line
     ]
     assert listed == sorted(listed)
     assert listed[0] == lo and listed[-1] == hi
+
+
+def test_archived_map_falls_back_to_local_format_without_host_index(
+    monkeypatch,
+):
+    """A standalone install keeps the archive->recall contract.
+
+    The platform odometer map is reused only when importable. With the host
+    scroll absent, ``_render_archived_index`` must still hand back a
+    ``[context compressed]`` map naming the durable seqs, so the reuse can
+    never regress into the old silent hole.
+    """
+    monkeypatch.setattr(
+        model_context,
+        "_HOST_EVICTION_INDEX_AVAILABLE",
+        False,
+    )
+    history = [
+        {
+            "role": "user",
+            "source": "initial_goal",
+            "messageSeq": 1,
+            "content": [{"type": "text", "text": "keep all six episodes"}],
+        },
+    ]
+    for index in range(6):
+        history.append(
+            {
+                "role": "assistant",
+                "source": "run_review_feedback",
+                "messageSeq": 10 + index,
+                "content": [
+                    {"type": "text", "text": f"review-{index} " + "x" * 4096},
+                ],
+            },
+        )
+
+    elision = compact_conversation_history(history, max_bytes=4096)[0]
+    map_text = elision["archivedHistoryMap"]
+    assert "[context compressed]" in map_text
+    assert "recall_history" in map_text
+    # Local flat format uses ``seq . \u27e6headline\u27e7`` lines, not the
+    # platform tier banners.
+    assert any(" . \u27e6" in line for line in map_text.splitlines())
+    assert "===== Tier" not in map_text
+    lo, hi = elision["recoverableSeqRange"]
+    assert (lo, hi) == (10, 15)
 
 
 def test_continuation_summary_rides_on_the_elision_when_supplied():

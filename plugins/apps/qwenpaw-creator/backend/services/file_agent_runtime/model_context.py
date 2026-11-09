@@ -41,6 +41,25 @@ except ImportError:  # pragma: no cover - standalone plugin installs
     _HOST_CONTEXT_ESTIMATOR_AVAILABLE = False
     _HOST_CONTEXT_WINDOW_AVAILABLE = False
 
+try:
+    # The platform scroll already owns the eviction-index odometer: a tiered,
+    # KV-cache-safe map of evicted turns keyed by their durable seq, with the
+    # recall guidance baked into the envelope. Creator's own flat map predated
+    # it; reusing the class keeps the archived map byte-for-byte what the
+    # platform emits and inherits its graceful per-tier endpoint folding. The
+    # module imports nothing but dataclasses, so it is safe to pull in even
+    # though Creator drives its own (byte-gated) compaction loop.
+    from qwenpaw.agents.context.scroll.eviction_index import (
+        EvictionIndex as _HostEvictionIndex,
+        Leaf as _HostEvictionLeaf,
+    )
+
+    _HOST_EVICTION_INDEX_AVAILABLE = True
+except ImportError:  # pragma: no cover - standalone plugin installs
+    _HostEvictionIndex = None
+    _HostEvictionLeaf = None
+    _HOST_EVICTION_INDEX_AVAILABLE = False
+
 # A transport safety floor — not the primary gate when a token window is
 # resolved. The actual guard is the input token budget from
 # ``context_window()``, whose byte equivalent can be far larger; this
@@ -1036,11 +1055,20 @@ def _record_headline(item: Mapping[str, Any]) -> str:
 def _render_archived_index(
     archived: Sequence[Mapping[str, Any]],
 ) -> tuple[str, int | None, int | None]:
-    """Render dropped turns into a recallable ``seq . headline`` map.
+    """Render dropped turns into a recallable map, oldest first.
 
     Turns without a durable ``messageSeq`` (unit-test fixtures) carry no
     address, so they are skipped: the map only lists what recall can
     actually fetch back, never a pointer to nothing.
+
+    When the host scroll is importable the platform ``EvictionIndex`` owns
+    the map: one eviction block is dropped on tier 0 and the odometer
+    carries older blocks up, folding them to their endpoint headlines, so
+    the archived view is byte-for-byte what the platform emits and stays
+    KV-cache friendly. A standalone plugin install falls back to Creator's
+    own flat ``seq . headline`` list; either way the returned text already
+    carries the ``[context compressed]`` preamble and the recall guidance,
+    so the caller never wraps it again.
     """
     addressable = [
         item for item in archived if isinstance(item.get("seq"), int)
@@ -1049,6 +1077,27 @@ def _render_archived_index(
         return "", None, None
     seqs = [int(item["seq"]) for item in addressable]
     lo, hi = min(seqs), max(seqs)
+
+    if _HOST_EVICTION_INDEX_AVAILABLE and _HostEvictionIndex is not None:
+        leaves = [
+            _HostEvictionLeaf(
+                seq=int(item["seq"]),
+                headline=_record_headline(item),
+            )
+            for item in addressable
+        ]
+        index = _HostEvictionIndex(session_id="creator")
+        index.add_eviction(leaves, seq_lo=lo, seq_hi=hi)
+        return (
+            index.render(
+                include_envelope=False,
+                include_live_banner=False,
+                detail_char_budget=ARCHIVED_EVIDENCE_MAX_CHARS,
+            ),
+            lo,
+            hi,
+        )
+
     lines: list[str] = []
     shown = addressable
     if len(shown) > _ARCHIVED_INDEX_MAX_LINES:
@@ -1063,7 +1112,14 @@ def _render_archived_index(
         lines.append(
             f"{item['seq']} . " f"\u27e6{_record_headline(item)}\u27e7",
         )
-    return "\n".join(lines), lo, hi
+    return (
+        "[context compressed] the turns below left the live window but "
+        "remain durable by messageSeq; read them back with "
+        'recall_history(op="expand", lo=..., hi=...) or '
+        'op="search". Oldest first.\n' + "\n".join(lines),
+        lo,
+        hi,
+    )
 
 
 def plan_history_compaction(
@@ -1148,15 +1204,12 @@ def plan_history_compaction(
     history_map, seq_lo, seq_hi = _render_archived_index(archived)
     if history_map:
         # The dropped turns are not gone: they stay durable in the session
-        # store under the seqs listed here. Point the model at the same
-        # recall entry the platform uses, so an elided goal or decision can
-        # be read back instead of silently forgotten.
-        elision["archivedHistoryMap"] = (
-            "[context compressed] the turns below left the live window but "
-            "remain durable by messageSeq; read them back with "
-            'recall_history(op="expand", lo=..., hi=...) or '
-            'op="search". Oldest first.\n' + history_map
-        )
+        # store under the seqs listed here. _render_archived_index already
+        # carries the ``[context compressed]`` preamble and the recall
+        # guidance - the platform odometer map when the host scroll is
+        # importable, Creator's flat fallback otherwise - so the caller
+        # assigns it verbatim rather than wrapping it a second time.
+        elision["archivedHistoryMap"] = history_map
         elision["recoverableSeqRange"] = [seq_lo, seq_hi]
     return [
         elision,
