@@ -80,7 +80,9 @@ def _punctuation_hugs_baseline(font_path: str, size: int = 48) -> bool:
     except OSError:
         return False
     tolerance = max(1, round(size * 0.06))
-    return comma[3] >= hanzi[3] - tolerance and quote[1] <= hanzi[1] + tolerance
+    return (
+        comma[3] >= hanzi[3] - tolerance and quote[1] <= hanzi[1] + tolerance
+    )
 
 
 def _placement_values(
