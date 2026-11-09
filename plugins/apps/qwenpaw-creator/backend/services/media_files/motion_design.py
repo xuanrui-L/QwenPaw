@@ -1949,7 +1949,10 @@ async def design_motion_overlays(
         try:
             _validate_caption_location(location, creation.text, canvas_size)
         except ValidationError:
-            location = ElementLocation(**default_loc)
+            # Retreating to ``default_loc`` would hand back the very preset
+            # that just failed, so the guard would never change anything.
+            # Fall back to the generic caption box instead.
+            location = ElementLocation(**DEFAULT_CAPTION_LOCATION)
         concept = "简洁无边框字幕：透明背景、清晰字体、稳定排版"
         motion = MotionGraphic(
             format="html_css",

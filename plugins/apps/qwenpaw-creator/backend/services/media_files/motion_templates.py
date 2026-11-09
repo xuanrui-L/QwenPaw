@@ -14,33 +14,40 @@ MOTION_TEMPLATE_VERSION = 1
 CAPTION_TEMPLATE_VERSION = 2
 DEFAULT_CAPTION_LOCATION = {
     "x": 0.5,
-    "y": 0.88,
-    "width": 0.72,
-    "height": 0.14,
+    "y": 0.86,
+    "width": 0.8,
+    "height": 0.18,
     "anchor_x": 0.5,
     "anchor_y": 0.5,
 }
-# Preset locations for each caption_role.  The dialogue entry is
-# intentionally identical to DEFAULT_CAPTION_LOCATION so legacy callers
-# that look up locations by role get a consistent result.
+# Preset locations for each caption_role.  Every entry must clear the
+# compose-time validator ``caption_layout_error`` for the text length its own
+# role is documented to carry, and must stay inside the 0.04/0.96 safe area on
+# landscape and portrait canvases alike.  The renderer only logs a rejected
+# caption box, so a preset that fails here clips words in the finished video.
+#
+# A role that hugs a frame edge pins that edge through ``anchor_y`` rather
+# than centering the box: a centered box grows both ways, and the height two
+# lines need would push the hugged edge out of the safe area.
 CAPTION_ROLE_LOCATIONS: dict[str, dict[str, object]] = {
-    # 对白字幕 — 电影标准底部居中，留出安全边距（画面 72% 宽，底边距 12%）
+    # 对白字幕 — 电影标准底部居中（画面 80% 宽，底边距 5%）。钉住底边，与
+    # DEFAULT_CAPTION_LOCATION 覆盖同一块画布区域。
     "dialogue": {
         "x": 0.50,
-        "y": 0.88,
-        "width": 0.72,
-        "height": 0.14,
+        "y": 0.95,
+        "width": 0.8,
+        "height": 0.18,
         "anchor_x": 0.5,
-        "anchor_y": 0.5,
+        "anchor_y": 1.0,
     },
-    # 旁白/内心独白 — 较对话更靠下、更窄，配合斜体样式形成视觉区分
+    # 旁白/内心独白 — 与对白同样贴底边，但更窄，配合斜体样式形成视觉区分
     "narration": {
         "x": 0.50,
-        "y": 0.90,
+        "y": 0.95,
         "width": 0.65,
-        "height": 0.12,
+        "height": 0.17,
         "anchor_x": 0.5,
-        "anchor_y": 0.5,
+        "anchor_y": 1.0,
     },
     # 开场片名 — 黄金比例位置（约 38.2% 处），居中，留给片名呼吸空间
     "opening_title": {
@@ -56,25 +63,25 @@ CAPTION_ROLE_LOCATIONS: dict[str, dict[str, object]] = {
         "x": 0.50,
         "y": 0.80,
         "width": 0.55,
-        "height": 0.06,
+        "height": 0.13,
         "anchor_x": 0.5,
         "anchor_y": 0.5,
     },
-    # 片尾致谢 — 底部居中，预留滚动空间；电影惯例：从底部向上滚动
+    # 片尾致谢 — 钉住底边居中，向上预留滚动空间；电影惯例：从底部向上滚动
     "ending_credit": {
         "x": 0.50,
         "y": 0.95,
-        "width": 0.65,
+        "width": 0.7,
         "height": 0.30,
         "anchor_x": 0.5,
-        "anchor_y": 0.5,
+        "anchor_y": 1.0,
     },
     # 地点/时间标注 — 左下角，小字；参考"巴黎，1942"、"三年前"等电影惯用位置
     "location": {
         "x": 0.06,
         "y": 0.88,
         "width": 0.35,
-        "height": 0.08,
+        "height": 0.13,
         "anchor_x": 0.0,
         "anchor_y": 1.0,
     },
@@ -83,18 +90,18 @@ CAPTION_ROLE_LOCATIONS: dict[str, dict[str, object]] = {
         "x": 0.50,
         "y": 0.10,
         "width": 0.55,
-        "height": 0.10,
+        "height": 0.13,
         "anchor_x": 0.5,
-        "anchor_y": 0.5,
+        "anchor_y": 0.0,
     },
-    # 访谈要点摘要 — 顶部区域，纪录片事实卡风格；"同理顶部"
+    # 访谈要点摘要 — 顶部区域，纪录片事实卡风格；钉住顶边向下生长
     "interview_summary": {
         "x": 0.50,
-        "y": 0.08,
+        "y": 0.06,
         "width": 0.75,
-        "height": 0.12,
+        "height": 0.13,
         "anchor_x": 0.5,
-        "anchor_y": 0.5,
+        "anchor_y": 0.0,
     },
 }
 SUPPORTED_MOTIFS = frozenset(
