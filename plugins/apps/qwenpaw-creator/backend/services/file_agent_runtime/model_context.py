@@ -158,6 +158,23 @@ def media_observation_degrade_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+CONTINUATION_SUMMARY_ENV = "CREATOR_CONTINUATION_SUMMARY_ENABLED"
+
+
+def continuation_summary_enabled() -> bool:
+    """Whether an archived slice may be summarized by one extra model turn.
+
+    The prose continuation summary is the platform scroll's fourth relief
+    lever: a state cache that reads beside the seq recall map so the model
+    sees a coherent snapshot of what the archived middle decided and still
+    owes, not only a list of pointers. It costs a model turn, and the map
+    already guarantees nothing is lost, so a deployment that would rather not
+    spend the turn flips it off and keeps the recall-only behavior.
+    """
+    raw = (os.environ.get(CONTINUATION_SUMMARY_ENV) or "").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _media_charge_bounds(budget_bytes: int) -> tuple[int, int]:
     """Return the ``(floor, ceiling)`` one media part is charged within."""
     ceiling = min(
@@ -1040,12 +1057,19 @@ def _render_archived_index(
     return "\n".join(lines), lo, hi
 
 
-def compact_conversation_history(
+def plan_history_compaction(
     history: list[dict[str, Any]],
     *,
     max_bytes: int = HISTORY_BYTES,
     max_tokens: int | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Compact the history view and hand back the turns it archived.
+
+    Split out of ``compact_conversation_history`` so an async caller can read
+    the dropped slice (via ``render_archived_evidence``) and ask the model for
+    a continuation summary before the compacted view is serialized, without
+    re-walking the budget by hand and risking drift against it.
+    """
     result = deepcopy(history)
     latest_snapshot: int | None = None
     for index, item in enumerate(result):
@@ -1072,7 +1096,7 @@ def compact_conversation_history(
     if _media_aware_bytes(result, budget_bytes=max_bytes) <= max_bytes and (
         max_tokens is None or estimate_input_tokens(result) <= max_tokens
     ):
-        return result
+        return result, []
     # Preserve every human goal/constraint and the newest state. Runtime
     # feedback also uses the user role; retaining every old review would make
     # a long production exceed the hard budget even after all tools are gone.
@@ -1128,7 +1152,96 @@ def compact_conversation_history(
     return [
         elision,
         *(item for item in result if item is not None),
+    ], archived
+
+
+# A continuation summary is a state cache over the *archived* slice, so its
+# prompt carries a bounded preview of exactly those turns, not the whole
+# window. The platform fits that preview with a binary search over
+# ``model.count_tokens``; Creator has no such hook on the compaction path, so
+# it caps the preview by characters instead. The durable pointers, not this
+# preview, stay authoritative — the prompt already says so.
+ARCHIVED_EVIDENCE_MAX_CHARS = 16_000
+ARCHIVED_EVIDENCE_TURN_MAX_CHARS = 1_500
+
+
+def _archived_turn_text(item: Mapping[str, Any]) -> str:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part["text"]
+            for part in content
+            if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+        )
+    return ""
+
+
+def render_archived_evidence(
+    archived: Sequence[Mapping[str, Any]],
+    *,
+    max_chars: int = ARCHIVED_EVIDENCE_MAX_CHARS,
+) -> tuple[str, tuple[int | None, int | None]]:
+    """Render the archived slice into a bounded prompt preview and its range.
+
+    The returned ``(lo, hi)`` spans every addressable archived turn even when
+    ``max_chars`` truncates the body: the model is told the covered range, so
+    a preview that stops early must not shrink what the summary may claim to
+    cover. Turns with no durable ``seq`` are skipped, matching the recall map.
+    """
+    addressable = [
+        item for item in archived if isinstance(item.get("seq"), int)
     ]
+    if not addressable:
+        return "", (None, None)
+    seqs = [int(item["seq"]) for item in addressable]
+    bounds: tuple[int | None, int | None] = (min(seqs), max(seqs))
+    lines: list[str] = []
+    used = 0
+    for item in addressable:
+        body = " ".join(
+            _archived_turn_text(item).split(),
+        )[:ARCHIVED_EVIDENCE_TURN_MAX_CHARS]
+        role = str(item.get("role") or "message")
+        source = str(item.get("source") or "").strip()
+        line = f"[seq:{item['seq']}] {role} {source}: {body}".strip()
+        # Always keep the first turn, however long, so a tiny budget still
+        # yields some evidence; only later turns are dropped once the cap is
+        # reached. The covered bounds stay the full range regardless.
+        if lines and used + len(line) + 1 > max_chars:
+            break
+        used += len(line) + 1
+        lines.append(line)
+    return "\n".join(lines), bounds
+
+
+def compact_conversation_history(
+    history: list[dict[str, Any]],
+    *,
+    max_bytes: int = HISTORY_BYTES,
+    max_tokens: int | None = None,
+    continuation_summary: str = "",
+) -> list[dict[str, Any]]:
+    """Compact the history view, optionally carrying a continuation summary.
+
+    The summary is the platform scroll's fourth relief lever: a prose state
+    cache that reads beside the seq recall map. It rides on the compaction
+    marker only when the caller actually produced one (the async driver asks
+    the model); serialization itself stays synchronous here.
+    """
+    compacted, _archived = plan_history_compaction(
+        history,
+        max_bytes=max_bytes,
+        max_tokens=max_tokens,
+    )
+    if (
+        continuation_summary
+        and compacted
+        and compacted[0].get("source") == "context_compaction"
+    ):
+        compacted[0]["continuationSummary"] = continuation_summary
+    return compacted
 
 
 def _shrink_continuation(

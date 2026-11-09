@@ -45,7 +45,9 @@ from services.file_agent_runtime.model_context import (
     ModelContextBudgetError,
     _inline_media_relief,
     compact_conversation_history,
+    plan_history_compaction,
     prepare_model_messages,
+    render_archived_evidence,
 )
 
 pytestmark = pytest.mark.unit
@@ -298,6 +300,99 @@ def test_elided_turns_stay_recallable_by_seq():
     ]
     assert listed == sorted(listed)
     assert listed[0] == lo and listed[-1] == hi
+
+
+def test_continuation_summary_rides_on_the_elision_when_supplied():
+    """The prose state cache is attached only when a caller produced one.
+
+    Reverse guard for the platform-scroll reuse: the fourth relief lever is a
+    continuation summary beside the recall map. Old compaction had no such
+    argument at all (``TypeError`` here), and an unsolicited summary would put
+    words in the marker the model never asked for — so absence must stay
+    absence.
+    """
+    history = [
+        {
+            "role": "user",
+            "source": "initial_goal",
+            "messageSeq": 1,
+            "content": [{"type": "text", "text": "keep all six episodes"}],
+        },
+    ]
+    for index in range(6):
+        history.append(
+            {
+                "role": "assistant",
+                "source": "run_review_feedback",
+                "messageSeq": 10 + index,
+                "content": [
+                    {"type": "text", "text": f"review-{index} " + "x" * 4096},
+                ],
+            },
+        )
+
+    without = compact_conversation_history(history, max_bytes=4096)
+    assert "continuationSummary" not in without[0]
+
+    summary = "## Active Task\nkeep six episodes\nStatus: in_progress\n"
+    with_summary = compact_conversation_history(
+        history,
+        max_bytes=4096,
+        continuation_summary=summary,
+    )
+    assert with_summary[0]["continuationSummary"] == summary
+    # The recall map and the summary are complementary, never exclusive.
+    assert "archivedHistoryMap" in with_summary[0]
+
+
+def test_render_archived_evidence_bounds_covered_range_past_truncation():
+    """A truncated preview must not shrink the range the summary may claim.
+
+    The platform prompt is told the covered seq range is authoritative while
+    the preview is bounded. If the bounds followed the truncated body instead
+    of every archived turn, the model would be invited to forget the tail of
+    the archived slice entirely.
+    """
+    archived = [
+        {
+            "seq": 10 + index,
+            "role": "assistant",
+            "source": "runtime_action_result",
+            "content": [{"type": "text", "text": "y" * 2000}],
+        }
+        for index in range(12)
+    ]
+
+    evidence, (lo, hi) = render_archived_evidence(archived, max_chars=1500)
+
+    assert (lo, hi) == (10, 21)
+    # Truncation is real: the preview cannot hold all twelve turns.
+    assert evidence.count("[seq:") < 12
+    assert "[seq:10]" in evidence
+    # And the planner exposes the same archived slice for it.
+    _compacted, planned = plan_history_compaction(
+        [
+            {
+                "role": "user",
+                "source": "initial_goal",
+                "messageSeq": 1,
+                "content": [{"type": "text", "text": "anchor"}],
+            },
+            *(
+                {
+                    "role": "assistant",
+                    "source": "run_review_feedback",
+                    "messageSeq": 10 + index,
+                    "content": [
+                        {"type": "text", "text": "z" * 4096},
+                    ],
+                }
+                for index in range(12)
+            ),
+        ],
+        max_bytes=4096,
+    )
+    assert planned and all(isinstance(item["seq"], int) for item in planned)
 
 
 @pytest.mark.parametrize(
