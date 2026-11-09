@@ -1946,13 +1946,34 @@ async def design_motion_overlays(
         )
         default_loc = role_default or DEFAULT_CAPTION_LOCATION
         location = overlay.location or ElementLocation(**default_loc)
-        try:
-            _validate_caption_location(location, creation.text, canvas_size)
-        except ValidationError:
-            # Retreating to ``default_loc`` would hand back the very preset
-            # that just failed, so the guard would never change anything.
-            # Fall back to the generic caption box instead.
-            location = ElementLocation(**DEFAULT_CAPTION_LOCATION)
+        # Try the authored or preset box first, then the role preset, then the
+        # generic caption box.  Retreating straight to the generic box was
+        # wrong twice over: it handed back the very preset that just failed
+        # whenever no authored box existed, and for a long credit roll the
+        # taller role box is the one option that still fits while the generic
+        # box fails validation too.
+        candidates: list[ElementLocation] = [location]
+        if role_default is not None:
+            candidates.append(ElementLocation(**role_default))
+        generic = ElementLocation(**DEFAULT_CAPTION_LOCATION)
+        if generic != candidates[0]:
+            candidates.append(generic)
+        chosen: ElementLocation | None = None
+        for candidate in candidates:
+            try:
+                _validate_caption_location(
+                    candidate,
+                    creation.text,
+                    canvas_size,
+                )
+            except ValidationError:
+                continue
+            chosen = candidate
+            break
+        # When nothing in the table can hold the copy, keep the first choice
+        # rather than swapping in a different illegal box, so the compose-time
+        # gate reports against the geometry the author actually set.
+        location = candidates[0] if chosen is None else chosen
         concept = "简洁无边框字幕：透明背景、清晰字体、稳定排版"
         motion = MotionGraphic(
             format="html_css",

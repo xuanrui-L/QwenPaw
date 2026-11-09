@@ -214,28 +214,59 @@ class TestMotionDesignSafety:
                 _validate_caption_location(location, text, canvas)
 
     def test_caption_role_presets_stay_inside_the_safe_area(self) -> None:
-        """An off-canvas caption is unreadable no matter how the box is sized."""
+        """An off-canvas caption is unreadable no matter how the box is sized.
+
+        The validator has no safe-area rule, so this invariant lives only
+        here.  The epsilon keeps it honest about floating point: some presets
+        sit exactly on the 0.96 line by construction.
+        """
         from services.media_files.motion_templates import (
             CAPTION_ROLE_LOCATIONS,
         )
 
+        epsilon = 1e-9
         for role, preset in CAPTION_ROLE_LOCATIONS.items():
             location = ElementLocation(**preset)
             left = location.x - location.anchor_x * location.width
             top = location.y - location.anchor_y * location.height
-            assert left >= 0.04, f"{role} 左边越界 {left:.3f}"
-            assert top >= 0.04, f"{role} 顶边越界 {top:.3f}"
-            assert left + location.width <= 0.96, f"{role} 右边越界"
-            assert top + location.height <= 0.96, f"{role} 底边越界"
+            assert left >= 0.04 - epsilon, f"{role} 左边越界 {left:.3f}"
+            assert top >= 0.04 - epsilon, f"{role} 顶边越界 {top:.3f}"
+            right = left + location.width
+            bottom = top + location.height
+            assert right <= 0.96 + epsilon, f"{role} 右边越界 {right:.3f}"
+            assert bottom <= 0.96 + epsilon, f"{role} 底边越界 {bottom:.3f}"
 
     def test_caption_roles_cover_every_prompted_value(self) -> None:
         """A role the model can write but the preset table lacks would fall
-        through to the generic box, silently undoing the layout intent."""
+        through to the generic box, silently undoing the layout intent.
+
+        The truth source has to be the model's own Literal, not a list this
+        file keeps by hand, or adding a role would leave this guard green.
+        """
+        from typing import Literal, get_args, get_origin
+
         from services.media_files.motion_templates import (
             CAPTION_ROLE_LOCATIONS,
         )
+        from services.project_files.models import OverlayCreation
 
-        assert set(CAPTION_ROLE_LOCATIONS) == set(self._ROLE_TEXTS)
+        def literal_members(annotation: object) -> set[str]:
+            for arg in get_args(annotation):
+                if get_origin(arg) is Literal:
+                    return set(str(value) for value in get_args(arg))
+                nested = literal_members(arg)
+                if nested:
+                    return nested
+            return set()
+
+        prompted = literal_members(
+            OverlayCreation.model_fields["caption_role"].annotation,
+        )
+        assert prompted, "caption_role 不再是 Literal，本守卫已失效"
+        assert set(CAPTION_ROLE_LOCATIONS) == prompted
+        # The rendering guard above only samples the roles listed here, so a
+        # new role must arrive with a text budget, not just a preset.
+        assert set(self._ROLE_TEXTS) == prompted
 
     def test_active_or_embedded_content_is_rejected(self) -> None:
         html = (
