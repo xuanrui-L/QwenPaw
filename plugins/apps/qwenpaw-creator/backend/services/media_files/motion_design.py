@@ -77,6 +77,7 @@ from services.media_files.motion_overlay import (
     probe_motion_document,
 )
 from services.media_files.motion_templates import (
+    CAPTION_ROLE_LOCATIONS,
     CAPTION_TEMPLATE_VERSION,
     DEFAULT_CAPTION_LOCATION,
     MOTION_TEMPLATE_VERSION,
@@ -1731,11 +1732,13 @@ async def design_motion_overlays(
             ffmpeg_path,
         )
         text_overlays = [
-            item.model_copy(
-                update={"span": aligned_caption_spans[item.element_id]},
+            (
+                item.model_copy(
+                    update={"span": aligned_caption_spans[item.element_id]},
+                )
+                if item.element_id in aligned_caption_spans
+                else item
             )
-            if item.element_id in aligned_caption_spans
-            else item
             for item in text_overlays
         ]
     motion_clips = sorted(
@@ -1919,7 +1922,12 @@ async def design_motion_overlays(
         return {**entry, "status": "designed", "concept": concept}
 
     def uniform_text_style(overlay: TimelineElement) -> dict[str, Any]:
-        """Use the same borderless typography for all ordinary subtitles."""
+        """Use the same borderless typography for all ordinary subtitles.
+
+        When the Element has no explicit ``location``, the default position
+        is determined by ``caption_role`` (falling back to
+        ``DEFAULT_CAPTION_LOCATION`` for legacy or decoration overlays).
+        """
         creation = overlay.creation
         assert isinstance(creation, OverlayCreation)
         entry: dict[str, Any] = {
@@ -1931,13 +1939,17 @@ async def design_motion_overlays(
         forced = requested is not None and overlay.element_id in requested
         if not forced and _is_trusted_caption_motion(creation.motion):
             return {**entry, "status": "already_styled"}
-        location = overlay.location or ElementLocation(
-            **DEFAULT_CAPTION_LOCATION,
+        role_default = (
+            CAPTION_ROLE_LOCATIONS.get(creation.caption_role or "")
+            if creation.caption_role
+            else None
         )
+        default_loc = role_default or DEFAULT_CAPTION_LOCATION
+        location = overlay.location or ElementLocation(**default_loc)
         try:
             _validate_caption_location(location, creation.text, canvas_size)
         except ValidationError:
-            location = ElementLocation(**DEFAULT_CAPTION_LOCATION)
+            location = ElementLocation(**default_loc)
         concept = "简洁无边框字幕：透明背景、清晰字体、稳定排版"
         motion = MotionGraphic(
             format="html_css",
@@ -2256,7 +2268,11 @@ async def design_motion_overlays(
                     update={"html": normalized, "html_file_id": None},
                 )
                 styled[overlay.element_id] = (motion, location)
-                return {**entry, "status": "styled", "concept": "保留设计并修复转义"}
+                return {
+                    **entry,
+                    "status": "styled",
+                    "concept": "保留设计并修复转义",
+                }
             if requests_informal_launch_preset(creation):
                 motion, location = render_informal_launch_caption(
                     overlay,
@@ -2279,7 +2295,9 @@ async def design_motion_overlays(
                     )
                     if artifact is not None:
                         if artifact.stale:
-                            raise ValidationError("非正式发布会字幕不能基于已过期的视频设计")
+                            raise ValidationError(
+                                "非正式发布会字幕不能基于已过期的视频设计",
+                            )
                         source = verified_indexed_path(
                             project_root,
                             project.assets.files_by_id[artifact.file_id],
@@ -2292,7 +2310,9 @@ async def design_motion_overlays(
                             executions=executions,
                         )
                     if source is None:
-                        raise ValidationError("非正式发布会字幕缺少实片字节，无法设计主体避让")
+                        raise ValidationError(
+                            "非正式发布会字幕缺少实片字节，无法设计主体避让",
+                        )
                     for fraction in (0.12, 0.38, 0.62, 0.88):
                         frame = await asyncio.to_thread(
                             materialize_keyframe,
@@ -2359,7 +2379,9 @@ async def design_motion_overlays(
                         },
                     )
                 if isinstance(design, str):
-                    raise ValidationError("非正式发布会字幕设计未完成：" + design)
+                    raise ValidationError(
+                        "非正式发布会字幕设计未完成：" + design,
+                    )
                 motion, location, _concept = design
             styled[overlay.element_id] = (motion, location)
             return {
@@ -2596,7 +2618,9 @@ async def design_motion_overlays(
                 != timeline.ticks_per_second
                 or _design_canvas_size(current.project) != canvas_size
             ):
-                raise ValidationError("字幕设计期间模板或画布已变化，请基于最新设置重新设计")
+                raise ValidationError(
+                    "字幕设计期间模板或画布已变化，请基于最新设置重新设计",
+                )
             # Model calls can outlive an editor change. Only merge designs
             # whose caption and observed footage still match their inputs;
             # unrelated edits (for example a project rename) remain valid.
@@ -2610,7 +2634,9 @@ async def design_motion_overlays(
                     getattr(latest, field) != getattr(original, field)
                     for field in ("creation", "span", "location", "enabled")
                 ):
-                    raise ValidationError("字幕设计期间字幕已被修改，保留最新修改并重新设计")
+                    raise ValidationError(
+                        "字幕设计期间字幕已被修改，保留最新修改并重新设计",
+                    )
                 if overlay_id in caption_frame_windows:
                     try:
                         windows = informal_launch_frame_windows(
@@ -2658,7 +2684,9 @@ async def design_motion_overlays(
                 or source_slot.selected_version_id
                 != caption_timing["sourceVersionId"]
             ):
-                raise ValidationError("字幕设计期间实片版本已变化，请基于新版本重新设计")
+                raise ValidationError(
+                    "字幕设计期间实片版本已变化，请基于新版本重新设计",
+                )
         for item in designed:
             if item.element_id in elements:
                 continue

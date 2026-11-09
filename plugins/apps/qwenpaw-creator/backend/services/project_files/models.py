@@ -31,7 +31,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_PROJECT_SCHEMA_VERSION = 9
+CURRENT_PROJECT_SCHEMA_VERSION = 10
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 
@@ -119,6 +119,9 @@ class ProjectSettings(StrictModel):
     language: str = "zh-CN"
     target_duration_seconds: float | None = Field(default=None, ge=0)
     content_type: str | None = None
+    # Captions are opt-in end to end: a Project without an explicit choice
+    # never grows subtitle Overlays on its own.
+    subtitle_policy: Literal["auto", "on", "off"] = "off"
     execution_preauthorization: ExecutionPreauthorization | None = None
 
 
@@ -1016,6 +1019,19 @@ class OverlayCreation(StrictModel):
     type: Literal["overlay"] = "overlay"
     text: str = ""
     vibe: str = "chill"
+    caption_role: (
+        Literal[
+            "dialogue",
+            "narration",
+            "opening_title",
+            "opening_credit",
+            "ending_credit",
+            "location",
+            "chapter",
+            "interview_summary",
+        ]
+        | None
+    ) = None
     prompt: str = ""
     reference_version_ids: list[EntityId] = Field(default_factory=list)
     motion: MotionGraphic | None = None
@@ -1370,7 +1386,7 @@ def narrative_timeline_ids(project: "Project") -> tuple[str, ...]:
 
 
 class Project(StrictModel):
-    schema_version: Literal[9] = CURRENT_PROJECT_SCHEMA_VERSION
+    schema_version: Literal[10] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
     generation: int = Field(default=0, ge=0)
     created_at: UtcDateTime

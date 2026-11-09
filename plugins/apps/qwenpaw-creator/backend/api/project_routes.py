@@ -42,6 +42,7 @@ from models.config import (
     EXECUTION_AUTHORIZATION_REQUIRED,
     get_execution_authorization_mode,
 )
+from schemas.common import StrictModel
 from schemas.projects import (
     ExecutionPreauthorizationPolicy,
     ProjectCreateRequest,
@@ -52,11 +53,13 @@ from services.file_agent_runtime import (
     interrupt_creator_agent_runtime,
     notify_creator_agent_runtime,
 )
-from services.project_files.facade import CreatorFileServices
 from services.project_files import archive as project_archive
 from services.project_files.archive import (
     extract_archive as _extract_archive_sanitized,
 )
+from services.project_files.edit_impact import apply_frontend_edit_impacts
+from services.project_files.facade import CreatorFileServices
+from services.project_files.json_pointer import escape_pointer_token
 from services.project_files.assets import AssetFileStore
 from services.project_files.models import (
     ExecutionPreauthorization,
@@ -175,6 +178,7 @@ def _settings(request: ProjectCreateRequest) -> ProjectSettings:
         aspect_ratio=request.aspect_ratio,
         resolution=request.resolution,
         content_type=request.content_type,
+        subtitle_policy=request.subtitle_policy or "off",
         execution_preauthorization=preauthorization,
     )
 
@@ -558,6 +562,93 @@ async def set_production_stage(
     )
     notify_creator_agent_runtime(project_id)
     return {"ok": True, "generation": result.snapshot.generation}
+
+
+class SubtitleToggleRequest(StrictModel):
+    enabled: bool
+
+
+@router.patch("/{project_id}/subtitles/toggle")
+async def toggle_subtitles(
+    project_id: str,
+    request: SubtitleToggleRequest,
+    services: CreatorFileServices = Depends(project_file_services),
+):
+    """Batch enable or disable all subtitle overlay elements."""
+
+    def operation() -> dict[str, Any]:
+        snapshot = services.projects.read(project_id)
+        base = snapshot.project.model_dump(mode="json")
+        candidate = snapshot.project.model_dump(mode="json")
+        updated_count = 0
+        changed: list[str] = []
+        captions: list[str] = []
+        timelines = candidate.get("timelines", {}).get("items", {})
+        for timeline_id, timeline in timelines.items():
+            # Rolled-back copies are frozen; the work graph never reads them.
+            if str(timeline_id).startswith("snapshot:"):
+                continue
+            elements = timeline.get("elements_by_id", {})
+            for element_id, element in elements.items():
+                creation = element.get("creation", {})
+                if not (
+                    creation.get("type") == "overlay"
+                    and isinstance(creation.get("text"), str)
+                    and creation["text"].strip()
+                ):
+                    continue
+                pointer = (
+                    "/timelines/items/"
+                    f"{escape_pointer_token(str(timeline_id))}"
+                    "/elements_by_id/"
+                    f"{escape_pointer_token(str(element_id))}/enabled"
+                )
+                captions.append(pointer)
+                if bool(element.get("enabled", True)) == request.enabled:
+                    continue
+                element["enabled"] = request.enabled
+                updated_count += 1
+                changed.append(pointer)
+        # The final cut bakes captions in, so a toggle has to flag the render
+        # stale; committing on its own keeps the previously composed video.
+        # Repeating a toggle that changes nothing still refreshes the cut,
+        # which recovers videos composed before their captions were hidden.
+        if changed:
+            candidate, _ = apply_frontend_edit_impacts(
+                candidate,
+                changed,
+                base=base,
+            )
+        elif captions:
+            candidate, _ = apply_frontend_edit_impacts(candidate, captions)
+        return {
+            "candidate": candidate,
+            "snapshot": snapshot,
+            "count": updated_count,
+        }
+
+    try:
+        data = await asyncio.to_thread(operation)
+    except ProjectNotFound as exc:
+        raise NotFoundError(str(exc)) from exc
+    except InvalidProjectId as exc:
+        raise BadRequestError(str(exc)) from exc
+    except (ProjectIntegrityError, ProjectStoreError) as exc:
+        raise StorageIntegrityError(str(exc)) from exc
+
+    result = await services.commit_candidate(
+        base=data["snapshot"],
+        candidate=data["candidate"],
+        origin="frontend_edit",
+        review_policy="auto_fix",
+    )
+    notify_creator_agent_runtime(project_id)
+    return {
+        "ok": True,
+        "generation": result.snapshot.generation,
+        "toggled": data["count"],
+        "enabled": request.enabled,
+    }
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

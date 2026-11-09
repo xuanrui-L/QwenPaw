@@ -92,8 +92,8 @@ timelines.items[timelineId].elements_by_id[elementId]
 - `gaming`：优先关键击杀/得分/反杀、逆转、成就、情绪爆发和搞笑失误；回避菜单、加载、等待大厅和长时间无操作。
 - `travel_vlog`：优先地标初现、美食、人文互动、日出日落和意外趣事；回避冗长交通、等待空镜和不可用画面。
 - `sports`：优先得分、技术动作、情绪高点、险失反应和赛况转折；回避暂停和长时间待命。
-- `short_drama`：优先情绪高点、冲突转折、关键对白、表情特写和剧情反转；回避冗长铺垫、无事件空镜和重复情绪。人物说话的字幕（对话、旁白）必须贴在画面最底部，使用 `x=0.50, y=0.88, width=0.80, height=0.18, anchor_x=0.5, anchor_y=0.5`，横向居中。
-- `interview`：以完整话语边界选择，优先核心观点、金句、关键事实和必要背景；全部 Edit Element 总时长为 60 至 120 秒。每个 Edit Element 对应一个要点摘要台词卡 Overlay Element（概括文字写入 `text`），文字不超过 30 个汉字。interview 场景的无文字装饰动效默认放在画面最顶部。
+- `short_drama`：优先情绪高点、冲突转折、关键对白、表情特写和剧情反转；回避冗长铺垫、无事件空镜和重复情绪。每个需要展示对话/旁白文字的区间应创建独立的 `creation.type=overlay` 台词卡 Element：对白使用 `caption_role="dialogue"`，画外旁白使用 `caption_role="narration"`；系统根据角色自动选择底部位置和样式，无需手动指定 location（除非画面主体遮挡需要调整）。
+- `interview`：以完整话语边界选择，优先核心观点、金句、关键事实和必要背景；全部 Edit Element 总时长为 60 至 120 秒。每个 Edit Element 对应一个要点摘要台词卡 Overlay Element（概括文字写入 `text`，`caption_role="interview_summary"`），文字不超过 30 个汉字。interview 场景的无文字装饰动效默认放在画面最顶部。
 - 其他类型：选择视觉冲击、叙事推进或情绪浓度高的范围，形成有吸引力的开场、清晰推进和收束结尾。
 
 ### 通用选择质量规则
