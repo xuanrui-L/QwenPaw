@@ -42,13 +42,14 @@ except ImportError:  # pragma: no cover - standalone plugin installs
     _HOST_CONTEXT_WINDOW_AVAILABLE = False
 
 try:
-    # The platform scroll already owns the eviction-index odometer: a tiered,
-    # KV-cache-safe map of evicted turns keyed by their durable seq, with the
-    # recall guidance baked into the envelope. Creator's own flat map predated
-    # it; reusing the class keeps the archived map byte-for-byte what the
-    # platform emits and inherits its graceful per-tier endpoint folding. The
-    # module imports nothing but dataclasses, so it is safe to pull in even
-    # though Creator drives its own (byte-gated) compaction loop.
+    # The platform scroll already owns the eviction-index odometer: a tiered
+    # map of evicted turns keyed by their durable seq. Creator's own flat map
+    # predated it; reusing the class lets the archived map share the platform's
+    # folding algorithm, at the cost of Creator's own wording - the host
+    # preamble names stores and recall tools a Creator session lacks, so it is
+    # sliced off and Creator re-emits its own. The module itself imports
+    # nothing but dataclasses, so it is safe to pull in even though Creator
+    # drives its own (byte-gated) compaction loop.
     from qwenpaw.agents.context.scroll.eviction_index import (
         EvictionIndex as _HostEvictionIndex,
         Leaf as _HostEvictionLeaf,
@@ -1027,10 +1028,27 @@ def is_carried_project_view(message: Mapping[str, Any]) -> bool:
 # durable in the session store, addressable by ``messageSeq``. The map below
 # mirrors the platform eviction index: it tells the model *what* was dropped
 # and *which seq* to recall it by, instead of leaving a bare count that no
-# one can act on. Rendering stays local and bounded so the map itself can
-# never re-inflate the budget it was built to relieve.
+# one can act on. The dropped turns are already out of the byte gate by the
+# time the map is built, so it rides on top of the result rather than inside
+# that gate; it is therefore hard-bounded here - a fixed per-block line cap
+# and a character budget - so it can never re-inflate the budget it relieves.
 _ARCHIVED_HEADLINE_CHARS = 120
 _ARCHIVED_INDEX_MAX_LINES = 24
+# The host odometer is folded to this character budget for the model view.
+# It is Creator's own bound, aligned with the per-block line cap, not the
+# one-off character cap the continuation-summary preview borrows elsewhere.
+ARCHIVED_INDEX_CHAR_BUDGET = 3_200
+
+# Creator's own recall guidance, emitted on both the host and fallback paths
+# so the model is never shown the platform's wording about a
+# ``conversation_history`` table and an "advanced Python recall tool" that a
+# Creator session does not have.
+_ARCHIVED_MAP_PREAMBLE = (
+    "[context compressed] the turns below left the live window but remain "
+    "durable by messageSeq; read them back with "
+    'recall_history(op="expand", lo=..., hi=...) or '
+    'op="search". Oldest first.'
+)
 
 
 def _record_headline(item: Mapping[str, Any]) -> str:
@@ -1052,6 +1070,23 @@ def _record_headline(item: Mapping[str, Any]) -> str:
     return collapsed[:_ARCHIVED_HEADLINE_CHARS]
 
 
+def _split_host_map_body(rendered: str) -> str:
+    """Keep the platform odometer body, drop the host recall preamble.
+
+    ``render`` leads with prose naming a ``conversation_history`` table and
+    an "advanced Python recall tool" that do not exist for a Creator session,
+    then the tiered body. Every fold level - expanded, endpoint, or the
+    last-resort global span - opens its body with a ``====`` banner and no
+    preamble line ever does, so slicing at the first banner keeps exactly the
+    map the platform draws while Creator supplies its own preamble.
+    """
+    lines = rendered.splitlines()
+    for offset, line in enumerate(lines):
+        if line.startswith("===="):
+            return "\n".join(lines[offset:])
+    return rendered
+
+
 def _render_archived_index(
     archived: Sequence[Mapping[str, Any]],
 ) -> tuple[str, int | None, int | None]:
@@ -1061,14 +1096,18 @@ def _render_archived_index(
     address, so they are skipped: the map only lists what recall can
     actually fetch back, never a pointer to nothing.
 
-    When the host scroll is importable the platform ``EvictionIndex`` owns
-    the map: one eviction block is dropped on tier 0 and the odometer
-    carries older blocks up, folding them to their endpoint headlines, so
-    the archived view is byte-for-byte what the platform emits and stays
-    KV-cache friendly. A standalone plugin install falls back to Creator's
-    own flat ``seq . headline`` list; either way the returned text already
-    carries the ``[context compressed]`` preamble and the recall guidance,
-    so the caller never wraps it again.
+    When the host scroll is importable the platform ``EvictionIndex`` draws
+    the map. The archived turns are split into blocks of
+    ``_ARCHIVED_INDEX_MAX_LINES`` and dropped one eviction per block, so the
+    odometer actually carries and folds as the archive grows the way the
+    platform intends - feeding a single block would leave one endpoint line
+    naming just the oldest and newest headlines and throw away the per-turn
+    pointers that make the map recallable. ``render`` is folded to a bounded
+    character budget and its host-specific preamble is sliced off in favour
+    of Creator's own recall guidance. A standalone plugin install falls back
+    to Creator's flat ``seq . headline`` list; either way the returned text
+    already carries the ``[context compressed]`` preamble, so the caller never
+    wraps it again.
     """
     addressable = [
         item for item in archived if isinstance(item.get("seq"), int)
@@ -1087,13 +1126,22 @@ def _render_archived_index(
             for item in addressable
         ]
         index = _HostEvictionIndex(session_id="creator")
-        index.add_eviction(leaves, seq_lo=lo, seq_hi=hi)
+        step = max(_ARCHIVED_INDEX_MAX_LINES, 1)
+        for start in range(0, len(leaves), step):
+            block = leaves[start : start + step]
+            block_seqs = [leaf.seq for leaf in block]
+            index.add_eviction(
+                block,
+                seq_lo=min(block_seqs),
+                seq_hi=max(block_seqs),
+            )
+        rendered = index.render(
+            include_envelope=False,
+            include_live_banner=False,
+            detail_char_budget=ARCHIVED_INDEX_CHAR_BUDGET,
+        )
         return (
-            index.render(
-                include_envelope=False,
-                include_live_banner=False,
-                detail_char_budget=ARCHIVED_EVIDENCE_MAX_CHARS,
-            ),
+            f"{_ARCHIVED_MAP_PREAMBLE}\n{_split_host_map_body(rendered)}",
             lo,
             hi,
         )
@@ -1113,10 +1161,7 @@ def _render_archived_index(
             f"{item['seq']} . " f"\u27e6{_record_headline(item)}\u27e7",
         )
     return (
-        "[context compressed] the turns below left the live window but "
-        "remain durable by messageSeq; read them back with "
-        'recall_history(op="expand", lo=..., hi=...) or '
-        'op="search". Oldest first.\n' + "\n".join(lines),
+        f"{_ARCHIVED_MAP_PREAMBLE}\n" + "\n".join(lines),
         lo,
         hi,
     )

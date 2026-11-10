@@ -294,10 +294,12 @@ def test_elided_turns_stay_recallable_by_seq():
     assert "recall_history" in map_text
     lo, hi = elision["recoverableSeqRange"]
     assert lo <= hi
-    # The reused platform EvictionIndex lists each evicted turn as
-    # ``· seq N  ⟦headline⟧``: oldest tier first, oldest turn first within a
-    # tier. Parse those lines (block headers use ``[seq a–b]`` and are
-    # deliberately skipped) to prove the ordering and endpoints survive.
+    # The reused platform EvictionIndex lists evicted turns oldest-first,
+    # either as individual ``· seq N`` lines (small archive) or folded to
+    # per-block ``· seq lo–hi`` spans once the char budget is exceeded.
+    # Parse whatever seq addresses appear and assert they stay ascending,
+    # then assert both endpoints are named somewhere, so the contract holds
+    # at every fold level instead of pinning one exact rendering format.
     marker = "\u00b7 seq "
     listed = [
         int(line.split(marker)[1].split()[0].split("\u2013")[0])
@@ -305,7 +307,7 @@ def test_elided_turns_stay_recallable_by_seq():
         if marker in line
     ]
     assert listed == sorted(listed)
-    assert listed[0] == lo and listed[-1] == hi
+    assert str(lo) in map_text and str(hi) in map_text
 
 
 def test_archived_map_falls_back_to_local_format_without_host_index(
@@ -353,6 +355,54 @@ def test_archived_map_falls_back_to_local_format_without_host_index(
     assert "===== Tier" not in map_text
     lo, hi = elision["recoverableSeqRange"]
     assert (lo, hi) == (10, 15)
+
+
+def test_archived_index_stays_recallable_when_the_map_folds():
+    """A big archive must fold to per-block spans, not collapse to one line.
+
+    Reverse guard for the stateless single-block regression: feeding the
+    whole archive as one eviction block makes the platform drop it to a
+    single endpoint line naming just the oldest and newest headlines the
+    moment the char budget is exceeded - the recall pointers vanish exactly
+    when the archive is largest. Splitting into per-block evictions keeps
+    one span line per block, oldest-first, and Creator's own preamble
+    replaces the host prose about a ``conversation_history`` table and an
+    advanced recall tool a Creator session does not have.
+    """
+    archived = [
+        {
+            "seq": index,
+            "role": "assistant",
+            "source": "run_review_feedback",
+            "content": [{"type": "text", "text": f"review turn {index}"}],
+        }
+        for index in range(1, 201)
+    ]
+
+    map_text, lo, hi = model_context._render_archived_index(archived)
+
+    assert (lo, hi) == (1, 200)
+    assert map_text.startswith("[context compressed]")
+    assert "recall_history" in map_text
+    # Host-specific prose must never leak into a Creator session's context.
+    assert "conversation_history" not in map_text
+    assert "advanced Python recall tool" not in map_text
+    # Folded to one endpoint span per block: more than the single line a
+    # one-block feed collapses to, and still ordered oldest-first.
+    marker = "\u00b7 seq "
+    spans = [line for line in map_text.splitlines() if marker in line]
+    assert len(spans) > 1
+    starts = [
+        int(line.split(marker)[1].split()[0].split("\u2013")[0])
+        for line in spans
+    ]
+    assert starts == sorted(starts)
+    # The map rides on top of the byte gate, so it stays hard-bounded.
+    assert len(map_text) <= (
+        model_context.ARCHIVED_INDEX_CHAR_BUDGET
+        + len(model_context._ARCHIVED_MAP_PREAMBLE)
+        + 512
+    )
 
 
 def test_continuation_summary_rides_on_the_elision_when_supplied():
