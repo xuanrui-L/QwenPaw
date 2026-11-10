@@ -28,6 +28,10 @@ logger = setup_logger("services.media_files.overlay")
 
 PET_OS_VIBES = frozenset(("action", "surprise", "curious", "chill"))
 
+# User-chosen subtitle colours arrive as ``#rrggbb``; anything else keeps
+# the renderer default so a malformed setting can never break a burn-in.
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
 
 @dataclass(frozen=True)
 class OverlayRenderResult:
@@ -204,12 +208,42 @@ def _wrap_subtitle(text: str, draw: Any, font: Any, width: int) -> str:
     return "\n".join(lines)
 
 
+def _subtitle_style_values(
+    style: Mapping[str, Any] | None,
+) -> tuple[str, float, float]:
+    """Clamp a user subtitle-style mapping to ``(color, font, stroke)``.
+
+    Missing or malformed entries fall back to the historical defaults
+    (white text, base size, base outline) so an untouched project renders
+    exactly as before.
+    """
+
+    data = style if isinstance(style, Mapping) else {}
+    color = str(data.get("color") or "").strip()
+    if not _HEX_COLOR.fullmatch(color):
+        color = "#FFFFFF"
+
+    def _scale(raw: object, fallback: float, low: float, high: float) -> float:
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return fallback
+        if not math.isfinite(value):
+            return fallback
+        return min(high, max(low, value))
+
+    font_scale = _scale(data.get("font_scale"), 1.0, 0.6, 1.8)
+    stroke_scale = _scale(data.get("stroke_scale"), 1.0, 0.0, 3.0)
+    return color, font_scale, stroke_scale
+
+
 def _render_plain_subtitle_png(
     text: str,
     video_width: int,
     video_height: int,
     output_path: Path,
     location: Mapping[str, Any] | None = None,
+    style: Mapping[str, Any] | None = None,
 ) -> bool:
     """Render exact subtitle copy over a transparent background."""
     try:
@@ -221,6 +255,7 @@ def _render_plain_subtitle_png(
         location if isinstance(location, Mapping) else DEFAULT_CAPTION_LOCATION
     )
     values = _placement_values(location, video_width, video_height)
+    color, font_scale, stroke_scale = _subtitle_style_values(style)
     box_width, box_height = int(values["box_width"]), int(values["box_height"])
     layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
@@ -228,7 +263,10 @@ def _render_plain_subtitle_png(
     padding = max(3, round(min(box_width, box_height) * 0.06))
     available_width = max(1, box_width - 2 * padding)
     available_height = max(1, box_height - 2 * padding)
-    target_size = max(10, round(min(video_height * 0.04, video_width * 0.045)))
+    target_size = max(
+        10,
+        round(min(video_height * 0.04, video_width * 0.045) * font_scale),
+    )
     for size in range(target_size, 9, -1):
         font = (
             ImageFont.truetype(font_path, size)
@@ -267,7 +305,7 @@ def _render_plain_subtitle_png(
         spacing=spacing,
         align="center",
         fill=(0, 0, 0, 210),
-        stroke_width=max(1, round(size * 0.025)),
+        stroke_width=max(0, round(size * 0.025 * stroke_scale)),
         stroke_fill=(0, 0, 0, 180),
     )
     layer.alpha_composite(
@@ -279,7 +317,7 @@ def _render_plain_subtitle_png(
         font=font,
         spacing=spacing,
         align="center",
-        fill="#FFFFFF",
+        fill=color,
     )
     canvas = Image.new("RGBA", (video_width, video_height), (0, 0, 0, 0))
     _place_layer(canvas, layer, location)
@@ -316,6 +354,7 @@ def _render_interview_summary_png(
     video_height: int,
     output_path: Path,
     location: Mapping[str, Any] | None = None,
+    style: Mapping[str, Any] | None = None,
 ) -> bool:
     return _render_plain_subtitle_png(
         text,
@@ -323,6 +362,7 @@ def _render_interview_summary_png(
         video_height,
         output_path,
         location,
+        style,
     )
 
 
@@ -426,6 +466,7 @@ def render_interview_summary_overlay(
     appear_at: float,
     duration: float,
     location: Mapping[str, Any] | None = None,
+    style: Mapping[str, Any] | None = None,
 ) -> OverlayRenderResult:
     """Render and composite an interview summary over one prepared segment."""
 
@@ -435,6 +476,7 @@ def render_interview_summary_overlay(
         *video_size,
         overlay_path,
         location=location,
+        style=style,
     ):
         return OverlayRenderResult(False, "采访总结 PNG 渲染失败")
     try:

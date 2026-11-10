@@ -50,6 +50,27 @@ class ExecutionPreauthorizationPolicy(StrictModel):
         return value
 
 
+class SubtitleStylePolicy(StrictModel):
+    """Camel-case mirror of ``models.SubtitleStyle`` for the create API."""
+
+    color: str | None = Field(
+        default=None,
+        pattern=r"^#[0-9a-fA-F]{6}$",
+    )
+    font_scale: float | None = Field(
+        default=None,
+        alias="fontScale",
+        ge=0.6,
+        le=1.8,
+    )
+    stroke_scale: float | None = Field(
+        default=None,
+        alias="strokeScale",
+        ge=0.0,
+        le=3.0,
+    )
+
+
 class ProjectCreateRequest(StrictModel):
     production_stage: Literal["script", "media"] | None = Field(
         None,
@@ -66,6 +87,11 @@ class ProjectCreateRequest(StrictModel):
     subtitle_policy: Literal["auto", "on", "off"] | None = Field(
         None,
         alias="subtitlePolicy",
+    )
+    subtitle_template: str | None = Field(None, alias="subtitleTemplate")
+    subtitle_style: SubtitleStylePolicy | None = Field(
+        None,
+        alias="subtitleStyle",
     )
     execution_preauthorization: ExecutionPreauthorizationPolicy | None = Field(
         None,

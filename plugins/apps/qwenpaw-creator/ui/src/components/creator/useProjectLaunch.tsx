@@ -6,6 +6,7 @@ import type {
   CreatorContentPart,
   CreatorScenario,
   ModelConfigData,
+  SubtitleStyle,
 } from "@/contracts/creator";
 import {
   createAssetImport,
@@ -447,6 +448,15 @@ export function useProjectLaunch(options?: {
   const [subtitlePolicy, setSubtitlePolicy] = useState<"auto" | "on" | "off">(
     "off",
   );
+  // JianYing-like subtitle style pack; null keeps the AI on smart recommend.
+  const [subtitleTemplate, setSubtitleTemplate] = useState<string | null>(
+    null,
+  );
+  // Standard subtitle-bar overrides (colour / font size / outline); null
+  // keeps every renderer default.
+  const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle | null>(
+    null,
+  );
   const [attachments, setAttachments] = useState<AttachmentDraft[]>(() =>
     (initialValues?.sourceUrls ?? []).map((url) => ({
       kind: "url" as const,
@@ -660,6 +670,8 @@ export function useProjectLaunch(options?: {
         contentType: isVideoEdit ? contentType : null,
         templateId: selectedTemplateId ?? undefined,
         subtitlePolicy,
+        subtitleTemplate: subtitleTemplate ?? undefined,
+        subtitleStyle: subtitleStyle ?? undefined,
         // With no assets, let Project creation persist the first Goal and
         // message atomically.  This avoids an observable IDLE Project between
         // navigation and the follow-up /messages request.
@@ -756,6 +768,10 @@ export function useProjectLaunch(options?: {
     setSelectedTemplateId,
     subtitlePolicy,
     setSubtitlePolicy,
+    subtitleTemplate,
+    setSubtitleTemplate,
+    subtitleStyle,
+    setSubtitleStyle,
     attachments,
     addFiles,
     addUrl,

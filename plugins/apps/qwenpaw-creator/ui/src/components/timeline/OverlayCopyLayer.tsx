@@ -1,5 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 
+import type { SubtitleStyleDocument } from "@/contracts/creator";
+
 /**
  * Copy-overlay rendering layer identical to the final render.
  *
@@ -335,12 +337,25 @@ export function PlainCaption({
   text,
   stageWidth,
   role,
+  style,
 }: {
   text: string;
   stageWidth: number;
   role?: string | null;
+  /** Project subtitle-bar overrides; absent keeps the historical look. */
+  style?: SubtitleStyleDocument | null;
 }) {
   if (stageWidth < 4) return null;
+  const clampScale = (raw: unknown, low: number, high: number) => {
+    const value = typeof raw === "number" && Number.isFinite(raw) ? raw : 1;
+    return Math.min(high, Math.max(low, value));
+  };
+  const fontScale = clampScale(style?.font_scale, 0.6, 1.8);
+  const strokeScale = clampScale(style?.stroke_scale, 0, 3);
+  const fillColor =
+    typeof style?.color === "string" && /^#[0-9a-fA-F]{6}$/.test(style.color)
+      ? style.color
+      : "#ffffff";
   const isTitle = role === "opening_title";
   // Mirror the backend caption_role placement so the hint does not contradict
   // the cut: chapter cards and interview facts pin the top edge, location
@@ -353,7 +368,10 @@ export function PlainCaption({
   // an italic hint here would promise styling the cut never delivers.
   const isNarrow = role === "narration";
   const onTopEdge = isTitle || isTopEdge;
-  const fontSize = Math.round((stageWidth / 1280) * (isTitle ? 48 : 26));
+  const fontSize = Math.max(
+    8,
+    Math.round((stageWidth / 1280) * (isTitle ? 48 : 26) * fontScale),
+  );
   const widthFactor = isTitle ? 0.7 : isNarrow ? 0.65 : 0.8;
   const maxW = Math.round(stageWidth * widthFactor);
   const padding = Math.round(fontSize * 0.35);
@@ -401,9 +419,13 @@ export function PlainCaption({
             textAnchor="middle"
             fontSize={fontSize}
             fontFamily={CJK_FONT_STACK}
-            fill="#ffffff"
+            fill={fillColor}
             stroke="#000000"
-            strokeWidth={Math.max(1, Math.round(fontSize * 0.05))}
+            strokeWidth={
+              strokeScale === 0
+                ? 0
+                : Math.max(1, Math.round(fontSize * 0.05 * strokeScale))
+            }
             style={{ paintOrder: "stroke" }}
           >
             {line}

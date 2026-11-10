@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { message } from "antd";
+import { message, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import {
@@ -142,36 +142,51 @@ function SubtitleLaneHeader({
   }
   // The count is the promise the backend toggle keeps: subtitles only, so
   // the label states how many rows are about to change.
-  const label = `${t(
+  const action = t(
     toggle.enabled ? "plan.subtitleRemove" : "plan.subtitleAdd",
-  )} · ${toggle.count}`;
+  );
+  const label = `${action} · ${toggle.count}`;
   return (
-    <button
-      type="button"
-      data-subtitle-toggle
-      title={label}
-      aria-label={label}
-      aria-pressed={!toggle.enabled}
-      disabled={toggle.busy}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => {
-        event.stopPropagation();
-        toggle.onToggle();
-      }}
-      className={`-ml-0.5 shrink-0 rounded p-0.5 ${
-        toggle.enabled
-          ? "text-[var(--color-accent)]"
-          : "text-[var(--color-text-tertiary)]"
-      } hover:bg-[var(--color-bg-secondary)]`}
+    // A native `title` waits about a second and ignores the app theme, so
+    // the lane hint rides the styled antd bubble and shows on arrival.
+    <Tooltip
+      mouseEnterDelay={0}
+      placement="top"
+      title={
+        <span className="flex flex-col gap-0.5">
+          <span className="font-semibold">{action}</span>
+          <span className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+            {t("plan.subtitleToggleTip", { count: toggle.count })}
+          </span>
+        </span>
+      }
     >
-      {toggle.busy ? (
-        <Loader2 className="h-3 w-3 animate-spin" />
-      ) : toggle.enabled ? (
-        <Captions className="h-3 w-3" />
-      ) : (
-        <CaptionsOff className="h-3 w-3" />
-      )}
-    </button>
+      <button
+        type="button"
+        data-subtitle-toggle
+        aria-label={label}
+        aria-pressed={!toggle.enabled}
+        disabled={toggle.busy}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          toggle.onToggle();
+        }}
+        className={`-ml-0.5 shrink-0 rounded p-0.5 ${
+          toggle.enabled
+            ? "text-[var(--color-accent)]"
+            : "text-[var(--color-text-tertiary)]"
+        } hover:bg-[var(--color-bg-secondary)]`}
+      >
+        {toggle.busy ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : toggle.enabled ? (
+          <Captions className="h-3 w-3" />
+        ) : (
+          <CaptionsOff className="h-3 w-3" />
+        )}
+      </button>
+    </Tooltip>
   );
 }
 

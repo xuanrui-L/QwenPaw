@@ -11,6 +11,7 @@ import type {
   ElementLocationDocument,
   MotionGraphicDocument,
   ProjectDocument,
+  SubtitleStyleDocument,
   TaskView,
   TimelineDocument,
 } from "@/contracts/creator";
@@ -207,11 +208,13 @@ function TextOverlayLayer({
   stageWidth,
   stageHeight,
   contentType,
+  subtitleStyle,
 }: {
   layer: ElementPlayback;
   stageWidth: number;
   stageHeight: number;
   contentType: string | null | undefined;
+  subtitleStyle?: SubtitleStyleDocument | null;
 }) {
   const { element } = layer;
   if (element.creation.type !== "overlay") return null;
@@ -250,6 +253,7 @@ function TextOverlayLayer({
         text={creation.text}
         stageWidth={stageWidth}
         role={creation.caption_role}
+        style={subtitleStyle}
       />
     </div>
   );
@@ -1052,6 +1056,7 @@ export default function TimelineLivePreview({
                 stageWidth={stageWidth}
                 stageHeight={stageHeight}
                 contentType={project.settings.content_type}
+                subtitleStyle={project.settings.subtitle_style}
               />
             );
           }

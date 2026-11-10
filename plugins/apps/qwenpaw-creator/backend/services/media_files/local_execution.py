@@ -1714,6 +1714,7 @@ class FfmpegLocalMediaRunner:
                 appear_at=overlay["appear_at"],
                 duration=overlay["duration"],
                 location=render_location,
+                style=overlay.get("subtitle_style"),
             )
         if not result.success:
             rendered.unlink(missing_ok=True)
@@ -1968,6 +1969,13 @@ class FfmpegLocalMediaRunner:
             "motion": (
                 dict(raw["motion"])
                 if isinstance(raw.get("motion"), Mapping)
+                else None
+            ),
+            # Carry the project's subtitle-bar overrides through
+            # normalisation so the plain-subtitle renderer can apply them.
+            "subtitle_style": (
+                dict(raw["subtitle_style"])
+                if isinstance(raw.get("subtitle_style"), Mapping)
                 else None
             ),
         }
@@ -2771,6 +2779,14 @@ def _edit_overlays(
                 ),
                 "text": overlay.creation.text,
                 "vibe": overlay.creation.vibe,
+                # Per-project subtitle-bar overrides (colour / font size /
+                # outline).  Consumed by the deterministic plain-subtitle
+                # renderer; designed motion documents ignore it.
+                "subtitle_style": (
+                    project.settings.subtitle_style.model_dump(mode="json")
+                    if project.settings.subtitle_style is not None
+                    else None
+                ),
                 "location": (
                     location.model_dump(mode="json")
                     if location is not None

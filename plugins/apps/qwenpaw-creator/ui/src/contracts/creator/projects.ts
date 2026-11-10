@@ -2,6 +2,21 @@ import type { CreatorSessionStatus } from "./sessions";
 
 export type CreatorScenario = "short_drama" | "video_edit" | "general";
 
+/**
+ * User overrides for the standard subtitle bar. Every field is optional:
+ * `null`/absent keeps the renderer default, so an untouched project looks
+ * exactly as before. Applied by the deterministic plain-subtitle renderer
+ * and its live preview; designed 花字 keeps its own per-footage styling.
+ */
+export interface SubtitleStyle {
+  /** Solid text colour as `#rrggbb`; null = default white. */
+  color?: string | null;
+  /** Font-size multiplier (0.6–1.8); null = base size. */
+  fontScale?: number | null;
+  /** Outline-width multiplier (0–3, 0 = no outline); null = base outline. */
+  strokeScale?: number | null;
+}
+
 export interface ProjectCreateRequest {
   productionStage?: "script" | "media";
   clientRequestId: string;
@@ -13,6 +28,10 @@ export interface ProjectCreateRequest {
   contentType?: string | null;
   templateId?: string;
   subtitlePolicy?: "auto" | "on" | "off";
+  /** Optional JianYing-like subtitle style pack id; null = smart recommend. */
+  subtitleTemplate?: string | null;
+  /** Optional overrides for the standard subtitle bar (colour/size/outline). */
+  subtitleStyle?: SubtitleStyle | null;
   /** Optional atomic bootstrap goal persisted in the file Runtime aggregate. */
   initialGoal?: string;
 }
@@ -33,6 +52,8 @@ export interface ProjectCreateHeader {
   aspectRatio: string;
   resolution: string;
   contentType: string | null;
+  subtitleTemplate?: string | null;
+  subtitleStyle?: SubtitleStyle | null;
 }
 
 export interface ProjectSummary {

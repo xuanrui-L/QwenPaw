@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Input, InputNumber, Select, message } from "antd";
+import {
+  Alert,
+  Button,
+  Input,
+  InputNumber,
+  Select,
+  Tooltip,
+  message,
+} from "antd";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import {
@@ -592,42 +600,63 @@ export default function ElementDetail({
                 </span>
               )}
               {isSubtitleOverlay && (
-                <button
-                  type="button"
+                // The label hides itself on narrow panels, so the hover
+                // bubble carries both the action and its consequence --
+                // instantly, and in the app's own tooltip styling.
+                <Tooltip
+                  mouseEnterDelay={0}
+                  placement="top"
                   title={
-                    element.enabled
-                      ? t("elementDetail.disableSubtitle")
-                      : t("elementDetail.enableSubtitle")
+                    <span className="flex flex-col gap-0.5">
+                      <span className="font-semibold">
+                        {element.enabled
+                          ? t("elementDetail.disableSubtitle")
+                          : t("elementDetail.enableSubtitle")}
+                      </span>
+                      <span className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+                        {t("elementDetail.subtitleToggleTip")}
+                      </span>
+                    </span>
                   }
-                  disabled={applying}
-                  onClick={() => {
-                    const next = !element.enabled;
-                    if (onToggleSubtitleEnabled) {
-                      onToggleSubtitleEnabled(element, next);
-                      return;
-                    }
-                    onChange((draft) => {
-                      draft.enabled = next;
-                    });
-                    onApply();
-                  }}
-                  className={`flex h-6 shrink-0 items-center gap-1 rounded-full px-2 text-[10px] font-semibold transition ${
-                    element.enabled
-                      ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]"
-                      : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
-                  }`}
                 >
-                  {element.enabled ? (
-                    <CaptionsOff className="h-3 w-3" />
-                  ) : (
-                    <Captions className="h-3 w-3" />
-                  )}
-                  <span className="@max-[399px]:hidden">
-                    {element.enabled
-                      ? t("elementDetail.disableSubtitle")
-                      : t("elementDetail.enableSubtitle")}
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    aria-label={
+                      element.enabled
+                        ? t("elementDetail.disableSubtitle")
+                        : t("elementDetail.enableSubtitle")
+                    }
+                    aria-pressed={!element.enabled}
+                    disabled={applying}
+                    onClick={() => {
+                      const next = !element.enabled;
+                      if (onToggleSubtitleEnabled) {
+                        onToggleSubtitleEnabled(element, next);
+                        return;
+                      }
+                      onChange((draft) => {
+                        draft.enabled = next;
+                      });
+                      onApply();
+                    }}
+                    className={`flex h-6 shrink-0 items-center gap-1 rounded-full px-2 text-[10px] font-semibold transition ${
+                      element.enabled
+                        ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)] hover:bg-[var(--color-danger-soft)] hover:text-[var(--color-danger)]"
+                        : "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                    }`}
+                  >
+                    {element.enabled ? (
+                      <CaptionsOff className="h-3 w-3" />
+                    ) : (
+                      <Captions className="h-3 w-3" />
+                    )}
+                    <span className="@max-[399px]:hidden">
+                      {element.enabled
+                        ? t("elementDetail.disableSubtitle")
+                        : t("elementDetail.enableSubtitle")}
+                    </span>
+                  </button>
+                </Tooltip>
               )}
               <button
                 type="button"

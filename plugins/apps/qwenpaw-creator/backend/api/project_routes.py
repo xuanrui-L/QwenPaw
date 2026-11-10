@@ -48,6 +48,7 @@ from schemas.projects import (
     ProjectCreateRequest,
     ProjectCreateResponse,
     ProductionStageRequest,
+    SubtitleStylePolicy,
 )
 from services.file_agent_runtime import (
     interrupt_creator_agent_runtime,
@@ -66,6 +67,7 @@ from services.project_files.models import (
     OverlayCreation,
     Project,
     ProjectSettings,
+    SubtitleStyle,
     is_subtitle_overlay,
 )
 from services.project_files.store import (
@@ -181,6 +183,12 @@ def _settings(request: ProjectCreateRequest) -> ProjectSettings:
         resolution=request.resolution,
         content_type=request.content_type,
         subtitle_policy=request.subtitle_policy or "off",
+        subtitle_template=request.subtitle_template,
+        subtitle_style=(
+            SubtitleStyle(**request.subtitle_style.model_dump())
+            if request.subtitle_style is not None
+            else None
+        ),
         execution_preauthorization=preauthorization,
     )
 
@@ -195,6 +203,14 @@ def _header(project: Project) -> dict[str, Any]:
         "aspectRatio": project.settings.aspect_ratio,
         "resolution": project.settings.resolution,
         "contentType": project.settings.content_type,
+        "subtitleTemplate": project.settings.subtitle_template,
+        "subtitleStyle": (
+            SubtitleStylePolicy.model_validate(
+                project.settings.subtitle_style.model_dump(mode="python"),
+            ).model_dump(by_alias=True, mode="json")
+            if project.settings.subtitle_style is not None
+            else None
+        ),
         **(
             {
                 "executionPreauthorization": (
