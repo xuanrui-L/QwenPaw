@@ -85,6 +85,9 @@ from services.media_files.motion_blueprints import (
     subtitle_pack_animation,
     subtitle_pack_typography,
 )
+from services.media_files.motion_design import (
+    caption_animation_for_compose,
+)
 from services.media_files.motion_templates import (
     DEFAULT_CAPTION_LOCATION,
     render_caption_template,
@@ -2689,22 +2692,31 @@ def _caption_fallback_style_kwargs(
 
     A compose-time fallback is still the final cut: when the user picked a
     style pack, a plain white bar under a description that says 综艺花字 would
-    recreate exactly the mismatch the subtitle style route removes.  Nothing
-    picked hands back no kwargs, so the historical document is reproduced
-    byte-for-byte (``render_caption_template`` defaults *are* the legacy look).
+    recreate exactly the mismatch the subtitle style route removes.  The same
+    reasoning covers the entrance triple, so a caption that carries its own
+    ``caption_animation=`` pick keeps it here instead of dropping back to the
+    pack's signature motion — the field report this answers was "the animation
+    setting did nothing", which was really the fallback ignoring the pick.
+    Nothing picked hands back no kwargs, so the historical document is
+    reproduced byte-for-byte (``render_caption_template`` defaults *are* the
+    legacy look).
     """
 
     pack_id = str(overlay.get("subtitle_template") or "") or None
     style = overlay.get("subtitle_style")
     style_map = dict(style) if isinstance(style, Mapping) and style else None
-    if pack_id is None and style_map is None:
+    stamped = overlay.get("caption_animation")
+    stamp_map = (
+        dict(stamped) if isinstance(stamped, Mapping) and stamped else None
+    )
+    if pack_id is None and style_map is None and stamp_map is None:
         return {}
     kwargs: dict[str, Any] = {
         "typography": subtitle_pack_typography(pack_id),
     }
     if style_map is not None:
         kwargs["style"] = style_map
-    animation = subtitle_pack_animation(pack_id)
+    animation = stamp_map or subtitle_pack_animation(pack_id)
     kwargs["entrance"] = str(animation["entrance"])
     kwargs["exit"] = str(animation["exit"])
     kwargs["loop"] = bool(animation["loop"])
@@ -2800,6 +2812,20 @@ def _edit_overlays(
             # Invalidate only this template's old forced-preset renders.
             # Generic subtitle projects retain their existing cache keys.
             template_fields["caption_renderer"] = "authored-v1"
+        # This caption's own motion pick, resolved while the model is still
+        # here: the compose worker only sees this dumped line, and the
+        # last-resort caption template would otherwise replay the pack's
+        # signature instead of what the user chose.  Absent for captions this
+        # pipeline never drew (and for the 发布会 template, which owns its
+        # lettering), so an untouched project keeps the fingerprint it had.
+        caption_animation = (
+            None
+            if template_fields
+            else caption_animation_for_compose(
+                motion,
+                project.settings.subtitle_template,
+            )
+        )
         result.append(
             {
                 **template_fields,
@@ -2830,6 +2856,11 @@ def _edit_overlays(
                 # overlay without a motion document still burns the pack's
                 # typography into the last-resort PNG.
                 "subtitle_template": project.settings.subtitle_template,
+                **(
+                    {"caption_animation": caption_animation}
+                    if caption_animation is not None
+                    else {}
+                ),
                 "location": (
                     location.model_dump(mode="json")
                     if location is not None

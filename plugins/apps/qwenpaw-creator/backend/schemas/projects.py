@@ -69,6 +69,12 @@ class SubtitleStylePolicy(StrictModel):
         ge=0.0,
         le=3.0,
     )
+    background_opacity: float | None = Field(
+        default=None,
+        alias="backgroundOpacity",
+        ge=0.0,
+        le=1.0,
+    )
 
 
 class ProjectCreateRequest(StrictModel):

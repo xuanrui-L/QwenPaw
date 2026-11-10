@@ -521,7 +521,7 @@ def test_project_create_persists_the_subtitle_style_overrides(
     api_runtime_root,
     run_scenario,
 ):
-    """Colour / font-size / outline overrides ride the create request."""
+    """Colour / font-size / outline / plate overrides ride the create."""
 
     async def scenario(client):
         styled = await client.post(
@@ -534,6 +534,7 @@ def test_project_create_persists_the_subtitle_style_overrides(
                     "color": "#FFE066",
                     "fontScale": 1.25,
                     "strokeScale": 0,
+                    "backgroundOpacity": 0.3,
                 },
             ),
         )
@@ -561,12 +562,14 @@ def test_project_create_persists_the_subtitle_style_overrides(
     assert persisted.color == "#FFE066"
     assert persisted.font_scale == 1.25
     assert persisted.stroke_scale == 0.0
+    assert persisted.background_opacity == 0.3
     # The header mirrors the setting in camelCase for the UI contract.
     header = styled.json()["header"]["subtitleStyle"]
     assert header == {
         "color": "#FFE066",
         "fontScale": 1.25,
         "strokeScale": 0.0,
+        "backgroundOpacity": 0.3,
     }
 
 
@@ -823,7 +826,11 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
             f"/projects/{project_id}/subtitles/style",
             json={
                 "subtitleTemplate": "variety_pop",
-                "subtitleStyle": {"color": "#FFE066", "fontScale": 1.2},
+                "subtitleStyle": {
+                    "color": "#FFE066",
+                    "fontScale": 1.2,
+                    "backgroundOpacity": 0.4,
+                },
             },
         )
         after_pick = durable()
@@ -901,12 +908,17 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
     assert settings.subtitle_template == "variety_pop"
     assert settings.subtitle_style is not None
     assert settings.subtitle_style.color == "#FFE066"
+    assert settings.subtitle_style.background_opacity == 0.4
     elements = picked_project.timelines.items["timeline:main"].elements_by_id
 
     # 1) The empty description got exactly the sentence the renderer obeys.
     caption = elements["caption"].creation
     assert caption.prompt.startswith("【字幕风格：综艺花字】综艺花字：")
     assert "用户覆盖样式：文字颜色 #FFE066" in caption.prompt
+    # 综艺花字 draws no background block, so the plate pick is never
+    # promised in wording the pixels cannot keep: it re-inks a block, it
+    # never adds one.
+    assert "底板" not in caption.prompt
     assert "入场 弹入／出场 淡出／循环 开" in caption.prompt
     assert caption.motion.motif == "caption_card"
     html = document_html(picked_project, caption.motion)

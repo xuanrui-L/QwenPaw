@@ -1,8 +1,12 @@
-"""Subtitle-bar style overrides (colour / font size / outline)."""
+# -*- coding: utf-8 -*-
+"""Subtitle-bar style overrides (colour / font size / outline / plate)."""
 
 import pytest
 
-from services.media_files.overlay import _subtitle_style_values
+from services.media_files.overlay import (
+    _subtitle_pack_painter,
+    _subtitle_style_values,
+)
 from services.project_files.models import ProjectSettings, SubtitleStyle
 
 
@@ -52,6 +56,7 @@ class TestSubtitleStyleValues:
 class TestSubtitleStyleModel:
     def test_settings_default_to_no_override(self) -> None:
         assert ProjectSettings().subtitle_style is None
+        assert SubtitleStyle().background_opacity is None
 
     def test_style_round_trips_through_the_settings_document(self) -> None:
         settings = ProjectSettings(
@@ -75,8 +80,52 @@ class TestSubtitleStyleModel:
             {"color": "red"},
             {"font_scale": 4.0},
             {"stroke_scale": -0.5},
+            {"background_opacity": 1.5},
+            {"background_opacity": -0.2},
         ],
     )
     def test_out_of_range_values_are_rejected(self, payload: dict) -> None:
         with pytest.raises(Exception):
             SubtitleStyle.model_validate(payload)
+
+
+class TestSubtitlePlatePainter:
+    """The last-resort PNG draws the same block the HTML template does.
+
+    Both read one helper for the user's plate pick, so ``0`` means "no block"
+    in the fallback cut as well, and a project that never picked anything gets
+    the pack's own alpha byte for byte.
+    """
+
+    def test_the_pack_alpha_is_what_an_untouched_project_gets(self) -> None:
+        assert _subtitle_pack_painter("warm_note", None)[1] == (
+            255,
+            248,
+            232,
+            128,
+        )
+
+    def test_a_pick_re_inks_the_pack_block(self) -> None:
+        assert _subtitle_pack_painter(
+            "warm_note",
+            {"background_opacity": 0.25},
+        )[1] == (255, 248, 232, 64)
+
+    def test_zero_paints_no_block_at_all(self) -> None:
+        assert (
+            _subtitle_pack_painter("clean_talk", {"background_opacity": 0})[1]
+            is None
+        )
+
+    @pytest.mark.parametrize("alpha", [None, 0.0, 0.5, 1.0])
+    def test_a_pack_without_a_block_stays_without_one(
+        self,
+        alpha: float | None,
+    ) -> None:
+        assert (
+            _subtitle_pack_painter(
+                "cinematic",
+                {"background_opacity": alpha},
+            )[1]
+            is None
+        )

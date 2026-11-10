@@ -31,8 +31,10 @@ from services.media_files.motion_overlay import (
     PreparedMotionLayer,
 )
 from services.media_files.motion_blueprints import (
+    caption_style_state,
     subtitle_pack_animation,
     subtitle_pack_typography,
+    subtitle_style_override_line,
 )
 from services.media_files.motion_templates import (
     CAPTION_TEMPLATE_VERSION,
@@ -46,6 +48,8 @@ from services.project_files.models import (
     EditCreation,
     ElementLocation,
     MotionGraphic,
+    ProjectSettings,
+    SubtitleStyle,
     Timeline,
     TimelineElement,
     TimelineSpan,
@@ -1083,6 +1087,43 @@ class TestCaptionStyleDerivation:
         assert 'data-caption-entrance="soft_fade"' in html
         assert 'data-caption-loop="0"' in html
 
+    def test_compose_triple_is_offered_only_for_owned_documents(self) -> None:
+        # A free-form design owns its look and never reaches the caption
+        # fallback; keeping the field absent also leaves its render fingerprint
+        # exactly as it was.
+        built, _concept = motion_design.build_caption_document(
+            text="这条字幕要带去兜底",
+            location=_LOC,
+            pack_id="clean_talk",
+            style=None,
+            animation={"entrance": "type_on", "exit": "shrink", "loop": False},
+        )
+        assert motion_design.caption_animation_for_compose(
+            built,
+            "clean_talk",
+        ) == {"entrance": "type_on", "exit": "shrink", "loop": False}
+        free = MotionGraphic(html=_HTML, format="html_js")
+        assert motion_design.caption_animation_for_compose(free, None) is None
+        assert motion_design.caption_animation_for_compose(None, None) is None
+
+    def test_compose_triple_re_adopts_after_a_pack_switch(self) -> None:
+        built, _concept = motion_design.build_caption_document(
+            text="换包之后的兜底",
+            location=_LOC,
+            pack_id="variety_pop",
+            style=None,
+            animation={"entrance": "type_on", "exit": "none", "loop": False},
+        )
+        # The stamp was written under the old pack, and the same rule the
+        # document path applies (a pack switch replays the new signature) has
+        # to reach the fallback too, or the two would disagree.
+        assert motion_design.caption_animation_for_compose(
+            built,
+            "cinematic",
+        ) == motion_design.normalise_caption_animation(
+            subtitle_pack_animation("cinematic"),
+        )
+
     def test_pack_tracking_and_leading_enter_the_font_fit(self) -> None:
         text = (
             "这是一行足够长的字幕文案用来验证字距与行高都会挤进字号自适应"
@@ -1114,6 +1155,30 @@ class TestCaptionStyleDerivation:
 
 class TestComposeCaptionFallbackStyle:
     """A compose-time fallback is still the final cut the user picked."""
+
+    def test_a_caption_pick_survives_the_fallback(self) -> None:
+        # The compose worker carries the resolved triple because it only sees
+        # a dumped overlay line; without it the last-resort document would
+        # replay the pack's signature and the picker would look dead.
+        kwargs = local_execution_module._caption_fallback_style_kwargs(
+            {
+                "subtitle_template": "clean_talk",
+                "caption_animation": {
+                    "entrance": "type_on",
+                    "exit": "shrink",
+                    "loop": False,
+                },
+            },
+        )
+        assert (kwargs["entrance"], kwargs["exit"]) == ("type_on", "shrink")
+        html = render_caption_template(
+            "兜底也要演我选的动效",
+            box_width=0.8,
+            box_height=0.18,
+            **kwargs,
+        )
+        assert 'data-caption-entrance="type_on"' in html
+        assert 'data-motion-exit="shrink"' in html
 
     def test_nothing_picked_reproduces_the_historical_document(self) -> None:
         assert local_execution_module._caption_fallback_style_kwargs({}) == {}
@@ -1147,3 +1212,180 @@ class TestComposeCaptionFallbackStyle:
             **kwargs,
         )
         assert "#ffe066" in html
+
+    def test_the_plate_pick_reaches_the_fallback_too(self) -> None:
+        kwargs = local_execution_module._caption_fallback_style_kwargs(
+            {
+                "subtitle_template": "warm_note",
+                "subtitle_style": {"background_opacity": 0.2},
+            },
+        )
+        html = render_caption_template(
+            "兜底也要按我调的底板",
+            box_width=0.8,
+            box_height=0.18,
+            **kwargs,
+        )
+        assert "background:rgba(255,248,232,0.200)" in html
+
+
+class TestCaptionBackgroundOpacity:
+    """One pick re-inks the plate a pack already draws, and never invents one.
+
+    ``background_opacity`` is the only subtitle override that edits a colour
+    the style pack owns, so what matters here is the byte guarantee: a project
+    that never touched it — and a pack that never drew a plate — must render
+    exactly what it rendered before, in the template, the fallback PNG and the
+    wording an agent reads.
+    """
+
+    @staticmethod
+    def _plate(html: str) -> str:
+        match = re.search(r"background:(rgba?\([^)]*\))", html)
+        return match.group(1) if match else ""
+
+    def test_the_pick_replaces_the_pack_alpha(self) -> None:
+        html = render_caption_template(
+            "把奶油底板调淡一点",
+            box_width=0.8,
+            box_height=0.18,
+            typography=subtitle_pack_typography("warm_note"),
+            style={"background_opacity": 0.25},
+        )
+        # Same colour, the picked alpha: the block is re-inked, not replaced.
+        assert self._plate(html) == "rgba(255,248,232,0.250)"
+
+    def test_zero_takes_the_plate_away(self) -> None:
+        html = render_caption_template(
+            "不要底板",
+            box_width=0.8,
+            box_height=0.18,
+            typography=subtitle_pack_typography("clean_talk"),
+            style={"background_opacity": 0.0},
+        )
+        assert self._plate(html) == ""
+        # The pill layout goes with it, so the text keeps filling its box.
+        assert "width:100%;" in html
+
+    def test_an_untouched_pick_keeps_the_pack_bytes(self) -> None:
+        pack = subtitle_pack_typography("warm_note")
+        historical = render_caption_template(
+            "升级前后一字不差",
+            box_width=0.8,
+            box_height=0.18,
+            typography=pack,
+        )
+        explicit_none = render_caption_template(
+            "升级前后一字不差",
+            box_width=0.8,
+            box_height=0.18,
+            typography=pack,
+            style={"background_opacity": None},
+        )
+        assert explicit_none == historical
+        assert self._plate(historical) == "rgba(255,248,232,0.5)"
+
+    def test_a_pack_without_a_plate_stays_without_one(self) -> None:
+        for alpha in (0.0, 0.5, 1.0):
+            html = render_caption_template(
+                "无底板风格不造底板",
+                box_width=0.8,
+                box_height=0.18,
+                typography=subtitle_pack_typography("cinematic"),
+                style={"background_opacity": alpha},
+            )
+            assert self._plate(html) == ""
+
+    def test_a_broken_value_falls_back_to_the_pack(self) -> None:
+        html = render_caption_template(
+            "非法值不猜",
+            box_width=0.8,
+            box_height=0.18,
+            typography=subtitle_pack_typography("clean_talk"),
+            style={"background_opacity": "lots"},
+        )
+        assert self._plate(html) == "rgba(14,16,20,0.42)"
+
+    def test_the_stamp_gains_a_token_only_when_touched(self) -> None:
+        # Four tokens is what every existing document already carries; adding
+        # the fifth only on a pick is what keeps an upgrade from redrawing the
+        # whole project.
+        assert (
+            caption_style_state("warm_note", {"color": "#FFE066"})
+            == "warm_note|#ffe066|1|1"
+        )
+        assert (
+            caption_style_state(
+                "warm_note",
+                {"color": "#FFE066", "background_opacity": 0.5},
+            )
+            == "warm_note|#ffe066|1|1|0.5"
+        )
+
+    def test_a_plate_pick_makes_the_document_stale(self) -> None:
+        built, _concept = motion_design.build_caption_document(
+            text="调过底板的重绘一次",
+            location=_LOC,
+            pack_id="warm_note",
+            style=SubtitleStyle(background_opacity=0.25).model_dump(
+                mode="json",
+            ),
+            animation=None,
+        )
+        project = SimpleNamespace(
+            settings=ProjectSettings(
+                subtitle_template="warm_note",
+                subtitle_style=SubtitleStyle(background_opacity=0.25),
+            ),
+        )
+        assert motion_design.caption_document_is_stale(built, project) is False
+        lighter = SimpleNamespace(
+            settings=ProjectSettings(
+                subtitle_template="warm_note",
+                subtitle_style=SubtitleStyle(background_opacity=0.75),
+            ),
+        )
+        assert (
+            motion_design.caption_document_is_stale(built, lighter) is True
+        )
+        # And a project that never touched the control still matches the
+        # four-token stamp every older document carries.
+        untouched = SimpleNamespace(
+            settings=ProjectSettings(subtitle_template="warm_note"),
+        )
+        plain, _plain_concept = motion_design.build_caption_document(
+            text="没调过底板",
+            location=_LOC,
+            pack_id="warm_note",
+            style=None,
+            animation=None,
+        )
+        assert (
+            motion_design.caption_document_is_stale(plain, untouched) is False
+        )
+
+    def test_the_wording_is_spoken_only_where_a_plate_is_drawn(self) -> None:
+        assert (
+            subtitle_style_override_line(
+                SubtitleStyle(background_opacity=0.5).model_dump(mode="json"),
+                "clean_talk",
+            )
+            == "字幕底板不透明度 50%"
+        )
+        assert (
+            subtitle_style_override_line(
+                SubtitleStyle(background_opacity=0.0).model_dump(mode="json"),
+                "clean_talk",
+            )
+            == "不加字幕底板"
+        )
+        for pack_id in ("cinematic", None):
+            assert (
+                subtitle_style_override_line(
+                    SubtitleStyle(
+                        background_opacity=0.5,
+                    ).model_dump(mode="json"),
+                    pack_id,
+                )
+                == ""
+            )

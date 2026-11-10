@@ -1452,8 +1452,11 @@ def subtitle_pack_style_line(pack_id: str | None) -> str | None:
     return str(pack["style_line"])
 
 
-def subtitle_style_override_line(style: Mapping[str, object] | None) -> str:
-    """Describe the user's colour / size / outline overrides in one clause.
+def subtitle_style_override_line(
+    style: Mapping[str, object] | None,
+    pack_id: str | None = None,
+) -> str:
+    """Describe the user's colour / size / outline / plate picks in one clause.
 
     Shared by the agent prompt, the design task text and the element's
     动效描述 so a subtitle never reads a wording that contradicts what the
@@ -1480,6 +1483,23 @@ def subtitle_style_override_line(style: Mapping[str, object] | None) -> str:
             if number > 0
             else f"{label} 0（关闭）",
         )
+    background = style.get("background_opacity")
+    try:
+        alpha = float(background)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        alpha = None
+    if alpha is not None and math.isfinite(alpha) and subtitle_pack_typography(
+        pack_id,
+    ).get("plate"):
+        # A plate only exists where a pack draws one (smart recommend draws
+        # none), so the sentence is spoken for that plate or not at all:
+        # promising a background the template leaves transparent is the drift
+        # this wording exists to avoid.
+        parts.append(
+            "不加字幕底板"
+            if alpha <= 0.0
+            else f"字幕底板不透明度 {alpha * 100:.0f}%",
+        )
     return "；".join(parts)
 
 
@@ -1499,19 +1519,21 @@ def subtitle_pack_prompt_line(
     """
 
     style_line = subtitle_pack_style_line(pack_id) or ""
-    override_line = subtitle_style_override_line(style)
-    parts = [part for part in (
-        style_line,
-        f"用户覆盖样式：{override_line}" if override_line else "",
-        (
-            f"动画：{caption_animation_line(animation)}"
-            # Smart recommend promises nothing about the look, so it must not
-            # dictate the wording either: the animation sentence only belongs
-            # to a description once a pack or an override was actually picked.
-            if animation and (style_line or override_line)
-            else ""
-        ),
-    ) if part]
+    override_line = subtitle_style_override_line(style, pack_id)
+    parts = [
+        part for part in (
+            style_line,
+            f"用户覆盖样式：{override_line}" if override_line else "",
+            (
+                f"动画：{caption_animation_line(animation)}"
+                # Smart recommend promises nothing about the look, so it must not
+                # dictate the wording either: the animation sentence only belongs
+                # to a description once a pack or an override was actually picked.
+                if animation and (style_line or override_line)
+                else ""
+            ),
+        ) if part
+    ]
     return "；".join(parts)
 
 
@@ -1707,14 +1729,18 @@ def caption_style_state(
     colour = str((style or {}).get("color") or "").strip().lower()
     if not re.fullmatch(r"#[0-9a-f]{6}", colour):
         colour = "default"
-    return "|".join(
-        (
-            pack_id or "auto",
-            colour,
-            _caption_scale((style or {}).get("font_scale")),
-            _caption_scale((style or {}).get("stroke_scale")),
-        ),
-    )
+    parts = [
+        pack_id or "auto",
+        colour,
+        _caption_scale((style or {}).get("font_scale")),
+        _caption_scale((style or {}).get("stroke_scale")),
+    ]
+    if (style or {}).get("background_opacity") is not None:
+        # Optional token: a project that never touched the control keeps the
+        # four-part stamp it always wrote, so adding the setting cannot make
+        # every existing caption document look stale on upgrade.
+        parts.append(_caption_scale((style or {}).get("background_opacity")))
+    return "|".join(parts)
 
 
 def caption_animation_state(animation: Mapping[str, object]) -> str:
