@@ -20,6 +20,7 @@ from typing import Any
 
 # pylint: disable=no-name-in-module
 from utils.logger import setup_logger
+from services.media_files.motion_blueprints import subtitle_pack_typography
 from services.media_files.motion_templates import DEFAULT_CAPTION_LOCATION
 
 # pylint: enable=no-name-in-module
@@ -237,6 +238,53 @@ def _subtitle_style_values(
     return color, font_scale, stroke_scale
 
 
+def _css_rgba(value: object) -> tuple[int, int, int, int] | None:
+    """Parse a pack plate colour (``rgba(r,g,b,a)``) into a PIL colour."""
+
+    text = str(value or "").strip()
+    match = re.fullmatch(
+        r"rgba?\((\d+),(\d+),(\d+)(?:,([0-9.]+))?\)",
+        text,
+    )
+    if not match:
+        return None
+    red, green, blue = (min(255, int(part)) for part in match.group(1, 2, 3))
+    alpha = float(match.group(4) or "1")
+    if not 0.0 <= alpha <= 1.0:
+        return None
+    return red, green, blue, round(alpha * 255)
+
+
+def _subtitle_pack_painter(
+    pack_id: str | None,
+) -> tuple[float, tuple[int, int, int, int] | None, float]:
+    """ ``(stroke multiplier, plate colour, plate radius in em)`` for a pack.
+
+    The last-resort PNG cannot offer the pack's font family, weight or
+    letter-spacing (PIL drives one validated CJK face), but the two
+    attributes that change how the bar reads at a glance — outline weight
+    and the plate behind the glyphs — are drawn exactly like the HTML
+    template does, so the fallback never contradicts the chosen style.
+    """
+
+    typography = subtitle_pack_typography(pack_id)
+    try:
+        stroke = float(typography.get("strokeScale", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        stroke = 1.0
+    if not math.isfinite(stroke) or stroke < 0:
+        stroke = 1.0
+    plate = _css_rgba(typography.get("plate"))
+    radius_em = 0.28
+    if plate is not None:
+        raw_radius = str(typography.get("plateRadius") or "0.28em")
+        try:
+            radius_em = max(0.0, float(raw_radius.rstrip("em")))
+        except ValueError:
+            radius_em = 0.28
+    return stroke, plate, radius_em
+
+
 def _render_plain_subtitle_png(
     text: str,
     video_width: int,
@@ -244,6 +292,7 @@ def _render_plain_subtitle_png(
     output_path: Path,
     location: Mapping[str, Any] | None = None,
     style: Mapping[str, Any] | None = None,
+    subtitle_template: str | None = None,
 ) -> bool:
     """Render exact subtitle copy over a transparent background."""
     try:
@@ -256,6 +305,7 @@ def _render_plain_subtitle_png(
     )
     values = _placement_values(location, video_width, video_height)
     color, font_scale, stroke_scale = _subtitle_style_values(style)
+    pack_stroke, plate, plate_radius = _subtitle_pack_painter(subtitle_template)
     box_width, box_height = int(values["box_width"]), int(values["box_height"])
     layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
@@ -297,6 +347,22 @@ def _render_plain_subtitle_png(
         (box_width - width) / 2 - bounds[0],
         (box_height - height) / 2 - bounds[1],
     )
+    if plate is not None:
+        # A pack with a plate (简洁讲解 / 治愈手写 / 霓虹音乐) paints the
+        # pill behind the glyphs, hugging them the same way the template's
+        # ``padding:.28em .6em`` does.
+        pad_x = round(size * 0.6)
+        pad_y = round(size * 0.28)
+        draw.rounded_rectangle(
+            (
+                max(0, position[0] - pad_x),
+                max(0, position[1] - pad_y),
+                min(box_width, position[0] + width + pad_x),
+                min(box_height, position[1] + height + pad_y),
+            ),
+            radius=min(pad_x, pad_y, round(size * plate_radius)),
+            fill=plate,
+        )
     shadow = Image.new("RGBA", layer.size, (0, 0, 0, 0))
     ImageDraw.Draw(shadow).multiline_text(
         (position[0], position[1] + max(1, round(size * 0.025))),
@@ -305,7 +371,10 @@ def _render_plain_subtitle_png(
         spacing=spacing,
         align="center",
         fill=(0, 0, 0, 210),
-        stroke_width=max(0, round(size * 0.025 * stroke_scale)),
+        stroke_width=max(
+            0,
+            round(size * 0.025 * stroke_scale * pack_stroke),
+        ),
         stroke_fill=(0, 0, 0, 180),
     )
     layer.alpha_composite(
@@ -355,6 +424,7 @@ def _render_interview_summary_png(
     output_path: Path,
     location: Mapping[str, Any] | None = None,
     style: Mapping[str, Any] | None = None,
+    subtitle_template: str | None = None,
 ) -> bool:
     return _render_plain_subtitle_png(
         text,
@@ -363,6 +433,7 @@ def _render_interview_summary_png(
         output_path,
         location,
         style,
+        subtitle_template,
     )
 
 
@@ -467,6 +538,7 @@ def render_interview_summary_overlay(
     duration: float,
     location: Mapping[str, Any] | None = None,
     style: Mapping[str, Any] | None = None,
+    subtitle_template: str | None = None,
 ) -> OverlayRenderResult:
     """Render and composite an interview summary over one prepared segment."""
 
@@ -477,6 +549,7 @@ def render_interview_summary_overlay(
         overlay_path,
         location=location,
         style=style,
+        subtitle_template=subtitle_template,
     ):
         return OverlayRenderResult(False, "采访总结 PNG 渲染失败")
     try:

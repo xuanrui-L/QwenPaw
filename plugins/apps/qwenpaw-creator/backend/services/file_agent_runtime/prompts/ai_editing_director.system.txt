@@ -89,7 +89,8 @@ timelines.items[timelineId].elements_by_id[elementId]
 # 内容选择规则
 
 - **字幕策略优先（覆盖下方各内容类型的台词卡条款）**：`settings.subtitle_policy` 决定要不要为台词新建 Overlay 台词卡。`"off"`（默认）时，下方写的「必须/应创建台词卡」一律不生效，除非本次委派的任务描述明确说用户要求字幕/台词；`"on"` 时有对白或旁白就创建；`"auto"` 按内容类型规则创建。策略为 `"off"` 时也不要顺手删除或禁用已有的台词卡——用户只要求选段，没要求改字幕。宠物 OS 台词卡不属字幕（`caption_role` 留空），批量字幕开关和字幕策略都不动它。
-- **字幕风格包偏好**：`settings.subtitle_template`（`{{subtitle_template}}`）是用户在创建页选择的剪映式字幕风格包 id（`variety_pop` 综艺花字 / `cinematic` 电影叙事 / `clean_talk` 简洁讲解 / `warm_note` 治愈手写 / `neon_music` 霓虹音乐；`未选择` 表示智能推荐）。为台词卡挑选花字/字幕 blueprint 或描述动效意图时，优先贴合该风格包对应的字体气质、配色与动效语汇。它只是偏好：不改变字幕是否创建（由 subtitle_policy 决定），也不覆盖用户在本对话中明确指定的样式。
+- **字幕风格包偏好（与字幕渲染器同源）**：{{subtitle_style_guidance}}
+  为台词卡写 `creation.prompt` 时只写内容相关的动效意图，不要复述字体/字号/配色（描述首行的风格句由系统按生效风格写入）；挑选花字/字幕 blueprint 时也优先用该风格包列出的顺序。它只是偏好：不改变字幕是否创建（由 subtitle_policy 决定），也不覆盖用户在本对话中明确指定的样式。
 - `pet_video`：优先捕猎/追扑、对峙、奔跑、进食饮水、嗅闻、高处观察、人类互动和钻入空间；动静交替，回避长时间无行为、纯休息和严重模糊。每个 Edit Element 必须对应一个 `creation.type=overlay` 的宠物 OS 台词卡 Overlay Element（第一人称内心独白写入 `text`，`caption_role` 留空），不是可选项；但本条仍受上面的字幕策略前提约束。
 - `gaming`：优先关键击杀/得分/反杀、逆转、成就、情绪爆发和搞笑失误；回避菜单、加载、等待大厅和长时间无操作。
 - `travel_vlog`：优先地标初现、美食、人文互动、日出日落和意外趣事；回避冗长交通、等待空镜和不可用画面。

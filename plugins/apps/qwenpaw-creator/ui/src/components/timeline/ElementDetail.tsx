@@ -26,6 +26,8 @@ import {
 import type {
   ProjectDocument,
   R2VReferenceOrderResponse,
+  SubtitleAnimationPolicy,
+  SubtitleStyleUpdateRequest,
   TaskView,
   TimelineDocument,
   TimelineElementDocument,
@@ -49,6 +51,10 @@ import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { storyboardOfOwner } from "@/components/workbench/referenceThumbs";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
 import PreviewImage from "@/components/assets/PreviewImage";
+import SubtitleStyleSection, {
+  captionDocumentOwnedByStyle,
+  subtitleAnimationFromDocument,
+} from "@/components/creator/SubtitleStyleSection";
 
 interface ElementDetailProps {
   project: ProjectDocument;
@@ -68,6 +74,13 @@ interface ElementDetailProps {
     element: TimelineElementDocument,
     enabled: boolean,
   ) => void;
+  /**
+   * Switch the subtitle style for this caption right away (bypasses the
+   * draft): the backend keeps the setting, the caption documents and the
+   * 动效描述 in step, which a local draft could only contradict.
+   */
+  onApplySubtitleStyle?: (request: SubtitleStyleUpdateRequest) => void;
+  subtitleStyleBusy?: boolean;
   onDiscard: () => void;
   onAcceptConflicts: () => void;
   onOpenWorkbench: (element: TimelineElementDocument) => void;
@@ -348,6 +361,8 @@ export default function ElementDetail({
   onChange,
   onApply,
   onToggleSubtitleEnabled,
+  onApplySubtitleStyle,
+  subtitleStyleBusy = false,
   onDiscard,
   onAcceptConflicts,
   onOpenWorkbench,
@@ -1217,6 +1232,28 @@ export default function ElementDetail({
                         })
                       }
                     />
+                    {/* A subtitle's look is a project-wide choice, so the
+                        style bar writes through the style endpoint instead of
+                        the element draft.  Only captions addressed by id get
+                        redrawn; the wording below stays exactly as written.
+                        A caption that already has a document of its own
+                        design keeps that design, so it gets no motion picker. */}
+                    {onApplySubtitleStyle &&
+                      isCaptionSubtitle(creation, project.settings.content_type) && (
+                        <SubtitleStyleSection
+                          settings={project.settings}
+                          elementIds={[element.element_id]}
+                          animation={subtitleAnimationFromDocument(
+                            creation.motion,
+                          )}
+                          motionOwned={
+                            !creation.motion ||
+                            captionDocumentOwnedByStyle(creation.motion)
+                          }
+                          busy={subtitleStyleBusy || applying}
+                          onApply={onApplySubtitleStyle}
+                        />
+                      )}
                   </div>
                 )}
                 {creation.type === "transition" && (

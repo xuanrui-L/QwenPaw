@@ -743,3 +743,368 @@ def test_subtitle_toggle_follows_the_subtitle_definition(
     assert elements["decoration"].enabled is True
     # A switch is not a policy edit.
     assert stored().settings.subtitle_policy == "off"
+
+
+def test_subtitle_style_patch_redraws_prompts_and_documents(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """Picking a style pack must reach settings, 动效描述 and the pixels.
+
+    One call owns the whole triangle: the project setting, the canonical
+    sentence in every subtitle's description (authored wording kept, never
+    overwritten) and the deterministic caption document the renderer draws.
+    A free-form design belongs to the model that made it and stays put.
+    """
+
+    async def scenario(client):
+        from services.media_files.motion_design import build_caption_document
+        from services.project_files.models import ElementLocation
+
+        created = await client.post(
+            "/projects",
+            json=_create_payload(
+                "style-pack",
+                "风格包项目",
+                subtitlePolicy="auto",
+            ),
+        )
+        project_id = created.json()["projectId"]
+        services = creator_file_services(api_runtime_root)
+        snapshot = services.projects.read(project_id)
+        candidate = snapshot.project.model_dump(mode="json")
+        free_form = _overlay_element(
+            "free",
+            text="花字保留自己的设计",
+            caption_role="narration",
+        )
+        free_form["creation"]["motion"] = {
+            "format": "html_css",
+            "html": (
+                '<html><body><div class="card">'
+                + "x" * 64
+                + "</div></body></html>"
+            ),
+            "motif": "custom",
+            "loop": False,
+        }
+        authored = _overlay_element(
+            "authored",
+            text="用户自己写过的字幕",
+            caption_role="dialogue",
+            prompt="手写意图：这里要安静一点",
+        )
+        # The design pass already drew this caption from the template with no
+        # pack selected, which is exactly the document a later pick rewrites.
+        caption = _overlay_element(
+            "caption",
+            text="这条要跟着风格包变",
+            caption_role="dialogue",
+        )
+        drawn, _concept = build_caption_document(
+            text="这条要跟着风格包变",
+            location=ElementLocation(
+                x=0.5,
+                y=0.86,
+                width=0.8,
+                height=0.18,
+                anchor_x=0.5,
+                anchor_y=0.5,
+            ),
+            pack_id=None,
+            style=None,
+            animation=None,
+        )
+        caption["creation"]["motion"] = drawn.model_dump(mode="json")
+        candidate["timelines"]["items"]["timeline:main"]["elements_by_id"] = {
+            "caption": caption,
+            "authored": authored,
+            "free": free_form,
+            "bubble": _overlay_element("bubble", text="本喵不属字幕"),
+        }
+        await services.commit_candidate(
+            base=snapshot,
+            candidate=candidate,
+            origin="frontend_edit",
+            review_policy="auto_fix",
+        )
+
+        def durable() -> str:
+            """The committed ``project.json`` text at this exact step."""
+
+            return (
+                api_runtime_root / project_id / "project.json"
+            ).read_text(encoding="utf-8")
+
+        unknown = await client.patch(
+            f"/projects/{project_id}/subtitles/style",
+            json={"subtitleTemplate": "nope"},
+        )
+        # A style pack is a project-wide promise: addressing it at single
+        # captions would leave the rest describing the previous look.
+        mixed = await client.patch(
+            f"/projects/{project_id}/subtitles/style",
+            json={"subtitleTemplate": "clean_talk", "elementIds": ["caption"]},
+        )
+        picked = await client.patch(
+            f"/projects/{project_id}/subtitles/style",
+            json={
+                "subtitleTemplate": "variety_pop",
+                "subtitleStyle": {"color": "#FFE066", "fontScale": 1.2},
+            },
+        )
+        after_pick = durable()
+        # An animation pick aimed at a caption this pipeline never drew has to
+        # be reported, not quietly swallowed behind a success message.
+        declined = await client.patch(
+            f"/projects/{project_id}/subtitles/style",
+            json={
+                "elementIds": ["free"],
+                "animation": {"entrance": "type_on"},
+            },
+        )
+        after_decline = durable()
+        # Element-scoped animation pick: only the addressed caption moves.
+        moved = await client.patch(
+            f"/projects/{project_id}/subtitles/style",
+            json={
+                "elementIds": ["caption"],
+                "animation": {"entrance": "slide", "loop": False},
+            },
+        )
+        after_move = durable()
+        # Going back to smart recommend clears settings and wording alike.
+        cleared = await client.patch(
+            f"/projects/{project_id}/subtitles/style",
+            json={"subtitleTemplate": None, "subtitleStyle": None},
+        )
+        after_clear = durable()
+        return (
+            project_id,
+            unknown,
+            mixed,
+            picked,
+            declined,
+            moved,
+            cleared,
+            (after_pick, after_decline, after_move, after_clear),
+        )
+
+    (
+        project_id,
+        unknown,
+        mixed,
+        picked,
+        declined,
+        moved,
+        cleared,
+        (after_pick, after_decline, after_move, after_clear),
+    ) = run_scenario(app, scenario)
+    root = api_runtime_root / project_id
+
+    def stored(text: str) -> Project:
+        return Project.model_validate_json(text)
+
+    def document_html(project: Project, motion) -> str:
+        """Read one caption document back the way the renderer does."""
+
+        assert motion is not None
+        indexed = project.assets.files_by_id[motion.html_file_id]
+        return (root / indexed.relative_uri).read_text(encoding="utf-8")
+
+    # An unknown pack is a domain validation error, not a silent fallback.
+    assert unknown.status_code == 422
+    assert "未知的字幕风格包" in unknown.text
+    # A pack cannot be addressed at single captions.
+    assert mixed.status_code == 422
+    assert "elementIds" in mixed.text
+    assert picked.status_code == 200, picked.text
+    assert picked.json()["subtitleTemplate"] == "variety_pop"
+    # The UI echoes this sentence instead of keeping its own copy of it.
+    assert picked.json()["styleLine"].startswith("综艺花字：")
+    assert "文字颜色" in picked.json()["styleLine"]
+    picked_project = stored(after_pick)
+    settings = picked_project.settings
+    assert settings.subtitle_template == "variety_pop"
+    assert settings.subtitle_style is not None
+    assert settings.subtitle_style.color == "#FFE066"
+    elements = picked_project.timelines.items["timeline:main"].elements_by_id
+
+    # 1) The empty description got exactly the sentence the renderer obeys.
+    caption = elements["caption"].creation
+    assert caption.prompt.startswith("【字幕风格：综艺花字】综艺花字：")
+    assert "用户覆盖样式：文字颜色 #FFE066" in caption.prompt
+    assert "入场 弹入／出场 淡出／循环 开" in caption.prompt
+    assert caption.motion.motif == "caption_card"
+    html = document_html(picked_project, caption.motion)
+    # The renderer normalises colours to lower case.
+    assert "#ffe066" in html.lower()
+    assert caption.motion.entrance == "pop"
+    assert 'data-caption-entrance="pop"' in html
+    assert "caption_animation=pop/soft_fade/1" in caption.motion.design_notes
+    # 2) An authored description keeps its own text under the new clause.
+    authored_prompt = elements["authored"].creation.prompt
+    assert authored_prompt.endswith("手写意图：这里要安静一点")
+    assert authored_prompt.startswith("【字幕风格：综艺花字】")
+    # A caption without a document burns the pack fallback, so the motion the
+    # fallback plays belongs in its description too.
+    assert "入场 弹入／出场 淡出／循环 开" in authored_prompt
+    # 3) A free-form design is never flattened by a project style switch.
+    free_motion = elements["free"].creation.motion
+    assert free_motion is not None and free_motion.motif == "custom"
+    assert "x" * 64 in (free_motion.html or "")
+    # ...and its description is not promised a look its pixels never keep.
+    assert elements["free"].creation.prompt == ""
+    # 4) The pet-OS bubble is not a subtitle.
+    assert elements["bubble"].creation.motion is None
+
+    # 4b) A motion pick aimed at an independently designed caption reports
+    # that nothing moved instead of claiming a silent success.
+    assert declined.status_code == 200, declined.text
+    assert declined.json()["skippedNonTemplate"] == 1
+    assert declined.json()["redrawnDocuments"] == 0
+    declined_elements = stored(after_decline).timelines.items[
+        "timeline:main"
+    ].elements_by_id
+    assert declined_elements["free"].creation.prompt == ""
+    assert "x" * 64 in (declined_elements["free"].creation.motion.html or "")
+
+    # 5) An element-scoped animation choice rewrites just that caption.
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["redrawnDocuments"] == 1
+    assert moved.json()["syncedPrompts"] == 1
+    moved_project = stored(after_move)
+    moved_elements = moved_project.timelines.items[
+        "timeline:main"
+    ].elements_by_id
+    moved_caption = moved_elements["caption"].creation
+    assert "入场 滑入／出场 淡出／循环 关" in moved_caption.prompt
+    assert moved_caption.motion.entrance == "slide"
+    assert 'data-caption-loop="0"' in document_html(
+        moved_project,
+        moved_caption.motion,
+    )
+    # Untouched elements keep the wording the pack switch wrote for them.
+    assert moved_elements["authored"].creation.prompt == authored_prompt
+
+    # 6) Switching back to smart recommend leaves no style wording behind.
+    assert cleared.status_code == 200, cleared.text
+    back = stored(after_clear)
+    assert back.settings.subtitle_template is None
+    assert back.settings.subtitle_style is None
+    back_elements = back.timelines.items["timeline:main"].elements_by_id
+    assert back_elements["caption"].creation.prompt == ""
+    assert back_elements["authored"].creation.prompt == "手写意图：这里要安静一点"
+    back_motion = back_elements["caption"].creation.motion
+    assert back_motion.entrance == "soft_fade"
+    assert "caption_animation=soft_fade/none/0" in back_motion.design_notes
+
+
+def test_subtitle_style_patch_keeps_the_caption_box_legal(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """The style route must not freeze an unusable caption box.
+
+    A document the route bakes carries the same stamp as a designed one, which
+    tells the next design pass this caption is settled.  Without the safe-area
+    gate here, a narrow tall box would be locked into the final cut (CJK copy
+    turns vertical) and nothing would ever repair it.  An unknown pack is also
+    refused on the way in, so a project cannot store a setting every reader
+    interprets as smart recommend.
+    """
+
+    async def scenario(client):
+        created = await client.post(
+            "/projects",
+            json=_create_payload(
+                "narrow-caption",
+                "窄框字幕",
+                subtitlePolicy="auto",
+            ),
+        )
+        project_id = created.json()["projectId"]
+        refused = await client.post(
+            "/projects",
+            json=_create_payload(
+                "unknown-pack",
+                "未知风格包",
+                subtitleTemplate="vaporware",
+            ),
+        )
+        services = creator_file_services(api_runtime_root)
+        snapshot = services.projects.read(project_id)
+        candidate = snapshot.project.model_dump(mode="json")
+        narrow = _overlay_element(
+            "narrow",
+            text="这条字幕的位置框太窄太高",
+            caption_role="dialogue",
+        )
+        narrow["location"] = {
+            "x": 0.9,
+            "y": 0.3,
+            "width": 0.12,
+            "height": 0.4,
+            "anchor_x": 0.5,
+            "anchor_y": 0.5,
+        }
+        candidate["timelines"]["items"]["timeline:main"]["elements_by_id"] = {
+            "narrow": narrow,
+        }
+        await services.commit_candidate(
+            base=snapshot,
+            candidate=candidate,
+            origin="frontend_edit",
+            review_policy="auto_fix",
+        )
+        # A pack alone leaves an undesigned caption to its design pass; the
+        # element-scoped motion pick is what bakes a document right here.
+        await client.patch(
+            f"/projects/{project_id}/subtitles/style",
+            json={"subtitleTemplate": "variety_pop"},
+        )
+        baked = await client.patch(
+            f"/projects/{project_id}/subtitles/style",
+            json={
+                "elementIds": ["narrow"],
+                "animation": {"entrance": "pop"},
+            },
+        )
+        return (
+            project_id,
+            refused,
+            baked,
+            (api_runtime_root / project_id / "project.json").read_text(
+                encoding="utf-8",
+            ),
+        )
+
+    project_id, refused, baked, durable = run_scenario(app, scenario)
+    assert refused.status_code == 422, refused.text
+    assert "未知的字幕风格包" in refused.text
+    assert baked.status_code == 200, baked.text
+    assert baked.json()["redrawnDocuments"] == 1
+
+    element = (
+        Project.model_validate_json(durable)
+        .timelines.items["timeline:main"]
+        .elements_by_id["narrow"]
+    )
+    # The route retreated to the dialogue preset — the box the template was
+    # measured for — and persisted it instead of painting into the illegal one.
+    assert element.location.width == 0.8
+    assert element.location.height == 0.18
+    from services.media_files.motion_templates import (
+        caption_box_out_of_safe_area,
+    )
+
+    # The preset is bottom-anchored, so its edges (not its centre) are what the
+    # safe area judges.
+    assert not caption_box_out_of_safe_area(
+        element.location.model_dump(mode="json"),
+    )
+    assert element.creation.motion is not None
+    assert element.creation.motion.entrance == "pop"
+    assert "caption_style=variety_pop" in element.creation.motion.design_notes

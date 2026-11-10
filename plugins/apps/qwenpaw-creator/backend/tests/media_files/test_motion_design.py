@@ -18,7 +18,7 @@ from services.media_files.local_execution import (
     LocalMediaInput,
 )
 from services.media_files.motion_design import (
-    _design_canvas_size,
+    design_canvas_size,
     _repair_common_html_slips,
     _select_decoration_ids,
     _validated_design,
@@ -30,7 +30,12 @@ from services.media_files.motion_overlay import (
     MotionLayerPrep,
     PreparedMotionLayer,
 )
+from services.media_files.motion_blueprints import (
+    subtitle_pack_animation,
+    subtitle_pack_typography,
+)
 from services.media_files.motion_templates import (
+    CAPTION_TEMPLATE_VERSION,
     MOTION_TEMPLATE_VERSION,
     SUPPORTED_MOTIFS,
     render_caption_template,
@@ -40,6 +45,7 @@ from services.media_files.overlay import OverlayRenderResult
 from services.project_files.models import (
     EditCreation,
     ElementLocation,
+    MotionGraphic,
     Timeline,
     TimelineElement,
     TimelineSpan,
@@ -194,10 +200,10 @@ class TestMotionDesignSafety:
         ],
     }
     # The guard has to sample the canvases the design path can actually hand
-    # it.  ``_design_canvas_size`` only ever uses a 720 or 1080 short side, so
+    # it.  ``design_canvas_size`` only ever uses a 720 or 1080 short side, so
     # a hand-written 4K row tested a geometry that never reaches this code.
     _CAPTION_CANVASES = [
-        _design_canvas_size(
+        design_canvas_size(
             SimpleNamespace(
                 settings=SimpleNamespace(
                     aspect_ratio=ratio,
@@ -694,7 +700,10 @@ async def test_plain_subtitles_need_no_edit_or_design_model(
         "timeline:main"
     ].elements_by_id.values():
         motion = element.creation.motion
-        assert motion.format == "html_css" and motion.template_version == 2
+        assert (
+            motion.format == "html_css"
+            and motion.template_version == CAPTION_TEMPLATE_VERSION
+        )
         assert element.location.y == 0.86
         assert element.location.y + element.location.height / 2 <= 0.96
         indexed = current.assets.files_by_id[motion.html_file_id]
@@ -756,7 +765,83 @@ async def test_plain_subtitle_redesign_preserves_authored_position(tmp_path):
         .elements_by_id["caption"]
     )
     assert element.location == location
-    assert element.creation.motion.template_version == 2
+    assert element.creation.motion.template_version == CAPTION_TEMPLATE_VERSION
+
+
+@pytest.mark.asyncio
+async def test_late_pack_switch_redescribes_authored_captions(
+    tmp_path,
+    monkeypatch,
+):
+    """A pack written behind the style route's back still reaches 动效描述.
+
+    The agent changes settings through the generic patch route, so the design
+    pass is the only writer left that can re-sync a description.  An authored
+    动效描述 has to gain the style sentence while keeping its own wording, and
+    the document has to be redrawn from the very same pack.
+    """
+
+    from unittest.mock import AsyncMock
+    from services.project_files.facade import CreatorFileServices
+    from services.project_files.models import OverlayCreation, Project
+
+    services = CreatorFileServices.create(tmp_path)
+    project = Project.new(project_id="late-pack", name="后切换风格包")
+    project.timelines.items["timeline:main"].elements_by_id["caption"] = (
+        TimelineElement(
+            element_id="caption",
+            span=TimelineSpan(start_tick=0, duration_tick=3000),
+            location=ElementLocation(x=0.5, y=0.86, width=0.8, height=0.18),
+            creation=OverlayCreation(
+                text="这条字幕先有了自己的描述",
+                prompt="镜头推进时轻微抖动",
+            ),
+        )
+    )
+    services.projects.create(project)
+    model = AsyncMock(
+        side_effect=AssertionError("a picked pack is drawn, never generated"),
+    )
+    monkeypatch.setattr(motion_design, "_design_document", model)
+
+    async def design(key: str) -> None:
+        await motion_design.design_motion_overlays(
+            services,
+            project_id=project.project_id,
+            target_ref="timeline:main",
+            arguments={},
+            idempotency_key=key,
+        )
+
+    def caption() -> TimelineElement:
+        return (
+            services.projects.read(project.project_id)
+            .project.timelines.items["timeline:main"]
+            .elements_by_id["caption"]
+        )
+
+    await design("no-pack")
+    # Nothing picked: the authored description stays exactly as written.
+    assert caption().creation.prompt == "镜头推进时轻微抖动"
+
+    # Another writer flips only the setting — what the agent's generic patch
+    # does — and never touches the description.
+    snapshot = services.projects.read(project.project_id)
+    candidate = snapshot.project.model_dump(mode="json")
+    candidate["settings"]["subtitle_template"] = "variety_pop"
+    await services.commit_candidate(
+        base=snapshot,
+        candidate=candidate,
+        origin="frontend_edit",
+        review_policy="auto_fix",
+    )
+    await design("with-pack")
+
+    element = caption()
+    assert element.creation.prompt.startswith("【字幕风格：综艺花字】")
+    assert element.creation.prompt.endswith("镜头推进时轻微抖动")
+    assert "caption_style=variety_pop" in element.creation.motion.design_notes
+    model.assert_not_called()
 
 
 class TestSegmentCache:
@@ -879,3 +964,186 @@ def test_repair_lifts_zero_starting_opacity() -> None:
     assert "opacity: 0.25" in fixed or "opacity:0.25" in fixed
     # Non-zero values stay untouched.
     assert "opacity:0.8" in fixed and "opacity:0.6" in fixed
+
+
+_LOC = ElementLocation(
+    x=0.5,
+    y=0.86,
+    width=0.8,
+    height=0.18,
+    anchor_x=0.5,
+    anchor_y=0.5,
+)
+
+
+def _font_terms(html: str) -> list[float]:
+    """The four ``min()`` terms of the fitted ``.words`` font size."""
+
+    expression = re.search(r"font-size:min\(([^)]+)\)", html).group(1)
+    return [
+        float(re.sub(r"[a-z]+", "", term)) for term in expression.split(",")
+    ]
+
+
+class TestCaptionStyleDerivation:
+    """The style stamp, never a schema default, decides what a caption plays.
+
+    A caption document is derived data: the ``caption_animation=`` stamp is
+    the one record of what was picked, because ``MotionGraphic.entrance``
+    defaults to ``pop`` and would otherwise read as an explicit choice on
+    every document written before the triple existed.
+    """
+
+    @staticmethod
+    def _legacy_document(text: str = "这是一条历史字幕") -> MotionGraphic:
+        """Exactly the document the pipeline wrote before style packs."""
+
+        return MotionGraphic(
+            html=render_caption_template(text, box_width=0.8, box_height=0.18),
+            fps=24,
+            loop=False,
+            design_notes="简洁无边框字幕：透明背景、清晰字体、稳定排版",
+            motif="caption_card",
+            template_version=2,
+            intensity=0,
+        )
+
+    def test_unstamped_document_keeps_the_historical_fade(self) -> None:
+        document = self._legacy_document()
+        # The schema default must not be mistaken for a user pick: a project
+        # that never chose a style may not change appearance on upgrade.
+        assert document.entrance == "pop"
+        assert motion_design.resolve_caption_animation(document, None) == {
+            "entrance": "soft_fade",
+            "exit": "none",
+            "loop": False,
+        }
+
+    def test_unstamped_document_adopts_the_pack_signature(self) -> None:
+        document = self._legacy_document()
+        assert motion_design.resolve_caption_animation(
+            document,
+            "variety_pop",
+        ) == subtitle_pack_animation("variety_pop")
+
+    def test_the_stamp_wins_over_the_document_fields(self) -> None:
+        built, _concept = motion_design.build_caption_document(
+            text="这条字幕选过动效",
+            location=_LOC,
+            pack_id="variety_pop",
+            style=None,
+            animation={"entrance": "slide", "exit": "shrink", "loop": True},
+        )
+        drifted = built.model_copy(
+            update={"entrance": "pop", "exit": "soft_fade"},
+        )
+        assert motion_design.resolve_caption_animation(
+            drifted,
+            "variety_pop",
+        ) == {"entrance": "slide", "exit": "shrink", "loop": True}
+        # The drift itself is what makes the next pass redraw this document.
+        project = SimpleNamespace(
+            settings=SimpleNamespace(
+                subtitle_template="variety_pop",
+                subtitle_style=None,
+            ),
+        )
+        assert motion_design.caption_document_is_stale(built, project) is False
+        assert motion_design.caption_document_is_stale(drifted, project) is True
+
+    def test_a_pack_switch_replays_the_new_signature(self) -> None:
+        built, _concept = motion_design.build_caption_document(
+            text="换风格包",
+            location=_LOC,
+            pack_id="variety_pop",
+            style=None,
+            animation={"entrance": "type_on", "exit": "none", "loop": False},
+        )
+        assert motion_design.resolve_caption_animation(
+            built,
+            "cinematic",
+        ) == subtitle_pack_animation("cinematic")
+
+    def test_no_pack_document_keeps_the_historical_layout(self) -> None:
+        built, concept = motion_design.build_caption_document(
+            text="今天试试这套七个字的无衬线字体，应该没有硬伤了吧？挺好的",
+            location=_LOC,
+            pack_id=None,
+            style=None,
+            animation=None,
+        )
+        html = built.html
+        # Smart recommend promises no look, so the concept stays the old prose.
+        assert "caption_style=" not in concept
+        assert built.template_version == CAPTION_TEMPLATE_VERSION
+        assert built.loop is False
+        assert "animation:appear .14s linear both" in html
+        assert "text-shadow:0 .025em .05em #000d,0 .04em .14em #000b" in html
+        assert "letter-spacing" not in html
+        assert 'data-caption-entrance="soft_fade"' in html
+        assert 'data-caption-loop="0"' in html
+
+    def test_pack_tracking_and_leading_enter_the_font_fit(self) -> None:
+        text = (
+            "这是一行足够长的字幕文案用来验证字距与行高都会挤进字号自适应"
+            "再长一点凑满四十多个汉字才够看效果吧"
+        )
+        plain = render_caption_template(text, box_width=0.8, box_height=0.18)
+        spaced = render_caption_template(
+            text,
+            box_width=0.8,
+            box_height=0.18,
+            typography=subtitle_pack_typography("cinematic"),
+        )
+        plain_terms = _font_terms(plain)
+        spaced_terms = _font_terms(spaced)
+        # The box-driven terms are the document's own geometry and stay.
+        assert plain_terms[:2] == spaced_terms[:2]
+        # 48 full-width glyphs fit 24 per line historically but only 20.3 once
+        # the pack adds .18em of tracking, so the fit has to plan for a third
+        # row at 1.5 leading.  Left out, the browser wraps rows the size never
+        # reserved and the stage's overflow:hidden clips the caption copy.
+        assert plain_terms[2] == pytest.approx(80 / (2 * 1.35), abs=0.01)
+        assert spaced_terms[2] == pytest.approx(80 / (3 * 1.5), abs=0.01)
+        # The same two numbers also reach the browser, or the fit would be
+        # planning for a layout the document never asks for.
+        assert "letter-spacing:0.18em" in spaced
+        assert "line-height:1.5" in spaced
+        assert "line-height:1.35" in plain
+
+
+class TestComposeCaptionFallbackStyle:
+    """A compose-time fallback is still the final cut the user picked."""
+
+    def test_nothing_picked_reproduces_the_historical_document(self) -> None:
+        assert local_execution_module._caption_fallback_style_kwargs({}) == {}
+
+    def test_a_picked_pack_reaches_the_fallback_document(self) -> None:
+        kwargs = local_execution_module._caption_fallback_style_kwargs(
+            {"subtitle_template": "variety_pop"},
+        )
+        assert kwargs["typography"] == subtitle_pack_typography("variety_pop")
+        assert kwargs["entrance"] == "pop" and kwargs["loop"] is True
+        html = render_caption_template(
+            "这条走了兜底路径",
+            box_width=0.8,
+            box_height=0.18,
+            **kwargs,
+        )
+        assert f"font-weight:{kwargs['typography']['fontWeight']}" in html
+        assert "capPop" in html
+
+    def test_override_only_projects_keep_the_legacy_family_but_take_the_colour(
+        self,
+    ) -> None:
+        kwargs = local_execution_module._caption_fallback_style_kwargs(
+            {"subtitle_style": {"color": "#FFE066"}},
+        )
+        assert kwargs["style"] == {"color": "#FFE066"}
+        html = render_caption_template(
+            "只改了颜色",
+            box_width=0.8,
+            box_height=0.18,
+            **kwargs,
+        )
+        assert "#ffe066" in html

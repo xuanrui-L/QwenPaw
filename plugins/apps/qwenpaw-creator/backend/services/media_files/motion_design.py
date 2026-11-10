@@ -60,14 +60,23 @@ from services.media_files.live_operation import (
 )
 from services.media_files.motion_blueprints import (
     CONTENT_TYPES,
-    SUBTITLE_TEMPLATE_PACKS,
     blueprint_catalog_text,
+    caption_animation_state,
+    caption_document_notes,
+    caption_notes_states,
+    caption_state_animation,
+    caption_style_state,
     content_type_frame,
     content_type_palette,
     render_caption_blueprint,
     render_decoration_blueprint,
     render_frame_blueprint,
     render_scene_blueprint,
+    subtitle_pack_animation,
+    subtitle_pack_caption_order,
+    subtitle_pack_prompt_line,
+    subtitle_pack_typography,
+    sync_subtitle_prompt,
 )
 from services.media_files.motion_engine import (
     referenced_vendor_filenames,
@@ -78,6 +87,8 @@ from services.media_files.motion_overlay import (
     probe_motion_document,
 )
 from services.media_files.motion_templates import (
+    CAPTION_ENTRANCES,
+    CAPTION_EXITS,
     CAPTION_ROLE_LOCATIONS,
     CAPTION_TEMPLATE_VERSION,
     DEFAULT_CAPTION_LOCATION,
@@ -111,6 +122,7 @@ from services.project_files.models import (
     MotionGraphic,
     OverlayCreation,
     Project,
+    ProjectSettings,
     SourceVersionRenderSource,
     Timeline,
     TimelineElement,
@@ -623,6 +635,71 @@ def _validate_caption_location(
         )
 
 
+def resolve_caption_location(
+    *,
+    text: str,
+    caption_role: str | None,
+    content_type: str | None,
+    vibe: str | None,
+    location: ElementLocation | None,
+    canvas_size: tuple[int, int],
+) -> ElementLocation:
+    """Pick the box a caption document may be painted into.
+
+    Shared by the design pass and the style route on purpose.  A document the
+    route bakes carries a fresh ``caption_style=`` stamp, which tells the next
+    design pass the caption is already styled; if that bake had skipped the
+    safe-area and aspect gates below, the illegal box would be frozen into the
+    final cut (narrow tall boxes force CJK copy vertical) and nothing would
+    ever repair it.
+    """
+
+    role_default = (
+        CAPTION_ROLE_LOCATIONS.get(caption_role or "")
+        if caption_role
+        else None
+    )
+    default_loc = role_default or DEFAULT_CAPTION_LOCATION
+    authored = location or ElementLocation(**default_loc)
+    # Try the authored or preset box first, then the role preset, then the
+    # generic caption box.  Retreating straight to the generic box was
+    # wrong twice over: it handed back the very preset that just failed
+    # whenever no authored box existed, and for a long credit roll the
+    # taller role box is the one option that still fits while the generic
+    # box fails validation too.
+    candidates: list[ElementLocation] = [authored]
+    if role_default is not None:
+        candidates.append(ElementLocation(**role_default))
+    generic = ElementLocation(**DEFAULT_CAPTION_LOCATION)
+    if generic != candidates[0]:
+        candidates.append(generic)
+    # Only subtitles are gated against the safe area; see
+    # ``_validate_caption_location``.
+    subtitle = is_subtitle_overlay(
+        text=text,
+        vibe=vibe,
+        caption_role=caption_role,
+        content_type=content_type,
+    )
+    chosen: ElementLocation | None = None
+    for candidate in candidates:
+        try:
+            _validate_caption_location(
+                candidate,
+                text,
+                canvas_size,
+                check_safe_area=subtitle,
+            )
+        except ValidationError:
+            continue
+        chosen = candidate
+        break
+    # When nothing in the table can hold the copy, keep the first choice
+    # rather than swapping in a different illegal box, so the compose-time
+    # gate reports against the geometry the author actually set.
+    return candidates[0] if chosen is None else chosen
+
+
 def _validated_design(
     raw: Mapping[str, Any],
     *,
@@ -896,7 +973,7 @@ def _validated_design(
     return motion, location, concept
 
 
-def _externalized_motion(
+def externalize_motion_document(
     motion: MotionGraphic,
     file_store: AssetFileStore,
 ) -> tuple[MotionGraphic, IndexedFile]:
@@ -1571,7 +1648,104 @@ async def _plan_story_beats(
     return "根据时间线建立开场、变化与收束", None
 
 
-def _is_trusted_caption_motion(motion: MotionGraphic | None) -> bool:
+def _caption_settings_state(
+    settings: ProjectSettings,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """ ``(pack id, user overrides)`` the caption renderer reads today."""
+
+    return (
+        settings.subtitle_template,
+        (
+            settings.subtitle_style.model_dump(mode="json")
+            if settings.subtitle_style is not None
+            else None
+        ),
+    )
+
+
+def caption_owned_template(motion: MotionGraphic | None) -> bool:
+    """Whether this pipeline drew the document, so it may redraw it.
+
+    True only for the deterministic plain-subtitle template.  Free-form
+    ``html_js`` designs, blueprint 花字 and the 发布会 lettering own a look
+    that a project style pack must never overwrite.
+    """
+
+    return (
+        motion is not None
+        and motion.format == "html_css"
+        and motion.motif == "caption_card"
+        and motion.template_version is not None
+    )
+
+
+def resolve_caption_animation(
+    motion: MotionGraphic | None,
+    pack_id: str | None,
+) -> dict[str, object]:
+    """Entrance / exit / loop one caption document must be drawn with.
+
+    The ``caption_animation=`` stamp is the only trusted record of a pick:
+    the animation write paths always rewrite it together with the document,
+    and it is what the UI reads back, so reading the same stamp here keeps
+    description, picker and pixels telling one story.  ``MotionGraphic.entrance``
+    must *not* be consulted: it carries a schema default (``pop``), so every
+    document written before the triple existed would look like an explicit
+    bouncy pick and a no-style project would change appearance on upgrade.
+    An unstamped document therefore follows its pack, exactly as it did
+    before packs existed.  A pack switch re-adopts the new pack's signature
+    motion: moving to 电影叙事 and still getting a pop-in would be precisely
+    the inconsistency this path exists to remove.
+    """
+
+    if caption_owned_template(motion):
+        assert motion is not None
+        style_state, animation_state = caption_notes_states(motion.design_notes)
+        stamped_pack = (style_state or "").split("|", 1)[0]
+        if stamped_pack and stamped_pack != (pack_id or "auto"):
+            return subtitle_pack_animation(pack_id)
+        if animation_state is not None:
+            return caption_state_animation(animation_state)
+    return subtitle_pack_animation(pack_id)
+
+
+def caption_document_is_stale(
+    motion: MotionGraphic | None,
+    project: Project,
+) -> bool:
+    """Whether a stored caption document must be redrawn from the template.
+
+    Documents this pipeline never drew (VLM ``html_js``, authored css) are
+    never stale here.  Template output is derived data and carries the
+    pack/style stamp plus the animation triple it was drawn with, so changing
+    the style pack, the colour overrides or an animation picker rebuilds
+    exactly the captions that no longer match — and a repeated design pass
+    stays a no-op, which keeps compose idempotent.
+    """
+
+    if not caption_owned_template(motion):
+        return False
+    assert motion is not None
+    if motion.template_version < CAPTION_TEMPLATE_VERSION:
+        return True
+    style_state, animation_state = caption_notes_states(motion.design_notes)
+    if style_state is None:
+        # Written before subtitle style packs could be stamped.
+        return True
+    pack_id, style = _caption_settings_state(project.settings)
+    if style_state != caption_style_state(pack_id, style):
+        return True
+    stamped = caption_state_animation(animation_state)
+    return (
+        motion.entrance != stamped["entrance"]
+        or motion.exit != stamped["exit"]
+    )
+
+
+def _is_trusted_caption_motion(
+    motion: MotionGraphic | None,
+    project: Project | None = None,
+) -> bool:
     """Whether a caption's motion document can reach the final cut as-is.
 
     Trusted documents come from this design pipeline: seek-driven
@@ -1581,13 +1755,95 @@ def _is_trusted_caption_motion(motion: MotionGraphic | None) -> bool:
     byte cards) fails the compose-time safety check and silently ships
     the plain subtitle fallback — treat it as unstyled so the design pass
     replaces it with a real footage-aware design.
+
+    Passing ``project`` additionally rejects template documents that no
+    longer match the project's subtitle style pack, which is how picking a
+    new pack reaches the final cut without a manual redesign.
     """
 
     if motion is None:
         return False
+    if project is not None and caption_document_is_stale(motion, project):
+        return False
     if motion.format == "html_js":
         return True
     return motion.template_version is not None
+
+
+def normalise_caption_animation(
+    animation: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Clamp one entrance / exit / loop triple onto the renderer's vocabulary.
+
+    A stale or hand-written value falls back exactly the way
+    ``render_caption_template`` does, so the stamp, the document and the
+    动效描述 can never name a motion the pixels do not play.
+    """
+
+    data = animation or {}
+    entrance = str(data.get("entrance") or "") if (
+        data.get("entrance") in CAPTION_ENTRANCES
+    ) else "soft_fade"
+    exit_style = str(data.get("exit") or "") if (
+        data.get("exit") in CAPTION_EXITS
+    ) else "none"
+    return {
+        "entrance": entrance,
+        "exit": exit_style,
+        "loop": bool(data.get("loop")),
+    }
+
+
+def build_caption_document(
+    *,
+    text: str,
+    location: ElementLocation,
+    pack_id: str | None,
+    style: Mapping[str, object] | None,
+    animation: Mapping[str, object] | None,
+) -> tuple[MotionGraphic, str]:
+    """Draw the deterministic subtitle document for one resolved style.
+
+    Shared by the design pass and the settings endpoint, so switching a style
+    pack writes byte-identical documents whether it happens while composing
+    or the moment the user picks a new pack.  Returns the document plus the
+    concept text, which already carries the canonical style sentence.
+    """
+
+    resolved = normalise_caption_animation(animation)
+    concept = "简洁无边框字幕：透明背景、清晰字体、稳定排版"
+    style_line = subtitle_pack_prompt_line(pack_id, style, resolved)
+    if style_line:
+        # The chosen pack is part of what the document says it draws, so the
+        # design notes and the 动效描述 wording can never drift from pixels.
+        concept = f"{concept}\n{style_line}"
+    motion = MotionGraphic(
+        format="html_css",
+        html=render_caption_template(
+            text,
+            box_width=location.width,
+            box_height=location.height,
+            style=style,
+            typography=subtitle_pack_typography(pack_id),
+            **resolved,
+        ),
+        fps=24,
+        # Caption documents are never tiled: one period is enough, and
+        # repeating it would replay the entrance (see the pack table's
+        # ``animation.loop`` note).
+        loop=False,
+        design_notes=caption_document_notes(
+            concept,
+            caption_style_state(pack_id, style),
+            caption_animation_state(resolved),
+        ),
+        motif="caption_card",
+        template_version=CAPTION_TEMPLATE_VERSION,
+        intensity=0,
+        entrance=str(resolved["entrance"]),
+        exit=str(resolved["exit"]),
+    )
+    return motion, concept
 
 
 def _is_frame_overlay(element: TimelineElement) -> bool:
@@ -1719,7 +1975,7 @@ async def design_motion_overlays(
     project_root = services.projects.project_root(project_id)
     executions = ProjectExecutionStore(services.root)
     ffmpeg_path = resolve_ffmpeg() or "ffmpeg"
-    canvas_size = _design_canvas_size(project)
+    canvas_size = design_canvas_size(project)
     launch_captions = uses_informal_launch_captions(timeline)
     if launch_captions:
         budget = 0
@@ -1823,6 +2079,9 @@ async def design_motion_overlays(
     designed: list[TimelineElement] = []
     styled: dict[str, tuple[MotionGraphic, ElementLocation]] = {}
     clip_styled: dict[str, MotionGraphic] = {}
+    # Element id -> a 动效描述 that was blank and is now filled with the
+    # project's canonical subtitle style sentence.
+    prompt_updates: dict[str, str] = {}
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT_DESIGNS)
 
     async def design_edu_step_card(
@@ -1954,7 +2213,7 @@ async def design_motion_overlays(
         return {**entry, "status": "designed", "concept": concept}
 
     def uniform_text_style(overlay: TimelineElement) -> dict[str, Any]:
-        """Use the same borderless typography for all ordinary subtitles.
+        """Draw one ordinary subtitle from the project's subtitle style.
 
         When the Element has no explicit ``location``, the default position
         is determined by ``caption_role`` (falling back to
@@ -1966,69 +2225,43 @@ async def design_motion_overlays(
             "elementId": overlay.element_id,
             "overlayKind": "caption",
         }
-        # Keep authored/template documents unless these captions were
-        # explicitly selected for redesign.
+        # Keep authored documents, and keep template documents only while
+        # they still carry today's style (see caption_document_is_stale),
+        # unless these captions were explicitly selected for redesign.
         forced = requested is not None and overlay.element_id in requested
-        if not forced and _is_trusted_caption_motion(creation.motion):
+        if not forced and _is_trusted_caption_motion(creation.motion, project):
             return {**entry, "status": "already_styled"}
-        role_default = (
-            CAPTION_ROLE_LOCATIONS.get(creation.caption_role or "")
-            if creation.caption_role
-            else None
-        )
-        default_loc = role_default or DEFAULT_CAPTION_LOCATION
-        location = overlay.location or ElementLocation(**default_loc)
-        # Try the authored or preset box first, then the role preset, then the
-        # generic caption box.  Retreating straight to the generic box was
-        # wrong twice over: it handed back the very preset that just failed
-        # whenever no authored box existed, and for a long credit roll the
-        # taller role box is the one option that still fits while the generic
-        # box fails validation too.
-        candidates: list[ElementLocation] = [location]
-        if role_default is not None:
-            candidates.append(ElementLocation(**role_default))
-        generic = ElementLocation(**DEFAULT_CAPTION_LOCATION)
-        if generic != candidates[0]:
-            candidates.append(generic)
-        # Only subtitles are gated against the safe area; see
-        # ``_validate_caption_location``.
-        subtitle = is_subtitle_overlay(
+        location = resolve_caption_location(
             text=creation.text,
-            vibe=creation.vibe,
             caption_role=creation.caption_role,
             content_type=project.settings.content_type,
+            vibe=creation.vibe,
+            location=overlay.location,
+            canvas_size=canvas_size,
         )
-        chosen: ElementLocation | None = None
-        for candidate in candidates:
-            try:
-                _validate_caption_location(
-                    candidate,
-                    creation.text,
-                    canvas_size,
-                    check_safe_area=subtitle,
-                )
-            except ValidationError:
-                continue
-            chosen = candidate
-            break
-        # When nothing in the table can hold the copy, keep the first choice
-        # rather than swapping in a different illegal box, so the compose-time
-        # gate reports against the geometry the author actually set.
-        location = candidates[0] if chosen is None else chosen
-        concept = "简洁无边框字幕：透明背景、清晰字体、稳定排版"
-        motion = MotionGraphic(
-            format="html_css",
-            html=render_caption_template(
-                creation.text,
-                box_width=location.width,
-                box_height=location.height,
-            ),
-            fps=24,
-            loop=False,
-            design_notes=concept,
-            motif="caption_card",
-            template_version=CAPTION_TEMPLATE_VERSION,
-            intensity=0,
+        pack_id, style = _caption_settings_state(project.settings)
+        animation = normalise_caption_animation(
+            resolve_caption_animation(creation.motion, pack_id),
+        )
+        # The style sentence follows the pack even where an agent or the user
+        # already wrote a description: ``sync_subtitle_prompt`` replaces only
+        # the line it owns and keeps everything else verbatim, so a pack
+        # switched through the generic patch route cannot leave captions
+        # drawing the new look while still describing the old one.
+        synced, _changed = sync_subtitle_prompt(
+            creation.prompt,
+            pack_id,
+            style,
+            animation,
+        )
+        if synced != creation.prompt:
+            prompt_updates[overlay.element_id] = synced
+        motion, concept = build_caption_document(
+            text=creation.text,
+            location=location,
+            pack_id=pack_id,
+            style=style,
+            animation=animation,
         )
         styled[overlay.element_id] = (motion, location)
         return {**entry, "status": "designed", "concept": concept}
@@ -2236,16 +2469,21 @@ async def design_motion_overlays(
         }
         if content_type in _KEYWORD_CONTENT_HINTS:
             task_lines.append(_KEYWORD_CONTENT_HINTS[content_type])
-        pack = SUBTITLE_TEMPLATE_PACKS.get(
-            project.settings.subtitle_template or "",
-        )
-        if pack:
+        # One canonical sentence for the whole pipeline: the same wording the
+        # subtitle template, the agents and the 动效描述 use, so a keyword
+        # card never describes a different style from the captions beside it.
+        pack_id, pack_style = _caption_settings_state(project.settings)
+        pack_line = subtitle_pack_prompt_line(pack_id, pack_style)
+        if pack_line:
+            pack_order = subtitle_pack_caption_order(pack_id)
             task_lines.append(
-                "字幕风格包偏好："
-                f"{pack['name']}（{pack['description']}）。"
-                "自由创作时优先贴近该风格包的字体气质、配色与动效语汇，"
-                "可参考 blueprint："
-                + "、".join(str(b) for b in pack["caption_order"])
+                f"本片字幕风格：{pack_line}。自由创作时优先贴近该风格的字体"
+                "气质、配色与动效语汇"
+                + (
+                    f"，可参考 blueprint：{'、'.join(pack_order)}"
+                    if pack_order
+                    else ""
+                )
                 + "。",
             )
         task_lines.append(
@@ -2693,7 +2931,7 @@ async def design_motion_overlays(
                 not uses_informal_launch_captions(current_timeline)
                 or current_timeline.ticks_per_second
                 != timeline.ticks_per_second
-                or _design_canvas_size(current.project) != canvas_size
+                or design_canvas_size(current.project) != canvas_size
             ):
                 raise ValidationError(
                     "字幕设计期间模板或画布已变化，请基于最新设置重新设计",
@@ -2740,7 +2978,7 @@ async def design_motion_overlays(
         def externalize(motion: MotionGraphic) -> MotionGraphic:
             if motion.html is None:
                 return motion
-            stored, indexed = _externalized_motion(motion, file_store)
+            stored, indexed = externalize_motion_document(motion, file_store)
             indexed_files[indexed.file_id] = indexed
             return stored
 
@@ -2782,6 +3020,10 @@ async def design_motion_overlays(
                 mode="json",
             )
             raw["location"] = location.model_dump(mode="json")
+            if overlay_id in prompt_updates:
+                # Only the line this module owns is rewritten; whatever the
+                # user or an agent authored below it survives verbatim.
+                raw["creation"]["prompt"] = prompt_updates[overlay_id]
             if overlay_id in aligned_caption_spans:
                 raw["span"] = aligned_caption_spans[overlay_id].model_dump(
                     mode="json",
@@ -2839,7 +3081,7 @@ async def design_motion_overlays(
     }
 
 
-def _design_canvas_size(project: Project) -> tuple[int, int]:
+def design_canvas_size(project: Project) -> tuple[int, int]:
     try:
         width_part, height_part = project.settings.aspect_ratio.split(":", 1)
         ratio = float(width_part) / float(height_part)
