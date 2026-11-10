@@ -3,13 +3,14 @@ import { useTranslation } from "react-i18next";
 import type { SubtitleStyle } from "@/contracts/creator";
 
 /**
- * Colour / font-size / outline overrides for the standard subtitle bar.
+ * Colour / font-size / outline / background-block overrides for the standard
+ * subtitle bar.
  *
  * Mirrors the backend ``SubtitleStyle`` model: every control keeps a
  * "default" choice mapped to ``null`` so an untouched project persists no
  * style at all and renders exactly as before. The values drive the
- * deterministic plain-subtitle renderer (PIL burn-in) and its live preview;
- * designed 花字 keeps its own per-footage styling.
+ * deterministic plain-subtitle renderer (PIL burn-in), the caption template
+ * and their live preview; designed 花字 keeps its own per-footage styling.
  */
 
 /** Swatches offered for the subtitle text colour. */
@@ -37,6 +38,21 @@ const STROKE_CHOICES: Array<{ id: number | null; key: string }> = [
   { id: 1.8, key: "home.subtitleStyleStrokeThick" },
 ];
 
+/**
+ * Opacity of the background block a style pack draws behind the text; ``null``
+ * keeps the pack's own alpha.  The pick reshapes the block a pack already
+ * draws and never invents one, so a pack without a block (电影叙事…) looks
+ * unchanged at every value — hence no per-pack branching here.
+ */
+const BACKGROUND_CHOICES: Array<{ id: number | null; key: string }> = [
+  { id: null, key: "home.subtitleStyleBackgroundDefault" },
+  { id: 0, key: "home.subtitleStyleBackgroundNone" },
+  { id: 0.3, key: "home.subtitleStyleBackground30" },
+  { id: 0.5, key: "home.subtitleStyleBackground50" },
+  { id: 0.7, key: "home.subtitleStyleBackground70" },
+  { id: 1, key: "home.subtitleStyleBackground100" },
+];
+
 interface SubtitleStyleControlsProps {
   value: SubtitleStyle | null;
   onChange: (style: SubtitleStyle | null) => void;
@@ -51,6 +67,7 @@ export function SubtitleStyleControls({
   const color = value?.color ?? null;
   const fontScale = value?.fontScale ?? null;
   const strokeScale = value?.strokeScale ?? null;
+  const backgroundOpacity = value?.backgroundOpacity ?? null;
 
   /** Merge one override, dropping the whole object back to ``null``. */
   const emit = (patch: Partial<SubtitleStyle>) => {
@@ -59,9 +76,16 @@ export function SubtitleStyleControls({
       fontScale: patch.fontScale !== undefined ? patch.fontScale : fontScale,
       strokeScale:
         patch.strokeScale !== undefined ? patch.strokeScale : strokeScale,
+      backgroundOpacity:
+        patch.backgroundOpacity !== undefined
+          ? patch.backgroundOpacity
+          : backgroundOpacity,
     };
     const isDefault =
-      next.color == null && next.fontScale == null && next.strokeScale == null;
+      next.color == null &&
+      next.fontScale == null &&
+      next.strokeScale == null &&
+      next.backgroundOpacity == null;
     onChange(isDefault ? null : next);
   };
 
@@ -144,6 +168,30 @@ export function SubtitleStyleControls({
                 type="button"
                 aria-pressed={selected}
                 onClick={() => emit({ strokeScale: choice.id })}
+                className={`${pillBase} ${selected ? pillOn : pillOff}`}
+              >
+                {t(choice.key)}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Background block opacity */}
+        <div className="flex items-center gap-1.5">
+          <span
+            className="text-[11px] text-[var(--color-text-tertiary)]"
+            title={t("home.subtitleStyleBackgroundHint")}
+          >
+            {t("home.subtitleStyleBackground")}
+          </span>
+          {BACKGROUND_CHOICES.map((choice) => {
+            const selected = backgroundOpacity === choice.id;
+            return (
+              <button
+                key={choice.key}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => emit({ backgroundOpacity: choice.id })}
                 className={`${pillBase} ${selected ? pillOn : pillOff}`}
               >
                 {t(choice.key)}

@@ -352,6 +352,14 @@ export function PlainCaption({
   };
   const fontScale = clampScale(style?.font_scale, 0.6, 1.8);
   const strokeScale = clampScale(style?.stroke_scale, 0, 3);
+  // The hint draws its own neutral block because it does not know the pack's
+  // alpha; a stated pick is different — it is exactly what the cut will do, so
+  // 无底板 must drop the block here as well instead of contradicting the pick.
+  const backgroundRaw =
+    typeof style?.background_opacity === "number" &&
+    Number.isFinite(style.background_opacity)
+      ? Math.min(1, Math.max(0, style.background_opacity))
+      : null;
   const fillColor =
     typeof style?.color === "string" && /^#[0-9a-fA-F]{6}$/.test(style.color)
       ? style.color
@@ -401,14 +409,14 @@ export function PlainCaption({
         height={boxH}
         aria-hidden
       >
-        {!isTitle && (
+        {!isTitle && backgroundRaw !== 0 && (
           <rect
             x={0}
             y={0}
             width={boxW - 1}
             height={boxH - 1}
             rx={Math.round(Math.min(boxW, boxH) * 0.1)}
-            fill="rgba(0,0,0,0.45)"
+            fill={`rgba(0,0,0,${backgroundRaw ?? 0.45})`}
           />
         )}
         {lines.map((line, index) => (

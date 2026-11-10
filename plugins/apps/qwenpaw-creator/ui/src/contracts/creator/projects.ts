@@ -15,6 +15,13 @@ export interface SubtitleStyle {
   fontScale?: number | null;
   /** Outline-width multiplier (0–3, 0 = no outline); null = base outline. */
   strokeScale?: number | null;
+  /**
+   * Opacity (0–1) of the background block a style pack draws behind the text;
+   * null = the pack's own, 0 = no block. It reshapes the block a pack already
+   * draws and never invents one, so a pack without a block looks unchanged at
+   * every value.
+   */
+  backgroundOpacity?: number | null;
 }
 
 /**
