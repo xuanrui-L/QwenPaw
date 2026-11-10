@@ -22,6 +22,8 @@ import {
 } from "./useProjectLaunch";
 import AttachmentChip from "./AttachmentChip";
 import ModelConfigModal from "./ModelConfigModal";
+import SubtitleTemplatePicker from "./SubtitleTemplatePicker";
+import SubtitleStyleControls from "./SubtitleStyleControls";
 import VideoTemplatePicker from "./VideoTemplatePicker";
 import { useRecreateStore } from "@/store/recreateStore";
 
@@ -65,6 +67,10 @@ export default function HeroComposerCard() {
     setSelectedTemplateId,
     subtitlePolicy,
     setSubtitlePolicy,
+    subtitleTemplate,
+    setSubtitleTemplate,
+    subtitleStyle,
+    setSubtitleStyle,
     attachments,
     addFiles,
     addUrl,
@@ -462,6 +468,24 @@ export default function HeroComposerCard() {
           </Tooltip>
         </div>
       </div>
+
+      {subtitleAuto && (
+        <div className="mt-3">
+          <div className="mb-1 text-xs font-semibold text-[var(--color-text-secondary)]">
+            {t("home.subtitleTemplateLabel")}
+          </div>
+          <SubtitleTemplatePicker
+            value={subtitleTemplate}
+            onChange={setSubtitleTemplate}
+          />
+          <div className="mt-3">
+            <SubtitleStyleControls
+              value={subtitleStyle}
+              onChange={setSubtitleStyle}
+            />
+          </div>
+        </div>
+      )}
 
       <ModelConfigModal
         open={modelConfigModalOpen}

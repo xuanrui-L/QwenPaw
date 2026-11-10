@@ -6,6 +6,13 @@ export interface ProjectEntityCollection<T> {
   order: string[];
 }
 
+/** Persisted subtitle-bar overrides (snake_case mirror of the API model). */
+export interface SubtitleStyleDocument extends ProjectJsonRecord {
+  color?: string | null;
+  font_scale?: number | null;
+  stroke_scale?: number | null;
+}
+
 export interface ProjectSettingsDocument extends ProjectJsonRecord {
   production_stage?: "script" | "media";
   script_approval_fingerprint?: string | null;
@@ -15,6 +22,9 @@ export interface ProjectSettingsDocument extends ProjectJsonRecord {
   language: string;
   target_duration_seconds: number | null;
   content_type: string | null;
+  subtitle_policy?: "auto" | "on" | "off";
+  subtitle_template?: string | null;
+  subtitle_style?: SubtitleStyleDocument | null;
   execution_preauthorization?: ProjectJsonRecord | null;
 }
 

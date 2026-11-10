@@ -110,6 +110,27 @@ class ExecutionPreauthorization(StrictModel):
         return self
 
 
+class SubtitleStyle(StrictModel):
+    """User overrides for the standard subtitle bar.
+
+    Every field is optional: ``None`` keeps the renderer default so an
+    untouched project behaves exactly as before.  These values style the
+    deterministic plain-subtitle path (PIL burn-in and its live preview);
+    designed 花字 (blueprint / VLM motion documents) keep their own
+    per-footage styling.
+    """
+
+    # Solid text colour, ``#rrggbb``.  None = renderer default (white).
+    color: str | None = Field(
+        default=None,
+        pattern=r"^#[0-9a-fA-F]{6}$",
+    )
+    # Font-size multiplier applied to the fitted base size.
+    font_scale: float | None = Field(default=None, ge=0.6, le=1.8)
+    # Outline-width multiplier; ``0`` disables the stroke entirely.
+    stroke_scale: float | None = Field(default=None, ge=0.0, le=3.0)
+
+
 class ProjectSettings(StrictModel):
     production_stage: Literal["script", "media"] = "media"
     script_approval_fingerprint: Sha256 | None = None
@@ -122,6 +143,11 @@ class ProjectSettings(StrictModel):
     # Captions are opt-in end to end: a Project without an explicit choice
     # never grows subtitle Overlays on its own.
     subtitle_policy: Literal["auto", "on", "off"] = "off"
+    # Optional JianYing-like subtitle style pack id (see
+    # motion_blueprints.SUBTITLE_TEMPLATE_PACKS).  None = smart recommend.
+    subtitle_template: str | None = None
+    # Optional per-project overrides for the standard subtitle bar.
+    subtitle_style: SubtitleStyle | None = None
     execution_preauthorization: ExecutionPreauthorization | None = None
 
 

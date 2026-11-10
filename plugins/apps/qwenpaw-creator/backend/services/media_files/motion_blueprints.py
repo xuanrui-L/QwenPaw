@@ -1248,6 +1248,66 @@ DECORATION_BLUEPRINTS = {
 # Deterministic rotation order for the caption fallback chain.
 CAPTION_BLUEPRINT_ORDER = ("stagger_pop", "ink_reveal", "glow_breath")
 
+# User-facing subtitle style packs (JianYing-like categories).  A pack is a
+# bias, not a hard override: it reorders the caption fallback chain so the
+# auto pipeline prefers the pack's blueprints, while an explicit blueprint
+# or hand-authored html still wins.  ``None`` (the UI's "smart recommend")
+# keeps the content-type / default order untouched.
+SUBTITLE_TEMPLATE_PACKS: dict[str, dict[str, object]] = {
+    "variety_pop": {
+        "name": "综艺花字",
+        "description": "活泼/搞笑/高光：逐字弹入与关键词强调",
+        "caption_order": ("stagger_pop", "keyword_spotlight", "brush_strike"),
+    },
+    "cinematic": {
+        "name": "电影叙事",
+        "description": "沉稳/文艺/短剧：横向揭示与低语独白",
+        "caption_order": ("ink_reveal", "drama_whisper", "editorial_title"),
+    },
+    "clean_talk": {
+        "name": "简洁讲解",
+        "description": "口播/教程/纪录片：静态胶囊与精密字幕",
+        "caption_order": (
+            "static_capsule",
+            "precision_subtitle",
+            "chapter_label",
+        ),
+    },
+    "warm_note": {
+        "name": "治愈手写",
+        "description": "Vlog/日常/手账：纸纹手写与情绪光晕",
+        "caption_order": ("handwritten_note", "glow_breath", "ink_reveal"),
+    },
+    "neon_music": {
+        "name": "霓虹音乐",
+        "description": "MV/夜间/音乐：霓虹脉冲与呼吸光晕",
+        "caption_order": ("neon_pulse", "glow_breath", "brush_strike"),
+    },
+}
+SUBTITLE_TEMPLATE_PACK_ORDER = (
+    "variety_pop",
+    "cinematic",
+    "clean_talk",
+    "warm_note",
+    "neon_music",
+)
+
+
+def subtitle_pack_caption_order(pack_id: str | None) -> tuple[str, ...] | None:
+    """Return a pack's preferred caption blueprint order, or ``None``.
+
+    Unknown or empty ids fall back to ``None`` so callers keep their
+    content-type / default rotation instead of failing.
+    """
+
+    if not pack_id:
+        return None
+    pack = SUBTITLE_TEMPLATE_PACKS.get(pack_id)
+    if not pack:
+        return None
+    return tuple(pack["caption_order"])  # type: ignore[arg-type]
+
+
 _BLUEPRINT_HINTS = {
     "stagger_pop": "综艺花字：逐字弹入+强调下划线，适合活泼/惊喜/动作场面",
     "ink_reveal": "电影字幕：横向揭示+侧色条，适合叙事/沉稳/收尾语气",
@@ -1284,15 +1344,21 @@ def blueprint_catalog_text(
     kind: str,
     *,
     content_type: str | None = None,
+    subtitle_template: str | None = None,
 ) -> str:
     """Prompt-ready catalog listing for one blueprint family.
 
     When *content_type* is given the listing is filtered to the preferred
     subset for that type (4-6 entries); otherwise every registered
-    blueprint is listed (backward-compatible).
+    blueprint is listed (backward-compatible).  A *subtitle_template* pack
+    overrides the caption subset so the auto pipeline follows the user's
+    chosen style pack.
     """
 
-    if content_type and content_type in _CONTENT_TYPE_PALETTES:
+    pack_order = subtitle_pack_caption_order(subtitle_template)
+    if kind == "caption" and pack_order:
+        names = pack_order
+    elif content_type and content_type in _CONTENT_TYPE_PALETTES:
         prefs = _CONTENT_TYPE_PALETTES[content_type]
         if kind == "caption":
             names = prefs["caption_order"]
@@ -1839,9 +1905,19 @@ def content_type_frame(content_type: str) -> str:
     return "pop_variety"
 
 
-def content_type_caption_order(content_type: str) -> tuple[str, ...]:
-    """Caption blueprint fallback rotation for a content type."""
+def content_type_caption_order(
+    content_type: str,
+    subtitle_template: str | None = None,
+) -> tuple[str, ...]:
+    """Caption blueprint fallback rotation for a content type.
 
+    A *subtitle_template* pack takes priority over the content-type subset
+    so the user's chosen style pack drives the auto fallback chain.
+    """
+
+    pack_order = subtitle_pack_caption_order(subtitle_template)
+    if pack_order:
+        return pack_order
     prefs = _CONTENT_TYPE_PALETTES.get(content_type)
     if prefs:
         return tuple(prefs["caption_order"])  # type: ignore[arg-type]
@@ -1856,6 +1932,8 @@ __all__ = [
     "DECORATION_BLUEPRINTS",
     "FRAME_BLUEPRINTS",
     "SCENE_BLUEPRINTS",
+    "SUBTITLE_TEMPLATE_PACKS",
+    "SUBTITLE_TEMPLATE_PACK_ORDER",
     "BlueprintPalette",
     "blueprint_catalog_text",
     "content_type_caption_order",
@@ -1865,6 +1943,7 @@ __all__ = [
     "render_decoration_blueprint",
     "render_frame_blueprint",
     "render_scene_blueprint",
+    "subtitle_pack_caption_order",
     "require_chinese_copy",
     "suggested_color_grade",
     "suggested_transitions_for_content",

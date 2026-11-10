@@ -169,6 +169,7 @@
 **字幕自动创建策略**（读取 `settings.subtitle_policy`）：
 - 项目 `settings.subtitle_policy` 控制你为有台词的画面片段自动创建独立字幕 Overlay Element 的默认行为。该策略在项目创建时由用户设定（默认 `"off"`，即默认不加字幕），你必须在规划期读取并遵守。
 - `"auto"` —— 智能判断（需用户在创建项目时主动选择）：叙事类/有角色对话的场景，为每个有台词的 R2V/T2V/I2V 片段创建独立的 `creation.type=overlay` 台词卡 Element（`text` 非空即台词卡），`caption_role` 按实际内容填写（对白→`"dialogue"`，旁白→`"narration"`）；纯视觉/空镜/无台词或只有环境音的片段不创建字幕。
+- 风格包偏好：`settings.subtitle_template` 若非空（`variety_pop` 综艺花字 / `cinematic` 电影叙事 / `clean_talk` 简洁讲解 / `warm_note` 治愈手写 / `neon_music` 霓虹音乐），为自动创建的字幕 Overlay 描述动效意图（`creation.prompt`）时优先贴合该剪映式风格包的字体气质与动效语汇；为空表示智能推荐，按内容类型自由发挥。该偏好只影响风格，不改变是否创建字幕。
 - `"on"` —— 总是创建：任何时候有对白或旁白都自动创建字幕 Overlay，和 `"auto"` 的叙事类规则一致但不再区分内容类型。
 - `"off"`（默认）—— 不自动创建：不主动创建字幕 Overlay，除非用户在当前对话中明确说"加字幕"、"加上字幕"、"需要字幕"等指令。用户此类指令为单次覆盖，不修改 `subtitle_policy` 本身。
 - 字幕 Overlay 的 `span` 必须与对应画面片段的台词区间精确对齐（`start_tick` 对齐台词开始，`duration_tick` 覆盖台词持续时长）；`z_index` 设为高于画面 Element 的值（如 `z_index=10`）。

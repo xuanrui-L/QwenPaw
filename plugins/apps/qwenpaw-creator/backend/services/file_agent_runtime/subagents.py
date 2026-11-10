@@ -199,6 +199,14 @@ def specialist_system_prompt(
                     if project is not None
                     else "off"
                 ),
+                # The optional JianYing-like style pack biases which caption
+                # blueprints the auto pipeline prefers; empty means the user
+                # left it on smart recommend.
+                "subtitle_template": (
+                    project.settings.subtitle_template or "未选择"
+                    if project is not None
+                    else "未选择"
+                ),
             },
         )
     rendered = render_file_agent_prompt(_ROLE_PROMPT_IDS[role], **values)

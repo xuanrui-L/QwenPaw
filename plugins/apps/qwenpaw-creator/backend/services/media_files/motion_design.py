@@ -60,6 +60,7 @@ from services.media_files.live_operation import (
 )
 from services.media_files.motion_blueprints import (
     CONTENT_TYPES,
+    SUBTITLE_TEMPLATE_PACKS,
     blueprint_catalog_text,
     content_type_frame,
     content_type_palette,
@@ -2235,6 +2236,18 @@ async def design_motion_overlays(
         }
         if content_type in _KEYWORD_CONTENT_HINTS:
             task_lines.append(_KEYWORD_CONTENT_HINTS[content_type])
+        pack = SUBTITLE_TEMPLATE_PACKS.get(
+            project.settings.subtitle_template or "",
+        )
+        if pack:
+            task_lines.append(
+                "字幕风格包偏好："
+                f"{pack['name']}（{pack['description']}）。"
+                "自由创作时优先贴近该风格包的字体气质、配色与动效语汇，"
+                "可参考 blueprint："
+                + "、".join(str(b) for b in pack["caption_order"])
+                + "。",
+            )
         task_lines.append(
             "附图是该时段内按时间顺序抽取的真实画面帧，请从中判断主体位置、留白区域和配色。严格按系统要求只输出一个 JSON 对象。",
         )

@@ -505,6 +505,99 @@ def test_project_create_keeps_the_subtitle_policy_off_unless_asked(
     assert policy(auto) == "auto"
 
 
+def test_project_create_persists_the_subtitle_template_pack(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """The JianYing-like style pack rides the create request end to end."""
+
+    async def scenario(client):
+        packed = await client.post(
+            "/projects",
+            json=_create_payload(
+                "pack-cinematic",
+                "电影叙事包",
+                subtitlePolicy="auto",
+                subtitleTemplate="cinematic",
+            ),
+        )
+        plain = await client.post(
+            "/projects",
+            json=_create_payload("pack-none", "智能推荐"),
+        )
+        return packed, plain
+
+    packed, plain = run_scenario(app, scenario)
+
+    def template(response) -> str | None:
+        project = Project.model_validate_json(
+            (
+                api_runtime_root
+                / response.json()["projectId"]
+                / "project.json"
+            ).read_text(encoding="utf-8"),
+        )
+        return project.settings.subtitle_template
+
+    assert template(packed) == "cinematic"
+    assert template(plain) is None
+
+
+def test_project_create_persists_the_subtitle_style_overrides(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """Colour / font-size / outline overrides ride the create request."""
+
+    async def scenario(client):
+        styled = await client.post(
+            "/projects",
+            json=_create_payload(
+                "style-gold",
+                "金色大字幕",
+                subtitlePolicy="auto",
+                subtitleStyle={
+                    "color": "#FFE066",
+                    "fontScale": 1.25,
+                    "strokeScale": 0,
+                },
+            ),
+        )
+        plain = await client.post(
+            "/projects",
+            json=_create_payload("style-none", "默认样式"),
+        )
+        return styled, plain
+
+    styled, plain = run_scenario(app, scenario)
+
+    def style(response):
+        project = Project.model_validate_json(
+            (
+                api_runtime_root
+                / response.json()["projectId"]
+                / "project.json"
+            ).read_text(encoding="utf-8"),
+        )
+        return project.settings.subtitle_style
+
+    assert style(plain) is None
+    persisted = style(styled)
+    assert persisted is not None
+    assert persisted.color == "#FFE066"
+    assert persisted.font_scale == 1.25
+    assert persisted.stroke_scale == 0.0
+    # The header mirrors the setting in camelCase for the UI contract.
+    header = styled.json()["header"]["subtitleStyle"]
+    assert header == {
+        "color": "#FFE066",
+        "fontScale": 1.25,
+        "strokeScale": 0.0,
+    }
+
+
 def _overlay_element(
     element_id: str,
     *,

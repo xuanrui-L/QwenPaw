@@ -60,6 +60,7 @@ FILE_AGENT_PROMPT_SPECS = {
             "content_type",
             "target_duration_seconds",
             "subtitle_policy",
+            "subtitle_template",
             "tts_guidance",
         ),
     )
