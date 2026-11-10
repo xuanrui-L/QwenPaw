@@ -784,7 +784,8 @@
     "subtitleRemove": "一键去字幕",
     "subtitleAdd": "一键加字幕",
     "subtitleToggleFailed": "字幕切换失败：{{detail}}",
-    "subtitleToggleRecompose": "字幕状态已更新，请点击「合成最终成片」刷新视频"
+    "subtitleToggleRecompose": "字幕状态已更新，请点击「合成最终成片」刷新视频",
+    "subtitleToggleTip": "共 {{count}} 条字幕 · 切换后点击「合成最终成片」生效"
   },
   "r2v": {
     "title": "视频方案 / {{element}} / 制作工作台",
@@ -971,6 +972,7 @@
     "disabled": "已停用",
     "enableSubtitle": "启用字幕",
     "disableSubtitle": "停用字幕",
+    "subtitleToggleTip": "仅影响这一条字幕 · 切换后点击「合成最终成片」生效",
     "closeDetail": "关闭内容详情",
     "conflictTitle": "这些字段在编辑期间被其他操作更新",
     "conflictDesc": "本地草稿仍然保留。确认使用本地修改覆盖最新值后，才能应用。",

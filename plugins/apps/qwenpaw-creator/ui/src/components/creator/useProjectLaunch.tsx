@@ -453,7 +453,9 @@ export function useProjectLaunch(options?: {
     "off",
   );
   // JianYing-like subtitle style pack; null keeps the AI on smart recommend.
-  const [subtitleTemplate, setSubtitleTemplate] = useState<string | null>(null);
+  const [subtitleTemplate, setSubtitleTemplate] = useState<string | null>(
+    null,
+  );
   // Standard subtitle-bar overrides (colour / font size / outline); null
   // keeps every renderer default.
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle | null>(

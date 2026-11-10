@@ -9,7 +9,9 @@ import SubtitleTemplatePicker, {
 
 function Harness() {
   const [value, setValue] = useState<string | null>(null);
-  return <SubtitleTemplatePicker value={value} onChange={setValue} />;
+  return (
+    <SubtitleTemplatePicker value={value} onChange={setValue} />
+  );
 }
 
 describe("SubtitleTemplatePicker", () => {

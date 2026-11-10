@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Subtitle style packs (JianYing-like) bias the caption fallback chain."""
 
 from services.media_files.motion_blueprints import (

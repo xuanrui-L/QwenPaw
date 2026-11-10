@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Subtitle-bar style overrides (colour / font size / outline)."""
 
 import pytest

@@ -102,15 +102,11 @@ export function SubtitleTemplatePicker({
           >
             <span
               className={`flex h-9 items-center justify-center rounded-md ${
-                card.previewClass ?? "bg-[rgba(43,27,0,0.05)] dark:bg-white/10"
+                card.previewClass ??
+                "bg-[rgba(43,27,0,0.05)] dark:bg-white/10"
               }`}
             >
-              <span
-                className={`text-lg leading-none ${
-                  card.glyphClass ??
-                  "font-semibold text-[var(--color-text-secondary)]"
-                }`}
-              >
+              <span className={`text-lg leading-none ${card.glyphClass ?? "font-semibold text-[var(--color-text-secondary)]"}`}>
                 字
               </span>
             </span>

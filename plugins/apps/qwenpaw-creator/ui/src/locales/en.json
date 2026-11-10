@@ -784,7 +784,8 @@
     "subtitleRemove": "Remove All Subtitles",
     "subtitleAdd": "Add All Subtitles",
     "subtitleToggleFailed": "Subtitle toggle failed: {{detail}}",
-    "subtitleToggleRecompose": "Subtitle state updated. Click 'Compose Final Cut' to refresh the video."
+    "subtitleToggleRecompose": "Subtitle state updated. Click 'Compose Final Cut' to refresh the video.",
+    "subtitleToggleTip": "{{count}} subtitles · takes effect after clicking 'Compose Final Cut'"
   },
   "r2v": {
     "title": "Video Plan / {{element}} / Production Workbench",
@@ -971,6 +972,7 @@
     "disabled": "Disabled",
     "enableSubtitle": "Enable Subtitle",
     "disableSubtitle": "Disable Subtitle",
+    "subtitleToggleTip": "Affects this subtitle only · takes effect after clicking 'Compose Final Cut'",
     "closeDetail": "Close content detail",
     "conflictTitle": "These fields were updated by other operations during editing",
     "conflictDesc": "Local draft preserved. Confirm using local changes to overwrite latest values before applying.",
