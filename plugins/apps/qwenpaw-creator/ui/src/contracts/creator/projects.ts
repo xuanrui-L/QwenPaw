@@ -17,6 +17,35 @@ export interface SubtitleStyle {
   strokeScale?: number | null;
 }
 
+/**
+ * Entrance / exit / loop one caption must play. Absent or `null` keeps what
+ * the style pack (or the element itself) already chose; the vocabulary is the
+ * renderer's own, so a description can never name a motion the pixels skip.
+ */
+export interface SubtitleAnimationPolicy {
+  entrance?: "soft_fade" | "pop" | "slide" | "type_on" | null;
+  exit?: "none" | "soft_fade" | "shrink" | null;
+  loop?: boolean | null;
+}
+
+/**
+ * Switch the subtitle style pack after the project exists.
+ *
+ * A key that is present wins: `subtitleTemplate: null` goes back to smart
+ * recommend and `subtitleStyle: null` clears the colour/size/outline
+ * overrides. The backend keeps the burned-in captions, the live preview and
+ * every subtitle's 动效描述 in step with the choice.
+ */
+export interface SubtitleStyleUpdateRequest {
+  subtitleTemplate?: string | null;
+  subtitleStyle?: SubtitleStyle | null;
+  animation?: SubtitleAnimationPolicy;
+  /** Restrict the change to these elements (defaults to every subtitle). */
+  elementIds?: string[];
+  /** Fill the canonical style sentence into empty descriptions; default true. */
+  syncPrompts?: boolean;
+}
+
 export interface ProjectCreateRequest {
   productionStage?: "script" | "media";
   clientRequestId: string;

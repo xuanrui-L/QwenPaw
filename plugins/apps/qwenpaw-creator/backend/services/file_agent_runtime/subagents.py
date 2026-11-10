@@ -14,6 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from domain.enums import SpecialistRole
 from services.file_agent_runtime.prompts import render_file_agent_prompt
 from services.file_agent_runtime.prompts import tts_guidance
+from services.media_files.motion_blueprints import (
+    subtitle_settings_prompt_block,
+)
 from services.project_files.models import Project
 from services.project_files.schema_prompt import build_project_schema_prompt
 
@@ -199,13 +202,18 @@ def specialist_system_prompt(
                     if project is not None
                     else "off"
                 ),
-                # The optional JianYing-like style pack biases which caption
-                # blueprints the auto pipeline prefers; empty means the user
-                # left it on smart recommend.
+                # The optional JianYing-like style pack id, kept verbatim so
+                # the director can reason about (or echo) the real setting.
                 "subtitle_template": (
                     project.settings.subtitle_template or "未选择"
                     if project is not None
                     else "未选择"
+                ),
+                # Full style wording generated from the same table the caption
+                # renderer reads, so the 动效描述 the director writes cannot
+                # disagree with the burned-in subtitles.
+                "subtitle_style_guidance": subtitle_settings_prompt_block(
+                    project.settings if project is not None else None,
                 ),
             },
         )

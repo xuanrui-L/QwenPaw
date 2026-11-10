@@ -13,7 +13,12 @@ import unicodedata
 from typing import Any
 
 MOTION_TEMPLATE_VERSION = 1
-CAPTION_TEMPLATE_VERSION = 2
+# v3: the plain-subtitle template now honours the chosen style pack
+# (weight / letter-spacing / plate / glow / tilt), the user's colour,
+# font-size and outline overrides, and the entrance / exit / loop triple.
+# v2 hard-coded white glyphs with one fixed shadow and ignored all of it,
+# so the live preview and the final cut disagreed with the 动效描述.
+CAPTION_TEMPLATE_VERSION = 3
 DEFAULT_CAPTION_LOCATION = {
     "x": 0.5,
     "y": 0.86,
@@ -198,6 +203,16 @@ SUPPORTED_VARIANTS = frozenset({"sticker", "ink", "neon"})
 SUPPORTED_EMOTIONS = frozenset({"chill", "curious", "surprise", "action"})
 SUPPORTED_ENTRANCES = frozenset({"pop", "stamp", "draw_in", "slide"})
 SUPPORTED_EXITS = frozenset({"soft_fade", "shrink", "none"})
+# Caption-only animation vocabulary.  ``exit`` mirrors the renderer-managed
+# ``data-motion-exit`` contract (the compositor owns the fade / shrink, the
+# document must not exit by itself); every entrance keeps the first probe
+# frame non-empty, which is why none of them starts fully transparent.
+CAPTION_ENTRANCES = frozenset({"soft_fade", "pop", "slide", "type_on"})
+CAPTION_EXITS = frozenset({"none", "soft_fade", "shrink"})
+_LEGACY_CAPTION_FAMILY = (
+    '"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",'
+    "sans-serif"
+)
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -207,12 +222,35 @@ def _color(value: object, fallback: str) -> str:
     return text.lower() if _HEX_COLOR.fullmatch(text) else fallback
 
 
+def _caption_em_value(value: object) -> float:
+    """Read one ``"0.18em"`` typography token as a plain em multiplier."""
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return 0.0
+    try:
+        return max(0.0, float(text[:-2] if text.endswith("em") else text))
+    except ValueError:
+        return 0.0
+
+
 def _caption_font_css(
     text: str,
     box_width: float | None,
     box_height: float | None,
+    *,
+    line_height: float = 1.35,
+    letter_spacing_em: float = 0.0,
 ) -> str:
-    """Keep normal copy at one canvas-relative size and fit longer lines."""
+    """Keep normal copy at one canvas-relative size and fit longer lines.
+
+    The 24-character line and the 1.35 leading are the historical assumption,
+    which the defaults reproduce byte-for-byte.  A style pack may widen the
+    glyphs (letter-spacing) or the leading, so both have to enter the fit
+    here: otherwise the browser wraps more rows than the formula reserved and
+    the stage's ``overflow:hidden`` silently clips the caption copy.
+    """
+    per_line_capacity = 24.0 / (1.0 + letter_spacing_em)
     widths = [
         sum(
             1.0 if unicodedata.east_asian_width(char) in "WF" else 0.55
@@ -221,13 +259,103 @@ def _caption_font_css(
         for line in text.splitlines()
         if line.strip()
     ] or [1.0]
-    rows = [max(1, math.ceil(width / 24)) for width in widths]
+    rows = [max(1, math.ceil(width / per_line_capacity)) for width in widths]
     per_line = max(width / count for width, count in zip(widths, rows))
     width = box_width if box_width and box_width > 0 else 0.8
     height = box_height if box_height and box_height > 0 else 0.18
     return (
         f"min({4 / height:.3f}vh,{4.5 / width:.3f}vw,"
-        f"{80 / (sum(rows) * 1.35):.3f}vh,{88 / max(1, per_line):.3f}vw)"
+        f"{80 / (sum(rows) * line_height):.3f}vh,{88 / max(1, per_line):.3f}vw)"
+    )
+
+
+def _caption_style_number(
+    style: Mapping[str, Any] | None,
+    key: str,
+    fallback: float,
+    low: float,
+    high: float,
+) -> float:
+    """Read one clamped multiplier out of a user subtitle-style mapping."""
+
+    raw = style.get(key) if isinstance(style, Mapping) else None
+    if raw is None:
+        return fallback
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if math.isnan(value):
+        return fallback
+    return max(low, min(high, value))
+
+
+def _caption_em(value: float) -> str:
+    """Format an em offset the way the historical template wrote it."""
+
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    if text.startswith("0."):
+        text = text[1:]
+    return f"{text}em" if text else "0em"
+
+
+def _caption_shadow_stack(
+    stroke_multiplier: float,
+    glow: bool,
+    colour: str,
+) -> str:
+    """Text shadow layers for one effective stroke weight.
+
+    ``stroke_multiplier == 1.0`` reproduces the historical two-layer
+    shadow byte-for-byte, so nothing changes until a pack or an override
+    actually asks for it.  ``0`` drops the outline entirely (the UI's
+    "描边关闭"), and neon packs stack coloured glow on top.
+    """
+
+    parts: list[str] = []
+    if stroke_multiplier > 0:
+        parts.append(
+            f"0 {_caption_em(0.025 * stroke_multiplier)} "
+            f"{_caption_em(0.05 * stroke_multiplier)} #000d",
+        )
+        parts.append(
+            f"0 {_caption_em(0.04 * stroke_multiplier)} "
+            f"{_caption_em(0.14 * stroke_multiplier)} #000b",
+        )
+    if glow:
+        halo = colour if colour.startswith("#") else "#ffffff"
+        parts.append(f"0 0 .06em {halo}")
+        parts.append(f"0 0 .18em {halo}88")
+        parts.append(f"0 0 .38em {halo}55")
+    return ",".join(parts) if parts else "none"
+
+
+def _caption_entrance_css(
+    entrance: str,
+) -> tuple[str, str]:
+    """``(animation shorthand, keyframes)`` for one caption entrance."""
+
+    if entrance == "pop":
+        return (
+            "capPop .28s cubic-bezier(.34,1.56,.64,1) both",
+            "@keyframes capPop{from{opacity:.6;transform:scale(.88)}"
+            "to{opacity:1;transform:scale(1)}}",
+        )
+    if entrance == "slide":
+        return (
+            "capSlide .3s ease-out both",
+            "@keyframes capSlide{from{opacity:.6;transform:translateY(.45em)}"
+            "to{opacity:1;transform:translateY(0)}}",
+        )
+    if entrance == "type_on":
+        return (
+            "capType .5s linear both",
+            "@keyframes capType{from{opacity:.85;clip-path:inset(0 62% 0 0)}"
+            "to{opacity:1;clip-path:inset(0 0 0 0)}}",
+        )
+    return (
+        "appear .14s linear both",
+        "@keyframes appear{from{opacity:.72}to{opacity:1}}",
     )
 
 
@@ -238,22 +366,110 @@ def render_caption_template(
     emotion: str = "chill",
     box_width: float | None = None,
     box_height: float | None = None,
+    style: Mapping[str, Any] | None = None,
+    typography: Mapping[str, Any] | None = None,
+    entrance: str | None = None,
+    exit: str | None = None,
+    loop: bool | None = None,
 ) -> str:
     """Render plain subtitles, also used when an authored design fails.
 
     Legacy theme/emotion arguments remain accepted without changing the
-    typography. The only motion is a brief opacity fade; glyphs stay still.
+    typography.  ``typography`` (a resolved style pack), ``style`` (the
+    user's colour / font-size / outline overrides) and the ``entrance`` /
+    ``exit`` / ``loop`` triple all default to nothing, so a project that
+    never picked a style emits exactly the document it used to.
     """
+
     del theme, emotion
     safe_text = "<br>".join(escape(line) for line in text.strip().splitlines())
-    font = _caption_font_css(text, box_width, box_height)
+    pack = typography if isinstance(typography, Mapping) else None
+    # The pack's own leading and tracking are layout facts, so they enter the
+    # fit; ``font_scale`` stays a visible multiplier below because a user who
+    # picks 大字 expects bigger glyphs even on a long line.
+    line_height = float(pack.get("lineHeight", 1.35) or 1.35) if pack else 1.35
+    letter_spacing = str(pack.get("letterSpacing") or "") if pack else ""
+    font = _caption_font_css(
+        text,
+        box_width,
+        box_height,
+        line_height=line_height,
+        letter_spacing_em=_caption_em_value(letter_spacing),
+    )
+    font_scale = _caption_style_number(style, "font_scale", 1.0, 0.6, 1.8)
+    if abs(font_scale - 1.0) > 1e-6:
+        font = f"calc({font}*{font_scale:.4f})"
+    colour = (
+        _color(style.get("color"), "#ffffff")
+        if isinstance(style, Mapping) and style.get("color")
+        else "#fff"
+    )
+    pack_stroke = (
+        float(pack.get("strokeScale", 1.0) or 1.0)
+        if pack is not None
+        else 1.0
+    )
+    user_stroke = _caption_style_number(style, "stroke_scale", 1.0, 0.0, 3.0)
+    stroke = max(0.0, pack_stroke * user_stroke)
+    shadow = _caption_shadow_stack(
+        stroke,
+        bool(pack and pack.get("glow")),
+        colour if colour.startswith("#") else "#ffffff",
+    )
+    family = (
+        str(pack.get("fontFamily"))
+        if pack and pack.get("fontFamily")
+        else _LEGACY_CAPTION_FAMILY
+    )
+    weight = int(pack.get("fontWeight", 600) or 600) if pack else 600
+    plate = str(pack.get("plate") or "") if pack else ""
+    plate_radius = str(pack.get("plateRadius") or "0.28em") if pack else ""
+    tilt = float(pack.get("tiltDeg", 0.0) or 0.0) if pack else 0.0
+
+    # The caller resolves the triple (element override -> pack default ->
+    # historical default), so anything unrecognised simply stays legacy.
+    entrance_key = entrance if entrance in CAPTION_ENTRANCES else "soft_fade"
+    exit_key = exit if exit in CAPTION_EXITS else "none"
+    is_loop = bool(loop)
+    animation, keyframes = _caption_entrance_css(entrance_key)
+    if is_loop:
+        # One long iteration carrying several breaths: the capture clamps a
+        # non-looping document at its detected period, so the ambient motion
+        # has to live inside that period and settle back to scale 1.
+        animation += ",capBreath 9.6s ease-in-out .45s infinite"
+        keyframes += (
+            "@keyframes capBreath{0%,100%{transform:scale(1)}"
+            "12%{transform:scale(1.022)}25%{transform:scale(1)}"
+            "37%{transform:scale(1.018)}50%{transform:scale(1)}"
+            "62%{transform:scale(1.022)}75%{transform:scale(1)}"
+            "87%{transform:scale(1.014)}}"
+        )
+    # A plate turns the line box into a pill, so it has to hug the glyphs;
+    # without one the text keeps filling the whole placement box as before.
+    words_layout = (
+        "width:auto;max-width:100%;display:inline-block;"
+        f"padding:.28em .6em;background:{plate};border-radius:{plate_radius};"
+        if plate
+        else "width:100%;"
+    )
+    # Semicolon-leading so an untilted document keeps the historical byte-for-
+    # byte ``.stage`` rule.
+    tilt_css = f";transform:rotate({tilt}deg)" if tilt else ""
+    # The tilt lives on the stage, never on the glyphs: every entrance and the
+    # ambient breath animate ``transform``, which would overwrite a rotate on
+    # the same element for the rest of the caption.
+    spacing_css = (
+        f"letter-spacing:{letter_spacing};"
+        if letter_spacing and letter_spacing != "0em"
+        else ""
+    )
     return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
 html,body{{width:100%;height:100%;margin:0;background:transparent;overflow:hidden}}
 *{{box-sizing:border-box}}
-.stage{{position:absolute;inset:6%;display:flex;align-items:center;justify-content:center}}
-.words{{width:100%;margin:0;color:#fff;font-family:"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;font-size:{font};font-weight:600;line-height:1.35;text-align:center;word-break:normal;overflow-wrap:break-word;line-break:strict;text-shadow:0 .025em .05em #000d,0 .04em .14em #000b;animation:appear .14s linear both}}
-@keyframes appear{{from{{opacity:.72}}to{{opacity:1}}}}
-</style></head><body><div class="stage" data-motion-template-version="{CAPTION_TEMPLATE_VERSION}" data-motion-motif="caption_card" data-caption-style="plain" data-motion-exit="none"><div class="words">{safe_text}</div></div></body></html>"""
+.stage{{position:absolute;inset:6%;display:flex;align-items:center;justify-content:center{tilt_css}}}
+.words{{{words_layout}margin:0;color:{colour};font-family:{family};font-size:{font};font-weight:{weight};line-height:{line_height};{spacing_css}text-align:center;word-break:normal;overflow-wrap:break-word;line-break:strict;text-shadow:{shadow};animation:{animation}}}
+{keyframes}
+</style></head><body><div class="stage" data-motion-template-version="{CAPTION_TEMPLATE_VERSION}" data-motion-motif="caption_card" data-caption-style="plain" data-caption-entrance="{entrance_key}" data-motion-exit="{exit_key}" data-caption-loop="{1 if is_loop else 0}"><div class="words">{safe_text}</div></div></body></html>"""
 
 
 def render_decoration_template(

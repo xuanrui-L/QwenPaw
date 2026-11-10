@@ -11,7 +11,7 @@ import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { renderTimeline } from "@/api/creator";
-import { toggleSubtitles } from "@/api/creator";
+import { setSubtitleStyle, toggleSubtitles } from "@/api/creator";
 import {
   isSubtitleOverlay,
   overlayContentKind,
@@ -33,7 +33,10 @@ import WorkbenchModal from "@/components/workbench/WorkbenchModal";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
 import SaveAsTemplateDialog from "@/components/creator/SaveAsTemplateDialog";
-import type { TimelineElementDocument } from "@/contracts/creator";
+import type {
+  SubtitleStyleUpdateRequest,
+  TimelineElementDocument,
+} from "@/contracts/creator";
 import { useTranslation } from "react-i18next";
 
 function sec(tick: number, ticksPerSecond: number): string {
@@ -108,6 +111,7 @@ export default function PlanPage() {
   const [composeFailed, setComposeFailed] = useState(false);
   const [saveAsTemplateOpen, setSaveAsTemplateOpen] = useState(false);
   const [subtitleToggling, setSubtitleToggling] = useState(false);
+  const [subtitleStyleBusy, setSubtitleStyleBusy] = useState(false);
   const [comparePreviewOpen, setComparePreviewOpen] = useState(true);
   const composeAttemptedGeneration = useRef<number | null>(null);
   const hadPendingReviews = useRef(false);
@@ -230,6 +234,59 @@ export default function PlanPage() {
       }
     },
     [id, timeline, patchProject, pollOnce, t],
+  );
+
+  // A subtitle style pick is one backend call that keeps the setting, the
+  // burned-in caption documents and every 动效描述 in step, so the page only
+  // reports what that sync actually reached.
+  const handleApplySubtitleStyle = useCallback(
+    async (request: SubtitleStyleUpdateRequest) => {
+      setSubtitleStyleBusy(true);
+      try {
+        const result = await setSubtitleStyle(id, request);
+        // A caption whose look was designed independently keeps it: reporting
+        // "updated" for a pick that reached nothing would be the same lie the
+        // style switch was built to remove.
+        const nothingButSkips =
+          result.skippedNonTemplate > 0 &&
+          !result.syncedPrompts &&
+          !result.redrawnDocuments;
+        if (nothingButSkips) {
+          message.warning(
+            t("plan.subtitleStyleSkippedDesign", {
+              count: result.skippedNonTemplate,
+            }),
+          );
+        } else {
+          if (result.syncedPrompts || result.redrawnDocuments) {
+            message.success(
+              t("plan.subtitleStyleSynced", {
+                prompts: result.syncedPrompts,
+                documents: result.redrawnDocuments,
+              }),
+            );
+          }
+          if (result.skippedNonTemplate) {
+            message.warning(
+              t("plan.subtitleStyleSkippedDesign", {
+                count: result.skippedNonTemplate,
+              }),
+            );
+          }
+          message.info(t("plan.subtitleStyleApplied"), 4);
+        }
+        await pollOnce(id);
+      } catch (error) {
+        message.error(
+          t("plan.subtitleStyleFailed", {
+            detail: (error as Error).message,
+          }),
+        );
+      } finally {
+        setSubtitleStyleBusy(false);
+      }
+    },
+    [id, pollOnce, t],
   );
 
   // Any playhead motion (transport keys, scrub, playback, seeks) returns the
@@ -726,6 +783,10 @@ export default function PlanPage() {
       onApply={() => void applyElementDraft()}
       onToggleSubtitleEnabled={(element, enabled) =>
         void handleToggleElementSubtitle(element, enabled)
+      }
+      subtitleStyleBusy={subtitleStyleBusy}
+      onApplySubtitleStyle={(request) =>
+        void handleApplySubtitleStyle(request)
       }
       onDiscard={elementDraft.discard}
       onAcceptConflicts={elementDraft.acceptConflicts}

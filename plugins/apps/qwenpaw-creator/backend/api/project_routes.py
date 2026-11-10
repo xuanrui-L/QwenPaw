@@ -26,12 +26,14 @@ from fastapi import (
     Request,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import Field
 from pydantic import ValidationError as PydanticValidationError
 from starlette.routing import Match
 from starlette.types import Scope
 from starlette.datastructures import UploadFile
 
 from domain.errors import (
+    CasConflictError,
     ConflictError,
     NotFoundError,
     StorageIntegrityError,
@@ -60,7 +62,10 @@ from services.project_files.archive import (
 )
 from services.project_files.edit_impact import apply_frontend_edit_impacts
 from services.project_files.facade import CreatorFileServices
-from services.project_files.json_pointer import escape_pointer_token
+from services.project_files.json_pointer import (
+    JsonCasConflict,
+    escape_pointer_token,
+)
 from services.project_files.assets import AssetFileStore
 from services.project_files.models import (
     ExecutionPreauthorization,
@@ -160,6 +165,8 @@ def _copy_request_hash(source_project_id: str) -> str:
 
 
 def _settings(request: ProjectCreateRequest) -> ProjectSettings:
+    from services.media_files.motion_blueprints import SUBTITLE_TEMPLATE_PACKS
+
     preauthorization = (
         ExecutionPreauthorization.model_validate(
             request.execution_preauthorization.model_dump(mode="python"),
@@ -176,6 +183,12 @@ def _settings(request: ProjectCreateRequest) -> ProjectSettings:
         and get_execution_authorization_mode()
         == EXECUTION_AUTHORIZATION_REQUIRED
     )
+    # Reject an unknown pack on the way in, the same way the style route does.
+    # Persisting one would store a setting that every renderer, prompt and the
+    # UI reads back as "smart recommend" — a fourth state nobody can see.
+    wanted_template = (request.subtitle_template or "").strip()
+    if wanted_template and wanted_template not in SUBTITLE_TEMPLATE_PACKS:
+        raise ValidationError(f"未知的字幕风格包：{wanted_template}")
     return ProjectSettings(
         production_stage=request.production_stage
         or ("script" if script_first else "media"),
@@ -183,7 +196,7 @@ def _settings(request: ProjectCreateRequest) -> ProjectSettings:
         resolution=request.resolution,
         content_type=request.content_type,
         subtitle_policy=request.subtitle_policy or "off",
-        subtitle_template=request.subtitle_template,
+        subtitle_template=wanted_template or None,
         subtitle_style=(
             SubtitleStyle(**request.subtitle_style.model_dump())
             if request.subtitle_style is not None
@@ -675,6 +688,300 @@ async def toggle_subtitles(
         "generation": result.snapshot.generation,
         "toggled": data["count"],
         "enabled": request.enabled,
+    }
+
+
+class SubtitleAnimationPolicy(StrictModel):
+    """Entrance / exit / loop the caption bar must play, ``None`` = keep."""
+
+    entrance: Literal["soft_fade", "pop", "slide", "type_on"] | None = None
+    exit: Literal["none", "soft_fade", "shrink"] | None = None
+    loop: bool | None = None
+
+
+class SubtitleStyleRequest(StrictModel):
+    """One request that changes how subtitles look and keeps copy honest.
+
+    A key that is present wins, so the same call can switch, adjust or go
+    back: ``subtitleTemplate`` ``null``/``""`` mean smart recommend and
+    ``subtitleStyle`` ``null`` (or an all-default object) clears the colour /
+    size / outline overrides.  ``animation`` overrides the pack's signature
+    motion for the addressed captions, field by field.
+    """
+
+    subtitle_template: str | None = Field(None, alias="subtitleTemplate")
+    subtitle_style: SubtitleStylePolicy | None = Field(
+        None,
+        alias="subtitleStyle",
+    )
+    animation: SubtitleAnimationPolicy | None = None
+    element_ids: list[str] | None = Field(
+        None,
+        alias="elementIds",
+        max_length=500,
+    )
+    sync_prompts: bool = Field(True, alias="syncPrompts")
+
+
+@router.patch("/{project_id}/subtitles/style")
+async def set_subtitle_style(
+    project_id: str,
+    request: SubtitleStyleRequest,
+    services: CreatorFileServices = Depends(project_file_services),
+):
+    """Switch the subtitle style pack and keep every layer of it in step.
+
+    Picking a pack used to change only what the creation form remembered:
+    the burned-in captions, the live preview and each subtitle's 动效描述
+    kept describing the old look until a model happened to redesign them.
+    This route writes the setting, redraws the deterministic caption
+    documents it owns and fills the canonical style sentence into empty
+    descriptions — never overwriting wording a user or an agent wrote.
+    """
+
+    from services.media_files.informal_launch_template import (
+        uses_informal_launch_captions,
+    )
+    from services.media_files.motion_blueprints import (
+        SUBTITLE_TEMPLATE_PACKS,
+        subtitle_pack_animation,
+        subtitle_pack_prompt_line,
+        sync_subtitle_prompt,
+    )
+    from services.media_files.motion_design import (
+        build_caption_document,
+        caption_owned_template,
+        design_canvas_size,
+        externalize_motion_document,
+        normalise_caption_animation,
+        resolve_caption_animation,
+        resolve_caption_location,
+    )
+    from services.project_files.models import (
+        IndexedFile,
+        MotionGraphic,
+    )
+
+    def operation() -> dict[str, Any]:
+        snapshot = services.projects.read(project_id)
+        project = snapshot.project
+        settings = project.settings
+        pack_id = settings.subtitle_template
+        # A style pack is a project-wide promise (see the section's own note):
+        # scoping it to some captions would leave the rest describing — and
+        # drawing — the previous look, which is the drift this route removes.
+        if request.element_ids and (
+            "subtitle_template" in request.model_fields_set
+            or "subtitle_style" in request.model_fields_set
+        ):
+            raise ValidationError(
+                "elementIds 只能配合入场/出场/循环选择；"
+                "风格包与覆盖样式始终作用于全项目字幕。",
+            )
+        # A present key is authoritative, so the UI can also go back:
+        # ``null``/``""`` mean smart recommend and an explicit ``null`` style
+        # clears every colour / size / outline override.
+        if "subtitle_template" in request.model_fields_set:
+            wanted = (request.subtitle_template or "").strip()
+            if wanted and wanted not in SUBTITLE_TEMPLATE_PACKS:
+                raise ValidationError(f"未知的字幕风格包：{wanted}")
+            pack_id = wanted or None
+        style_model = settings.subtitle_style
+        if "subtitle_style" in request.model_fields_set:
+            style_model = (
+                SubtitleStyle(**request.subtitle_style.model_dump())
+                if request.subtitle_style is not None
+                else None
+            )
+            if style_model is not None and not (
+                style_model.color
+                or style_model.font_scale is not None
+                or style_model.stroke_scale is not None
+            ):
+                # "No overrides" is stored as no style object at all, so an
+                # untouched project keeps serialising exactly as it did.
+                style_model = None
+        style_json = (
+            style_model.model_dump(mode="json")
+            if style_model is not None
+            else None
+        )
+        candidate = project.model_dump(mode="json")
+        candidate["settings"]["subtitle_template"] = pack_id
+        candidate["settings"]["subtitle_style"] = style_json
+        # Redrawn documents are published as content-addressed Project files
+        # before the commit references them, exactly as the design pass does,
+        # so switching a pack here cannot leave a second copy of the truth.
+        file_store = AssetFileStore(services.projects.project_root(project_id))
+        indexed_files: dict[str, IndexedFile] = {}
+
+        def externalize(document: MotionGraphic) -> dict[str, Any]:
+            stored, indexed = externalize_motion_document(document, file_store)
+            indexed_files[indexed.file_id] = indexed
+            return stored.model_dump(mode="json")
+        timelines = candidate["timelines"]["items"]
+        # The caption boxes are validated against the same canvas the design
+        # pass and the renderer use, so a switch here cannot bake a document
+        # the next pass would refuse to repair.
+        canvas_size = design_canvas_size(project)
+        pointers = ["/settings/subtitle_template", "/settings/subtitle_style"]
+        selected = set(request.element_ids or ())
+        requested_animation = (
+            request.animation.model_dump(exclude_none=True)
+            if request.animation is not None
+            else None
+        )
+        synced = 0
+        redrawn = 0
+        skipped = 0
+        for timeline_id, timeline in project.timelines.items.items():
+            # Rolled-back copies are frozen, and a 发布会 timeline owns its
+            # lettering through the official template: neither is redrawn.
+            if str(timeline_id).startswith("snapshot:"):
+                continue
+            if uses_informal_launch_captions(timeline):
+                continue
+            items = timelines[str(timeline_id)]["elements_by_id"]
+            for element_id, element in timeline.elements_by_id.items():
+                creation = element.creation
+                if not isinstance(creation, OverlayCreation):
+                    continue
+                if not is_subtitle_overlay(
+                    text=creation.text,
+                    vibe=creation.vibe,
+                    caption_role=creation.caption_role,
+                    content_type=settings.content_type,
+                ):
+                    continue
+                if selected and element_id not in selected:
+                    continue
+                raw = items.get(str(element_id))
+                if not isinstance(raw, dict):
+                    continue
+                # The element root is what invalidates the composed master;
+                # a ``/creation/prompt`` pointer would also throw away a
+                # hand-designed document, which a style switch must not do.
+                pointers.append(
+                    "/timelines/items/"
+                    f"{escape_pointer_token(str(timeline_id))}"
+                    "/elements_by_id/"
+                    f"{escape_pointer_token(str(element_id))}",
+                )
+                motion = creation.motion
+                # Only these two kinds of caption can honour a pack in pixels:
+                # the documents this pipeline drew (redrawn below) and a
+                # caption with no document at all (the compose-time fallback
+                # burns the pack typography into it).  A free-form design, a
+                # blueprint 花字 or an authored card owns its own look, so its
+                # description must keep describing that — writing the pack
+                # sentence into it would invent the very mismatch users report.
+                owned = caption_owned_template(motion)
+                if not owned and motion is not None:
+                    if requested_animation:
+                        skipped += 1
+                    continue
+                animation = normalise_caption_animation(
+                    resolve_caption_animation(motion, pack_id)
+                    if owned
+                    else subtitle_pack_animation(pack_id),
+                )
+                if requested_animation:
+                    animation.update(requested_animation)
+                if request.sync_prompts:
+                    prompt, changed = sync_subtitle_prompt(
+                        creation.prompt,
+                        pack_id,
+                        style_json,
+                        animation,
+                    )
+                    if changed and prompt != creation.prompt:
+                        raw["creation"]["prompt"] = prompt
+                        synced += 1
+                if not owned and not requested_animation:
+                    # A caption that never had a document and got no motion
+                    # pick keeps waiting for its design pass; a style switch
+                    # must not quietly preempt a pending free-form design.
+                    continue
+                location = resolve_caption_location(
+                    text=creation.text,
+                    caption_role=creation.caption_role,
+                    content_type=settings.content_type,
+                    vibe=creation.vibe,
+                    location=element.location,
+                    canvas_size=canvas_size,
+                )
+                document, _concept = build_caption_document(
+                    text=creation.text,
+                    location=location,
+                    pack_id=pack_id,
+                    style=style_json,
+                    animation=animation,
+                )
+                payload = externalize(document)
+                if raw["creation"].get("motion") != payload:
+                    raw["creation"]["motion"] = payload
+                    redrawn += 1
+                if raw.get("location") != location.model_dump(mode="json"):
+                    # The document was measured for the box it is being drawn
+                    # into, so the element has to end up with that same box;
+                    # leaving a narrower one behind would clip the copy again.
+                    raw["location"] = location.model_dump(mode="json")
+        files_by_id = candidate["assets"]["files_by_id"]
+        for file_id, indexed in indexed_files.items():
+            if file_id not in files_by_id:
+                files_by_id[file_id] = indexed.model_dump(mode="json")
+        # No ``base`` on purpose: a repeated pick of the same pack still has
+        # to refresh the composed video (see the toolbar toggle for the same
+        # deliberate no-op refresh).
+        candidate, _impact = apply_frontend_edit_impacts(candidate, pointers)
+        return {
+            "candidate": candidate,
+            "snapshot": snapshot,
+            "pack": pack_id,
+            "style": style_json,
+            # The exact sentence the renderer was built from, so the UI can
+            # echo the truth instead of keeping a second copy of the wording.
+            "style_line": subtitle_pack_prompt_line(pack_id, style_json),
+            "synced": synced,
+            "redrawn": redrawn,
+            "skipped": skipped,
+        }
+
+    try:
+        data = await asyncio.to_thread(operation)
+    except ProjectNotFound as exc:
+        raise NotFoundError(str(exc)) from exc
+    except InvalidProjectId as exc:
+        raise BadRequestError(str(exc)) from exc
+    except (ProjectIntegrityError, ProjectStoreError) as exc:
+        raise StorageIntegrityError(str(exc)) from exc
+
+    try:
+        result = await services.commit_candidate(
+            base=data["snapshot"],
+            candidate=data["candidate"],
+            origin="frontend_edit",
+            review_policy="auto_fix",
+        )
+    except JsonCasConflict as exc:
+        # The agent may be editing the same caption; a stale-field collision is
+        # a retryable conflict, never a 500 (same mapping /patch already gives).
+        raise CasConflictError(
+            "Project 字段已被其他写者修改",
+            details={"conflicts": exc.conflicts},
+        ) from exc
+    notify_creator_agent_runtime(project_id)
+    return {
+        "ok": True,
+        "generation": result.snapshot.generation,
+        "subtitleTemplate": data["pack"],
+        "subtitleStyle": data["style"],
+        "styleLine": data["style_line"],
+        "syncedPrompts": data["synced"],
+        "redrawnDocuments": data["redrawn"],
+        # Captions whose look belongs to an independent design: the caller has
+        # to be able to say so instead of reporting a silent success.
+        "skippedNonTemplate": data["skipped"],
     }
 
 
