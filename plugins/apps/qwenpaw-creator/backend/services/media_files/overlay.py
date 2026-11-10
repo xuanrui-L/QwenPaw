@@ -21,7 +21,10 @@ from typing import Any
 # pylint: disable=no-name-in-module
 from utils.logger import setup_logger
 from services.media_files.motion_blueprints import subtitle_pack_typography
-from services.media_files.motion_templates import DEFAULT_CAPTION_LOCATION
+from services.media_files.motion_templates import (
+    DEFAULT_CAPTION_LOCATION,
+    plate_with_opacity,
+)
 
 # pylint: enable=no-name-in-module
 
@@ -257,6 +260,7 @@ def _css_rgba(value: object) -> tuple[int, int, int, int] | None:
 
 def _subtitle_pack_painter(
     pack_id: str | None,
+    style: Mapping[str, Any] | None = None,
 ) -> tuple[float, tuple[int, int, int, int] | None, float]:
     """ ``(stroke multiplier, plate colour, plate radius in em)`` for a pack.
 
@@ -264,7 +268,9 @@ def _subtitle_pack_painter(
     letter-spacing (PIL drives one validated CJK face), but the two
     attributes that change how the bar reads at a glance — outline weight
     and the plate behind the glyphs — are drawn exactly like the HTML
-    template does, so the fallback never contradicts the chosen style.
+    template does, so the fallback never contradicts the chosen style.  The
+    user's background-opacity pick is applied through the same helper the
+    template uses, which is what keeps ``0`` meaning "no plate" in both.
     """
 
     typography = subtitle_pack_typography(pack_id)
@@ -274,7 +280,9 @@ def _subtitle_pack_painter(
         stroke = 1.0
     if not math.isfinite(stroke) or stroke < 0:
         stroke = 1.0
-    plate = _css_rgba(typography.get("plate"))
+    plate = _css_rgba(
+        plate_with_opacity(str(typography.get("plate") or ""), style),
+    )
     radius_em = 0.28
     if plate is not None:
         raw_radius = str(typography.get("plateRadius") or "0.28em")
@@ -305,7 +313,10 @@ def _render_plain_subtitle_png(
     )
     values = _placement_values(location, video_width, video_height)
     color, font_scale, stroke_scale = _subtitle_style_values(style)
-    pack_stroke, plate, plate_radius = _subtitle_pack_painter(subtitle_template)
+    pack_stroke, plate, plate_radius = _subtitle_pack_painter(
+        subtitle_template,
+        style,
+    )
     box_width, box_height = int(values["box_width"]), int(values["box_height"])
     layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)

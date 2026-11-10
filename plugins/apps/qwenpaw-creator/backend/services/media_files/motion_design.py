@@ -1709,6 +1709,28 @@ def resolve_caption_animation(
     return subtitle_pack_animation(pack_id)
 
 
+def caption_animation_for_compose(
+    motion: MotionGraphic | None,
+    pack_id: str | None,
+) -> dict[str, object] | None:
+    """The entrance / exit / loop one overlay line must carry to the worker.
+
+    Only captions whose document this pipeline drew get a triple: the compose
+    worker sees a dumped overlay line without the model, and the last-resort
+    caption template has to burn the pick that caption was designed with
+    instead of dropping back to the pack's signature motion (the field report
+    "the animation setting did nothing" was really this fallback ignoring the
+    pick).  ``None`` means "follow the pack, as before", which keeps an
+    untouched project's render fingerprint byte-identical.
+    """
+
+    if not caption_owned_template(motion):
+        return None
+    return normalise_caption_animation(
+        resolve_caption_animation(motion, pack_id),
+    )
+
+
 def caption_document_is_stale(
     motion: MotionGraphic | None,
     project: Project,

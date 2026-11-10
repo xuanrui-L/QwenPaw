@@ -129,6 +129,11 @@ class SubtitleStyle(StrictModel):
     font_scale: float | None = Field(default=None, ge=0.6, le=1.8)
     # Outline-width multiplier; ``0`` disables the stroke entirely.
     stroke_scale: float | None = Field(default=None, ge=0.0, le=3.0)
+    # Opacity of the pack's plate (the pill behind the glyphs), ``0`` = no
+    # plate.  It re-alpha's the plate the pack already draws and invents none:
+    # a pack without a plate stays plate-free whatever this says, so the value
+    # can never promise a block the renderer will not paint.
+    background_opacity: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class ProjectSettings(StrictModel):

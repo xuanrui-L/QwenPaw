@@ -330,6 +330,54 @@ def _caption_shadow_stack(
     return ",".join(parts) if parts else "none"
 
 
+_PLATE_RGBA = re.compile(r"^rgba\((\d+),(\d+),(\d+),[0-9.]+\)$")
+_PLATE_RGB = re.compile(r"^rgb\((\d+),(\d+),(\d+)\)$")
+
+
+def plate_with_opacity(
+    plate: str,
+    style: Mapping[str, Any] | None,
+) -> str:
+    """Re-alpha one pack plate with the user's background-opacity pick.
+
+    ``None`` keeps the pack's own alpha byte-for-byte and a plate-free pack
+    stays plate-free whatever the value says: the override reshapes the block
+    the pack already draws and never invents one, so no wording can promise a
+    background the pixels do not show.  ``0`` drops the plate entirely.
+    """
+
+    if not plate:
+        return ""
+    raw = (
+        style.get("background_opacity")
+        if isinstance(style, Mapping)
+        else None
+    )
+    # A missing, unreadable or non-finite value all mean the same thing to
+    # this function: nothing was picked, so the pack keeps its own alpha.
+    try:
+        alpha = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        alpha = None
+    if alpha is None or not math.isfinite(alpha):
+        return plate
+    alpha = max(0.0, min(1.0, alpha))
+    if alpha <= 0.0:
+        return ""
+    text = plate.strip()
+    match = _PLATE_RGBA.match(text) or _PLATE_RGB.match(text)
+    if match:
+        red, green, blue = match.group(1, 2, 3)
+    elif _HEX_COLOR.fullmatch(text):
+        digits = text.lstrip("#")
+        red, green, blue = (str(int(digits[i:i + 2], 16)) for i in (0, 2, 4))
+    else:
+        # An unparseable colour stays as the pack wrote it rather than being
+        # guessed at; the browser reads it either way.
+        return plate
+    return f"rgba({red},{green},{blue},{alpha:.3f})"
+
+
 def _caption_entrance_css(
     entrance: str,
 ) -> tuple[str, str]:
@@ -423,6 +471,7 @@ def render_caption_template(
     )
     weight = int(pack.get("fontWeight", 600) or 600) if pack else 600
     plate = str(pack.get("plate") or "") if pack else ""
+    plate = plate_with_opacity(plate, style)
     plate_radius = str(pack.get("plateRadius") or "0.28em") if pack else ""
     tilt = float(pack.get("tiltDeg", 0.0) or 0.0) if pack else 0.0
 
