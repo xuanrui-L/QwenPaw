@@ -1,16 +1,20 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
   MotionGraphicDocument,
   ProjectSettingsDocument,
+  SubtitleStyleUpdateRequest,
 } from "@/contracts/creator";
 import SubtitleStyleSection, {
   captionDocumentOwnedByStyle,
   subtitleAnimationFromDocument,
   subtitleStyleFromSettings,
+  type SubtitleStyleDraft,
 } from "../SubtitleStyleSection";
+import { subtitleStyleBaseFrom } from "../subtitleStyleDraft";
 
 function settings(
   overrides: Partial<ProjectSettingsDocument> = {},
@@ -28,30 +32,51 @@ function settings(
 
 interface SectionProps {
   settings?: Partial<ProjectSettingsDocument>;
-  elementIds?: string[];
-  animation?: Parameters<typeof SubtitleStyleSection>[0]["animation"];
+  /** What the caption document plays today; ``undefined`` = pack default. */
+  animation?: SubtitleStyleDraft["animation"];
   motionOwned?: boolean;
+  elementScoped?: boolean;
   busy?: boolean;
+  /** The bar hides the motion picker unless a test asks for it back. */
+  showMotion?: boolean;
 }
 
+/**
+ * The bar is a controlled draft, so the test needs the owner the detail panel
+ * is: state that the pickers write into.  The bar no longer holds a write
+ * path at all — only the panel's 「应用修改」 sends the diff — so the tests
+ * read the draft and the 「当前生效」 line, never a request.
+ */
 function renderSection(props: SectionProps = {}) {
-  const onApply = vi.fn();
-  render(
-    <SubtitleStyleSection
-      settings={settings(props.settings)}
-      elementIds={props.elementIds}
-      animation={props.animation}
-      motionOwned={props.motionOwned}
-      busy={props.busy}
-      onApply={onApply}
-    />,
+  const live = subtitleStyleBaseFrom(
+    settings(props.settings),
+    props.animation ?? null,
   );
-  return onApply;
-}
+  let latestDraft: SubtitleStyleDraft = live;
 
-/** The last request handed to the endpoint, as the section built it. */
-function lastRequest(onApply: ReturnType<typeof vi.fn>): Record<string, unknown> {
-  return onApply.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+  function Harness() {
+    const [draft, setDraft] = useState<SubtitleStyleDraft>(live);
+    return (
+      <SubtitleStyleSection
+        settings={settings(props.settings)}
+        base={live}
+        draft={draft}
+        onDraftChange={(next) => {
+          latestDraft = next;
+          setDraft(next);
+        }}
+        motionOwned={props.motionOwned}
+        elementScoped={props.elementScoped}
+        busy={props.busy}
+        showMotion={props.showMotion}
+      />
+    );
+  }
+
+  render(<Harness />);
+  return {
+    draft: () => latestDraft,
+  };
 }
 
 describe("SubtitleStyleSection", () => {
@@ -59,7 +84,15 @@ describe("SubtitleStyleSection", () => {
     render(
       <SubtitleStyleSection
         settings={settings({ subtitle_template: "variety_pop" })}
-        onApply={vi.fn()}
+        base={subtitleStyleBaseFrom(
+          settings({ subtitle_template: "variety_pop" }),
+          null,
+        )}
+        draft={subtitleStyleBaseFrom(
+          settings({ subtitle_template: "variety_pop" }),
+          null,
+        )}
+        onDraftChange={vi.fn()}
       />,
     );
     expect(screen.getByText("当前生效：综艺花字")).toBeInTheDocument();
@@ -70,90 +103,125 @@ describe("SubtitleStyleSection", () => {
     expect(screen.getByText("当前生效：智能推荐")).toBeInTheDocument();
   });
 
-  it("sends a pack pick project-wide, even from one caption's detail", async () => {
+  it("keeps a pack pick local instead of rewriting every caption at once", async () => {
     const user = userEvent.setup();
-    const onApply = renderSection({ elementIds: ["cap-1"] });
+    const view = renderSection();
 
-    await user.click(
-      screen.getByRole("button", { name: /综艺花字/ }),
-    );
+    await user.click(screen.getByRole("button", { name: /综艺花字/ }));
 
-    // Scoping a pack to one caption would leave the rest describing the old
-    // look, so the request must carry no element ids at all.
-    expect(lastRequest(onApply)).toEqual({ subtitleTemplate: "variety_pop" });
+    // The old behaviour: one click PATCHed the project, redrew every caption
+    // document and invalidated the composed master. A browse must be free,
+    // and the bar no longer even holds a write path to do it with.
+    expect(view.draft()).toMatchObject({ packId: "variety_pop" });
+    // And the bar still tells the truth about what is playing right now.
+    expect(screen.getByText("当前生效：智能推荐")).toBeInTheDocument();
   });
 
-  it("clears the pack with an explicit null for smart recommend", async () => {
+  it("counts the pending groups so the confirm button can carry them", async () => {
     const user = userEvent.setup();
-    const onApply = renderSection({
-      settings: { subtitle_template: "variety_pop" },
-    });
+    renderSection({ settings: { subtitle_template: "variety_pop" } });
 
-    await user.click(screen.getByRole("button", { name: /智能推荐/ }));
+    expect(screen.queryByText(/字幕风格改动待确认/)).not.toBeInTheDocument();
 
-    expect(lastRequest(onApply)).toEqual({ subtitleTemplate: null });
+    await user.click(screen.getByRole("button", { name: /电影叙事/ }));
+    await user.click(screen.getByLabelText("#FFE066"));
+
+    const pending = await waitFor(() => screen.getByText(/字幕风格改动待确认/));
+    expect(pending.textContent).toContain("2");
   });
 
-  it("keeps a colour override project-wide too", async () => {
+  it("drops the pending count back to nothing when the pick is undone", async () => {
     const user = userEvent.setup();
-    const onApply = renderSection({ elementIds: ["cap-1"] });
+    renderSection({ settings: { subtitle_template: "variety_pop" } });
+
+    await user.click(screen.getByRole("button", { name: /电影叙事/ }));
+    expect(screen.getByText(/字幕风格改动待确认/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /综艺花字/ }));
+    expect(screen.queryByText(/字幕风格改动待确认/)).not.toBeInTheDocument();
+  });
+
+  it("keeps a colour override in the draft too", async () => {
+    const user = userEvent.setup();
+    const view = renderSection();
 
     await user.click(screen.getByLabelText("#FFE066"));
 
-    expect(lastRequest(onApply)).toEqual({
-      subtitleStyle: { color: "#FFE066", fontScale: null, strokeScale: null },
+    expect(view.draft().style).toEqual({
+      color: "#FFE066",
+      fontScale: null,
+      strokeScale: null,
+      backgroundOpacity: null,
     });
   });
 
-  it("addresses only the open caption when the motion changes", async () => {
+  it("holds a motion pick for the confirm button as well", async () => {
     const user = userEvent.setup();
-    const onApply = renderSection({ elementIds: ["cap-1"] });
+    const view = renderSection({ elementScoped: true, showMotion: true });
 
     await user.click(screen.getByText("弹入"));
 
-    expect(lastRequest(onApply)).toEqual({
-      animation: { entrance: "pop" },
-      elementIds: ["cap-1"],
-    });
+    expect(view.draft().animation).toEqual({ entrance: "pop" });
   });
 
-  it("drops the element scope when the bar is not inside a detail view", async () => {
+  it("echoes the draft back into the pills, not the persisted setting", async () => {
     const user = userEvent.setup();
-    const onApply = renderSection();
+    renderSection({
+      settings: {
+        subtitle_template: "cinematic",
+        subtitle_style: { color: "#7DD3FC", font_scale: 1.25, stroke_scale: 0 },
+      },
+      animation: { entrance: "slide", exit: "soft_fade", loop: true },
+      showMotion: true,
+    });
+
+    expect(screen.getByLabelText("#7DD3FC")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByText("滑入")).toHaveAttribute("aria-pressed", "true");
 
     await user.click(screen.getByText("弹入"));
-
-    expect(lastRequest(onApply)).toEqual({ animation: { entrance: "pop" } });
+    expect(screen.getByText("弹入")).toHaveAttribute("aria-pressed", "true");
+    // The pack default hint is gone as soon as a motion is stated.
+    expect(
+      screen.queryByText("未选择时跟随风格包默认动效"),
+    ).not.toBeInTheDocument();
   });
 
   it("tells the user the motion picker only reaches this caption", () => {
-    renderSection({ elementIds: ["cap-1"] });
+    renderSection({ elementScoped: true, showMotion: true });
     expect(
       screen.getByText("动效只改这条字幕；风格包与样式作用于全项目字幕"),
     ).toBeInTheDocument();
   });
 
-  it("re-describes the captions on demand without touching settings", async () => {
-    const user = userEvent.setup();
-    const onApply = renderSection();
-
-    await user.click(screen.getByRole("button", { name: /同步动效描述/ }));
-
-    expect(lastRequest(onApply)).toEqual({ syncPrompts: true });
+  it("offers no button of its own to write the picks", () => {
+    // The 「按所选风格同步动效描述」 button is gone: the panel's 应用修改
+    // already syncs descriptions and redraws documents on every pack or style
+    // switch (the route's syncPrompts defaults to true), so a second button
+    // only differed by demanding no change at all — and two write buttons in
+    // one panel is how a browse stops being free.
+    renderSection();
+    expect(
+      screen.queryByRole("button", { name: /同步动效描述/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /应用修改/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("goes inert while a request is in flight", async () => {
     const user = userEvent.setup();
-    const onApply = renderSection({ busy: true });
+    const view = renderSection({ busy: true, showMotion: true });
 
     await user.click(screen.getByText("弹入"));
-    await user.click(screen.getByRole("button", { name: /同步动效描述/ }));
 
-    expect(onApply).not.toHaveBeenCalled();
+    expect(view.draft().animation).toBeNull();
   });
 
   it("trades the motion picker for an explanation when the design owns the look", () => {
-    renderSection({ motionOwned: false });
+    renderSection({ motionOwned: false, showMotion: true });
 
     expect(
       screen.getByText(
@@ -166,29 +234,48 @@ describe("SubtitleStyleSection", () => {
 
   it("keeps the picker for a caption that has no document yet", () => {
     // compose falls back to the pack there, so the pick does land.
-    renderSection({ motionOwned: true });
+    renderSection({ motionOwned: true, showMotion: true });
     expect(screen.getByText("弹入")).toBeInTheDocument();
   });
 
-  it("echoes the persisted overrides back into the controls", () => {
-    renderSection({
-      settings: {
-        subtitle_template: "cinematic",
-        subtitle_style: { color: "#7DD3FC", font_scale: 1.25, stroke_scale: 0 },
-      },
-      animation: { entrance: "slide", exit: "soft_fade", loop: true },
-    });
+  it("offers no motion picker while the renderer is offline", () => {
+    // The default is the shipped state: an entrance pill the composed master
+    // cannot honour is the "my setting did nothing" report, so the picker
+    // stays out of the bar until someone asks for it back.
+    renderSection();
+    expect(screen.queryByText("字幕动效")).not.toBeInTheDocument();
+    expect(screen.queryByText("弹入")).not.toBeInTheDocument();
+  });
 
-    expect(screen.getByText("当前生效：电影叙事")).toBeInTheDocument();
-    expect(screen.getByLabelText("#7DD3FC")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(screen.getByText("滑入")).toHaveAttribute("aria-pressed", "true");
-    // The pack default hint disappears once the document states a motion.
+  it("keeps the motion sentences out of the bar too", () => {
+    // Sentences about a control the bar no longer offers would leave the user
+    // looking for a picker that was never there.
+    renderSection({ motionOwned: false, elementScoped: true });
     expect(
-      screen.queryByText("未选择时跟随风格包默认动效"),
+      screen.queryByText(
+        "这条字幕的外观由其动效设计决定，风格包不会重写它；入场/出场/循环请在动效设计里调整",
+      ),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("动效只改这条字幕；风格包与样式作用于全项目字幕"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still offers the style controls the motion switch does not cover", () => {
+    renderSection();
+    expect(
+      screen.getByRole("button", { name: /综艺花字/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("#FFE066")).toBeInTheDocument();
+  });
+
+  it("still sends a project-wide pack with no element ids", () => {
+    // The confirm handler builds the requests from the same draft the bar
+    // writes, and the route rejects a pack addressed at single captions.
+    const requests: SubtitleStyleUpdateRequest[] = [
+      { subtitleTemplate: "variety_pop" },
+    ];
+    expect(requests[0]).not.toHaveProperty("elementIds");
   });
 });
 
@@ -197,10 +284,20 @@ describe("subtitleStyleFromSettings", () => {
     expect(
       subtitleStyleFromSettings(
         settings({
-          subtitle_style: { color: null, font_scale: 0.85, stroke_scale: null },
+          subtitle_style: {
+            color: null,
+            font_scale: 0.85,
+            stroke_scale: null,
+            background_opacity: 0.3,
+          },
         }),
       ),
-    ).toEqual({ color: null, fontScale: 0.85, strokeScale: null });
+    ).toEqual({
+      color: null,
+      fontScale: 0.85,
+      strokeScale: null,
+      backgroundOpacity: 0.3,
+    });
   });
 
   it("reports null for a project that never overrode anything", () => {
@@ -250,7 +347,8 @@ describe("subtitleAnimationFromDocument", () => {
         caption({
           entrance: "slide",
           exit: "soft_fade",
-          design_notes: "caption_style=variety_pop|None caption_animation=slide/soft_fade/1",
+          design_notes:
+            "caption_style=variety_pop|None caption_animation=slide/soft_fade/1",
         }),
       ),
     ).toEqual({ entrance: "slide", exit: "soft_fade", loop: true });
@@ -277,12 +375,18 @@ describe("subtitleAnimationFromDocument", () => {
   it("stays quiet about documents the caption bar does not own", () => {
     expect(
       subtitleAnimationFromDocument(
-        caption({ motif: "custom", design_notes: "caption_animation=pop/none/0" }),
+        caption({
+          motif: "custom",
+          design_notes: "caption_animation=pop/none/0",
+        }),
       ),
     ).toBeNull();
     expect(
       subtitleAnimationFromDocument(
-        caption({ format: "html_js", design_notes: "caption_animation=pop/none/0" }),
+        caption({
+          format: "html_js",
+          design_notes: "caption_animation=pop/none/0",
+        }),
       ),
     ).toBeNull();
   });

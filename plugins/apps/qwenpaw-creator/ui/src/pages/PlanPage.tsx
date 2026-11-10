@@ -236,40 +236,46 @@ export default function PlanPage() {
     [id, timeline, patchProject, pollOnce, t],
   );
 
-  // A subtitle style pick is one backend call that keeps the setting, the
-  // burned-in caption documents and every 动效描述 in step, so the page only
-  // reports what that sync actually reached.
+  // One confirmed pick may be two backend calls (the project-wide pack and
+  // overrides, then this caption's motion), and each of them keeps the
+  // setting, the burned-in caption documents and every 动效描述 in step, so
+  // the page reports what the whole batch actually reached.
   const handleApplySubtitleStyle = useCallback(
-    async (request: SubtitleStyleUpdateRequest) => {
+    async (requests: SubtitleStyleUpdateRequest[]) => {
+      if (!requests.length) return;
       setSubtitleStyleBusy(true);
       try {
-        const result = await setSubtitleStyle(id, request);
+        let syncedPrompts = 0;
+        let redrawnDocuments = 0;
+        let skippedNonTemplate = 0;
+        for (const request of requests) {
+          const result = await setSubtitleStyle(id, request);
+          syncedPrompts += result.syncedPrompts;
+          redrawnDocuments += result.redrawnDocuments;
+          skippedNonTemplate += result.skippedNonTemplate;
+        }
         // A caption whose look was designed independently keeps it: reporting
         // "updated" for a pick that reached nothing would be the same lie the
         // style switch was built to remove.
         const nothingButSkips =
-          result.skippedNonTemplate > 0 &&
-          !result.syncedPrompts &&
-          !result.redrawnDocuments;
+          skippedNonTemplate > 0 && !syncedPrompts && !redrawnDocuments;
         if (nothingButSkips) {
           message.warning(
-            t("plan.subtitleStyleSkippedDesign", {
-              count: result.skippedNonTemplate,
-            }),
+            t("plan.subtitleStyleSkippedDesign", { count: skippedNonTemplate }),
           );
         } else {
-          if (result.syncedPrompts || result.redrawnDocuments) {
+          if (syncedPrompts || redrawnDocuments) {
             message.success(
               t("plan.subtitleStyleSynced", {
-                prompts: result.syncedPrompts,
-                documents: result.redrawnDocuments,
+                prompts: syncedPrompts,
+                documents: redrawnDocuments,
               }),
             );
           }
-          if (result.skippedNonTemplate) {
+          if (skippedNonTemplate) {
             message.warning(
               t("plan.subtitleStyleSkippedDesign", {
-                count: result.skippedNonTemplate,
+                count: skippedNonTemplate,
               }),
             );
           }
@@ -780,13 +786,13 @@ export default function PlanPage() {
           if (draft) mutator(draft);
         })
       }
-      onApply={() => void applyElementDraft()}
+      onApply={applyElementDraft}
       onToggleSubtitleEnabled={(element, enabled) =>
         void handleToggleElementSubtitle(element, enabled)
       }
       subtitleStyleBusy={subtitleStyleBusy}
-      onApplySubtitleStyle={(request) =>
-        void handleApplySubtitleStyle(request)
+      onApplySubtitleStyle={(requests) =>
+        void handleApplySubtitleStyle(requests)
       }
       onDiscard={elementDraft.discard}
       onAcceptConflicts={elementDraft.acceptConflicts}

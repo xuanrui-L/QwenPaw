@@ -22,8 +22,7 @@ import {
 } from "./useProjectLaunch";
 import AttachmentChip from "./AttachmentChip";
 import ModelConfigModal from "./ModelConfigModal";
-import SubtitleTemplatePicker from "./SubtitleTemplatePicker";
-import SubtitleStyleControls from "./SubtitleStyleControls";
+import SubtitleSettingsPicker from "./SubtitleSettingsPicker";
 import VideoTemplatePicker from "./VideoTemplatePicker";
 import { useRecreateStore } from "@/store/recreateStore";
 
@@ -120,13 +119,8 @@ export default function HeroComposerCard() {
     },
   } as const;
 
-  // The pill always reads "字幕" and keeps the neutral pill look of its
-  // neighbours; only the leading dot carries the state (green = 自动).
-  const subtitleAuto = subtitlePolicy === "auto";
-  const subtitleHints: Record<string, string> = {
-    auto: t("home.subtitlePolicyAutoHint"),
-    off: t("home.subtitlePolicyOffHint"),
-  };
+  // The subtitle pill is the policy dropdown; picking 自动 opens the window
+  // that holds the style packs and the overrides.
 
   return (
     <div
@@ -392,48 +386,15 @@ export default function HeroComposerCard() {
               className="!h-8 !w-auto min-w-[84px] !rounded-full !bg-[rgba(43,27,0,0.04)] dark:!bg-white/5"
               classNames={pillSelectClassNames}
             />
-            <Tooltip title={t("home.subtitlePolicyTip")}>
-              <Select
-                aria-label={t("home.subtitlePolicy")}
-                size="small"
-                value={subtitlePolicy}
-                onChange={setSubtitlePolicy}
-                options={[
-                  {
-                    value: "auto",
-                    label: t("home.subtitlePolicyAuto"),
-                  },
-                  { value: "off", label: t("home.subtitlePolicyOff") },
-                ]}
-                labelRender={() => (
-                  <span className="inline-flex items-center justify-center gap-1">
-                    <span
-                      aria-hidden
-                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                        subtitleAuto
-                          ? "bg-[var(--color-success)]"
-                          : "bg-[var(--color-text-tertiary)]"
-                      }`}
-                    />
-                    {t("home.subtitlePolicy")}
-                  </span>
-                )}
-                optionRender={(option) => (
-                  <span className="flex flex-col gap-0.5 py-0.5 text-left">
-                    <span className="!text-xs !font-semibold !text-[var(--color-text-primary)]">
-                      {option.data.label}
-                    </span>
-                    <span className="!text-[11px] !font-normal !text-[var(--color-text-tertiary)]">
-                      {subtitleHints[String(option.data.value ?? "")]}
-                    </span>
-                  </span>
-                )}
-                popupMatchSelectWidth={false}
-                variant="borderless"
-                className="!h-8 !w-auto min-w-[80px] !rounded-full !bg-[rgba(43,27,0,0.04)] dark:!bg-white/5"
-                classNames={pillSelectClassNames}
-              />
-            </Tooltip>
+            <SubtitleSettingsPicker
+              policy={subtitlePolicy}
+              onPolicyChange={setSubtitlePolicy}
+              template={subtitleTemplate}
+              onTemplateChange={setSubtitleTemplate}
+              style={subtitleStyle}
+              onStyleChange={setSubtitleStyle}
+              selectClassNames={pillSelectClassNames}
+            />
           </>
         )}
 
@@ -468,24 +429,6 @@ export default function HeroComposerCard() {
           </Tooltip>
         </div>
       </div>
-
-      {subtitleAuto && (
-        <div className="mt-3">
-          <div className="mb-1 text-xs font-semibold text-[var(--color-text-secondary)]">
-            {t("home.subtitleTemplateLabel")}
-          </div>
-          <SubtitleTemplatePicker
-            value={subtitleTemplate}
-            onChange={setSubtitleTemplate}
-          />
-          <div className="mt-3">
-            <SubtitleStyleControls
-              value={subtitleStyle}
-              onChange={setSubtitleStyle}
-            />
-          </div>
-        </div>
-      )}
 
       <ModelConfigModal
         open={modelConfigModalOpen}

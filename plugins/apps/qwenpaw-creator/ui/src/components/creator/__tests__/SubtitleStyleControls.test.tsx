@@ -48,7 +48,36 @@ describe("SubtitleStyleControls", () => {
       color: "#FFE066",
       fontScale: 1.25,
       strokeScale: 0,
+      backgroundOpacity: null,
     });
+  });
+
+  it("keeps the plate opacity beside the other overrides", async () => {
+    const user = userEvent.setup();
+    const emitted: Array<SubtitleStyle | null> = [];
+    render(<Harness onEmit={(style) => emitted.push(style)} />);
+
+    // The row starts on the pack's own alpha, which stores nothing.
+    expect(screen.getByText("跟随风格")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await user.click(screen.getByText("无底板"));
+    expect(emitted.at(-1)).toEqual({
+      color: null,
+      fontScale: null,
+      strokeScale: null,
+      backgroundOpacity: 0,
+    });
+
+    await user.click(screen.getByText("50%"));
+    expect(emitted.at(-1)).toMatchObject({ backgroundOpacity: 0.5 });
+
+    // Going back to 跟随风格 clears the only override, so the whole style
+    // object collapses and an untouched project still persists no style.
+    await user.click(screen.getByText("跟随风格"));
+    expect(emitted.at(-1)).toBeNull();
   });
 
   it("collapses back to null once every override is cleared", async () => {

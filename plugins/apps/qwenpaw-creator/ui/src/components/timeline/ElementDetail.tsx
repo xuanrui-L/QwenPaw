@@ -55,6 +55,12 @@ import SubtitleStyleSection, {
   captionDocumentOwnedByStyle,
   subtitleAnimationFromDocument,
 } from "@/components/creator/SubtitleStyleSection";
+import {
+  subtitleStyleBaseFrom,
+  subtitleStyleDraftDirtyCount,
+  subtitleStyleDraftRequests,
+  type SubtitleStyleDraft,
+} from "@/components/creator/subtitleStyleDraft";
 
 interface ElementDetailProps {
   project: ProjectDocument;
@@ -68,18 +74,21 @@ interface ElementDetailProps {
   frameless?: boolean;
   onClose: () => void;
   onChange: (mutator: (element: TimelineElementDocument) => void) => void;
-  onApply: () => void;
+  /** Persist the element draft; resolves once the write is over. */
+  onApply: () => void | Promise<void>;
   /** Persist a caption show/hide toggle immediately (bypasses the draft). */
   onToggleSubtitleEnabled?: (
     element: TimelineElementDocument,
     enabled: boolean,
   ) => void;
   /**
-   * Switch the subtitle style for this caption right away (bypasses the
-   * draft): the backend keeps the setting, the caption documents and the
-   * 动效描述 in step, which a local draft could only contradict.
+   * Persist the confirmed subtitle style picks. The draft panel owns the
+   * picks, so this arrives as the requests the style endpoint accepts: the
+   * project-wide pack/override call first, then the caption-scoped motion one
+   * (the route refuses to mix them), and each keeps the caption documents and
+   * the 动效描述 in step with the setting it writes.
    */
-  onApplySubtitleStyle?: (request: SubtitleStyleUpdateRequest) => void;
+  onApplySubtitleStyle?: (requests: SubtitleStyleUpdateRequest[]) => void;
   subtitleStyleBusy?: boolean;
   onDiscard: () => void;
   onAcceptConflicts: () => void;
@@ -369,6 +378,10 @@ export default function ElementDetail({
 }: ElementDetailProps) {
   const { t } = useTranslation();
   const [narrationBusy, setNarrationBusy] = useState(false);
+  // A subtitle style pick stays local until the 应用修改 button above agrees
+  // to send it; ``null`` means "nothing picked yet, show what is in effect".
+  const [subtitleStyleDraft, setSubtitleStyleDraft] =
+    useState<SubtitleStyleDraft | null>(null);
   const refreshNarrationTasks = useCreatorTaskViewStore(
     (state) => state.refresh,
   );
@@ -411,6 +424,10 @@ export default function ElementDetail({
     useState<R2VReferenceOrderResponse | null>(null);
   const overviewElementId = element?.element_id ?? null;
   const overviewIsR2v = element?.creation.type === "r2v";
+  useEffect(() => {
+    // Never carry one caption's unfinished style picks into another.
+    setSubtitleStyleDraft(null);
+  }, [overviewElementId]);
   useEffect(() => {
     if (!overviewElementId || !overviewIsR2v) {
       setReferenceOrder(null);
@@ -475,6 +492,46 @@ export default function ElementDetail({
   const showsTimeLayerEditors =
     creation.type !== "overlay" ||
     !isCaptionSubtitle(creation, project.settings.content_type);
+  // ── 字幕风格：本地草稿与当前生效的差异，确认后才写回后端 ──
+  const captionCreation =
+    creation.type === "overlay" &&
+    isCaptionSubtitle(creation, project.settings.content_type)
+      ? creation
+      : null;
+  const subtitleStyleHosted =
+    Boolean(captionCreation) && Boolean(onApplySubtitleStyle);
+  const subtitleStyleBase = subtitleStyleBaseFrom(
+    project.settings,
+    subtitleAnimationFromDocument(captionCreation?.motion),
+  );
+  const subtitleStylePicked = subtitleStyleDraft ?? subtitleStyleBase;
+  const subtitleStylePendingCount = subtitleStyleHosted
+    ? subtitleStyleDraftDirtyCount(subtitleStylePicked, subtitleStyleBase)
+    : 0;
+  const subtitleStyleRequests = subtitleStyleHosted
+    ? subtitleStyleDraftRequests(subtitleStylePicked, subtitleStyleBase, [
+        element.element_id,
+      ])
+    : [];
+  // A caption whose look belongs to its own motion design has nothing here for
+  // the pack motion to move, so the bar explains that instead of offering a
+  // picker the route would refuse.
+  const subtitleMotionOwned =
+    !captionCreation?.motion ||
+    captionDocumentOwnedByStyle(captionCreation.motion);
+  const pendingCount = dirtyCount + subtitleStylePendingCount;
+  const applyAllChanges = async () => {
+    // The element draft and the style picks are two writes on one document,
+    // so they go one after the other rather than racing the project CAS.
+    await onApply();
+    if (subtitleStyleRequests.length) {
+      onApplySubtitleStyle?.(subtitleStyleRequests);
+    }
+  };
+  const discardAllChanges = () => {
+    setSubtitleStyleDraft(null);
+    onDiscard();
+  };
   const spanStart = sec(element.span.start_tick, timeline.ticks_per_second);
   const spanEnd = sec(
     element.span.start_tick + element.span.duration_tick,
@@ -585,12 +642,12 @@ export default function ElementDetail({
               data-element-detail-header-actions
               className="flex shrink-0 flex-wrap items-center justify-end gap-1.5"
             >
-              {dirtyCount > 0 && (
+              {pendingCount > 0 && (
                 <>
                   <Button
                     size="small"
-                    disabled={applying}
-                    onClick={onDiscard}
+                    disabled={applying || subtitleStyleBusy}
+                    onClick={discardAllChanges}
                     className="!h-[22px] !px-2 !font-[inherit] !text-[11px] !font-semibold !leading-[20px]"
                   >
                     {t("elementDetail.discardChanges")}
@@ -598,13 +655,13 @@ export default function ElementDetail({
                   <Button
                     size="small"
                     type="primary"
-                    loading={applying}
+                    loading={applying || subtitleStyleBusy}
                     disabled={conflictPaths.length > 0}
-                    onClick={onApply}
+                    onClick={() => void applyAllChanges()}
                     className="!h-[22px] !px-2 !font-[inherit] !text-[11px] !font-semibold !leading-[20px]"
                   >
                     {t("elementDetail.applyChangesCount", {
-                      count: dirtyCount,
+                      count: pendingCount,
                     })}
                   </Button>
                 </>
@@ -941,6 +998,23 @@ export default function ElementDetail({
             {t("elementDetail.advancedSettings")}
           </summary>
           <div className="space-y-4 pt-3">
+            {/* How a subtitle looks is the first thing its editor is about, so
+                the style bar leads the advanced form and timing, layer and
+                wording follow.  A pick only lands in the local draft: the
+                应用修改 button at the top is what writes it back and asks for
+                a recompose, so browsing the options can never redraw every
+                caption on its own. */}
+            {captionCreation && subtitleStyleHosted && (
+              <SubtitleStyleSection
+                settings={project.settings}
+                base={subtitleStyleBase}
+                draft={subtitleStylePicked}
+                onDraftChange={setSubtitleStyleDraft}
+                motionOwned={subtitleMotionOwned}
+                elementScoped
+                busy={subtitleStyleBusy || applying}
+              />
+            )}
             <section className="rounded-xl border border-[var(--color-border)] p-3">
               {!showsTimeLayerEditors && (
                 <>
@@ -1232,28 +1306,8 @@ export default function ElementDetail({
                         })
                       }
                     />
-                    {/* A subtitle's look is a project-wide choice, so the
-                        style bar writes through the style endpoint instead of
-                        the element draft.  Only captions addressed by id get
-                        redrawn; the wording below stays exactly as written.
-                        A caption that already has a document of its own
-                        design keeps that design, so it gets no motion picker. */}
-                    {onApplySubtitleStyle &&
-                      isCaptionSubtitle(creation, project.settings.content_type) && (
-                        <SubtitleStyleSection
-                          settings={project.settings}
-                          elementIds={[element.element_id]}
-                          animation={subtitleAnimationFromDocument(
-                            creation.motion,
-                          )}
-                          motionOwned={
-                            !creation.motion ||
-                            captionDocumentOwnedByStyle(creation.motion)
-                          }
-                          busy={subtitleStyleBusy || applying}
-                          onApply={onApplySubtitleStyle}
-                        />
-                      )}
+                    {/* The subtitle style bar lives at the top of 更多设置 and
+                        the 动效描述 field above stays exactly as written. */}
                   </div>
                 )}
                 {creation.type === "transition" && (

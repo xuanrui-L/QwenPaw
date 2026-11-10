@@ -11,6 +11,7 @@ export interface SubtitleStyleDocument extends ProjectJsonRecord {
   color?: string | null;
   font_scale?: number | null;
   stroke_scale?: number | null;
+  background_opacity?: number | null;
 }
 
 export interface ProjectSettingsDocument extends ProjectJsonRecord {
