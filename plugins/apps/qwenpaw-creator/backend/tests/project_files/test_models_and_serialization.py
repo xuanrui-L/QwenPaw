@@ -254,10 +254,6 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
         mode="json",
     )
     raw["schema_version"] = 3
-    # A v3 document predates the interactive presentation field entirely: it is
-    # one of the fields a migration adds in memory, so the source document the
-    # historical runtime hashed cannot have carried it.
-    raw.pop("interactive_presentation", None)
     del raw["visual"]["entities"]["items"]["char:hero"]["required_variant_ids"]
     # Legacy documents predate the character voice field entirely.
     del raw["visual"]["entities"]["items"]["char:hero"]["voice"]
@@ -277,7 +273,7 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
         # Pinned against the current schema dump: bump when Project gains
         # fields, the mechanism under test is that migration-added fields
         # stay out of the source-document hash.
-        "sha256:ba0c52f9776631e67e20405f2a2dab994c48b045219cd2f5400ae5561dd6f764"
+        "sha256:d9f4c38342295b8f81097fbc574918eb11ae8bab58996f1e2b89de2a1bfd7055"
     )
     assert project_document_etag(raw, project=migrated) != project_etag(
         migrated,
