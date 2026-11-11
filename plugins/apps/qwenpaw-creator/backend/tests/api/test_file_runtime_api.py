@@ -9,6 +9,7 @@ import time
 import pytest
 from fastapi import FastAPI
 
+from api import file_session_routes
 from api.dependencies import creator_error_handler, project_file_services
 from api.file_execution_routes import router as execution_router
 from api.file_session_routes import router as session_router, stream_events
@@ -105,9 +106,21 @@ def test_file_session_message_is_idempotent_and_visible(
 )
 def test_event_stream_replays_pages_and_handles_file_changes(
     tmp_path,
-    caplog,
+    monkeypatch,
     change,
 ):
+    # Uses a lifecycle type, not a streaming delta: the replay filter drops
+    # historical deltas on purpose, and this test is about cursor progress
+    # and fail-closed behaviour when the durable file changes underneath it.
+    # The plugin logger does not propagate to the root logger, so caplog
+    # can never see it; record the warning at its call site instead.
+    notices: list[str] = []
+
+    # pylint: disable-next=unused-argument
+    def record_warning(message, *args, **kwargs):
+        notices.append(message % args if args else str(message))
+
+    monkeypatch.setattr(file_session_routes.logger, "warning", record_warning)
     _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
     store = services.sessions
 
@@ -115,7 +128,7 @@ def test_event_stream_replays_pages_and_handles_file_changes(
         store.append_event(
             "project-1",
             "session-1",
-            event_type="agent.message_delta",
+            event_type="workspace.head_changed",
             actor="agent",
             payload={"value": value},
         )
@@ -162,7 +175,7 @@ def test_event_stream_replays_pages_and_handles_file_changes(
         range(4, 207 if change == "append" else 204),
     )
     if change != "append":
-        assert "Event replay stopped" in caplog.text
+        assert any("Event replay stopped" in line for line in notices)
 
 
 def test_interrupt_is_persisted_before_process_local_cancellation(
@@ -456,6 +469,7 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
         started = asyncio.Event()
         release = asyncio.Event()
         calls: list[tuple[str, str]] = []
+        prechecks: list[dict] = []
 
         async def fake_execute(
             _services,
@@ -478,7 +492,7 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
         )
         monkeypatch.setattr(
             "services.media_files.local_execution.validate_local_media_execution",
-            lambda *_args, **_kwargs: None,
+            lambda _services, **kwargs: prechecks.append(kwargs),
         )
 
         first = await client.post(
@@ -492,9 +506,9 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
         )
         release.set()
         await asyncio.sleep(0)
-        return first, second, calls
+        return first, second, calls, prechecks
 
-    first, second, calls = run_scenario(app, scenario)
+    first, second, calls, prechecks = run_scenario(app, scenario)
     assert first.status_code == 202
     assert first.json()["taskId"] == "task-compose-1"
     assert first.json()["replayed"] is False
@@ -502,6 +516,12 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
     assert second.json()["taskId"] == "task-compose-1"
     assert second.json()["replayed"] is True
     assert calls == [("project-1", "timeline:timeline:main")]
+    # The precheck must not enforce the scene gate: stale locks are
+    # repaired by the auto-rereview inside the dispatch it precedes.
+    assert prechecks
+    assert all(
+        precheck["enforce_scene_gate"] is False for precheck in prechecks
+    )
 
 
 def test_file_execution_authorization_can_be_polled_and_approved(
@@ -1051,3 +1071,58 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
         assert executions.list_tasks("project-1") == []
 
     run_scenario(app, scenario)
+
+
+def test_sse_replay_drops_historical_deltas_and_keeps_lifecycle(tmp_path):
+    """The replay exists to rebuild lifecycle state (CR #7), but streaming
+    deltas inside it are discarded by the client by design. The endpoint must
+    stop shipping the noise without ever losing a lifecycle event."""
+    _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
+    store = services.sessions
+    for event_type, payload in (
+        ("agent.run.started", {"runId": "run-1"}),
+        ("agent.message_delta", {"runId": "run-1", "delta": "x"}),
+        ("subagent.message_delta", {"runId": "run-1", "delta": "y"}),
+        ("message.completed", {"runId": "run-1", "text": "xy"}),
+        ("agent.tool_completed", {"runId": "run-1", "toolCallId": "c-1"}),
+    ):
+        store.append_event(
+            "project-1",
+            "session-1",
+            event_type=event_type,
+            actor="agent",
+            payload=payload,
+        )
+
+    class Connection:
+        polls = 0
+
+        async def is_disconnected(self):
+            self.polls += 1
+            return self.polls > 2
+
+    async def scenario():
+        response = await stream_events(
+            "project-1",
+            Connection(),
+            after=0,
+            last_event_id=None,
+            services=services,
+        )
+        types, seqs = [], []
+        async for chunk in response.body_iterator:
+            for line in chunk.splitlines():
+                if line.startswith("event: "):
+                    types.append(line[len("event: ") :])
+                elif line.startswith("id: "):
+                    seqs.append(int(line[len("id: ") :]))
+        return types, seqs
+
+    types, seqs = asyncio.run(scenario())
+    assert types == [
+        "agent.run.started",
+        "message.completed",
+        "agent.tool_completed",
+    ]
+    # Gaps are expected and safe: the client cursor compares with `>`.
+    assert seqs == [1, 4, 5]

@@ -201,7 +201,10 @@ describe("ProjectLayout visible shell", () => {
           else rejectRequest(new Error("temporary failure"));
           await pending.catch(() => undefined);
         });
-        await act(() => vi.advanceTimersByTimeAsync(2_000));
+        // The cadence now follows activity (5 s while nothing is pending), so
+        // this waits past the idle interval. What is under test is that a slow
+        // request never piles up and polling continues once it lands.
+        await act(() => vi.advanceTimersByTimeAsync(6_000));
         expect(load).toHaveBeenCalledTimes(2);
       } finally {
         vi.useRealTimers();

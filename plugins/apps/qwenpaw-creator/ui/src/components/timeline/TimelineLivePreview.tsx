@@ -34,6 +34,11 @@ import { PetOsBubble } from "@/components/timeline/OverlayCopyLayer";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 
+/** How often the rAF clock publishes a tick to React. */
+export const PLAYHEAD_COMMIT_MS = 200;
+/** CSS variable the track playhead reads its fraction from. */
+export const PLAYHEAD_FRACTION_VARIABLE = "--creator-playhead-frac";
+
 interface TimelineLivePreviewProps {
   project: ProjectDocument;
   timeline: TimelineDocument;
@@ -568,6 +573,7 @@ export default function TimelineLivePreview({
   );
   const clock = useRef<{ baseTick: number; baseTime: number } | null>(null);
   const lastEmittedTick = useRef(playheadTick);
+  const committedTick = useRef(playheadTick);
   const lastCorrectionSeekAt = useRef(new Map<string, number>());
   const stageRef = useRef<HTMLDivElement>(null);
   const [stageWidth, setStageWidth] = useState(1280);
@@ -641,6 +647,7 @@ export default function TimelineLivePreview({
       return;
     }
     let frame = 0;
+    let lastCommit = 0;
     const step = (now: number) => {
       if (!clock.current) {
         clock.current = { baseTick: lastEmittedTick.current, baseTime: now };
@@ -651,12 +658,30 @@ export default function TimelineLivePreview({
       );
       if (tick >= durationTick) {
         lastEmittedTick.current = durationTick;
+        committedTick.current = durationTick;
+        document.documentElement.style.setProperty(
+          PLAYHEAD_FRACTION_VARIABLE,
+          "1.000000",
+        );
         onPlayheadChange(durationTick);
         onPlayingChange(false);
         return;
       }
       lastEmittedTick.current = tick;
-      onPlayheadChange(tick);
+      // Frame position goes straight onto a CSS custom property; only a
+      // throttled tick reaches React. setState at 60 fps re-rendered the whole
+      // track tree every frame (measured: ~5 DOM mutation batches per
+      // pointermove, frame time 16.7 ms -> 33.4 ms), while the compositor can
+      // move one element for free.
+      document.documentElement.style.setProperty(
+        PLAYHEAD_FRACTION_VARIABLE,
+        (durationTick ? tick / durationTick : 0).toFixed(6),
+      );
+      if (now - lastCommit >= PLAYHEAD_COMMIT_MS) {
+        lastCommit = now;
+        committedTick.current = tick;
+        onPlayheadChange(tick);
+      }
       frame = requestAnimationFrame(step);
     };
     frame = requestAnimationFrame(step);
@@ -665,9 +690,13 @@ export default function TimelineLivePreview({
   }, [playing, durationTick, ticksPerSecond]);
 
   // Re-base the clock when an external scrub happens (clicking the timeline or
-  // progress bar).
+  // progress bar). Compared against the last *committed* tick: with a
+  // throttled publish the per-frame tick and the React value legitimately
+  // differ during playback, and re-basing on that difference would rewind the
+  // clock by up to PLAYHEAD_COMMIT_MS every time React caught up.
   useEffect(() => {
-    if (Math.abs(playheadTick - lastEmittedTick.current) <= 1) return;
+    if (Math.abs(playheadTick - committedTick.current) <= 1) return;
+    committedTick.current = playheadTick;
     lastEmittedTick.current = playheadTick;
     clock.current = null;
   }, [playheadTick]);

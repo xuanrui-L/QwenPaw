@@ -22,7 +22,6 @@ import type {
   TimelineSpanDocument,
 } from "@/contracts/creator";
 import { getArtifactVersionMediaUrl } from "@/api/creator";
-import { renderTimeline } from "@/api/creator/tasks";
 import {
   elementsAtTick,
   groupDisplayTracks,
@@ -370,11 +369,11 @@ export default function TimelineCanvas({
       if (response.editImpact?.regenerationRequired) {
         message.success(t("timeline.timingAppliedRegenRequired"));
       } else if (response.editImpact?.renderTimelineIds.length) {
-        message.success(t("timeline.timingAppliedRecomposing"));
-        // Auto-trigger recompose so the final render stays in sync
-        void renderTimeline(project.project_id, timeline.timeline_id).catch(
-          () => undefined,
-        );
+        // Never compose from here, in any mode: this path only runs because
+        // the user just dragged something, and there is no way to tell when
+        // they are done. Delegated runs still auto-compose, but through the
+        // scheduler on the first unattended pass — not on every edit.
+        message.success(t("timeline.timingAppliedComposeWaiting"));
       } else {
         message.success(t("timeline.timingApplied"));
       }

@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Sequence
 from uuid import uuid4
 
+from services.media_files import media_gate
+
 logger = logging.getLogger(__name__)
 
 #: The poster is always landscape, whatever the video's own aspect ratio is.
@@ -329,7 +331,7 @@ def _run_ffmpeg_frame(
             str(output),
         ]
         try:
-            subprocess.run(  # noqa: S603
+            media_gate.run(  # noqa: S603
                 command,
                 capture_output=True,
                 timeout=30,

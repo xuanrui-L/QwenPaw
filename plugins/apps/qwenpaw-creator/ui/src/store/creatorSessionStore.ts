@@ -32,6 +32,9 @@ import {
 
 const conversationRetryIds = new Map<string, string>();
 
+/** Events kept in memory by `ingestEvents`; older ones are dropped. */
+const EVENT_WINDOW = 500;
+
 async function createStableConversation(projectId: string) {
   const requestId =
     conversationRetryIds.get(projectId) ?? newClientId("conversation");
@@ -735,7 +738,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           // backward on demand (scroll-up in AgentDock).
           const page = await listMessages(projectId, activeConversationId, {
             tail: true,
-            limit: 50,
+            limit: 200,
           });
           if (
             bootstrapGeneration !== lifecycleGeneration ||
@@ -1638,12 +1641,19 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               const alreadyDurable = messageId
                 ? messages.some((message) => message.messageId === messageId)
                 : false;
+              // A first view loads the conversation tail as durable messages,
+              // so replayed deltas for those same messages must not build a
+              // streaming bubble on top of them - that duplication was
+              // rendering every recent reply twice.
+              const historicalReplay =
+                current.isReplaying && event.seq <= replayUntilSeq;
               if (
                 messageId &&
                 Number.isInteger(deltaIndex) &&
                 deltaIndex >= 0 &&
                 typeof delta === "string" &&
-                !alreadyDurable
+                !alreadyDurable &&
+                !historicalReplay
               ) {
                 const existing = streamingAssistantMessages[messageId];
                 const target =
@@ -1686,7 +1696,15 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               const alreadyDurable = messageId
                 ? messages.some((message) => message.messageId === messageId)
                 : false;
-              if (messageId && toolCallId && toolName && !alreadyDurable) {
+              const historicalReplay =
+                current.isReplaying && event.seq <= replayUntilSeq;
+              if (
+                messageId &&
+                toolCallId &&
+                toolName &&
+                !alreadyDurable &&
+                !historicalReplay
+              ) {
                 const existing = streamingAssistantMessages[messageId];
                 const currentTool = existing?.toolCall;
                 streamingAssistantMessages = {
@@ -1843,7 +1861,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           if (session && session.lastEventSeq !== lastEventSeq)
             session = { ...session, lastEventSeq };
           const combinedEvents = [...current.events, ...accepted];
-          const recentStart = Math.max(0, combinedEvents.length - 500);
+          const recentStart = Math.max(0, combinedEvents.length - EVENT_WINDOW);
           // A superseded run may have no tool-result message. Preserve its
           // authoritative end event after high-volume streaming deltas leave
           // the recent window, including when rebuilding from durable SSE.

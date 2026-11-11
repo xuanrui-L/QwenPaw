@@ -73,6 +73,10 @@ from .models import CURRENT_PROJECT_SCHEMA_VERSION, Project
 from .serialization import project_etag
 from .review_bookkeeping import is_human_review_change
 from .store import ProjectSnapshot, ProjectStore
+from .transaction_index import (
+    plan_transaction_scan,
+    record_transaction_scan,
+)
 
 logger = logging.getLogger("qwenpaw.creator.project_files.commit")
 
@@ -425,8 +429,9 @@ class ProjectCommitBoundary:
         ) = None,
         production_stage_confirmation: str | None = None,
         prompt_sync_expected_etag: str | None = None,
-        prompt_sync_context_validator: Callable[[dict[str, Any]], None]
-        | None = None,
+        prompt_sync_context_validator: (
+            Callable[[dict[str, Any]], None] | None
+        ) = None,
         _order_lock_held: bool = False,
         _lifecycle_lock_held: bool = False,
     ) -> ProjectCommitResult:
@@ -669,14 +674,18 @@ class ProjectCommitBoundary:
                 ):
                     from domain.errors import ConflictError
 
-                    raise ConflictError("剧本已更新，请查看最新内容后重新确认。")
+                    raise ConflictError(
+                        "剧本已更新，请查看最新内容后重新确认。",
+                    )
                 if (
                     prompt_sync_expected_etag is not None
                     and latest.etag != prompt_sync_expected_etag
                 ):
                     from domain.errors import ConflictError
 
-                    raise ConflictError("项目在保存同步结果时已更新，请按最新内容重新生成")
+                    raise ConflictError(
+                        "项目在保存同步结果时已更新，请按最新内容重新生成",
+                    )
                 latest_doc = _snapshot_document(latest)
                 latest_data = _json(latest.project)
                 if prompt_sync_context_validator is not None:
@@ -1155,19 +1164,21 @@ class ProjectCommitBoundary:
         current_transaction_id: str,
         authority_etag: str,
     ) -> None:
+        # Reading every transaction journal made this grow with project history
+        # (72 ms at 242 transactions, on the path of every agent patch).  The
+        # index caches which journals are known to be non-terminal; a disagreeing
+        # listing falls back to the full scan below, so a stale cache can only
+        # cost time, never miss a transaction that needs recovery.
         transactions_root = runtime_root / "transactions"
         if not transactions_root.is_dir():
             return
-        for entry in sorted(
-            transactions_root.iterdir(),
-            key=lambda item: item.name,
-        ):
-            if (
-                entry.name.startswith(".")
-                or entry.name == current_transaction_id
-                or not entry.is_dir()
-            ):
-                continue
+        plan = plan_transaction_scan(
+            transactions_root,
+            current_transaction_id=current_transaction_id,
+        )
+        observed_states: dict[str, str] = {}
+        for name in plan.read_ids:
+            entry = transactions_root / name
             journal_store = AtomicJsonRecordStore(
                 entry / "journal.json",
                 ProjectCommitJournal,
@@ -1175,8 +1186,9 @@ class ProjectCommitBoundary:
             journal = journal_store.read_or_none()
             if journal is None:
                 raise PendingProjectRecoveryError(
-                    f"Runtime transaction has no journal: {entry.name}",
+                    f"Runtime transaction has no journal: {name}",
                 )
+            observed_states[name] = journal.state.value
             if journal.state is CommitJournalState.PROJECT_REPLACED:
                 # If final_etag doesn't match current authority_etag, the
                 # project
@@ -1198,6 +1210,7 @@ class ProjectCommitBoundary:
                         },
                     )
                     journal_store.write(aborted_journal)
+                    observed_states[name] = CommitJournalState.ABORTED.value
                     continue
                 raise PendingProjectRecoveryError(
                     f"Project transaction requires recovery: {journal.transaction_id}",
@@ -1214,6 +1227,22 @@ class ProjectCommitBoundary:
                     f"Prepared Project publication requires recovery: "
                     f"{journal.transaction_id}",
                 )
+        record_transaction_scan(transactions_root, plan, observed_states)
+        # A container that is never restarted never ran the startup sweep,
+        # so commit history asks for its own collection once it outgrows the
+        # threshold. This runs before the current transaction exists, which is
+        # what keeps the sweep off the committing thread's critical path.
+        #
+        # Imported here rather than at module level on purpose:
+        # transaction_gc reaches services.media_files, whose package init
+        # reaches this module back through project_files.facade -- a module
+        # level edge here closes that cycle and breaks plugin installation.
+        from .transaction_gc import request_project_sweep
+
+        request_project_sweep(
+            runtime_root.parent,
+            directory_count=plan.directory_count,
+        )
 
     def _finalize_no_change(
         self,
@@ -1532,9 +1561,11 @@ class ProjectCommitBoundary:
                     if live_hash != operation.after_hash:
                         operation = operation.model_copy(
                             update={
-                                "after": None
-                                if live_value is MISSING
-                                else live_value,
+                                "after": (
+                                    None
+                                    if live_value is MISSING
+                                    else live_value
+                                ),
                                 "after_hash": live_hash,
                             },
                         )

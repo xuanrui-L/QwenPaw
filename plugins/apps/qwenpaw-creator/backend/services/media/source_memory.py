@@ -49,6 +49,7 @@ from schemas.assets import (
     SourceModelRunRef,
 )
 from schemas.common import StrictModel
+from services.media_files import media_gate
 from services.media.source_observation import (
     clip_segment_for_transport_sync,
     clip_segment_hq_sync,
@@ -56,6 +57,7 @@ from services.media.source_observation import (
     clip_segment_within_budget_sync,
     clip_size_budget_bytes,
 )
+from services.observability import mem_probe
 from services.runtime_files.atomic_store import atomic_replace_path
 from services.runtime_files.errors import RecordNotFoundError
 from services.runtime_files.execution_models import (
@@ -512,7 +514,7 @@ def _seek_jpeg(
         "pipe:1",
     ]
     try:
-        proc = subprocess.run(  # nosec B603
+        proc = media_gate.run(  # nosec B603
             command,
             capture_output=True,
             timeout=timeout,
@@ -551,6 +553,13 @@ def _detect_segments_sync(
             timeout=30,
         )
 
+    mem_probe.budget(
+        "source_memory.frame_workers",
+        active=FRAME_WORKERS,
+        limit=FRAME_WORKERS,
+        timestamps=len(timestamps),
+        window_s=round(end_sec - start_sec),
+    )
     with ThreadPoolExecutor(max_workers=FRAME_WORKERS) as pool:
         results = list(pool.map(_extract, timestamps))
 
@@ -561,6 +570,23 @@ def _detect_segments_sync(
         hls = decode_jpeg_to_hls(data)
         if hls is not None:
             hls_frames.append((ts, hls))
+    array_bytes = mem_probe.held_bytes(hls for _, hls in hls_frames)
+    mem_probe.gauge(
+        "source_memory.detection_frames",
+        "array_mb",
+        round(array_bytes / 1048576.0, 1),
+        requested=len(timestamps),
+        decoded=len(hls_frames),
+        jpeg_mb=round(
+            mem_probe.held_bytes(data for _, data in results if data)
+            / 1048576.0,
+            1,
+        ),
+        per_frame_kb=round(array_bytes / 1024.0 / max(1, len(hls_frames)), 1),
+        frame_shape=str(
+            hls_frames[0][1].shape if hls_frames else "no-frame",
+        ),
+    )
     logger.info(
         "source memory P1: %d/%d detection frames decoded "
         "(range %.0f-%.0fs)",
@@ -2023,6 +2049,11 @@ class SourceMemoryService:
                 embeddings_path,
             )
             self._toolkits[key] = (mtime, toolkit)
+            mem_probe.gauge(
+                "source_memory.toolkit_cache",
+                "entries",
+                len(self._toolkits),
+            )
             return toolkit
 
     async def _merged_toolkit_for(
@@ -2079,6 +2110,11 @@ class SourceMemoryService:
                 fingerprint,
                 toolkit,
                 prefix_assets,
+            )
+            mem_probe.gauge(
+                "source_memory.merged_toolkit_cache",
+                "entries",
+                len(self._merged_toolkits),
             )
             return toolkit, prefix_assets
 

@@ -44,13 +44,15 @@ def test_export_waits_for_inflight_work(tmp_path, monkeypatch, state):
     )
     # Assembly/content validity is exercised by the bundle suite. This
     # probe checks the admission boundary even when old content is valid.
+    sentinel = object()
     monkeypatch.setattr(
         routes,
-        "assemble_interactive_bundle",
-        lambda *_args, **_kwargs: b"approved-content",
+        "plan_interactive_bundle",
+        lambda *_args, **_kwargs: sentinel,
     )
     if state == "idle":
-        assert routes._assemble("bundle", services) == b"approved-content"
+        _project, plan = routes._plan_locked("bundle", services)
+        assert plan is sentinel
     else:
         with pytest.raises(ConflictError, match="generation and media review"):
-            routes._assemble("bundle", services)
+            routes._plan_locked("bundle", services)

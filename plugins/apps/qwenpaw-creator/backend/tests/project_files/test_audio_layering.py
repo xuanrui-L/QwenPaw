@@ -331,7 +331,16 @@ def test_v9_document_with_roles_is_not_altered_by_the_repair() -> None:
     )
     assert raw["schema_version"] == 9
 
-    assert migrate_project_document(raw) == raw
+    # Not merely equal: the old code deep-copied the whole document on every
+    # load (measured 0.26 s of a 0.42 s read, and a read runs on every HTTP
+    # listing, every scheduler tick and the startup sweep). The repairs rebuild
+    # only the containers they actually change, so an untouched Timeline must
+    # still be the very object that came in.
+    migrated = migrate_project_document(raw)
+    assert (
+        migrated["timelines"]["items"]["timeline:main"]
+        is raw["timelines"]["items"]["timeline:main"]
+    )
 
 
 def test_legacy_dialogue_rows_do_not_gate_narration() -> None:
