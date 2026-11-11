@@ -989,6 +989,60 @@ def _font_terms(html: str) -> list[float]:
     ]
 
 
+from services.project_files.models import ProjectSettings, SubtitleAnimation
+
+
+class TestProjectAnimationOverride:
+    """The creation form's default sits between the stamp and the pack."""
+
+    def test_only_set_fields_travel(self) -> None:
+        settings = ProjectSettings(
+            subtitle_animation=SubtitleAnimation(loop=True),
+        )
+        assert motion_design.caption_animation_override(settings) == {
+            "loop": True,
+        }
+        assert (
+            motion_design.caption_animation_override(ProjectSettings())
+            is None
+        )
+
+    def test_override_merges_onto_the_pack_field_by_field(self) -> None:
+        assert motion_design.resolve_caption_animation(
+            None,
+            "variety_pop",
+            {"entrance": "slide"},
+        ) == {**subtitle_pack_animation("variety_pop"), "entrance": "slide"}
+
+    def test_override_reaches_the_pack_switch_path(self) -> None:
+        built, _concept = motion_design.build_caption_document(
+            text="换包也带着项目默认",
+            location=_LOC,
+            pack_id="variety_pop",
+            style=None,
+            animation={"entrance": "type_on", "exit": "none", "loop": False},
+        )
+        assert motion_design.resolve_caption_animation(
+            built,
+            "cinematic",
+            {"loop": True},
+        ) == {**subtitle_pack_animation("cinematic"), "loop": True}
+
+    def test_the_stamp_still_wins_over_the_override(self) -> None:
+        built, _concept = motion_design.build_caption_document(
+            text="逐条选择优先",
+            location=_LOC,
+            pack_id="variety_pop",
+            style=None,
+            animation={"entrance": "slide", "exit": "shrink", "loop": True},
+        )
+        assert motion_design.resolve_caption_animation(
+            built,
+            "variety_pop",
+            {"entrance": "pop"},
+        ) == {"entrance": "slide", "exit": "shrink", "loop": True}
+
+
 class TestCaptionStyleDerivation:
     """The style stamp, never a schema default, decides what a caption plays.
 

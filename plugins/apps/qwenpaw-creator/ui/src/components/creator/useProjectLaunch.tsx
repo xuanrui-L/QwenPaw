@@ -6,6 +6,7 @@ import type {
   CreatorContentPart,
   CreatorScenario,
   ModelConfigData,
+  SubtitleAnimationPolicy,
   SubtitleStyle,
 } from "@/contracts/creator";
 import {
@@ -461,6 +462,10 @@ export function useProjectLaunch(options?: {
   const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle | null>(
     null,
   );
+  // Project-level caption motion default (entrance / exit / loop); null
+  // leaves every decision to the selected style pack.
+  const [subtitleAnimation, setSubtitleAnimation] =
+    useState<SubtitleAnimationPolicy | null>(null);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>(() =>
     (initialValues?.sourceUrls ?? []).map((url) => ({
       kind: "url" as const,
@@ -680,6 +685,7 @@ export function useProjectLaunch(options?: {
         subtitlePolicy,
         subtitleTemplate: subtitleTemplate ?? undefined,
         subtitleStyle: subtitleStyle ?? undefined,
+        subtitleAnimation: subtitleAnimation ?? undefined,
         // With no assets, let Project creation persist the first Goal and
         // message atomically.  This avoids an observable IDLE Project between
         // navigation and the follow-up /messages request.
@@ -780,6 +786,8 @@ export function useProjectLaunch(options?: {
     setSubtitleTemplate,
     subtitleStyle,
     setSubtitleStyle,
+    subtitleAnimation,
+    setSubtitleAnimation,
     attachments,
     addFiles,
     addUrl,

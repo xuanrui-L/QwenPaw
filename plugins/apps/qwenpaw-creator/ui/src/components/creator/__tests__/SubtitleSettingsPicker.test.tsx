@@ -146,4 +146,27 @@ describe("SubtitleSettingsPicker", () => {
     fireEvent.click(screen.getByText("综艺花字"));
     expect(view.onTemplateChange).toHaveBeenCalledWith("variety_pop");
   });
+
+  it("carries a motion pick out of the window", async () => {
+    const view = renderPicker({
+      policy: "auto",
+      onAnimationChange: vi.fn(),
+    });
+    await pickOption("自动");
+    await expectWindow(true);
+    const panel = document.querySelector("[data-subtitle-style-modal]")!;
+    expect(panel.textContent).toContain("字幕动效");
+    fireEvent.click(screen.getByRole("button", { name: "滑入" }));
+    expect(view.onAnimationChange).toHaveBeenCalledWith({
+      entrance: "slide",
+    });
+  });
+
+  it("hides the motion picker when the host cannot persist it", async () => {
+    renderPicker({ policy: "auto" });
+    await pickOption("自动");
+    await expectWindow(true);
+    const panel = document.querySelector("[data-subtitle-style-modal]")!;
+    expect(panel.textContent).not.toContain("字幕动效");
+  });
 });

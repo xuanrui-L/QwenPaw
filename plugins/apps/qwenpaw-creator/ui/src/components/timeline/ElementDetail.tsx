@@ -1012,6 +1012,7 @@ export default function ElementDetail({
                 onDraftChange={setSubtitleStyleDraft}
                 motionOwned={subtitleMotionOwned}
                 elementScoped
+                showMotion
                 busy={subtitleStyleBusy || applying}
               />
             )}

@@ -601,6 +601,49 @@ def test_project_create_persists_the_subtitle_style_overrides(
     }
 
 
+def test_project_create_persists_the_subtitle_animation_default(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """The creation form's entrance / exit / loop ride the create request."""
+
+    async def scenario(client):
+        moved = await client.post(
+            "/projects",
+            json=_create_payload(
+                "motion-slide",
+                "滑入字幕",
+                subtitlePolicy="auto",
+                subtitleAnimation={"entrance": "slide", "loop": True},
+            ),
+        )
+        plain = await client.post(
+            "/projects",
+            json=_create_payload("motion-none", "跟随风格包"),
+        )
+        return moved, plain
+
+    moved, plain = run_scenario(app, scenario)
+
+    def animation(response):
+        project = Project.model_validate_json(
+            (
+                api_runtime_root
+                / response.json()["projectId"]
+                / "project.json"
+            ).read_text(encoding="utf-8"),
+        )
+        return project.settings.subtitle_animation
+
+    assert animation(plain) is None
+    persisted = animation(moved)
+    assert persisted is not None
+    assert persisted.entrance == "slide"
+    assert persisted.exit is None
+    assert persisted.loop is True
+
+
 def _overlay_element(
     element_id: str,
     *,

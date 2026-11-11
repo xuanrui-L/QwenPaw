@@ -1679,9 +1679,38 @@ def caption_owned_template(motion: MotionGraphic | None) -> bool:
     )
 
 
+def caption_animation_override(
+    settings: ProjectSettings,
+) -> dict[str, object] | None:
+    """The project-level entrance / exit / loop default, ``None`` = pack.
+
+    Only the fields the creation form actually set travel: an unset choice
+    keeps following the style pack, field by field, exactly like the
+    per-caption picker leaving a pill unpressed.
+    """
+
+    policy = settings.subtitle_animation
+    if policy is None:
+        return None
+    return policy.model_dump(exclude_none=True) or None
+
+
+def pack_caption_animation(
+    pack_id: str | None,
+    override: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """The pack's signature motion with the project default merged in."""
+
+    animation = subtitle_pack_animation(pack_id)
+    if override:
+        animation.update(override)
+    return animation
+
+
 def resolve_caption_animation(
     motion: MotionGraphic | None,
     pack_id: str | None,
+    override: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Entrance / exit / loop one caption document must be drawn with.
 
@@ -1703,15 +1732,16 @@ def resolve_caption_animation(
         style_state, animation_state = caption_notes_states(motion.design_notes)
         stamped_pack = (style_state or "").split("|", 1)[0]
         if stamped_pack and stamped_pack != (pack_id or "auto"):
-            return subtitle_pack_animation(pack_id)
+            return pack_caption_animation(pack_id, override)
         if animation_state is not None:
             return caption_state_animation(animation_state)
-    return subtitle_pack_animation(pack_id)
+    return pack_caption_animation(pack_id, override)
 
 
 def caption_animation_for_compose(
     motion: MotionGraphic | None,
     pack_id: str | None,
+    override: Mapping[str, object] | None = None,
 ) -> dict[str, object] | None:
     """The entrance / exit / loop one overlay line must carry to the worker.
 
@@ -1727,7 +1757,7 @@ def caption_animation_for_compose(
     if not caption_owned_template(motion):
         return None
     return normalise_caption_animation(
-        resolve_caption_animation(motion, pack_id),
+        resolve_caption_animation(motion, pack_id, override),
     )
 
 
@@ -2263,7 +2293,11 @@ async def design_motion_overlays(
         )
         pack_id, style = _caption_settings_state(project.settings)
         animation = normalise_caption_animation(
-            resolve_caption_animation(creation.motion, pack_id),
+            resolve_caption_animation(
+                creation.motion,
+                pack_id,
+                caption_animation_override(project.settings),
+            ),
         )
         # The style sentence follows the pack even where an agent or the user
         # already wrote a description: ``sync_subtitle_prompt`` replaces only
