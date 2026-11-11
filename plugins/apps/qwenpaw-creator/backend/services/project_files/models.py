@@ -136,6 +136,21 @@ class SubtitleStyle(StrictModel):
     background_opacity: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class SubtitleAnimation(StrictModel):
+    """Project-level entrance / exit / loop default for the caption bar.
+
+    Every field is optional: ``None`` hands that decision to the selected
+    style pack, exactly like the per-caption picker leaving a choice unset.
+    The vocabulary is the renderer's own (``CAPTION_ENTRANCES`` and the
+    ``data-motion-exit`` contract), so a persisted pick can never name a
+    motion the pixels skip.
+    """
+
+    entrance: Literal["soft_fade", "pop", "slide", "type_on"] | None = None
+    exit: Literal["none", "soft_fade", "shrink"] | None = None
+    loop: bool | None = None
+
+
 class ProjectSettings(StrictModel):
     production_stage: Literal["script", "media"] = "media"
     script_approval_fingerprint: Sha256 | None = None
@@ -153,6 +168,10 @@ class ProjectSettings(StrictModel):
     subtitle_template: str | None = None
     # Optional per-project overrides for the standard subtitle bar.
     subtitle_style: SubtitleStyle | None = None
+    # Optional project-level entrance / exit / loop default; captions drawn
+    # later adopt it over their pack's signature motion until a per-caption
+    # pick stamps something else.
+    subtitle_animation: SubtitleAnimation | None = None
     execution_preauthorization: ExecutionPreauthorization | None = None
 
 

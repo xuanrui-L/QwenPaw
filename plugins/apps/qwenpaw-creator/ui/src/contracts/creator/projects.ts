@@ -68,6 +68,8 @@ export interface ProjectCreateRequest {
   subtitleTemplate?: string | null;
   /** Optional overrides for the standard subtitle bar (colour/size/outline). */
   subtitleStyle?: SubtitleStyle | null;
+  /** Optional project-level caption motion default; unset follows the pack. */
+  subtitleAnimation?: SubtitleAnimationPolicy | null;
   /** Optional atomic bootstrap goal persisted in the file Runtime aggregate. */
   initialGoal?: string;
 }

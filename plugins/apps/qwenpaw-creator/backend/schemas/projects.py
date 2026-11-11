@@ -77,6 +77,18 @@ class SubtitleStylePolicy(StrictModel):
     )
 
 
+class SubtitleAnimationPolicy(StrictModel):
+    """Camel-case mirror of ``models.SubtitleAnimation`` for the create API.
+
+    Entrance / exit / loop the project's captions default to; every field
+    optional, ``None`` keeps the style pack's signature motion.
+    """
+
+    entrance: Literal["soft_fade", "pop", "slide", "type_on"] | None = None
+    exit: Literal["none", "soft_fade", "shrink"] | None = None
+    loop: bool | None = None
+
+
 class ProjectCreateRequest(StrictModel):
     production_stage: Literal["script", "media"] | None = Field(
         None,
@@ -98,6 +110,10 @@ class ProjectCreateRequest(StrictModel):
     subtitle_style: SubtitleStylePolicy | None = Field(
         None,
         alias="subtitleStyle",
+    )
+    subtitle_animation: SubtitleAnimationPolicy | None = Field(
+        None,
+        alias="subtitleAnimation",
     )
     execution_preauthorization: ExecutionPreauthorizationPolicy | None = Field(
         None,

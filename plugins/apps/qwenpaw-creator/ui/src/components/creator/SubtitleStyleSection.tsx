@@ -10,8 +10,9 @@ import SubtitleAnimationControls, {
   CAPTION_EXIT_CHOICES,
 } from "./SubtitleAnimationControls";
 import SubtitleStyleControls from "./SubtitleStyleControls";
-import SubtitleTemplatePicker from "./SubtitleTemplatePicker";
-import { SUBTITLE_TEMPLATE_PACKS } from "./SubtitleTemplatePicker";
+import SubtitleTemplatePicker, {
+  subtitlePackNameKey,
+} from "./SubtitleTemplatePicker";
 import {
   subtitleStyleDraftDirtyCount,
   type SubtitleStyleDraft,
@@ -56,12 +57,11 @@ interface SubtitleStyleSectionProps {
   /**
    * Whether the entrance / exit / loop picker is offered at all.
    *
-   * The motion bar is offline for now, and the default says so: where the
-   * caption renderer cannot deliver the frame sequence, a picker that promises
-   * an animation the master never shows is exactly the "my setting did
-   * nothing" report.  Nothing else moves — the draft field, the stamp the
-   * backend reads and the route stay as they are, so bringing the picker back
-   * is one ``showMotion`` at the call site.
+   * The caption renderer delivers the entrance / exit / loop frame sequences,
+   * so the picker is live wherever its pick can land: hosts whose settings
+   * document carries no animation field (the creation modal) still opt out,
+   * because a picker whose pick never persists is exactly the "my setting did
+   * nothing" report.
    */
   showMotion?: boolean;
 }
@@ -130,7 +130,6 @@ export function SubtitleStyleSection({
 }: SubtitleStyleSectionProps) {
   const { t } = useTranslation();
   const packId = settings.subtitle_template ?? null;
-  const pack = SUBTITLE_TEMPLATE_PACKS.find((item) => item.id === packId);
   const pending = subtitleStyleDraftDirtyCount(draft, base);
 
   return (
@@ -145,7 +144,7 @@ export function SubtitleStyleSection({
           </span>
           <span className="text-[11px] text-[var(--color-text-tertiary)]">
             {t("plan.subtitleStyleCurrent", {
-              name: pack ? t(pack.nameKey) : t("plan.subtitleStyleSmart"),
+              name: t(subtitlePackNameKey(packId)),
             })}
           </span>
         </div>
@@ -164,6 +163,7 @@ export function SubtitleStyleSection({
       <SubtitleTemplatePicker
         value={draft.packId}
         onChange={(id) => onDraftChange({ ...draft, packId: id })}
+        style={draft.style}
       />
 
       <SubtitleStyleControls

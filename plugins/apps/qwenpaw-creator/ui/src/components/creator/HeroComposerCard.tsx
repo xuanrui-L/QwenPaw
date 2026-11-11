@@ -70,6 +70,8 @@ export default function HeroComposerCard() {
     setSubtitleTemplate,
     subtitleStyle,
     setSubtitleStyle,
+    subtitleAnimation,
+    setSubtitleAnimation,
     attachments,
     addFiles,
     addUrl,
@@ -393,6 +395,8 @@ export default function HeroComposerCard() {
               onTemplateChange={setSubtitleTemplate}
               style={subtitleStyle}
               onStyleChange={setSubtitleStyle}
+              animation={subtitleAnimation}
+              onAnimationChange={setSubtitleAnimation}
               selectClassNames={pillSelectClassNames}
             />
           </>

@@ -87,6 +87,7 @@ from services.media_files.motion_blueprints import (
 )
 from services.media_files.motion_design import (
     caption_animation_for_compose,
+    caption_animation_override,
 )
 from services.media_files.motion_templates import (
     DEFAULT_CAPTION_LOCATION,
@@ -2824,6 +2825,7 @@ def _edit_overlays(
             else caption_animation_for_compose(
                 motion,
                 project.settings.subtitle_template,
+                caption_animation_override(project.settings),
             )
         )
         result.append(

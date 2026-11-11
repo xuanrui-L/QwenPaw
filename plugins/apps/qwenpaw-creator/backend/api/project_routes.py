@@ -50,6 +50,7 @@ from schemas.projects import (
     ProjectCreateRequest,
     ProjectCreateResponse,
     ProductionStageRequest,
+    SubtitleAnimationPolicy,
     SubtitleStylePolicy,
 )
 from services.file_agent_runtime import (
@@ -72,6 +73,7 @@ from services.project_files.models import (
     OverlayCreation,
     Project,
     ProjectSettings,
+    SubtitleAnimation,
     SubtitleStyle,
     is_subtitle_overlay,
 )
@@ -200,6 +202,11 @@ def _settings(request: ProjectCreateRequest) -> ProjectSettings:
         subtitle_style=(
             SubtitleStyle(**request.subtitle_style.model_dump())
             if request.subtitle_style is not None
+            else None
+        ),
+        subtitle_animation=(
+            SubtitleAnimation(**request.subtitle_animation.model_dump())
+            if request.subtitle_animation is not None
             else None
         ),
         execution_preauthorization=preauthorization,
@@ -691,14 +698,6 @@ async def toggle_subtitles(
     }
 
 
-class SubtitleAnimationPolicy(StrictModel):
-    """Entrance / exit / loop the caption bar must play, ``None`` = keep."""
-
-    entrance: Literal["soft_fade", "pop", "slide", "type_on"] | None = None
-    exit: Literal["none", "soft_fade", "shrink"] | None = None
-    loop: bool | None = None
-
-
 class SubtitleStyleRequest(StrictModel):
     """One request that changes how subtitles look and keeps copy honest.
 
@@ -744,16 +743,17 @@ async def set_subtitle_style(
     )
     from services.media_files.motion_blueprints import (
         SUBTITLE_TEMPLATE_PACKS,
-        subtitle_pack_animation,
         subtitle_pack_prompt_line,
         sync_subtitle_prompt,
     )
     from services.media_files.motion_design import (
         build_caption_document,
+        caption_animation_override,
         caption_owned_template,
         design_canvas_size,
         externalize_motion_document,
         normalise_caption_animation,
+        pack_caption_animation,
         resolve_caption_animation,
         resolve_caption_location,
     )
@@ -881,10 +881,11 @@ async def set_subtitle_style(
                     if requested_animation:
                         skipped += 1
                     continue
+                override = caption_animation_override(settings)
                 animation = normalise_caption_animation(
-                    resolve_caption_animation(motion, pack_id)
+                    resolve_caption_animation(motion, pack_id, override)
                     if owned
-                    else subtitle_pack_animation(pack_id),
+                    else pack_caption_animation(pack_id, override),
                 )
                 if requested_animation:
                     animation.update(requested_animation)

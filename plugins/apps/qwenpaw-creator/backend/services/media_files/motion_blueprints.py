@@ -1405,6 +1405,66 @@ SUBTITLE_TEMPLATE_PACK_ORDER = (
 )
 
 
+def subtitle_pack_preview_specs() -> list[dict[str, object]]:
+    """Preview parameters for the style-window cards, from the pack table.
+
+    The picker cards paint a miniature of the deterministic renderer
+    instead of a decorative glyph: every field below is read straight from
+    ``SUBTITLE_TEMPLATE_PACKS`` (and from the historical default typography
+    for the "smart recommend" card), so card preview, prompt wording and
+    final pixels keep describing one same style.  ``fontFamily`` is
+    re-quoted with single quotes because the UI pastes the string into a
+    ``style`` attribute, where the table's double quotes would terminate
+    the attribute value.
+    """
+
+    def spec(
+        pack_id: str | None,
+        name: str,
+        desc: str,
+        typography: Mapping[str, object],
+        animation: Mapping[str, object],
+    ) -> dict[str, object]:
+        return {
+            "id": pack_id,
+            "name": name,
+            "desc": desc,
+            "fontFamily": str(typography["fontFamily"]).replace('"', "'"),
+            "fontWeight": typography.get("fontWeight", 400),
+            "letterSpacing": typography.get("letterSpacing", "0em"),
+            "lineHeight": typography.get("lineHeight", 1.35),
+            "strokeScale": typography.get("strokeScale", 1.0),
+            "tiltDeg": typography.get("tiltDeg", 0.0),
+            "plate": typography.get("plate", ""),
+            "plateRadius": typography.get("plateRadius", "0.28em"),
+            "glow": bool(typography.get("glow", False)),
+            "entrance": animation.get("entrance", "soft_fade"),
+            "loop": bool(animation.get("loop", False)),
+        }
+
+    specs = [
+        spec(
+            None,
+            "智能推荐",
+            "由 AI 按内容自动选择",
+            DEFAULT_CAPTION_TYPOGRAPHY,
+            DEFAULT_CAPTION_ANIMATION,
+        ),
+    ]
+    for pack_id in SUBTITLE_TEMPLATE_PACK_ORDER:
+        pack = SUBTITLE_TEMPLATE_PACKS[pack_id]
+        specs.append(
+            spec(
+                pack_id,
+                str(pack["name"]),
+                str(pack["description"]),
+                pack["typography"],  # type: ignore[arg-type]
+                pack["animation"],  # type: ignore[arg-type]
+            ),
+        )
+    return specs
+
+
 def subtitle_pack_caption_order(pack_id: str | None) -> tuple[str, ...] | None:
     """Return a pack's preferred caption blueprint order, or ``None``.
 
@@ -2463,6 +2523,7 @@ __all__ = [
     "CAPTION_ANIMATION_MARKER",
     "subtitle_pack_caption_order",
     "subtitle_pack_catalog_text",
+    "subtitle_pack_preview_specs",
     "subtitle_settings_prompt_block",
     "subtitle_style_prompt_block",
     "subtitle_pack_typography",

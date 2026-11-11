@@ -3,7 +3,8 @@ import { useTranslation } from "react-i18next";
 import { Button, Modal, Select, Tooltip } from "antd";
 import type { SelectProps } from "antd";
 
-import type { SubtitleStyle } from "@/contracts/creator";
+import type { SubtitleAnimationPolicy, SubtitleStyle } from "@/contracts/creator";
+import SubtitleAnimationControls from "./SubtitleAnimationControls";
 import SubtitleStyleControls from "./SubtitleStyleControls";
 import SubtitleTemplatePicker from "./SubtitleTemplatePicker";
 
@@ -32,6 +33,13 @@ interface SubtitleSettingsPickerProps {
   onTemplateChange: (id: string | null) => void;
   style: SubtitleStyle | null;
   onStyleChange: (style: SubtitleStyle | null) => void;
+  /**
+   * Project-level entrance / exit / loop default.  The creation request
+   * persists it, so captions drawn later keep the pick; leaving the host
+   * without a change callback hides the picker (a pick that cannot land).
+   */
+  animation?: SubtitleAnimationPolicy | null;
+  onAnimationChange?: (animation: SubtitleAnimationPolicy) => void;
   /** Same dropdown chrome as the resolution and ratio pills beside it. */
   selectClassNames?: SelectProps["classNames"];
 }
@@ -43,6 +51,8 @@ export default function SubtitleSettingsPicker({
   onTemplateChange,
   style,
   onStyleChange,
+  animation = null,
+  onAnimationChange,
   selectClassNames,
 }: SubtitleSettingsPickerProps) {
   const { t } = useTranslation();
@@ -131,11 +141,21 @@ export default function SubtitleSettingsPicker({
           <SubtitleTemplatePicker
             value={template}
             onChange={onTemplateChange}
+            style={style}
           />
 
           <div className="mt-4 border-t border-[var(--color-border)] pt-3">
             <SubtitleStyleControls value={style} onChange={onStyleChange} />
           </div>
+
+          {onAnimationChange && (
+            <div className="mt-4 border-t border-[var(--color-border)] pt-3">
+              <SubtitleAnimationControls
+                value={animation}
+                onChange={onAnimationChange}
+              />
+            </div>
+          )}
 
           <div className="mt-4 flex justify-end">
             <Button
