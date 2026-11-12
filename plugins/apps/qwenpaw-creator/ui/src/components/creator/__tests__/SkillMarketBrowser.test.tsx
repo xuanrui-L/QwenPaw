@@ -1,16 +1,27 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConfigProvider } from "antd";
+import { ConfigProvider, message } from "antd";
 import SkillMarketBrowser from "../SkillMarketBrowser";
 import type { MarketSkillResult } from "@/api/creator/skills";
+import i18n from "@/i18n";
 import zh from "@/locales/zh.json";
 
 // Controllable market API: paging is decided by the (query, page) pair the
 // component sends, so tests read the call log instead of the rendered rows.
-const { searchMarketMock, importUrlMock } = vi.hoisted(() => ({
-  searchMarketMock: vi.fn(),
-  importUrlMock: vi.fn(),
-}));
+const { searchMarketMock, importUrlMock, listProvidersMock } = vi.hoisted(
+  () => ({
+    searchMarketMock: vi.fn(),
+    importUrlMock: vi.fn(),
+    listProvidersMock: vi.fn(),
+  }),
+);
 
 vi.mock("@/api/creator", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/api/creator")>();
@@ -18,6 +29,7 @@ vi.mock("@/api/creator", async (importOriginal) => {
     ...actual,
     searchMarketSkills: searchMarketMock,
     importSkillFromUrl: importUrlMock,
+    listMarketProviders: listProvidersMock,
   };
 });
 
@@ -45,6 +57,33 @@ function searchPage(items: MarketSkillResult[], hasMore: boolean) {
     has_more: hasMore,
     totals: { qwenpaw: items.length },
   });
+}
+
+function provider(
+  label: string,
+  available = true,
+  reason: string | null = null,
+) {
+  return {
+    key: label.toLowerCase(),
+    label,
+    available,
+    reason,
+    supports_browse: true,
+  };
+}
+
+function installResult(name: string, renamedFrom: string | null = null) {
+  return {
+    imported: [name],
+    skipped: [],
+    count: 1,
+    name,
+    renamed_from: renamedFrom,
+    source_url: "https://example.test/whatever",
+    installed_from: "qwenpaw",
+    ignored_files: 0,
+  };
 }
 
 /** motion:false makes the antd Modal mount/unmount synchronously under jsdom. */
@@ -126,6 +165,8 @@ describe("SkillMarketBrowser paging", () => {
   beforeEach(() => {
     searchMarketMock.mockReset();
     importUrlMock.mockReset();
+    listProvidersMock.mockReset();
+    listProvidersMock.mockResolvedValue({ providers: [provider("QwenPaw")] });
     // Every test starts with the browse request the modal fires on open.
     searchMarketMock.mockImplementation((query: string, page: number) =>
       searchPage([marketItem(`p${page}-${query || "browse"}`)], true),
@@ -134,6 +175,7 @@ describe("SkillMarketBrowser paging", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("requests page 2 for the term whose results are on screen", async () => {
@@ -251,7 +293,7 @@ describe("SkillMarketBrowser paging", () => {
   });
 
   it("installs through the item source url and marks it installed", async () => {
-    importUrlMock.mockResolvedValue({ ok: true, name: "p1-alpha" });
+    importUrlMock.mockResolvedValue(installResult("p1-alpha"));
     const { onInstalled } = renderBrowser();
     await submitSearch("alpha");
 
@@ -274,5 +316,91 @@ describe("SkillMarketBrowser paging", () => {
     expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(0);
     expect(buttonByLabel(zh.skills.marketInstalled)).toBeDisabled();
     expect(importUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("reports the name the backend really installed and closes the row", async () => {
+    // The market row is called "My Skill"; the backend folds it into a valid
+    // slug, so neither the toast nor the row state may keep the row's name.
+    importUrlMock.mockResolvedValue(installResult("my-skill", "My Skill"));
+    const success = vi.spyOn(message, "success");
+    const warning = vi.spyOn(message, "warning");
+    const { onInstalled } = renderBrowser();
+    await submitSearch("alpha");
+
+    await act(async () => {
+      fireEvent.click(installButton());
+    });
+
+    expect(success).toHaveBeenCalledWith(
+      `${zh.skills.importUrlSuccess}: my-skill`,
+    );
+    expect(warning).toHaveBeenCalledWith(
+      i18n.t("skills.importUrlRenamed", { from: "My Skill", to: "my-skill" }),
+    );
+    expect(onInstalled).toHaveBeenCalled();
+    // The refreshed library carries the folded name, which never matches this
+    // row, so the row-level overlay is what keeps a refused second install
+    // from being offered.
+    expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(0);
+
+    await act(async () => {
+      fireEvent.click(buttonByLabel(zh.skills.marketInstalled));
+    });
+    expect(importUrlMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the unusable markets together with the host's reason", async () => {
+    listProvidersMock.mockResolvedValue({
+      providers: [
+        provider("QwenPaw"),
+        provider("Aliyun", false, "access key 未配置"),
+        provider("ClawHub", false, null),
+      ],
+    });
+    renderBrowser();
+
+    const notice = await screen.findByText(/Aliyun/);
+    expect(notice.textContent).toContain("access key 未配置");
+    expect(notice.textContent).toContain("ClawHub");
+    // A reachable market is not listed as a problem.
+    expect(notice.textContent).not.toContain("QwenPaw");
+  });
+
+  it("shows no market warning when every provider is usable", async () => {
+    const error = vi.spyOn(message, "error");
+    renderBrowser();
+    await waitFor(() => expect(listProvidersMock).toHaveBeenCalled());
+
+    expect(screen.queryByText(/Aliyun/)).toBeNull();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it("warns when the market status itself cannot be read", async () => {
+    listProvidersMock.mockRejectedValue(new Error("network down"));
+    const error = vi.spyOn(message, "error");
+    renderBrowser();
+
+    await waitFor(() =>
+      expect(error).toHaveBeenCalledWith(zh.skills.marketLoadFailed),
+    );
+  });
+
+  it("passes the backend's own search guidance through", async () => {
+    const detail = "当前运行时未提供技能市场搜索能力，请改用 URL 导入";
+    searchMarketMock.mockRejectedValue(new Error(detail));
+    const error = vi.spyOn(message, "error");
+    renderBrowser();
+    await submitSearch("alpha");
+
+    expect(error).toHaveBeenCalledWith(detail);
+  });
+
+  it("falls back to a generic failure when the server says nothing", async () => {
+    searchMarketMock.mockRejectedValue(new Error(""));
+    const error = vi.spyOn(message, "error");
+    renderBrowser();
+    await submitSearch("alpha");
+
+    expect(error).toHaveBeenCalledWith(zh.skills.marketSearchFailed);
   });
 });
