@@ -130,6 +130,42 @@ def test_a_damaged_summary_record_is_only_a_cache_miss(tmp_path) -> None:
     assert store.list()[0].name == "A"
 
 
+def test_a_well_formed_summary_with_a_typed_field_still_degrades_to_a_miss(
+    tmp_path,
+) -> None:
+    """JSON that parses but carries a non-string field must not 500 the list.
+
+    Review #243 blocking #3 / #255 remaining item: ``_cached_summary`` used
+    to hand ``raw["name"]`` straight to a ``ProjectSummary`` dataclass whose
+    annotations are compile-time only, so a ``42`` under a valid
+    ``sourceStamp`` sailed through and blew up later in
+    ``list(sort_by="name")`` on ``s.name.lower()`` -- which the surrounding
+    ``except (KeyError, TypeError, ValueError)`` does not catch (the crash
+    happens after the return). The listing must treat that record as a miss
+    exactly like malformed JSON, not as an authority.
+    """
+
+    store = ProjectStore(tmp_path.resolve())
+    store.create(_project("project-a", "A"))
+    store.list()
+
+    record = store.project_root("project-a") / "runtime" / "summary.json"
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    payload["name"] = 42
+    record.write_text(json.dumps(payload), encoding="utf-8")
+
+    # Previously this raised AttributeError on ``s.name.lower()``.
+    assert store.list(sort_by="name")[0].name == "A"
+
+    # Optional fields accept None but reject any other non-string, so a
+    # corrupt coverVersionId cannot leak into HomePage's image lookup.
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    payload["name"] = "A"
+    payload["coverVersionId"] = 3.14
+    record.write_text(json.dumps(payload), encoding="utf-8")
+    assert store.list()[0].cover_version_id is None
+
+
 def test_summary_cache_can_be_switched_off(
     tmp_path,
     monkeypatch,
