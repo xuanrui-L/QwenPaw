@@ -509,4 +509,50 @@ describe("TimelineLivePreview", () => {
       globalThis.cancelAnimationFrame = realCancel;
     }
   });
+
+  it("samples a one-second fade often enough that its middle frames move", () => {
+    // Review #243 P2-7 remaining half: at PLAYHEAD_COMMIT_MS=200 a
+    // one-second fade received five React samples total, so an
+    // opacity check halfway through the transition saw the same value
+    // as the boundary and the fade stepped. The cadence is now 60 ms
+    // (~16 samples/second), which is enough to render a smooth fade
+    // while still leaving the per-frame setState cost behind.
+    const rafQueue: Array<(t: number) => void> = [];
+    const realRaf = globalThis.requestAnimationFrame;
+    const realCancel = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = (cb) => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+    try {
+      const project = cloneProject();
+      const onPlayheadChange = vi.fn();
+      render(
+        <TimelineLivePreview
+          {...previewProps(project, 0)}
+          playing
+          onPlayheadChange={onPlayheadChange}
+        />,
+      );
+      const fire = (now: number) => {
+        const batch = rafQueue.splice(0, rafQueue.length);
+        batch.forEach((cb) => cb(now));
+      };
+      // Simulate a one-second fade window at 1000 ticks/s: seed the
+      // clock at t=0, then step through in 16 ms frames (~60 fps).
+      fire(0);
+      for (let t = 16; t <= 1000; t += 16) fire(t);
+      // A 200 ms cadence would yield ~5 samples inside 1 s; 60 ms
+      // should give at least 12 distinct React commits, enough that a
+      // transition's midpoint ticks each land on their own sample.
+      const distinctTicks = new Set(
+        onPlayheadChange.mock.calls.map(([tick]) => tick),
+      );
+      expect(distinctTicks.size).toBeGreaterThanOrEqual(12);
+    } finally {
+      globalThis.requestAnimationFrame = realRaf;
+      globalThis.cancelAnimationFrame = realCancel;
+    }
+  });
 });

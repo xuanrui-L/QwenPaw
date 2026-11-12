@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
 """Runtime primitives: path safety, idempotency, record models, status bar."""
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -35,7 +36,6 @@ from services.runtime_files import (
 from services.runtime_files.execution_models import TaskRecord
 from services.runtime_files.models import CreatorSessionRecord
 from services.runtime_files.status_projection import build_agent_status_bar
-
 
 pytestmark = pytest.mark.unit
 
@@ -117,6 +117,72 @@ def test_idempotency_payload_drift_and_terminal_state_drift_are_conflicts(
     )
     with pytest.raises(IdempotencyStateConflictError):
         store.complete(**KEY, request_hash="hash-a", response={"ok": True})
+
+
+def test_a_reserve_retry_republishes_an_entry_the_first_attempt_never_wrote(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Crash window between record write and mark_open must self-heal.
+
+    Review #243 blocking #2: the original reserve called ``mark_open``
+    only when ``created`` was true. A process that wrote the record as
+    IN_PROGRESS and died before publishing the ledger entry left the
+    retry seeing ``created=False`` while the ledger still missed the
+    id, so GC would delete the finalized transaction the pending
+    record still needed to replay its response. ``mark_open`` is now
+    unconditional; this test pre-seeds the ledger so the rebuild-scan
+    safety net is not the one closing the window, silences mark_open
+    for the first attempt, and asserts the retry republishes the
+    entry on the second attempt.
+    """
+
+    from services.runtime_files import idempotency_ledger
+
+    root = tmp_path / "runtime" / "commands" / "idempotency"
+    # Seed an unrelated reservation so the ledger file exists and the
+    # scan-based fallback cannot mask the crash window we are trying
+    # to reproduce: without the unconditional mark_open, the retry
+    # would see a readable ledger missing this id and return the
+    # seeded set unchanged.
+    idempotency_ledger.mark_open(root, "txn-unrelated")
+
+    request_hash = IdempotencyRecordStore.request_hash({"value": 1})
+    real_mark_open = idempotency_ledger.mark_open
+    suppress = [True]
+
+    def flaky_mark_open(path_root, record_id):
+        if suppress[0]:
+            return
+        return real_mark_open(path_root, record_id)
+
+    monkeypatch.setattr(idempotency_ledger, "mark_open", flaky_mark_open)
+
+    first = IdempotencyRecordStore(root).reserve(
+        **KEY,
+        request_hash=request_hash,
+    )
+    suppress[0] = False
+    assert first.created is True
+    # The crash window: the record is IN_PROGRESS on disk but the
+    # ledger still only names the unrelated seed. Without the fix the
+    # retry below would leave it that way and GC could delete the
+    # witness.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset(
+        {"txn-unrelated"},
+    )
+
+    second = IdempotencyRecordStore(root).reserve(
+        **KEY,
+        request_hash=request_hash,
+    )
+    assert second.created is False
+    # The retry must republish. Without the unconditional mark_open
+    # this assertion fails and the transaction becomes GC-eligible
+    # while the reservation is still IN_PROGRESS.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset(
+        {"txn-unrelated", second.record.record_id},
+    )
 
 
 def boundary() -> ReviewBoundary:

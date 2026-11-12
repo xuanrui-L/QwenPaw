@@ -179,6 +179,114 @@ def test_event_stream_replays_pages_and_handles_file_changes(
         assert any("Event replay stopped" in line for line in notices)
 
 
+def test_live_streaming_delta_past_the_replay_boundary_is_delivered(
+    tmp_path,
+) -> None:
+    """A live delta must survive a long-lived SSE connection.
+
+    Review #243 blocking #1: ``replay_noise_line`` was passed to the
+    reader without a boundary, so it kept dropping every streaming
+    delta for the whole life of the connection -- a returning user saw
+    the replay up to the tail seq, then silence while a fresh reply
+    generated in front of them. The fix scopes the filter to the tail
+    at connect time; anything appended after that point reaches the
+    client verbatim.
+    """
+
+    _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
+    store = services.sessions
+
+    def append(event_type, payload):
+        return store.append_event(
+            "project-1",
+            "session-1",
+            event_type=event_type,
+            actor="agent",
+            payload=payload,
+        )
+
+    # Pre-replay: a lifecycle event + an old delta that the filter is
+    # allowed to drop. Boundary is the tail at connect time (=2).
+    append("agent.run.started", {"runId": "run-old"})
+    append(
+        "agent.message_delta",
+        {
+            "runId": "run-old",
+            "messageId": "m-old",
+            "deltaIndex": 0,
+            "delta": "旧",
+        },
+    )
+
+    class Connection:
+        polls = 0
+
+        async def is_disconnected(self):
+            self.polls += 1
+            # Keep the SSE loop open past the initial replay so the
+            # live append below has a chance to be picked up; the
+            # body exits as soon as the test's iteration stops.
+            return self.polls > 40
+
+    async def scenario() -> list[tuple[int, str]]:
+        response = await stream_events(
+            "project-1",
+            Connection(),
+            after=0,
+            last_event_id=None,
+            services=services,
+        )
+
+        seen: list[tuple[int, str]] = []
+        iterator = response.body_iterator.__aiter__()
+        # Drain the replay (lifecycle event) before firing the live append
+        # so the reader has definitely crossed the boundary.
+        first = await iterator.__anext__()
+        seq, kind = _parse_sse_id_type(first)
+        seen.append((seq, kind))
+
+        append(
+            "agent.message_delta",
+            {
+                "runId": "run-live",
+                "messageId": "m-live",
+                "deltaIndex": 0,
+                "delta": "live",
+            },
+        )
+        try:
+            while True:
+                chunk = await iterator.__anext__()
+                seq, kind = _parse_sse_id_type(chunk)
+                seen.append((seq, kind))
+                if kind.startswith("agent.message_delta"):
+                    break
+        except StopAsyncIteration:
+            pass
+        return seen
+
+    events = asyncio.run(scenario())
+    # The historical delta at seq 2 stayed filtered (replay), but the live
+    # delta at seq 3 must reach the client even though it is the same
+    # event type the filter is trained to drop.
+    kinds = [kind for _, kind in events]
+    assert (
+        "agent.message_delta" in kinds
+    ), f"live streaming delta was filtered out of the SSE body: {events}"
+    assert kinds[0] == "agent.run.started"
+
+
+def _parse_sse_id_type(chunk: str) -> tuple[int, str]:
+    seq = 0
+    kind = ""
+    for line in chunk.splitlines():
+        if line.startswith("id: "):
+            seq = int(line.removeprefix("id: "))
+        elif line.startswith("event: "):
+            kind = line.removeprefix("event: ")
+    return seq, kind
+
+
 def test_interrupt_is_persisted_before_process_local_cancellation(
     tmp_path,
     monkeypatch,
@@ -1186,7 +1294,12 @@ def test_preflight_scene_review_surfaces_a_failed_repair(
     asyncio.run(routes._preflight_scene_review(services, "project-1", "main"))
     assert not calls
 
-    # An exhausted budget is late, not wrong: the drive repeats the sweep.
+    # An exhausted budget now also refuses admission (review #243 P1-3
+    # remaining half): wait_for cancels ``auto_review_stale_scenes``, so
+    # the scenes it had not reached stay blocked, the drive's scene gate
+    # still rejects the export, and no Task exists to carry that later
+    # failure. Admitting anyway reproduced the 202-plus-phantom-Task
+    # defect the whole preflight was introduced to close.
     monkeypatch.setattr(
         scene_review,
         "collect_scene_review_targets",
@@ -1199,8 +1312,15 @@ def test_preflight_scene_review_surfaces_a_failed_repair(
 
     monkeypatch.setattr(scene_review, "auto_review_stale_scenes", slow)
     monkeypatch.setattr(routes, "ADMISSION_REVIEW_BUDGET_SECONDS", 0.01)
-    asyncio.run(routes._preflight_scene_review(services, "project-1", "main"))
+    from domain.errors import ConflictError
+
+    with pytest.raises(ConflictError) as timeout_refusal:
+        asyncio.run(
+            routes._preflight_scene_review(services, "project-1", "main"),
+        )
     assert calls == ["slow"]
+    assert timeout_refusal.value.details["code"] == "SCENE_REVIEW_TIMEOUT"
+    assert timeout_refusal.value.details["scenes"] == ["scene:hall"]
 
 
 def test_preflight_scene_review_refuses_when_scenes_are_still_blocked(

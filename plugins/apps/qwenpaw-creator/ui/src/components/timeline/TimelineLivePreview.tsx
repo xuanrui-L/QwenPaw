@@ -34,8 +34,23 @@ import { PetOsBubble } from "@/components/timeline/OverlayCopyLayer";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 
-/** How often the rAF clock publishes a tick to React. */
-export const PLAYHEAD_COMMIT_MS = 200;
+/**
+ * How often the rAF clock publishes a tick to React.
+ *
+ * Two measurements met in the middle here. At the previous 200 ms the
+ * preview React-tick landed 5 times a second, and a one-second crossfade
+ * or a JS timeline seek driven off ``playheadTick`` visibly stepped
+ * (review #243 P2-7 remaining half -- the boundary commits close the
+ * short-overlay gap, but a fade's middle frames still needed the
+ * cadence). At per-frame 60 fps setState the whole track tree re-rendered
+ * every frame and the measured frame time doubled from 16.7 ms to
+ * 33.4 ms during a scrub. 60 ms keeps ~16 React samples per second --
+ * fine enough for a one-second fade, ~4x cheaper than the rAF cadence
+ * the perf probe flagged. Short spans still ride on top of this via the
+ * boundary commit below, so nothing gets skipped just because it fits
+ * between two throttled samples.
+ */
+export const PLAYHEAD_COMMIT_MS = 60;
 /** CSS variable the track playhead reads its fraction from. */
 export const PLAYHEAD_FRACTION_VARIABLE = "--creator-playhead-frac";
 

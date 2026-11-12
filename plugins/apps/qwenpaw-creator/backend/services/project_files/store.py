@@ -68,6 +68,32 @@ BUILTIN_EXAMPLE_MARKER: Final = ".builtin-example"
 PROJECT_SUMMARY_RECORD: Final = "runtime/summary.json"
 SUMMARY_RECORD_SCHEMA: Final = 1
 LIST_SUMMARY_CACHE_ENV: Final = "CREATOR_LIST_SUMMARY_CACHE"
+# Fields the listing projection treats as required strings. A damaged
+# record must be a miss, never an authority: ``_cached_summary`` checks
+# each one before handing it to a dataclass whose annotations are
+# compile-time only, so a ``name=42`` would otherwise sail through and
+# blow up later in ``list(sort_by="name")`` with an AttributeError on
+# ``s.name.lower()`` -- which the surrounding ``except (KeyError,
+# TypeError, ValueError)`` does not catch. ``str.lower()`` is not the
+# only consumer (HomePage renders name and scenario, the API returns
+# etag), so a corrupt field would 500 the whole listing rather than
+# downgrade to a full read.
+SUMMARY_REQUIRED_STR_FIELDS: Final = (
+    "name",
+    "description",
+    "scenario",
+    "aspectRatio",
+    "resolution",
+    "etag",
+    "createdAt",
+    "updatedAt",
+)
+SUMMARY_OPTIONAL_STR_FIELDS: Final = (
+    "contentType",
+    "coverVersionId",
+    "coverVersionSource",
+    "finalVideoVersionId",
+)
 
 
 class ProjectStoreError(RuntimeError):
@@ -1459,6 +1485,22 @@ class ProjectStore:
             return None
         stamp = _project_json_stamp(entry)
         if stamp is None or raw.get("sourceStamp") != list(stamp):
+            return None
+        # Field-level validation is the difference between "damage is only
+        # a cache miss" and "damage 500s every listing"; see the constants
+        # above for the specific crash a missing check would enable.
+        for key in SUMMARY_REQUIRED_STR_FIELDS:
+            if not isinstance(raw.get(key), str):
+                return None
+        for key in SUMMARY_OPTIONAL_STR_FIELDS:
+            present = raw.get(key)
+            if present is not None and not isinstance(present, str):
+                return None
+        generation = raw.get("generation")
+        if not isinstance(generation, (int, str)) or isinstance(
+            generation,
+            bool,
+        ):
             return None
         try:
             return ProjectSummary(

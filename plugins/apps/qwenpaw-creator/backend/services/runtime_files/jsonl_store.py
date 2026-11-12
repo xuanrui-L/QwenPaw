@@ -396,9 +396,23 @@ class DurableJsonlStore(Generic[T]):
         after_seq: int = 0,
         *,
         skip_noise: Callable[[bytes], bool] | None = None,
+        replay_boundary_seq: int | None = None,
     ) -> JsonlReadCursor[T]:
-        """Create a bounded, sequential reader for one durable subscription."""
-        return JsonlReadCursor(self, after_seq, skip_noise=skip_noise)
+        """Create a bounded, sequential reader for one durable subscription.
+
+        ``replay_boundary_seq`` bounds where ``skip_noise`` applies: lines
+        at or past that seq are treated as live appends and go through
+        the full parse path. Without it a long-lived SSE connection would
+        drop every live streaming delta -- the filter would run for the
+        whole connection lifetime, not just the replay it was designed
+        to shorten (review #243 blocking #1).
+        """
+        return JsonlReadCursor(
+            self,
+            after_seq,
+            skip_noise=skip_noise,
+            replay_boundary_seq=replay_boundary_seq,
+        )
 
     def read_records_after(
         self,
@@ -777,10 +791,17 @@ class JsonlReadCursor(Generic[T]):
         after_seq: int,
         *,
         skip_noise: Callable[[bytes], bool] | None = None,
+        replay_boundary_seq: int | None = None,
     ) -> None:
         self.store = store
         self.after_seq = max(0, after_seq)
         self.skip_noise = skip_noise
+        # A None boundary means the caller wants the filter to apply for
+        # the whole reader lifetime, which is what a bounded replay (a
+        # single page pull) wants. SSE subscriptions pass the tail seq so
+        # live appends past that point fall through to the parse path
+        # instead of being dropped as replay noise.
+        self.replay_boundary_seq = replay_boundary_seq
         self.offset = 0
         self.seq = 0
         self.identity: tuple[int, int] | None = None
@@ -824,7 +845,14 @@ class JsonlReadCursor(Generic[T]):
                     # Do not advance past a concurrent write or crash fragment.
                     # The next append may complete or repair this same offset.
                     break
-                if self.skip_noise is not None and self.skip_noise(raw):
+                if (
+                    self.skip_noise is not None
+                    and (
+                        self.replay_boundary_seq is None
+                        or self.seq < self.replay_boundary_seq
+                    )
+                    and self.skip_noise(raw)
+                ):
                     cheap = _seq_of_line(raw)
                     if cheap == self.seq + 1:
                         # Contiguity proven without parsing: the line is

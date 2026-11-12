@@ -39,8 +39,15 @@ interface AgentDockUiState {
    * attachments) stashed when the dock folds or unmounts. Live typing never
    * reaches the store -- that re-rendered the whole dock per keystroke -- but
    * unmounting used to eat an unsent instruction with it (review #243).
+   *
+   * Tagged with the Project that produced it: navigation between Projects
+   * can unmount and remount the same dock, and an untagged stash would
+   * restore Project A's half-typed instruction into Project B's composer
+   * -- where a send would deliver it to the wrong session entirely
+   * (review #243 blocking #5). Consumers must compare
+   * ``unsentDraft.projectId`` against the current route id before applying.
    */
-  unsentDraft: MentionInputDraft | null;
+  unsentDraft: { projectId: string; content: MentionInputDraft } | null;
   selection: SelectionAttachment | null;
   allowExpandDetails: boolean;
   /**
@@ -55,7 +62,9 @@ interface AgentDockUiState {
   setOverviewHeight: (height: number | null) => void;
   setRunFilter: (filter: string) => void;
   setDraft: (draft: string) => void;
-  setUnsentDraft: (draft: MentionInputDraft | null) => void;
+  setUnsentDraft: (
+    draft: { projectId: string; content: MentionInputDraft } | null,
+  ) => void;
   setSelection: (selection: SelectionAttachment | null) => void;
   setAllowExpandDetails: (allow: boolean) => void;
   setDecisionTrayCollapsed: (collapsed: boolean) => void;

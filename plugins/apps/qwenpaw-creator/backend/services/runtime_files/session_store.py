@@ -1625,17 +1625,24 @@ class ProjectRuntimeSessionStore:
         *,
         after_seq: int = 0,
         skip_noise: Callable[[bytes], bool] | None = None,
+        replay_boundary_seq: int | None = None,
     ) -> JsonlReadCursor[SessionEventRecord]:
         """Keep one forward cursor for a live SSE connection's replay.
 
         ``skip_noise`` discards streaming noise on the raw bytes, before
-        parsing; see ``replay_filter.replay_noise_line``.
+        parsing; see ``replay_filter.replay_noise_line``. The filter is
+        scoped to ``replay_boundary_seq`` -- lines at or beyond that seq
+        are live appends the client needs verbatim (review #243
+        blocking #1: leaving the boundary unset made the filter outlive
+        the replay it was supposed to shorten and dropped every real
+        streaming delta on a persistent connection).
         """
         project_id, session_id = self._safe_session_ids(project_id, session_id)
         _validate_window(after_seq, None)
         return self._events_store(project_id, session_id).forward_reader(
             after_seq,
             skip_noise=skip_noise,
+            replay_boundary_seq=replay_boundary_seq,
         )
 
     def append_queued_message(

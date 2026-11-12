@@ -705,12 +705,22 @@ async def stream_events(
         # the reader: parsing 70,942 deltas only to discard them held the
         # interpreter for 90+ seconds per replay and starved every other
         # endpoint in the process.
+        #
+        # The filter is scoped to the tail at connect time so it stops at
+        # the replay boundary: anything appended while this connection is
+        # held open is a live event the client must see, and a streaming
+        # delta from an in-flight reply is exactly what replay_filter is
+        # trained to drop (review #243 blocking #1 -- without this bound,
+        # a long-lived SSE connection silently lost every live token).
         filter_enabled = replay_filter_enabled()
         reader = store.event_reader(
             project_id,
             session.session_id,
             after_seq=cursor,
             skip_noise=replay_noise_line if filter_enabled else None,
+            replay_boundary_seq=(
+                session.last_event_seq if filter_enabled else None
+            ),
         )
         active_run_ids = (
             await asyncio.to_thread(
@@ -745,10 +755,31 @@ async def stream_events(
             if events:
                 idle_ticks = 0
                 if filter_enabled:
-                    events = filter_replay_events(
-                        events,
-                        active_run_ids=active_run_ids,
-                        result_max_bytes=result_max_bytes,
+                    # ``filter_replay_events`` shares skip_noise's scope:
+                    # it drops historical deltas for runs that are not
+                    # currently active, and summarizes oversized tool
+                    # results. Applied past the boundary it would silently
+                    # discard live deltas from a run that started after
+                    # connect -- the same defect review #243 blocking #1
+                    # named for the byte-level filter. Split the batch
+                    # along the replay boundary and only filter the left
+                    # half.
+                    boundary = session.last_event_seq
+                    replayed = [
+                        event
+                        for event in events
+                        if event.event_seq <= boundary
+                    ]
+                    live = [
+                        event for event in events if event.event_seq > boundary
+                    ]
+                    events = (
+                        filter_replay_events(
+                            replayed,
+                            active_run_ids=active_run_ids,
+                            result_max_bytes=result_max_bytes,
+                        )
+                        + live
                     )
                 for event in events:
                     yield _sse(event)

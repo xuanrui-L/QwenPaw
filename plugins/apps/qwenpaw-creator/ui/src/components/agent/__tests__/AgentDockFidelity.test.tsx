@@ -1730,14 +1730,36 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
-    expect(useAgentDockUiStore.getState().unsentDraft).toEqual([
-      "Keep this unsent instruction",
-    ]);
+    expect(useAgentDockUiStore.getState().unsentDraft).toEqual({
+      projectId: "p1",
+      content: ["Keep this unsent instruction"],
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
     await waitFor(() => {
       expect(composerBox().textContent).toBe("Keep this unsent instruction");
     });
+  });
+
+  it("does not restore an unsent draft that belongs to another Project", async () => {
+    // Review #243 blocking #5: the stash used to be untagged, so a
+    // Project switch that unmounted the dock (which fired
+    // onUnmountDraft) followed by a mount on a different Project would
+    // hand A's half-typed instruction to B's composer -- and one
+    // Enter key would send it to the wrong session.
+    useAgentDockUiStore.setState({
+      unsentDraft: {
+        projectId: "p-other",
+        content: ["Leaked from another Project"],
+      },
+    });
+    renderDock();
+
+    // The stash is preserved for its own Project but never applied.
+    expect(composerBox().textContent ?? "").toBe("");
+    expect(useAgentDockUiStore.getState().unsentDraft?.projectId).toBe(
+      "p-other",
+    );
   });
 
   it("prefers the edited draft over a one-shot injection on reopen", async () => {
@@ -1760,9 +1782,10 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
-    expect(useAgentDockUiStore.getState().unsentDraft).toEqual([
-      "Edited instruction",
-    ]);
+    expect(useAgentDockUiStore.getState().unsentDraft).toEqual({
+      projectId: "p1",
+      content: ["Edited instruction"],
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
     await waitFor(() =>

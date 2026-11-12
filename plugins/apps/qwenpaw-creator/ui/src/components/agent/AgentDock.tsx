@@ -104,6 +104,7 @@ import DecisionTray from "./DecisionTray";
 import FeedbackModal from "@/components/creator/FeedbackModal";
 import MentionInput, {
   type MentionInputContent,
+  type MentionInputDraft,
   type MentionInputHandle,
 } from "./MentionInput";
 import { reviewPendingUnits } from "./FileProjectReviewPanel";
@@ -1293,15 +1294,31 @@ export default function AgentDock({
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionOptions, setMentionOptions] = useState<RefSearchItem[]>([]);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const previousProjectId = useRef<string | null>(null);
   useEffect(() => {
     setRemovedContextRefs([]);
     setRateLimitResuming(false);
     setPendingUploads([]);
     setUploadingAssets(false);
     setInterruptedDraft(null);
+    // Navigation between Projects must not carry the previous composer's
+    // in-memory state across. The unsent-draft stash is tagged with its
+    // producing Project (review #243 blocking #5) so a legitimate
+    // return-to-A still restores A's instruction; only the switch away
+    // from a Project wipes what the current mount shows. Doing this on
+    // first mount would erase the stash before the restore effect even
+    // got a chance to compare Project ids.
+    if (
+      previousProjectId.current !== null &&
+      previousProjectId.current !== projectId
+    ) {
+      setUnsentDraft(null);
+      inputRef.current?.clear();
+    }
+    previousProjectId.current = projectId;
     submissionVersion.current += 1;
     projectLifecycleVersion.current += 1;
-  }, [projectId]);
+  }, [projectId, setUnsentDraft]);
   const [showJump, setShowJump] = useState(false);
   const inputRef = useRef<MentionInputHandle>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -1863,12 +1880,30 @@ export default function AgentDock({
   // via onUnmountDraft below: a passive cleanup here would run after the
   // handle's ref is already detached, so the parent cannot read it in time.
 
+  // MentionInput's unmount effect keys off the callback identity, so a
+  // fresh arrow per render would re-register the cleanup and call it
+  // every commit (the store write then loops back through Zustand).
+  // Memoizing here lets it fire only on the real fold/unmount, and the
+  // Project-tag keeps the review #243 blocking #5 guarantee: the stash
+  // names the Project it belongs to so another route cannot restore it.
+  const stashUnmountedDraft = useCallback(
+    (content: MentionInputDraft | null) =>
+      setUnsentDraft(content ? { projectId, content } : null),
+    [projectId, setUnsentDraft],
+  );
+
   useEffect(() => {
     if (!open || !unsentDraft || draft) return;
+    // A stash from a different Project is not this composer's business.
+    // Navigation between Projects can unmount the dock on the way out
+    // (which fires onUnmountDraft) and mount a fresh one on the way in;
+    // restoring across that boundary hands Project A's half-typed
+    // instruction to Project B's session (review #243 blocking #5).
+    if (unsentDraft.projectId !== projectId) return;
     if (inputRef.current?.getContent().text) return;
-    inputRef.current?.setDraft(unsentDraft);
+    inputRef.current?.setDraft(unsentDraft.content);
     setCanSend(Boolean(inputRef.current?.getContent().text.trim()));
-  }, [open, unsentDraft, draft]);
+  }, [open, unsentDraft, draft, projectId]);
 
   useEffect(() => {
     if (!open || !selectionAttachment) return;
@@ -3037,7 +3072,7 @@ export default function AgentDock({
                   onMentionNavigate={navigateMention}
                   onMentionConfirm={confirmMention}
                   onMentionClose={() => setMentionQuery(null)}
-                  onUnmountDraft={setUnsentDraft}
+                  onUnmountDraft={stashUnmountedDraft}
                 />
                 {(stoppable || stopping) &&
                 !canSend &&

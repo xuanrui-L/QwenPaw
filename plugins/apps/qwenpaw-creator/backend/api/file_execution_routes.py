@@ -452,17 +452,13 @@ async def _preflight_scene_review(
     against the Project the repair just changed, so a post-admit review would
     reject the first export outright and make the user press it twice.
 
-    A spent budget is not a failure. The same sweep runs again inside the
-    drive, so an unusually slow Project is late rather than wrong.
-
-    ``auto_review_stale_scenes`` gathers per-scene work with
-    ``return_exceptions=True``, swallows each failure into a log line, and
-    returns the scene ids still needing attention. Raising only on the
-    exception path therefore kept the original 202-plus-phantom-Task defect
-    alive (review #243 P1): a VLM outage on any scene leaves that id in
-    ``remaining``, the drive's scene gate still refuses, and drive() has no
-    Task to persist the failure into. Treat a non-empty result as a refused
-    admission too, naming the scenes so the user sees what blocked them.
+    A spent budget is not a benign outcome either. ``auto_review_stale_scenes``
+    was cancelled by ``wait_for``, so the scenes it had not reached are still
+    blocked; the drive's scene gate refuses, and no Task carries that
+    refusal -- the same 202-plus-phantom-Task defect (review #243 P1-3
+    remaining half). Refuse admission on the timeout path too, naming
+    the scenes we were about to sweep so the user learns which
+    Projects need another pass before pressing "成片".
     """
 
     from services.render_review.scene_review import (
@@ -477,6 +473,7 @@ async def _preflight_scene_review(
     stale, drafts = collect_scene_review_targets(timeline)
     if not (stale or drafts):
         return
+    targets = [str(scene_id) for scene_id in (*drafts, *stale)]
     try:
         remaining = await asyncio.wait_for(
             auto_review_stale_scenes(
@@ -489,12 +486,22 @@ async def _preflight_scene_review(
         )
     except asyncio.TimeoutError:
         _logger.warning(
-            "compose preflight review exceeded %ss for %s; continuing in the "
-            "background, where its failure would not be observable",
+            "compose preflight review exceeded %ss for %s; refusing "
+            "admission because the drive has no Task to carry a later "
+            "scene-gate failure",
             ADMISSION_REVIEW_BUDGET_SECONDS,
             _log_safe(project_id),
         )
-        return
+        raise ConflictError(
+            f"场景自动重审超过 {ADMISSION_REVIEW_BUDGET_SECONDS:.0f} 秒预算："
+            + "、".join(targets)
+            + "；请稍后重试或手动触发重审。",
+            details={
+                "code": "SCENE_REVIEW_TIMEOUT",
+                "scenes": targets,
+                "budgetSeconds": ADMISSION_REVIEW_BUDGET_SECONDS,
+            },
+        ) from None
     if remaining:
         raise ConflictError(
             "场景自动重审未能修复："

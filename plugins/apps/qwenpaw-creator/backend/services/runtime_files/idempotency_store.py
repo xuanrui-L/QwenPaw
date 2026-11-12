@@ -235,13 +235,22 @@ class IdempotencyRecordStore:
             idempotency_key,
             created,
         )
-        if created:
-            # Transaction GC reads this ledger before deleting a Project's
-            # settled transactions: an IN_PROGRESS reservation still needs the
-            # transaction as the durable witness for replaying that request's
-            # response, and a record cannot be traced back from its id
-            # (review #243).
-            idempotency_ledger.mark_open(self.root, record.record_id)
+        # Transaction GC reads this ledger before deleting a Project's
+        # settled transactions: an IN_PROGRESS reservation still needs the
+        # transaction as the durable witness for replaying that request's
+        # response, and a record cannot be traced back from its id
+        # (review #243).
+        #
+        # Called on every reserve, not just when ``created`` is true:
+        # crash window (review #243 blocking #2). A reserve that wrote
+        # the record as IN_PROGRESS and died before marking the ledger
+        # left the retry seeing ``created=False`` while the ledger still
+        # missed this id, so GC would delete the finalized transaction
+        # the pending record still needed to replay. ``mark_open`` is
+        # idempotent -- it returns early when the id is already present
+        # -- so unconditional publishing costs nothing when the ledger
+        # is correct and closes the crash window when it is not.
+        idempotency_ledger.mark_open(self.root, record.record_id)
         return IdempotencyReservation(record=record, created=created)
 
     @staticmethod
