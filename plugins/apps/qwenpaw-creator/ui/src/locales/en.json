@@ -1871,7 +1871,8 @@
       "ground_image_objects": "Identify image objects",
       "browser_use": "Interact with webpage",
       "computer_use": "Interact with desktop app",
-      "recall_media": "Recall moved-out media"
+      "recall_media": "Recall moved-out media",
+      "recall_history": "Recall archived history"
     },
     "skillGuides": {
       "visualDesign": "Read visual design guide",
@@ -1931,7 +1932,8 @@
       "ground_image_objects": "Identifying image objects…",
       "browser_use": "Interacting with webpage…",
       "computer_use": "Interacting with desktop app…",
-      "recall_media": "Recalling moved-out media…"
+      "recall_media": "Recalling moved-out media…",
+      "recall_history": "Recalling archived history…"
     },
     "productionAssistant": "Production Assistant",
     "estimatedDurations": {
