@@ -179,21 +179,28 @@ large, older tool exchanges are compacted first and only then is media the
 runtime can observe again demoted. Set these when starting the process; a
 change needs a restart.
 
-- `CREATOR_MODEL_CONTEXT_TOKENS`: the **maximum input tokens** of the model
-  this deployment uses. Undeclared by default, which leaves the serialized
-  request size (384KB) as the only guard, unable to predict the provider's own
-  window refusal. Once declared, an input over the window gives way early, and
-  a request that still does not fit after every media block has been demoted
-  ends with `MODEL_CONTEXT_UNFIT` and waits for shorter input instead of
-  replaying. About an eighth of the window is reserved for the reply.
+- `CREATOR_MODEL_CONTEXT_TOKENS`: an explicit **maximum input tokens**
+  override for the model this deployment uses. By default Creator resolves the
+  window from the same host catalog the platform scroll reads (an unknown model
+  falls back to 128k), so in a normal QwenPaw install the token gate is already
+  on and predicts the provider's window refusal; the serialized request size
+  (384KB) is a transport floor, not the guard. Declare this only when the
+  catalog is wrong for your endpoint. With a window in hand, an input over it
+  gives way early, and a request that still does not fit after every media
+  block has been demoted ends with `MODEL_CONTEXT_UNFIT` and waits for shorter
+  input instead of replaying. The reply reserve is `min(4096, 5%)` of the
+  window (about 3.2% at 128k, about 0.4% at 1M), matching the platform scroll.
 - `CREATOR_MEDIA_OBSERVATION_DEGRADE_ENABLED`: set to `0` to switch the media
   demotion ladder off and take the hard failure with its full diagnostics.
 - `CREATOR_MEDIA_CLAMP_RATIO`: the share of the budget one inline media part
   may be charged for, default `0.5`, accepted range `0.05`-`1`.
+- `CREATOR_CONTINUATION_SUMMARY_ENABLED`: set to `0` to skip the prose
+  continuation summary (one extra model turn) read beside the archived seq
+  recall map; the map alone already guarantees nothing is lost. Default on.
 
 Known boundary: media that reaches the request as a URL (a DashScope
 temporary OSS object, a public asset address) is neither charged to this
 budget nor demotable - it costs a few hundred bytes on the wire while the
 provider still bills full vision tokens. Deployments using that transport
-should declare `CREATOR_MODEL_CONTEXT_TOKENS` so the token measure holds the
-window.
+should confirm the resolved window covers the model, declaring
+`CREATOR_MODEL_CONTEXT_TOKENS` when the catalog does not.

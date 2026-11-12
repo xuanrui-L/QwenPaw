@@ -1827,7 +1827,8 @@
       "ground_image_objects": "识别画面对象",
       "browser_use": "操作网页",
       "computer_use": "操作桌面应用",
-      "recall_media": "取回已移出的媒体"
+      "recall_media": "取回已移出的媒体",
+      "recall_history": "回读归档历史"
     },
     "skillGuides": {
       "visualDesign": "查阅视觉设计指南",
@@ -1887,7 +1888,8 @@
       "ground_image_objects": "正在识别画面对象…",
       "browser_use": "正在操作网页…",
       "computer_use": "正在操作桌面应用…",
-      "recall_media": "正在取回已移出的媒体…"
+      "recall_media": "正在取回已移出的媒体…",
+      "recall_history": "正在回读归档历史…"
     },
     "productionAssistant": "制作助手",
     "estimatedDurations": {

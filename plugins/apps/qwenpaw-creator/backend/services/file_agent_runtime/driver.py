@@ -104,6 +104,7 @@ from services.runtime_files.models import (
     ChangeOrigin,
     CreatorMessageRecord,
     MessageChannel,
+    MessageContentPart,
     ReviewPolicy,
 )
 from services.runtime_files.execution_models import (
@@ -365,6 +366,11 @@ MAX_RECALL_MEDIA_HANDLES = 4
 # a single expand may cross; search reports matches within the same ceiling.
 MAX_RECALL_HISTORY_BYTES = 64 * 1024
 MAX_RECALL_HISTORY_SPAN = 200
+# A keyword search has no seq span to bound it, so cap the hit count and charge
+# the whole serialized entry (metadata included) against the byte ceiling:
+# appending empty matches once the budget is spent lets plain metadata
+# re-inflate the very window recall is meant to stay inside.
+MAX_RECALL_HISTORY_SEARCH_HITS = 200
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
 # Planning turns that emit a full Element structure in one response can
@@ -1924,7 +1930,11 @@ class FileCreatorAgentRuntime:
                 # pointer means the summary cannot be trusted, so fall back to
                 # the recall map instead of injecting a plausible fabrication.
                 return ""
-            return parsed.render_background(include_envelope=False)
+            return _creator_summary_recall_wording(
+                parsed.render_background(include_envelope=False),
+                lo,
+                hi,
+            )
         except Exception:  # pylint: disable=broad-except
             # The summary is pure relief — it may never break or block a run.
             return ""
@@ -5273,7 +5283,10 @@ class FileCreatorAgentRuntime:
                     item.message_seq,
                     item.role,
                     item.source,
-                    _message_text(item),
+                    # Media parts render as pointers, never as a Base64 dump:
+                    # recall must hand back readable history, not bytes that
+                    # fill the ceiling and crowd out the text.
+                    _message_text(item, media_as_pointer=True),
                 ),
             )
         truncated = False
@@ -5316,18 +5329,30 @@ class FileCreatorAgentRuntime:
             for seq, role, source, text in rendered:
                 if query not in text.lower():
                     continue
-                snippet = text[:512]
-                used, keep = _reserve_recall_bytes(used, snippet)
-                entries.append(
-                    {
-                        "messageSeq": seq,
-                        "role": role,
-                        "source": source,
-                        "match": keep,
-                    },
-                )
-                if keep != snippet:
+                if len(entries) >= MAX_RECALL_HISTORY_SEARCH_HITS:
                     truncated = True
+                    break
+                entry = {
+                    "messageSeq": seq,
+                    "role": role,
+                    "source": source,
+                    "match": text[:512],
+                }
+                # Charge the whole serialized entry, not just the match text:
+                # metadata overhead across many hits is what re-inflated the
+                # response past the ceiling. Stop once the next cannot fit.
+                cost = len(
+                    json.dumps(
+                        entry,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8"),
+                )
+                if used + cost > MAX_RECALL_HISTORY_BYTES:
+                    truncated = True
+                    break
+                used += cost
+                entries.append(entry)
         response: dict[str, Any] = {
             "ok": True,
             "status": "success",
@@ -10542,16 +10567,89 @@ def _reserve_recall_bytes(used: int, text: str) -> tuple[int, str]:
     return MAX_RECALL_HISTORY_BYTES, kept
 
 
+_HOST_SUMMARY_RECALL_SENTENCE = (
+    "Exact archived content remains in conversation_history for\n"
+    "sequence range {lo}–{hi}. Recall that range only when exact\n"
+    "wording or evidence is needed."
+)
+
+
+def _creator_summary_recall_wording(text: str, lo: int, hi: int) -> str:
+    """Swap the host summary's ``conversation_history`` line for Creator's.
+
+    ``render_background`` hard-codes a recall sentence naming
+    ``conversation_history`` — a store a Creator session does not have. The
+    archived map already slices the host preamble off for the same reason;
+    the summary needs it too, so the model is not pointed at a table that
+    does not exist while the system prompt teaches ``recall_history``.
+    """
+    host = _HOST_SUMMARY_RECALL_SENTENCE.format(lo=lo, hi=hi)
+    creator = (
+        f"Exact archived content stays durable by messageSeq {lo}–{hi}; "
+        f'read it back with recall_history(op="expand", lo={lo}, hi={hi}) '
+        "only when exact wording or evidence is needed."
+    )
+    if host in text:
+        return text.replace(host, creator)
+    # Resilient fallback: never let the non-existent table name leak even if
+    # the host rewords the sentence around it.
+    return text.replace(
+        "conversation_history",
+        "the durable conversation store",
+    )
+
+
+def _recall_media_pointer(part: MessageContentPart) -> str:
+    """Describe a media part for recall without dumping its bytes.
+
+    ``recall_history`` re-reads durable turns; a ``data:`` URL part would
+    pour its whole Base64 payload into the recall text, filling the byte
+    ceiling with bytes the model cannot read and crowding out the history
+    that was asked for (and letting a keyword search match Base64
+    substrings). Media stays a compact pointer — type, mime, approximate
+    size — consistent with the demotion ladder; the original bytes remain
+    recallable via ``recall_media`` or by re-running the producing tool.
+    """
+    url_obj = part.image_url or part.video_url or {}
+    url = str(url_obj.get("url") or "")
+    mime = str(url_obj.get("mediaType") or "")
+    if not url and isinstance(part.attachment, Mapping):
+        url = str(
+            part.attachment.get("url") or part.attachment.get("data") or "",
+        )
+        mime = mime or str(
+            part.attachment.get("mediaType")
+            or part.attachment.get("mime")
+            or "",
+        )
+    if url.startswith("data:"):
+        head, _, payload = url.partition(",")
+        if not mime and head.startswith("data:"):
+            mime = head[len("data:") :].split(";", 1)[0]
+        approx_bytes = len(payload) * 3 // 4
+        return (
+            f"[{part.type} 内联媒体 {mime or '未知类型'} "
+            f"约 {approx_bytes} 字节，已省略 Base64；"
+            "用 recall_media 或重新运行产出工具查看原件]"
+        )
+    if url:
+        return f"[{part.type} 媒体 {mime or '未知类型'} url={url[:120]}]"
+    return f"[{part.type} 媒体部件，已省略二进制内容]"
+
+
 def _message_text(
     message: CreatorMessageRecord,
     *,
     project: Project | None = None,
     project_root: Path | None = None,
+    media_as_pointer: bool = False,
 ) -> str:
     chunks: list[str] = []
     for part in message.content_parts:
         if part.type == "text" and part.text:
             chunks.append(part.text)
+        elif media_as_pointer:
+            chunks.append(_recall_media_pointer(part))
         else:
             chunks.append(
                 json.dumps(
