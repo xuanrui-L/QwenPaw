@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button, Input, Modal, Spin, message, type InputRef } from "antd";
 import {
@@ -11,7 +11,9 @@ import {
 } from "lucide-react";
 import {
   importSkillFromUrl,
+  listMarketProviders,
   searchMarketSkills,
+  type MarketProvider,
   type MarketSkillResult,
 } from "@/api/creator";
 
@@ -29,6 +31,11 @@ const KNOWN_SOURCES: Record<string, string> = {
 
 function sourceLabel(source: string, label: string | null): string {
   return label || KNOWN_SOURCES[source] || source;
+}
+
+/** Identity of one result row, the same key the list renders by. */
+function rowKey(item: MarketSkillResult): string {
+  return `${item.source}-${item.slug}`;
 }
 
 interface SkillMarketBrowserProps {
@@ -61,7 +68,15 @@ export default function SkillMarketBrowser({
   const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
   const [installing, setInstalling] = useState<Set<string>>(new Set());
-  const [installed, setInstalled] = useState<Set<string>>(new Set());
+  /** Skills this session installed, on top of the pane's library. */
+  const [localInstalled, setLocalInstalled] = useState<Set<string>>(new Set());
+  /**
+   * Rows this session installed, keyed like the rendered list. A folded
+   * install name never matches the market row's name, so without this the
+   * row would offer a second install that the backend refuses.
+   */
+  const [installedRows, setInstalledRows] = useState<Set<string>>(new Set());
+  const [providers, setProviders] = useState<MarketProvider[]>([]);
   const searchSeqRef = useRef(0);
   const resultsRef = useRef<MarketSkillResult[]>([]);
   const inputRef = useRef<InputRef>(null);
@@ -71,15 +86,46 @@ export default function SkillMarketBrowser({
 
   // Focus search input when modal opens.
   useEffect(() => {
-    if (open) {
-      setTimeout(() => inputRef.current?.focus(), 100);
-    }
+    if (!open) return;
+    const timer = setTimeout(() => inputRef.current?.focus(), 100);
+    return () => clearTimeout(timer);
   }, [open]);
 
-  // Sync installedNames into installed set.
+  // Derived instead of mirrored: the pane owns the library and this session
+  // only adds what it just installed, so there is no render where the two
+  // disagree (a synced state would be one effect behind).
+  const installed = useMemo(
+    () => new Set([...installedNames, ...localInstalled]),
+    [installedNames, localInstalled],
+  );
+
+  // Which markets the runtime can actually reach. Without this, a browse that
+  // fails because a provider is unconfigured looks like an empty market.
   useEffect(() => {
-    setInstalled(new Set(installedNames));
-  }, [installedNames]);
+    if (!open) return;
+    let discarded = false;
+    listMarketProviders()
+      .then((res) => {
+        if (!discarded) setProviders(res.providers);
+      })
+      .catch(() => {
+        if (!discarded) message.error(t("skills.marketLoadFailed"));
+      });
+    return () => {
+      discarded = true;
+    };
+  }, [open, t]);
+
+  const unavailableProviders = useMemo(
+    () => providers.filter((provider) => !provider.available),
+    [providers],
+  );
+
+  const isRowInstalled = useCallback(
+    (item: MarketSkillResult) =>
+      installed.has(item.name) || installedRows.has(rowKey(item)),
+    [installed, installedRows],
+  );
 
   const doSearch = useCallback(
     async (searchQuery: string, searchPage: number) => {
@@ -102,9 +148,16 @@ export default function SkillMarketBrowser({
         // click retries the page that failed instead of skipping it.
         setPage(searchPage);
         setCommittedQuery(searchQuery);
-      } catch {
+      } catch (error) {
         if (seq !== searchSeqRef.current) return;
-        message.error(t("skills.marketSearchFailed"));
+        // The host says what to do in the detail: a 501 explains that this
+        // runtime has no market service and points at URL import, a 502 names
+        // the failing provider. Swallowing it leaves a dead end.
+        message.error(
+          error instanceof Error && error.message
+            ? error.message
+            : t("skills.marketSearchFailed"),
+        );
       } finally {
         if (seq === searchSeqRef.current) {
           setLoading(false);
@@ -124,18 +177,25 @@ export default function SkillMarketBrowser({
 
   const handleInstall = useCallback(
     async (item: MarketSkillResult) => {
-      if (
-        installingRef.current.has(item.slug) ||
-        installed.has(item.name) ||
-        installedNames.includes(item.name)
-      )
-        return;
+      if (installingRef.current.has(item.slug) || isRowInstalled(item)) return;
       installingRef.current = new Set(installingRef.current).add(item.slug);
       setInstalling((prev) => new Set(prev).add(item.slug));
       try {
-        await importSkillFromUrl(item.source_url);
-        setInstalled((prev) => new Set(prev).add(item.name));
-        message.success(`${t("skills.importUrlSuccess")}: ${item.name}`);
+        const res = await importSkillFromUrl(item.source_url);
+        // A market name that is not a valid slug gets folded by the backend,
+        // so the overlay, the toast and the rename notice must speak about the
+        // name that was really installed rather than the row's label.
+        setLocalInstalled((prev) => new Set(prev).add(res.name));
+        setInstalledRows((prev) => new Set(prev).add(rowKey(item)));
+        message.success(`${t("skills.importUrlSuccess")}: ${res.name}`);
+        if (res.renamed_from) {
+          message.warning(
+            t("skills.importUrlRenamed", {
+              from: res.renamed_from,
+              to: res.name,
+            }),
+          );
+        }
         onInstalled();
       } catch (error) {
         message.error(
@@ -152,7 +212,7 @@ export default function SkillMarketBrowser({
         });
       }
     },
-    [installed, installedNames, onInstalled, t],
+    [installed, isRowInstalled, onInstalled, t],
   );
 
   // Run initial search when modal opens.
@@ -165,6 +225,10 @@ export default function SkillMarketBrowser({
       setSearched(false);
       setHasMore(false);
       setPage(1);
+      // The pane's list is refetched on every install, so a stale overlay
+      // would keep reporting "installed" for a skill deleted meanwhile.
+      setLocalInstalled(new Set());
+      setInstalledRows(new Set());
       void doSearch("", 1);
     }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -182,7 +246,9 @@ export default function SkillMarketBrowser({
       footer={null}
       width={780}
       centered
-      bodyStyle={{ maxHeight: "70vh", overflow: "auto", padding: "16px 24px" }}
+      styles={{
+        body: { maxHeight: "70vh", overflow: "auto", padding: "16px 24px" },
+      }}
     >
       <div
         style={{
@@ -194,6 +260,35 @@ export default function SkillMarketBrowser({
       >
         {t("skills.marketDesc")}
       </div>
+
+      {/* Markets the runtime cannot reach, named with the host's own reason. */}
+      {unavailableProviders.length > 0 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 6,
+            flexWrap: "wrap",
+            fontSize: 11.5,
+            lineHeight: 1.5,
+            color: "var(--color-warning)",
+            marginBottom: 12,
+          }}
+        >
+          <Globe size={13} style={{ marginTop: 2 }} />
+          <span>
+            {t("skills.marketProviderUnavailable", {
+              providers: unavailableProviders
+                .map((provider) =>
+                  provider.reason
+                    ? `${provider.label} (${provider.reason})`
+                    : provider.label,
+                )
+                .join(", "),
+            })}
+          </span>
+        </div>
+      )}
 
       {/* Search bar */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -258,13 +353,12 @@ export default function SkillMarketBrowser({
             }}
           >
             {results.map((item) => {
-              const isInstalled =
-                installed.has(item.name) || installedNames.includes(item.name);
+              const isInstalled = isRowInstalled(item);
               const isInstalling = installing.has(item.slug);
               const disabled = isInstalled || isInstalling;
               return (
                 <div
-                  key={`${item.source}-${item.slug}`}
+                  key={rowKey(item)}
                   style={{
                     border: "1px solid var(--color-border)",
                     borderRadius: 10,
@@ -353,6 +447,7 @@ export default function SkillMarketBrowser({
                   >
                     <span
                       style={{ display: "flex", alignItems: "center", gap: 4 }}
+                      title={t("skills.marketSource")}
                     >
                       <ShoppingBag size={11} />
                       {sourceLabel(item.source, item.source_label)}
@@ -364,6 +459,7 @@ export default function SkillMarketBrowser({
                           alignItems: "center",
                           gap: 4,
                         }}
+                        title={t("skills.marketAuthor")}
                       >
                         <User size={11} />
                         {item.author}
