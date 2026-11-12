@@ -6,6 +6,11 @@ so that Creator's skill browser sees the same providers and results as the
 main console's market page. Only reading/searching is delegated; install
 still flows through ``services.skill_hub``, so the single-SKILL.md-only
 rule stays enforced.
+
+Every host symbol is reached through ``qwenpaw.market.service``, the one
+module every release line ships; provider availability comes from
+``list_providers`` rather than the host's provider registry, which does not
+exist on all lines.
 """
 
 from __future__ import annotations
@@ -55,8 +60,7 @@ def _resolve_market_service():
     except Exception as exc:  # noqa: BLE001 - host layout, not our bug
         logger.warning("market service unavailable: %s", exc)
         raise MarketUnavailable(
-            "当前 QwenPaw 运行时未提供技能市场搜索能力，"
-            "请改用 URL 导入或手动创建技能",
+            "当前 QwenPaw 运行时未提供技能市场搜索能力，" "请改用 URL 导入或手动创建技能",
         ) from exc
     return list_providers, search_market
 
@@ -68,18 +72,22 @@ async def search_skills(
     lang: str = "en",
 ) -> tuple[list[MarketSkillResult], bool, dict[str, int]]:
     """Search skill market providers; returns results, has_more, totals."""
-    _, search_market_fn = _resolve_market_service()
-    capped_limit = max(1, min(int(limit or _MAX_MARKET_LIMIT), _MAX_MARKET_LIMIT))
+    list_providers_fn, search_market_fn = _resolve_market_service()
+    capped_limit = max(
+        1,
+        min(int(limit or _MAX_MARKET_LIMIT), _MAX_MARKET_LIMIT),
+    )
     page_num = max(1, int(page or _DEFAULT_PAGE))
-    from qwenpaw.market.registry import market_registry  # pylint: disable=import-outside-toplevel
 
-    # Build provider_pages for all available providers so the user
-    # sees results from every market in one call.
-    provider_pages: dict[str, int] = {}
-    for key, provider in market_registry.snapshot().items():
-        is_available, _reason = provider.available()
-        if is_available and provider.supports_browse:
-            provider_pages[key] = page_num
+    # Build provider_pages for every browsable provider so the user sees
+    # results from all markets in one call.  ``list_providers`` is the host's
+    # own view of availability and browse support, which keeps Creator free
+    # of the host's provider-registry layout (absent on some release lines).
+    provider_pages: dict[str, int] = {
+        info.key: page_num
+        for info in list_providers_fn()
+        if info.available and info.supports_browse
+    }
 
     results, errors, by_provider = await search_market_fn(
         query=query,
@@ -89,7 +97,9 @@ async def search_skills(
     )
     for err in errors:
         logger.warning(
-            "market provider %s failed: %s", err.provider, err.message,
+            "market provider %s failed: %s",
+            err.provider,
+            err.message,
         )
 
     converted = [
