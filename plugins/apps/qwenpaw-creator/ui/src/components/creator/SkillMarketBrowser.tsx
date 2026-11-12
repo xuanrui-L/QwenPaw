@@ -133,9 +133,7 @@ export default function SkillMarketBrowser({
         onInstalled();
       } catch (error) {
         message.error(
-          error instanceof Error
-            ? error.message
-            : t("skills.importUrlFailed"),
+          error instanceof Error ? error.message : t("skills.importUrlFailed"),
         );
       } finally {
         const next = new Set(installingRef.current);
@@ -196,7 +194,9 @@ export default function SkillMarketBrowser({
           ref={inputRef as any}
           value={query}
           placeholder={t("skills.marketSearchPlaceholder")}
-          prefix={<Search size={14} style={{ color: "var(--color-text-tertiary)" }} />}
+          prefix={
+            <Search size={14} style={{ color: "var(--color-text-tertiary)" }} />
+          }
           onChange={(e) => setQuery(e.target.value)}
           onPressEnter={handleSearch}
           style={{ flex: 1 }}
@@ -286,9 +286,19 @@ export default function SkillMarketBrowser({
                         style={{ width: 20, height: 20, borderRadius: 4 }}
                       />
                     ) : (
-                      <Globe size={14} style={{ color: "var(--color-text-tertiary)" }} />
+                      <Globe
+                        size={14}
+                        style={{ color: "var(--color-text-tertiary)" }}
+                      />
                     )}
-                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <span
+                      style={{
+                        flex: 1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
                       {item.name}
                     </span>
                     <Button
@@ -334,12 +344,20 @@ export default function SkillMarketBrowser({
                       flexWrap: "wrap",
                     }}
                   >
-                    <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <span
+                      style={{ display: "flex", alignItems: "center", gap: 4 }}
+                    >
                       <ShoppingBag size={11} />
                       {sourceLabel(item.source, item.source_label)}
                     </span>
                     {item.author && (
-                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <span
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
                         <User size={11} />
                         {item.author}
                       </span>
