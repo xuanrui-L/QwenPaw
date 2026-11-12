@@ -212,23 +212,28 @@ def _remember(
 def _spawn_argv(
     script: Path,
     data_root: Path,
-    project_scope: str,
+    paths: list[Path],
+    ceiling: int,
 ) -> list[str]:
     """Command line for the child, asked to be the one the OOM killer picks.
+
+    The candidate list is handed to the child verbatim rather than as a
+    Project scope: one Project can hold a 9 MiB stream beside a 606 MB one,
+    and a scan-by-project would pull the oversize sibling into the same
+    child regardless of what the parent already ruled out (review #243 P1).
+    ``--max-bytes`` travels with the list so the child re-checks each file
+    right before reading -- anything that grew past the ceiling since the
+    parent's scan is skipped there too.
 
     Only Linux exposes ``oom_score_adj``, and only raising it (never lowering
     it) is allowed without privileges; where either is unavailable the child
     simply runs as itself.
     """
 
-    command = [
-        sys.executable,
-        str(script),
-        "--data-root",
-        str(data_root),
-        "--project-id",
-        project_scope,
-    ]
+    command = [sys.executable, str(script), "--data-root", str(data_root)]
+    for path in paths:
+        command += ["--session-file", str(path)]
+    command += ["--max-bytes", str(ceiling)]
     if sys.platform != "linux":
         return command
     return [
@@ -246,14 +251,16 @@ def _spawn_argv(
 
 async def _run_one(
     data_root: Path,
-    project_scope: str,
+    paths: list[Path],
+    ceiling: int,
 ) -> tuple[bool, str]:
-    """Collapse one Project's sessions in a child process; never raise.
+    """Collapse one Project's listed sessions in a child process; never raise.
 
-    ``project_scope`` is the bare id the script expects -- it rebuilds the
-    directory name by prepending ``project-`` itself -- so the caller decides
-    what is addressed and a wrong scope shows up here rather than in a child
-    that reports a clean run over an empty list.
+    ``paths`` is the parent's already-filtered candidate list, and
+    ``ceiling`` is the size bound the child re-checks before opening a
+    stream. Together they are what keeps the child's resident peak inside
+    the container the app is using; passing a Project scope instead let one
+    small file smuggle an oversize sibling into the same read.
     """
 
     script = Path(__file__).resolve().parents[2] / ELISION_SCRIPT
@@ -261,7 +268,7 @@ async def _run_one(
     env["CREATOR_DATA_ROOT"] = str(data_root)
     try:
         process = await asyncio.create_subprocess_exec(
-            *_spawn_argv(script, data_root, project_scope),
+            *_spawn_argv(script, data_root, paths, ceiling),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
@@ -376,6 +383,7 @@ async def elide_stored_conversations(services: Any) -> ElisionSummary:
         stored,
         max_auto_elision_bytes(),
     )
+    ceiling = max_auto_elision_bytes()
     summary_projects = 0
     files = 0
     saved = 0
@@ -383,10 +391,7 @@ async def elide_stored_conversations(services: Any) -> ElisionSummary:
     for project_name, paths in candidates.items():
         before = sum(path.stat().st_size for path in paths)
         moment = datetime.now(timezone.utc)
-        ok, detail = await _run_one(
-            data_root,
-            project_name.removeprefix(PROJECT_DIR_PREFIX),
-        )
+        ok, detail = await _run_one(data_root, paths, ceiling)
         # Whatever the child left on disk is the new floor, failure included:
         # a partially collapsed file is still a file that should not be
         # re-read whole until it grows again.

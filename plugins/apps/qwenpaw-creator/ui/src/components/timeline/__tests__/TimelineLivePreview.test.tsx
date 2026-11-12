@@ -459,4 +459,54 @@ describe("TimelineLivePreview", () => {
       restore();
     }
   });
+
+  it("commits the playhead when a short overlay's span starts, not just on the throttle", () => {
+    // Review #243 P2: with PLAYHEAD_COMMIT_MS at 200ms and ticks_per_second
+    // at 1000, a 100-tick overlay [50, 150] could fall entirely between two
+    // React commits, so visibleLayers never sampled it and the overlay was
+    // invisible. The rAF clock now force-commits whenever the tick crosses
+    // any span boundary, so the layer mounts on time while the throttled
+    // track-scrubber cadence stays intact.
+    const project = cloneProject();
+    const timeline = project.timelines.items["timeline:main"];
+    const overlay = timeline.elements_by_id["overlay-os"];
+    overlay.span = { start_tick: 50, duration_tick: 100 };
+    overlay.enabled = true;
+
+    const rafQueue: Array<(t: number) => void> = [];
+    const realRaf = globalThis.requestAnimationFrame;
+    const realCancel = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = (cb) => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+    try {
+      const onPlayheadChange = vi.fn();
+      render(
+        <TimelineLivePreview
+          {...previewProps(project, 0)}
+          playing
+          onPlayheadChange={onPlayheadChange}
+        />,
+      );
+      const fire = (now: number) => {
+        const batch = rafQueue.splice(0, rafQueue.length);
+        batch.forEach((cb) => cb(now));
+      };
+      // First frame only seeds the clock; no boundary crossed at tick 0.
+      fire(0);
+      expect(onPlayheadChange).not.toHaveBeenCalled();
+      // tick=50 crosses the overlay's start_tick, well before the
+      // 200ms throttle expires -- boundary commit fires here.
+      fire(50);
+      expect(onPlayheadChange).toHaveBeenCalledWith(50);
+      // tick=150 crosses the overlay's end_tick, still under 200ms.
+      fire(150);
+      expect(onPlayheadChange).toHaveBeenCalledWith(150);
+    } finally {
+      globalThis.requestAnimationFrame = realRaf;
+      globalThis.cancelAnimationFrame = realCancel;
+    }
+  });
 });

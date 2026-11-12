@@ -575,6 +575,25 @@ export default function TimelineLivePreview({
   const lastEmittedTick = useRef(playheadTick);
   const committedTick = useRef(playheadTick);
   const lastCorrectionSeekAt = useRef(new Map<string, number>());
+  // Every span edge the preview can transition at, sorted ascending.
+  // The rAF clock uses this list to force a React commit exactly when
+  // the playhead crosses one, even if the 200 ms throttle has not
+  // expired yet. Without this a short overlay (measured: 100 ms against
+  // a 200 ms cadence) is completely invisible because the throttled
+  // React `playheadTick` never samples the range that would put it
+  // into visibleLayers (review #243 P2). Boundary commits are strictly
+  // bounded by the layer count, so the render budget still does not
+  // degrade to per-frame state updates on a Project with a long tail.
+  const layerBoundariesRef = useRef<number[]>([]);
+  useEffect(() => {
+    const set = new Set<number>();
+    Object.values(timeline.elements_by_id).forEach((element) => {
+      if (!element.enabled) return;
+      set.add(element.span.start_tick);
+      set.add(element.span.start_tick + element.span.duration_tick);
+    });
+    layerBoundariesRef.current = Array.from(set).sort((a, b) => a - b);
+  }, [timeline]);
   const stageRef = useRef<HTMLDivElement>(null);
   const [stageWidth, setStageWidth] = useState(1280);
   const [stageHeight, setStageHeight] = useState(720);
@@ -669,15 +688,21 @@ export default function TimelineLivePreview({
       }
       lastEmittedTick.current = tick;
       // Frame position goes straight onto a CSS custom property; only a
-      // throttled tick reaches React. setState at 60 fps re-rendered the whole
-      // track tree every frame (measured: ~5 DOM mutation batches per
-      // pointermove, frame time 16.7 ms -> 33.4 ms), while the compositor can
-      // move one element for free.
+      // throttled tick reaches React. setState at 60 fps re-rendered the
+      // whole track tree every frame (measured: ~5 DOM mutation batches
+      // per pointermove, frame time 16.7 ms -> 33.4 ms), while the
+      // compositor can move one element for free.
       document.documentElement.style.setProperty(
         PLAYHEAD_FRACTION_VARIABLE,
         (durationTick ? tick / durationTick : 0).toFixed(6),
       );
-      if (now - lastCommit >= PLAYHEAD_COMMIT_MS) {
+      // Crossing a span edge changes layer membership; commit now
+      // instead of waiting for the throttle so a short overlay is
+      // never completely skipped (review #243 P2).
+      const crossedBoundary = layerBoundariesRef.current.some(
+        (boundary) => boundary > committedTick.current && boundary <= tick,
+      );
+      if (crossedBoundary || now - lastCommit >= PLAYHEAD_COMMIT_MS) {
         lastCommit = now;
         committedTick.current = tick;
         onPlayheadChange(tick);

@@ -30,9 +30,14 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from services.runtime_files.errors import LockTimeoutError
+from services.runtime_files.locking import CrossProcessFileLock
+
 logger = logging.getLogger(__name__)
 
 LEDGER_FILE_NAME = "_open-ledger.json"
+LEDGER_LOCK_NAME = "_open-ledger.lock"
+LEDGER_LOCK_TIMEOUT_SECONDS = 10.0
 LEDGER_SCHEMA = 1
 _IN_PROGRESS_MARKERS = (
     b'"status": "IN_PROGRESS"',
@@ -43,6 +48,27 @@ _SCAN_HEAD_BYTES = 4096
 
 def _ledger_path(root: Path) -> Path:
     return root / LEDGER_FILE_NAME
+
+
+def _ledger_lock(root: Path) -> CrossProcessFileLock:
+    """Serialize the shared load-modify-save the ledger is built from.
+
+    ``mark_open`` and ``mark_closed`` are called with the caller already
+    holding the per-(owner, scope, key) idempotency lock, so two concurrent
+    reservations for different keys do *not* overlap there -- yet both
+    rewrite the one shared ledger file. Without a further lock, thread A
+    loads the set, thread B loads the same set and publishes its own entry,
+    and A's write clobbers B. A lost ``txn`` id means GC treats that
+    transaction as unprotected and deletes the durable witness an
+    IN_PROGRESS reservation still needs to replay its response
+    (review #243 P1). The lock lives beside the ledger but is not ``*.json``,
+    so the scan path keeps skipping it implicitly.
+    """
+
+    return CrossProcessFileLock(
+        root / LEDGER_LOCK_NAME,
+        timeout_seconds=LEDGER_LOCK_TIMEOUT_SECONDS,
+    )
 
 
 def _read_ledger(root: Path) -> dict[str, str] | None:
@@ -137,39 +163,95 @@ def _scan_open_ids(root: Path) -> dict[str, str]:
 
 
 def open_transaction_ids(root: Path) -> frozenset[str]:
-    """Reservation ids that have not completed or failed yet."""
+    """Reservation ids that have not completed or failed yet.
+
+    A warm read needs no lock: ``os.replace`` publishes the ledger
+    atomically, so any readable file is a whole snapshot. Rebuilding is
+    different -- the scan result is written back, and a concurrent
+    ``mark_open`` landing between the scan and the write would be lost from
+    the file we just published. Re-check under the lock so a peer that
+    rebuilt first short-circuits our write, and fall back to a one-shot
+    scan on timeout so a busy GC never blocks on a slow writer.
+    """
 
     open_ids = _read_ledger(root)
-    if open_ids is None:
-        open_ids = _scan_open_ids(root)
-        _write_ledger(root, open_ids)
+    if open_ids is not None:
+        return frozenset(open_ids)
+    try:
+        with _ledger_lock(root):
+            open_ids = _read_ledger(root)
+            if open_ids is not None:
+                return frozenset(open_ids)
+            open_ids = _scan_open_ids(root)
+            _write_ledger(root, open_ids)
+    except LockTimeoutError as exc:
+        logger.warning(
+            "idempotency ledger rebuild timed out for %s: %s; "
+            "serving this sweep from a transient scan",
+            root,
+            exc,
+        )
+        return frozenset(_scan_open_ids(root))
     return frozenset(open_ids)
 
 
 def mark_open(root: Path, record_id: str) -> None:
-    """Note a reservation that now depends on a durable transaction."""
+    """Note a reservation that now depends on a durable transaction.
 
-    open_ids = _read_ledger(root)
-    if open_ids is None:
-        open_ids = _scan_open_ids(root)
-    if record_id in open_ids:
-        return
-    open_ids[record_id] = datetime.now(timezone.utc).isoformat()
-    _write_ledger(root, open_ids)
+    Losing this entry is the dangerous direction (see :func:`_ledger_lock`),
+    so a lock timeout invalidates the ledger instead of returning quietly:
+    the record is already ``IN_PROGRESS`` on disk and the next reader
+    rebuilds from the records themselves.
+    """
+
+    try:
+        with _ledger_lock(root):
+            open_ids = _read_ledger(root)
+            if open_ids is None:
+                open_ids = _scan_open_ids(root)
+            if record_id in open_ids:
+                return
+            open_ids[record_id] = datetime.now(timezone.utc).isoformat()
+            _write_ledger(root, open_ids)
+    except LockTimeoutError as exc:
+        logger.warning(
+            "idempotency ledger mark_open(%s) timed out: %s; "
+            "invalidating so the next reader rebuilds from records",
+            record_id,
+            exc,
+        )
+        _invalidate(root)
 
 
 def mark_closed(root: Path, record_id: str) -> None:
-    """Drop a settled reservation. A stale entry only ever costs disk."""
+    """Drop a settled reservation. A stale entry only ever costs disk.
 
-    open_ids = _read_ledger(root)
-    if open_ids is None or record_id not in open_ids:
-        return
-    open_ids.pop(record_id, None)
-    _write_ledger(root, open_ids)
+    A lock timeout is therefore safe to ignore here: the record file has
+    already been written as COMPLETED/FAILED, and if the ledger still names
+    the transaction next sweep, GC leaves it in place and the sweep after
+    that reads the settled ledger. The dangerous direction is losing an
+    ``open`` entry, not keeping one too long.
+    """
+
+    try:
+        with _ledger_lock(root):
+            open_ids = _read_ledger(root)
+            if open_ids is None or record_id not in open_ids:
+                return
+            open_ids.pop(record_id, None)
+            _write_ledger(root, open_ids)
+    except LockTimeoutError as exc:
+        logger.warning(
+            "idempotency ledger mark_closed(%s) timed out: %s; "
+            "leaving the stale entry for a later sweep",
+            record_id,
+            exc,
+        )
 
 
 __all__ = [
     "LEDGER_FILE_NAME",
+    "LEDGER_LOCK_NAME",
     "mark_closed",
     "mark_open",
     "open_transaction_ids",

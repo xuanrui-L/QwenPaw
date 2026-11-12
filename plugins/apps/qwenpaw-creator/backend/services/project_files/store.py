@@ -1191,9 +1191,9 @@ class ProjectStore:
                         source.current_intelligence_version_id
                         in dropped_intel_ids
                     ):
-                        pointer_update[
-                            "current_intelligence_version_id"
-                        ] = None
+                        pointer_update["current_intelligence_version_id"] = (
+                            None
+                        )
                     replaced_sources[source_id] = source.model_copy(
                         update=pointer_update,
                     )
@@ -1275,12 +1275,12 @@ class ProjectStore:
                         for r in (variant.reference_asset_version_ids or [])
                         if r != version_id
                     ]
-                    variant_updates.setdefault(entity_id, {})[
-                        variant_id
-                    ] = variant.model_copy(
-                        update={
-                            "reference_asset_version_ids": new_refs,
-                        },
+                    variant_updates.setdefault(entity_id, {})[variant_id] = (
+                        variant.model_copy(
+                            update={
+                                "reference_asset_version_ids": new_refs,
+                            },
+                        )
                     )
         if variant_updates:
             merged_items = dict(base_entities.items)
@@ -1379,6 +1379,14 @@ class ProjectStore:
             if cached is not None:
                 summaries.append(cached)
                 continue
+            # The stamp is captured *before* the read so it names the exact
+            # bytes the summary will describe. ``_cache_summary`` re-checks
+            # it against the live file before publishing and skips the write
+            # if a commit landed in the read/build window -- otherwise an
+            # old summary would be stamped with the new document's fingerprint
+            # and every later list would keep serving the stale card until
+            # the next write happened to invalidate it.
+            stamp_before_read = _project_json_stamp(entry)
             try:
                 snapshot = self.read(safe_id)
             except ProjectStoreError as exc:
@@ -1403,7 +1411,12 @@ class ProjectStore:
                     snapshot.project,
                 ),
             )
-            self._cache_summary(entry, summary)
+            if stamp_before_read is not None:
+                self._cache_summary(
+                    entry,
+                    summary,
+                    expected_stamp=stamp_before_read,
+                )
             summaries.append(summary)
         reverse = sort_order == "desc"
         if sort_by == "name":
@@ -1467,12 +1480,30 @@ class ProjectStore:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def _cache_summary(self, entry: Path, summary: ProjectSummary) -> None:
-        """Persist the listing projection; a failed write is only a miss."""
+    def _cache_summary(
+        self,
+        entry: Path,
+        summary: ProjectSummary,
+        *,
+        expected_stamp: tuple[int, int],
+    ) -> None:
+        """Persist the listing projection; a failed write is only a miss.
 
-        stamp = _project_json_stamp(entry)
-        if stamp is None:
+        ``expected_stamp`` must be the fingerprint the summary was built
+        against, captured before :meth:`read`. If the live document has moved
+        on since (a concurrent commit that landed between the read and this
+        call), publishing the pair would stamp an old summary with a new
+        fingerprint and every later :meth:`list` would keep serving the stale
+        card until the next write -- a permanently-cached stale read of a
+        legal change, not the transient skew list() is allowed elsewhere.
+        Skipping this turn costs one full read on the next listing, which is
+        the pre-cache behaviour.
+        """
+
+        current_stamp = _project_json_stamp(entry)
+        if current_stamp is None or current_stamp != expected_stamp:
             return
+        stamp = current_stamp
         payload = {
             "schema": SUMMARY_RECORD_SCHEMA,
             "sourceStamp": list(stamp),

@@ -53,8 +53,14 @@ def calls(monkeypatch: pytest.MonkeyPatch):
 
     recorded: list[list[str]] = []
 
-    async def _fake(data_root: Path, scope: str) -> tuple[bool, str]:
-        recorded.append([str(data_root), scope])
+    async def _fake(
+        data_root: Path,
+        paths: list[Path],
+        ceiling: int,
+    ) -> tuple[bool, str]:
+        recorded.append(
+            [str(data_root), *[str(p) for p in paths], f"ceiling={ceiling}"],
+        )
         return True, ""
 
     monkeypatch.setattr(session_elision, "_run_one", _fake)
@@ -78,10 +84,14 @@ def test_an_oversized_conversation_is_handed_to_a_child_process(
     )
     visited: list[list[str]] = []
 
-    async def _collapse(data_root: Path, scope: str) -> tuple[bool, str]:
+    async def _collapse(
+        data_root: Path,
+        paths: list[Path],
+        ceiling: int,
+    ) -> tuple[bool, str]:
         with path.open("r+") as handle:
             handle.truncate(session_elision.MIN_ELISION_BYTES)
-        visited.append([str(data_root), scope])
+        visited.append([str(data_root), *[str(p) for p in paths]])
         return True, ""
 
     monkeypatch.setattr(session_elision, "_run_one", _collapse)
@@ -91,8 +101,10 @@ def test_an_oversized_conversation_is_handed_to_a_child_process(
     assert summary.saved_bytes == 4096
     assert summary.projects == 1
     assert summary.files == 1
-    # The script re-adds the directory prefix, so it is handed the bare id.
-    assert visited == [[str(tmp_path), PROJECT.removeprefix("project-")]]
+    # The candidate list goes to the child verbatim -- not a bare Project
+    # scope, which would let an oversize sibling in the same directory be
+    # dragged into the same read.
+    assert visited == [[str(tmp_path), str(path)]]
 
 
 def test_a_project_is_visited_once_until_it_grows_again(
@@ -165,7 +177,11 @@ def test_a_failed_child_is_not_retried_until_the_file_grows(
         size=session_elision.MIN_ELISION_BYTES + 4096,
     )
 
-    async def _die(data_root: Path, scope: str) -> tuple[bool, str]:
+    async def _die(
+        data_root: Path,
+        paths: list[Path],
+        ceiling: int,
+    ) -> tuple[bool, str]:
         return False, "Killed"
 
     monkeypatch.setattr(session_elision, "_run_one", _die)
@@ -254,16 +270,24 @@ def test_the_child_is_offered_to_the_oom_killer_before_the_app():
     """When the container limit is reached, the cleanup should lose."""
 
     script = Path("/x/elide.py")
+    candidate = Path("/root/project-abc/runtime/sessions/s/messages.jsonl")
     direct = [
         sys.executable,
         str(script),
         "--data-root",
         "/root",
-        "--project-id",
-        "abc",
+        "--session-file",
+        str(candidate),
+        "--max-bytes",
+        "67108864",
     ]
 
-    command = session_elision._spawn_argv(script, Path("/root"), "abc")
+    command = session_elision._spawn_argv(
+        script,
+        Path("/root"),
+        [candidate],
+        64 * 1024 * 1024,
+    )
 
     if sys.platform == "linux":
         assert command[:2] == ["/bin/sh", "-c"]
@@ -317,7 +341,9 @@ def test_cancelling_the_pass_kills_its_child(
     monkeypatch.setattr(session_elision, "ELISION_SCRIPT", slow)
 
     async def _go() -> None:
-        task = asyncio.create_task(session_elision._run_one(tmp_path, "x"))
+        task = asyncio.create_task(
+            session_elision._run_one(tmp_path, [tmp_path / "unused.jsonl"], 1),
+        )
         await asyncio.sleep(0.5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -363,6 +389,82 @@ def test_the_size_ceiling_stands_even_for_a_confirmed_project(
     assert summary.oversize_files == 1
     assert summary.files == 0
     assert calls == []
+
+
+def test_a_small_candidate_does_not_drag_an_oversize_sibling_into_the_child(
+    tmp_path: Path,
+    calls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The child receives the parent's filtered list, not a Project scope.
+
+    Regression for review #243 P1: with ``--project-id`` the script
+    enumerated every non-empty ``messages.jsonl`` under the Project and
+    read each one whole, so a 9 MiB candidate sitting next to a 606 MiB
+    stream collapsed both in the same child -- the ceiling the parent
+    had already applied was silently bypassed. Passing ``--session-file``
+    verbatim plus ``--max-bytes`` closes the window, and the child
+    re-checks size before opening a stream in case it grew in between.
+    """
+
+    monkeypatch.setenv(
+        "CREATOR_MESSAGE_ELISION_MAX_BYTES",
+        str(session_elision.MIN_ELISION_BYTES + 10000),
+    )
+    small = tmp_path / MESSAGE_FILE
+    small.parent.mkdir(parents=True, exist_ok=True)
+    small.write_bytes(
+        b"{}" + b"x" * (session_elision.MIN_ELISION_BYTES + 4096 - 2),
+    )
+    oversize = (
+        tmp_path
+        / PROJECT
+        / "runtime"
+        / "sessions"
+        / "session-2"
+        / "messages.jsonl"
+    )
+    oversize.parent.mkdir(parents=True, exist_ok=True)
+    oversize.write_bytes(
+        b"{}" + b"x" * (session_elision.MIN_ELISION_BYTES + 20000 - 2),
+    )
+
+    summary = _elide(tmp_path)
+
+    # The parent classified them; the child must see only the small one.
+    assert summary.oversize_files == 1
+    assert summary.oversize_bytes == session_elision.MIN_ELISION_BYTES + 20000
+    assert len(calls) == 1
+    listed = calls[0]
+    assert str(small) in listed
+    assert str(oversize) not in listed
+
+
+def test_the_child_refuses_a_file_that_grew_past_the_ceiling(
+    tmp_path: Path,
+) -> None:
+    """``--session-file`` is trusted only while ``--max-bytes`` still holds.
+
+    The parent listed this path before spawning. Between then and the
+    child's ``_decide`` a stream can grow into the danger zone; the child
+    must not read it just because it was named.
+    """
+
+    module = _script_module()
+    path = _conversation(tmp_path, size=4096)
+
+    args = SimpleNamespace(
+        session_files=[path],
+        max_bytes=1024,
+        project_id=None,
+    )
+
+    assert module._selected_files(args, tmp_path) == []
+
+    args.max_bytes = 8192
+    assert module._selected_files(args, tmp_path) == [
+        path.resolve(strict=False),
+    ]
 
 
 def _message(seq: int) -> CreatorMessageRecord:

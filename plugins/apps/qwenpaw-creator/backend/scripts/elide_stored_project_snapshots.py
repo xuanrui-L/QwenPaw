@@ -100,7 +100,32 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--project-id",
-        help="restrict the sweep to one Project directory",
+        help=(
+            "restrict the sweep to one Project directory; ignored when "
+            "--session-file is provided"
+        ),
+    )
+    parser.add_argument(
+        "--session-file",
+        type=Path,
+        action="append",
+        dest="session_files",
+        help=(
+            "explicit messages.jsonl to consider; repeatable. The runtime "
+            "maintenance pass uses this so a small candidate in a Project "
+            "cannot drag an oversize sibling into the same child, whose "
+            "resident peak would take the container down with it "
+            "(review #243 P1)."
+        ),
+    )
+    parser.add_argument(
+        "--max-bytes",
+        type=int,
+        help=(
+            "upper bound applied to each --session-file immediately before "
+            "it is read; a stream that grew past the ceiling since the "
+            "parent listed it is skipped and reported rather than loaded."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -127,6 +152,41 @@ def _session_files(data_root: Path, project_id: str | None) -> list[Path]:
         )
         if path.is_file() and path.stat().st_size
     )
+
+
+def _selected_files(
+    args: argparse.Namespace,
+    data_root: Path,
+) -> list[Path]:
+    """Resolve the exact files to touch and re-check each against the ceiling.
+
+    The parent listed these paths under its own size scan; time has passed
+    since then. Re-stating the bound here means a stream that grew into the
+    danger zone between the two reads is reported instead of loaded, so a
+    small candidate can no longer smuggle an oversize sibling through the
+    same child (review #243 P1).
+    """
+
+    if not args.session_files:
+        return _session_files(data_root, args.project_id)
+    chosen: list[Path] = []
+    for raw in args.session_files:
+        path = raw.expanduser().resolve(strict=False)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            print(f"  skipped (unreadable): {path}")
+            continue
+        if size == 0:
+            continue
+        if args.max_bytes is not None and size > args.max_bytes:
+            print(
+                f"  skipped (oversize): {path} {size} bytes > "
+                f"{args.max_bytes} ceiling",
+            )
+            continue
+        chosen.append(path)
+    return chosen
 
 
 def _collapse_one(
@@ -326,7 +386,7 @@ def main() -> int:
 
     touched = 0
     saved = 0
-    for path in _session_files(data_root, args.project_id):
+    for path in _selected_files(args, data_root):
         decision = _decide(path)
         if decision is None or not decision.changed:
             continue

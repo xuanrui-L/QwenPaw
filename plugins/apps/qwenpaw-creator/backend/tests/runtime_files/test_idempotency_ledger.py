@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -99,3 +101,121 @@ def test_an_unreadable_record_is_still_treated_as_open(tmp_path) -> None:
     assert idempotency_ledger.open_transaction_ids(root) == frozenset(
         {"rec"},
     )
+
+
+def test_mark_open_serializes_the_shared_load_modify_save(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Two reservations for different keys must both survive.
+
+    Regression for review #243 P1: ``mark_open`` is called under each
+    caller's per-key idempotency lock, so two concurrent writes for
+    different keys do not overlap there -- but they do overlap on the
+    single shared ledger file. Without a further lock, thread A loads the
+    empty set, pauses, thread B loads the same empty set and publishes
+    ``{B}``, then A's write clobbers B. A lost id means GC treats that
+    transaction as unprotected and deletes the durable witness an
+    IN_PROGRESS reservation still needs to replay its response.
+    """
+
+    root = tmp_path / "idempotency"
+    root.mkdir(parents=True)
+
+    inside_a = threading.Event()
+    leave_a = threading.Event()
+    real_read = idempotency_ledger._read_ledger
+
+    def pausing_read(path_root: Path) -> dict[str, str] | None:
+        result = real_read(path_root)
+        # Only thread A's first read is delayed; when A resumes and
+        # releases the lock, thread B enters and its read must see A's
+        # already-published entry -- proof the shared update was actually
+        # serialized rather than lucky scheduling.
+        if not inside_a.is_set():
+            inside_a.set()
+            leave_a.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(idempotency_ledger, "_read_ledger", pausing_read)
+
+    b_finished = threading.Event()
+
+    def thread_a() -> None:
+        idempotency_ledger.mark_open(root, "txn-A")
+
+    def thread_b() -> None:
+        inside_a.wait(timeout=5)
+        idempotency_ledger.mark_open(root, "txn-B")
+        b_finished.set()
+
+    ta = threading.Thread(target=thread_a)
+    tb = threading.Thread(target=thread_b)
+    ta.start()
+    assert inside_a.wait(timeout=5)
+    tb.start()
+    # Give B a window to bypass the lock if it were unprotected. Without
+    # the lock it would finish here and A's later write would drop its
+    # entry; with the lock, B is blocked in acquire.
+    time.sleep(0.2)
+    assert not b_finished.is_set(), (
+        "thread B completed while A was inside mark_open -- "
+        "the shared load-modify-save is not serialized"
+    )
+    leave_a.set()
+    ta.join(timeout=5)
+    tb.join(timeout=5)
+
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset(
+        {"txn-A", "txn-B"},
+    )
+
+
+def test_mark_closed_waits_for_the_in_flight_mark_open(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A settle that raced past its own add still removes the entry.
+
+    Without the shared lock, ``mark_closed`` would read an empty ledger
+    (A had not written yet), silently return, and A's write would leave
+    ``txn-A`` behind forever -- GC would then treat the settled
+    transaction as an open witness and never reclaim it.
+    """
+
+    root = tmp_path / "idempotency"
+    root.mkdir(parents=True)
+
+    inside_a = threading.Event()
+    leave_a = threading.Event()
+    real_read = idempotency_ledger._read_ledger
+
+    def pausing_read(path_root: Path) -> dict[str, str] | None:
+        result = real_read(path_root)
+        if not inside_a.is_set():
+            inside_a.set()
+            leave_a.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(idempotency_ledger, "_read_ledger", pausing_read)
+
+    def thread_a() -> None:
+        idempotency_ledger.mark_open(root, "txn-A")
+
+    def thread_b() -> None:
+        inside_a.wait(timeout=5)
+        idempotency_ledger.mark_closed(root, "txn-A")
+
+    ta = threading.Thread(target=thread_a)
+    tb = threading.Thread(target=thread_b)
+    ta.start()
+    assert inside_a.wait(timeout=5)
+    tb.start()
+    leave_a.set()
+    ta.join(timeout=5)
+    tb.join(timeout=5)
+
+    # With the lock, B entered after A had written {txn-A}, found the
+    # id there and popped it. The file remains as an empty ledger rather
+    # than being recreated by a later scan.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset()

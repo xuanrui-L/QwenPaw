@@ -47,7 +47,6 @@ from .dependencies import (
     semantic_etag,
 )
 
-
 router = APIRouter(
     prefix="/projects/{project_id}",
     tags=["runtime-files"],
@@ -455,6 +454,15 @@ async def _preflight_scene_review(
 
     A spent budget is not a failure. The same sweep runs again inside the
     drive, so an unusually slow Project is late rather than wrong.
+
+    ``auto_review_stale_scenes`` gathers per-scene work with
+    ``return_exceptions=True``, swallows each failure into a log line, and
+    returns the scene ids still needing attention. Raising only on the
+    exception path therefore kept the original 202-plus-phantom-Task defect
+    alive (review #243 P1): a VLM outage on any scene leaves that id in
+    ``remaining``, the drive's scene gate still refuses, and drive() has no
+    Task to persist the failure into. Treat a non-empty result as a refused
+    admission too, naming the scenes so the user sees what blocked them.
     """
 
     from services.render_review.scene_review import (
@@ -470,7 +478,7 @@ async def _preflight_scene_review(
     if not (stale or drafts):
         return
     try:
-        await asyncio.wait_for(
+        remaining = await asyncio.wait_for(
             auto_review_stale_scenes(
                 services,
                 project_id=project_id,
@@ -485,6 +493,17 @@ async def _preflight_scene_review(
             "background, where its failure would not be observable",
             ADMISSION_REVIEW_BUDGET_SECONDS,
             _log_safe(project_id),
+        )
+        return
+    if remaining:
+        raise ConflictError(
+            "场景自动重审未能修复："
+            + "、".join(str(scene_id) for scene_id in remaining)
+            + "；请稍后重试或手动触发重审。",
+            details={
+                "code": "SCENE_REVIEW_INCOMPLETE",
+                "scenes": [str(scene_id) for scene_id in remaining],
+            },
         )
 
 
@@ -889,12 +908,16 @@ async def _decide_authorization(
                 ) != script_fingerprint(
                     snapshot.project,
                 ):
-                    raise ConflictError("剧本已更新，请重新请求并确认当前版本。")
+                    raise ConflictError(
+                        "剧本已更新，请重新请求并确认当前版本。"
+                    )
             if (
                 decision.get("provider") != current.requested_provider
                 or decision.get("model") != current.requested_model
             ):
-                raise ConflictError("批准的 provider/model 必须与原执行请求一致")
+                raise ConflictError(
+                    "批准的 provider/model 必须与原执行请求一致"
+                )
             requested_candidates = current.requested_candidates or 1
             if int(decision.get("maxCandidates") or 0) > requested_candidates:
                 raise ConflictError("批准的候选数量不能超过原执行请求")
@@ -903,13 +926,13 @@ async def _decide_authorization(
                     decision.get("promptPointer") is None
                     or (current.scope or {}).get("workGraph") is not None
                 ):
-                    decision[
-                        "workGraph"
-                    ] = await _rebind_workgraph_authorization(
-                        services,
-                        store,
-                        current,
-                        decision["projectEtag"],
+                    decision["workGraph"] = (
+                        await _rebind_workgraph_authorization(
+                            services,
+                            store,
+                            current,
+                            decision["projectEtag"],
+                        )
                     )
                 else:
                     from services.project_files.approved_prompt import (
@@ -922,13 +945,17 @@ async def _decide_authorization(
                     )
                     expected = semantic_etag(decision["projectEtag"])
                     if snapshot.etag != expected:
-                        raise ConflictError("已保存的项目快照已改变，请重新查看后批准。")
+                        raise ConflictError(
+                            "已保存的项目快照已改变，请重新查看后批准。"
+                        )
                     saved = saved_authorization_prompt(
                         snapshot.project,
                         current,
                     )
                     if saved["pointer"] != decision["promptPointer"]:
-                        raise ConflictError("授权卡的提示词目标与执行目标不一致。")
+                        raise ConflictError(
+                            "授权卡的提示词目标与执行目标不一致。"
+                        )
                     decision["savedPrompt"] = {
                         "etag": snapshot.etag,
                         **saved,

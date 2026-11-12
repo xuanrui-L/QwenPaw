@@ -1661,19 +1661,24 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               const alreadyDurable = messageId
                 ? messages.some((message) => message.messageId === messageId)
                 : false;
-              // A first view loads the conversation tail as durable messages,
-              // so replayed deltas for those same messages must not build a
-              // streaming bubble on top of them - that duplication was
-              // rendering every recent reply twice.
-              const historicalReplay =
-                current.isReplaying && event.seq <= replayUntilSeq;
+              // Duplication is judged on whether the message is already
+              // durable, not on whether we are inside a replay. The backend
+              // deliberately keeps an active run's historical deltas because
+              // no durable message exists for them yet; discarding them here
+              // was stripping the prefix of a partial reply a returning user
+              // had every right to see (review #243 P2: bootstrap RUNNING,
+              // replay delta0 "Hello ", live delta1 "world" -> only
+              // "world" survived). A replayed delta whose run later reaches
+              // a terminal event in the same batch is dropped by the
+              // streamingAssistantMessages cleanup on run.completed /
+              // run.failed / run.cancelled above, so terminated history
+              // cannot leak a stale bubble.
               if (
                 messageId &&
                 Number.isInteger(deltaIndex) &&
                 deltaIndex >= 0 &&
                 typeof delta === "string" &&
-                !alreadyDurable &&
-                !historicalReplay
+                !alreadyDurable
               ) {
                 const existing = streamingAssistantMessages[messageId];
                 const target =
@@ -1716,15 +1721,12 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               const alreadyDurable = messageId
                 ? messages.some((message) => message.messageId === messageId)
                 : false;
-              const historicalReplay =
-                current.isReplaying && event.seq <= replayUntilSeq;
-              if (
-                messageId &&
-                toolCallId &&
-                toolName &&
-                !alreadyDurable &&
-                !historicalReplay
-              ) {
+              // Same rule as the delta branch: replayed progress is a
+              // duplicate only when the message already has a durable
+              // projection; a live run's progress is exactly what a fresh
+              // view needs to rebuild, and the terminal cleanup above
+              // bounds the stale case (review #243 P2).
+              if (messageId && toolCallId && toolName && !alreadyDurable) {
                 const existing = streamingAssistantMessages[messageId];
                 const currentTool = existing?.toolCall;
                 streamingAssistantMessages = {

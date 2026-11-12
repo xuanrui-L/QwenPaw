@@ -1736,12 +1736,39 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
     await waitFor(() => {
-      expect(composerBox().textContent).toBe(
-        "Keep this unsent instruction",
-      );
+      expect(composerBox().textContent).toBe("Keep this unsent instruction");
     });
   });
 
+  it("prefers the edited draft over a one-shot injection on reopen", async () => {
+    // Review #243 P2: BlueprintScriptPanel request-changes sets store.draft
+    // once, and the old effect re-applied that value every time the dock
+    // reopened against an empty input -- silently overwriting whatever the
+    // user had typed after the injection. The injection is now consumed
+    // after it lands, so unsentDraft wins on the next fold/reopen.
+    renderDock();
+    useAgentDockUiStore.getState().setDraft("Original injection");
+    await waitFor(() =>
+      expect(composerBox().textContent).toBe("Original injection"),
+    );
+    // Consume the injection: store.draft is cleared once it has landed.
+    expect(useAgentDockUiStore.getState().draft).toBe("");
+
+    fireEvent.input(composerBox(), {
+      target: { textContent: "Edited instruction" },
+    });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
+    expect(useAgentDockUiStore.getState().unsentDraft).toEqual([
+      "Edited instruction",
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
+    await waitFor(() =>
+      expect(composerBox().textContent).toBe("Edited instruction"),
+    );
+  });
 
   it("holds the composer button at 发送 while a replay is still catching up", () => {
     // The measured defect: a Project whose session had already ended in ERROR
@@ -1763,9 +1790,7 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
     });
     renderDock();
 
-    expect(
-      screen.getByRole("button", { name: "发送" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "停止所有 Agent" }),
     ).not.toBeInTheDocument();
@@ -1775,12 +1800,14 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
     // Replay replays events, not the session row. Without this the corrected
     // status only arrives with the next ~10s poll batch.
     const refresh = vi.fn(async () => undefined);
-    useCreatorSessionStore.setState({ isReplaying: true, refreshSession: refresh });
+    useCreatorSessionStore.setState({
+      isReplaying: true,
+      refreshSession: refresh,
+    });
     renderDock();
 
     useCreatorSessionStore.setState({ isReplaying: false });
 
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
   });
-
 });

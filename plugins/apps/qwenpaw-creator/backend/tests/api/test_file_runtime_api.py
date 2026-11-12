@@ -684,7 +684,10 @@ def test_legacy_specialist_uses_saved_prompt_instead_of_old_tool_argument(
             "arguments": {"prompt": "旧工具参数A", "ratio": "16:9"},
         }
         rebound = approved_specialist_arguments(current, approved, arguments)
-        assert rebound["arguments"] == {"prompt": "用户保存的提示词B", "ratio": "16:9"}
+        assert rebound["arguments"] == {
+            "prompt": "用户保存的提示词B",
+            "ratio": "16:9",
+        }
         assert arguments["arguments"]["prompt"] == "旧工具参数A"
         # An unrelated write moves the ETag but not the approved prompt: the
         # approval stays usable instead of re-asking the user.
@@ -774,19 +777,19 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
         # pylint: disable=too-many-branches,too-many-statements
         base = services.projects.read("project-1")
         project = base.project.model_copy(deep=True)
-        project.timelines.items["timeline:main"].elements_by_id[
-            "e1"
-        ] = TimelineElement.model_validate(
-            {
-                "element_id": "e1",
-                "label": "Sunset",
-                "span": {"start_tick": 0, "duration_tick": 4000},
-                "location": {},
-                "creation": {
-                    "type": "t2v",
-                    "video_prompt": "A quiet sunset.",
+        project.timelines.items["timeline:main"].elements_by_id["e1"] = (
+            TimelineElement.model_validate(
+                {
+                    "element_id": "e1",
+                    "label": "Sunset",
+                    "span": {"start_tick": 0, "duration_tick": 4000},
+                    "location": {},
+                    "creation": {
+                        "type": "t2v",
+                        "video_prompt": "A quiet sunset.",
+                    },
                 },
-            },
+            )
         )
         elements = project.timelines.items["timeline:main"].elements_by_id
         elements["e2"] = elements["e1"].model_copy(
@@ -1198,3 +1201,54 @@ def test_preflight_scene_review_surfaces_a_failed_repair(
     monkeypatch.setattr(routes, "ADMISSION_REVIEW_BUDGET_SECONDS", 0.01)
     asyncio.run(routes._preflight_scene_review(services, "project-1", "main"))
     assert calls == ["slow"]
+
+
+def test_preflight_scene_review_refuses_when_scenes_are_still_blocked(
+    monkeypatch,
+) -> None:
+    """``auto_review`` returning a non-empty list is also a refusal.
+
+    The repair gathers per-scene work with ``return_exceptions=True``, so a
+    VLM outage that used to escape as an exception now lands in the returned
+    ``remaining`` list. The route used to discard that value, and the drive's
+    scene gate would still reject the compose -- leaving the user holding a
+    202 receipt for a Task id that never materialised (review #243 P1).
+    """
+
+    # pylint: disable=protected-access
+    import api.file_execution_routes as routes
+    from domain.errors import ConflictError
+    from services.render_review import scene_review
+
+    class _Projects:
+        def read(self, _project_id):
+            return SimpleNamespace(
+                project=SimpleNamespace(
+                    timelines=SimpleNamespace(items={"main": object()}),
+                ),
+            )
+
+    services = SimpleNamespace(projects=_Projects())
+    monkeypatch.setattr(
+        scene_review,
+        "collect_scene_review_targets",
+        lambda _timeline: (["scene:hall"], []),
+    )
+
+    async def swallows_one(*_args, **_kwargs):
+        # The real auto_review gathers with return_exceptions=True and
+        # puts the still-broken scene id into its result, exactly like this.
+        return ["scene:hall"]
+
+    monkeypatch.setattr(scene_review, "auto_review_stale_scenes", swallows_one)
+
+    with pytest.raises(ConflictError) as captured:
+        asyncio.run(
+            routes._preflight_scene_review(services, "project-1", "main"),
+        )
+
+    assert captured.value.details == {
+        "code": "SCENE_REVIEW_INCOMPLETE",
+        "scenes": ["scene:hall"],
+    }
+    assert "scene:hall" in str(captured.value)

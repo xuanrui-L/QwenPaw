@@ -1126,9 +1126,7 @@ export default function AgentDock({
   const height = useAgentDockUiStore((state) => state.height);
   const draft = useAgentDockUiStore((state) => state.draft);
   const unsentDraft = useAgentDockUiStore((state) => state.unsentDraft);
-  const setUnsentDraft = useAgentDockUiStore(
-    (state) => state.setUnsentDraft,
-  );
+  const setUnsentDraft = useAgentDockUiStore((state) => state.setUnsentDraft);
   const selectionAttachment = useAgentDockUiStore((state) => state.selection);
   const setOpen = useAgentDockUiStore((state) => state.setOpen);
   const setTab = useAgentDockUiStore((state) => state.setTab);
@@ -1256,7 +1254,9 @@ export default function AgentDock({
     isReplaying && lastEventSeq < (replayUntilSeq || Number.POSITIVE_INFINITY);
   const stoppable =
     !replayOutstanding &&
-    (Object.values(subagentActivities).some((activity) => !activity.completed) ||
+    (Object.values(subagentActivities).some(
+      (activity) => !activity.completed,
+    ) ||
       tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status)) ||
       runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)) ||
       Boolean(session && STOPPABLE_SESSION_STATUSES.includes(session.status)));
@@ -1845,10 +1845,17 @@ export default function AgentDock({
     if (!open || !draft || inputRef.current?.getContent().text) return;
     inputRef.current?.setText(draft);
     setCanSend(Boolean(draft.trim()));
-    // An explicit injection takes over the box, so a stashed unsent draft has
-    // been superseded and must not resurface on the next open.
+    // Consume the injection. Callers only set ``draft`` on the intent that
+    // spawned it (BlueprintScriptPanel request-changes), and leaving the
+    // value on the store meant the next fold + reopen re-fired this effect
+    // against a now-empty box, silently overwriting the user's edited
+    // text with the original injection (review #243 P2). Clearing here also
+    // lets the unsent-draft effect below see that no injection is pending,
+    // so the stash is restored on the reopen instead of the older prompt.
+    setDraft("");
+    // A fresh injection supersedes any stashed unsent draft.
     setUnsentDraft(null);
-  }, [draft, open, setUnsentDraft]);
+  }, [draft, open, setDraft, setUnsentDraft]);
 
   // Folding or unmounting unmounts the input, and live typing never reaches
   // the store, so an unsent instruction used to vanish with the component
