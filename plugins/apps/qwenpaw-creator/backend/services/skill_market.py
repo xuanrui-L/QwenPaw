@@ -15,6 +15,7 @@ exist on all lines.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -83,9 +84,12 @@ async def search_skills(
     # results from all markets in one call.  ``list_providers`` is the host's
     # own view of availability and browse support, which keeps Creator free
     # of the host's provider-registry layout (absent on some release lines).
+    # Availability can read the environment and import optional backends, so
+    # it runs off the event loop exactly like the /market/providers route.
+    discovered = await asyncio.to_thread(list_providers_fn)
     provider_pages: dict[str, int] = {
         info.key: page_num
-        for info in list_providers_fn()
+        for info in discovered
         if info.available and info.supports_browse
     }
 
