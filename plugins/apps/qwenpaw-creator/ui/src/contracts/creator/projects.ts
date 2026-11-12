@@ -36,6 +36,24 @@ export interface SubtitleAnimationPolicy {
 }
 
 /**
+ * A user-saved bundle of style-window picks: base pack plus whichever
+ * colour / size / outline / plate and motion choices were set when it
+ * was saved.  Applying one is exactly re-moving those controls.
+ */
+export interface UserSubtitleStyle {
+  styleId: string;
+  name: string;
+  description?: string;
+  packId?: string | null;
+  style?: SubtitleStyle;
+  animation?: SubtitleAnimationPolicy;
+}
+
+export interface UserSubtitleStyleListResponse {
+  items: UserSubtitleStyle[];
+}
+
+/**
  * Switch the subtitle style pack after the project exists.
  *
  * A key that is present wins: `subtitleTemplate: null` goes back to smart

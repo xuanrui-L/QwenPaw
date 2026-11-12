@@ -164,6 +164,15 @@ export function SubtitleStyleSection({
         value={draft.packId}
         onChange={(id) => onDraftChange({ ...draft, packId: id })}
         style={draft.style}
+        animation={draft.animation}
+        onSelectCustom={(custom) =>
+          onDraftChange({
+            ...draft,
+            packId: custom.packId ?? null,
+            style: custom.style ?? null,
+            animation: custom.animation ?? null,
+          })
+        }
       />
 
       <SubtitleStyleControls

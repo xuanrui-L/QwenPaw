@@ -1,12 +1,43 @@
 import { useState } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  deleteUserSubtitleStyle,
+  listUserSubtitleStyles,
+  saveUserSubtitleStyle,
+  updateUserSubtitleStyle,
+} from "@/api/creator/subtitleStyles";
 import type { SubtitleStyle } from "@/contracts/creator";
 import SubtitleTemplatePicker, {
   SUBTITLE_TEMPLATE_PACKS,
 } from "../SubtitleTemplatePicker";
+
+vi.mock("@/api/creator/subtitleStyles", () => ({
+  listUserSubtitleStyles: vi.fn(),
+  saveUserSubtitleStyle: vi.fn(),
+  updateUserSubtitleStyle: vi.fn(),
+  deleteUserSubtitleStyle: vi.fn(),
+}));
+
+const CUSTOM = {
+  styleId: "user:abc",
+  name: "我的综艺字",
+  description: "高饱和",
+  packId: "variety_pop",
+  style: { color: "#ff0000" },
+  animation: { entrance: "pop" as const },
+};
+
+beforeEach(() => {
+  vi.mocked(listUserSubtitleStyles).mockResolvedValue({ items: [] });
+  vi.mocked(saveUserSubtitleStyle).mockResolvedValue(CUSTOM);
+  vi.mocked(updateUserSubtitleStyle).mockResolvedValue(CUSTOM);
+  vi.mocked(deleteUserSubtitleStyle).mockResolvedValue({
+    deleted: CUSTOM.styleId,
+  });
+});
 
 function Harness({ style = null }: { style?: SubtitleStyle | null }) {
   const [value, setValue] = useState<string | null>(null);
@@ -31,6 +62,13 @@ describe("SubtitleTemplatePicker", () => {
     expect(screen.getByText("智能推荐")).toBeInTheDocument();
     expect(screen.getByText("综艺花字")).toBeInTheDocument();
     expect(screen.getByText("霓虹音乐")).toBeInTheDocument();
+  });
+
+  it("speaks the entrance in the footnote, not the raw id", () => {
+    render(<Harness />);
+    expect(screen.getAllByText(/入场 弹入/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/入场 淡入/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/soft_fade/)).not.toBeInTheDocument();
   });
 
   it("selects a pack then returns to smart recommend", async () => {
@@ -128,5 +166,99 @@ describe("SubtitleTemplatePicker", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("shows saved bundles and applies them in one move", async () => {
+    const user = userEvent.setup();
+    vi.mocked(listUserSubtitleStyles).mockResolvedValue({ items: [CUSTOM] });
+    const onSelectCustom = vi.fn();
+    render(
+      <SubtitleTemplatePicker
+        value={null}
+        onChange={vi.fn()}
+        onSelectCustom={onSelectCustom}
+      />,
+    );
+
+    const card = await screen.findByText("我的综艺字");
+    expect(screen.getByText("自定义")).toBeInTheDocument();
+    await user.click(card.closest("button")!);
+
+    expect(onSelectCustom).toHaveBeenCalledWith(CUSTOM);
+  });
+
+  it("lights the saved bundle whose picks match the window", async () => {
+    vi.mocked(listUserSubtitleStyles).mockResolvedValue({ items: [CUSTOM] });
+    const card = await (async () => {
+      const view = render(
+        <SubtitleTemplatePicker
+          value="variety_pop"
+          onChange={vi.fn()}
+          style={{ color: "#ff0000" }}
+          animation={{ entrance: "pop" }}
+          onSelectCustom={vi.fn()}
+        />,
+      );
+      return view.findByText("我的综艺字");
+    })();
+    await waitFor(() =>
+      expect(card.closest("button")).toHaveAttribute("aria-pressed", "true"),
+    );
+    // The base pack card of the same pack stays unlit.
+    expect(
+      screen.getByText("综艺花字").closest("button"),
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("saves the current picks under a name", async () => {
+    const user = userEvent.setup();
+    render(
+      <SubtitleTemplatePicker
+        value="variety_pop"
+        onChange={vi.fn()}
+        style={{ color: "#ff0000" }}
+        animation={{ entrance: "pop" }}
+        onSelectCustom={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByText(/保存当前风格/));
+    await user.type(screen.getByPlaceholderText("风格名称"), "我的综艺字");
+    await user.click(screen.getByRole("button", { name: /确\s*定/ }));
+
+    expect(saveUserSubtitleStyle).toHaveBeenCalledWith({
+      name: "我的综艺字",
+      description: "",
+      packId: "variety_pop",
+      style: { color: "#ff0000" },
+      animation: { entrance: "pop" },
+    });
+  });
+
+  it("updates and deletes a saved bundle from its card actions", async () => {
+    vi.mocked(listUserSubtitleStyles).mockResolvedValue({ items: [CUSTOM] });
+    render(
+      <SubtitleTemplatePicker
+        value={null}
+        onChange={vi.fn()}
+        onSelectCustom={vi.fn()}
+      />,
+    );
+    await screen.findByText("我的综艺字");
+
+    // The actions ride on each custom card's top-right corner.
+    fireEvent.click(screen.getByRole("button", { name: "更新" }));
+    expect(updateUserSubtitleStyle).toHaveBeenCalledWith("user:abc", {
+      name: "我的综艺字",
+      description: "高饱和",
+      packId: null,
+      style: null,
+      animation: null,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    // antd spaces the two CJK chars of the popconfirm's ok button.
+    fireEvent.click(screen.getByRole("button", { name: "删 除" }));
+    expect(deleteUserSubtitleStyle).toHaveBeenCalledWith("user:abc");
   });
 });

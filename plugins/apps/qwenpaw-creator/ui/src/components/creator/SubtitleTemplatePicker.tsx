@@ -1,8 +1,21 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
+import { Input, message, Modal, Popconfirm, Tooltip } from "antd";
 
+import {
+  deleteUserSubtitleStyle,
+  listUserSubtitleStyles,
+  saveUserSubtitleStyle,
+  updateUserSubtitleStyle,
+  type UserSubtitleStyleBundle,
+} from "@/api/creator/subtitleStyles";
 import { creatorRequest } from "@/api/creator/client";
-import type { SubtitleStyle } from "@/contracts/creator";
+import type {
+  SubtitleAnimationPolicy,
+  SubtitleStyle,
+  UserSubtitleStyle,
+} from "@/contracts/creator";
+import { CAPTION_ENTRANCE_CHOICES } from "./SubtitleAnimationControls";
 
 /**
  * Preview parameters of one subtitle style pack, exactly as the backend's
@@ -217,11 +230,54 @@ const PREVIEW_FRAME_BACKGROUND =
   "radial-gradient(90% 80% at 85% 80%, rgba(64,120,190,0.5), transparent 65%)," +
   "linear-gradient(160deg, #4a5568 0%, #232a36 55%, #10141b 100%)";
 
+/** Normalised signature of the four style overrides, nulls included. */
+function styleSignature(style: SubtitleStyle | null | undefined): string {
+  return JSON.stringify({
+    color: style?.color ?? null,
+    fontScale: style?.fontScale ?? null,
+    strokeScale: style?.strokeScale ?? null,
+    backgroundOpacity: style?.backgroundOpacity ?? null,
+  });
+}
+
+/** Normalised signature of the entrance / exit / loop triple. */
+function motionSignature(
+  animation: SubtitleAnimationPolicy | null | undefined,
+): string {
+  return JSON.stringify({
+    entrance: animation?.entrance ?? null,
+    exit: animation?.exit ?? null,
+    loop: animation?.loop ?? null,
+  });
+}
+
+/** Whether the window right now shows exactly what this bundle saved. */
+function customMatchesCurrent(
+  custom: UserSubtitleStyle,
+  value: string | null,
+  style: SubtitleStyle | null,
+  animation: SubtitleAnimationPolicy | null | undefined,
+): boolean {
+  return (
+    (custom.packId ?? null) === value &&
+    styleSignature(custom.style) === styleSignature(style) &&
+    motionSignature(custom.animation) === motionSignature(animation)
+  );
+}
+
 interface SubtitleTemplatePickerProps {
   value: string | null;
   onChange: (id: string | null) => void;
   /** Live draft of the style window's four control groups; previews follow. */
   style?: SubtitleStyle | null;
+  /** Live motion triple; saved bundles light up when everything matches. */
+  animation?: SubtitleAnimationPolicy | null;
+  /**
+   * Apply a saved bundle (pack + overrides + motion) in one move.  Hosts
+   * that cannot persist the triple leave it out and the saved cards fall
+   * back to switching only the base pack.
+   */
+  onSelectCustom?: (custom: UserSubtitleStyle) => void;
 }
 
 /** Horizontal JianYing-style subtitle template strip shown for "auto". */
@@ -229,12 +285,24 @@ export function SubtitleTemplatePicker({
   value,
   onChange,
   style = null,
+  animation = null,
+  onSelectCustom,
 }: SubtitleTemplatePickerProps) {
   const { t } = useTranslation();
   const [packSpecs, setPackSpecs] = useState<SubtitlePackPreviewSpec[] | null>(
     null,
   );
+  const [customStyles, setCustomStyles] = useState<UserSubtitleStyle[]>([]);
   const [replay, setReplay] = useState<Record<string, number>>({});
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState("");
+  const [saveDesc, setSaveDesc] = useState("");
+
+  const refreshCustom = useCallback(() => {
+    listUserSubtitleStyles()
+      .then((body) => setCustomStyles(body?.items ?? []))
+      .catch(() => setCustomStyles([]));
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -253,32 +321,118 @@ export function SubtitleTemplatePicker({
     };
   }, []);
 
+  useEffect(() => {
+    refreshCustom();
+  }, [refreshCustom]);
+
   const specs = useMemo(
     () => [SMART_SUBTITLE_PREVIEW, ...(packSpecs ?? SUBTITLE_TEMPLATE_PACKS)],
     [packSpecs],
   );
 
-  const colour = style?.color || "#ffffff";
-  const fontScale = style?.fontScale ?? 1;
-  const strokeScale = style?.strokeScale ?? 1;
-  const bgOpacity = style?.backgroundOpacity ?? null;
+  // Every bundle equal to the current picks lights up: two saves can hold
+  // identical content, and lighting only the first made clicking its twin
+  // look like a no-op.  Built-ins stay dark while any custom matches.
+  const matchedCustomIds = useMemo(
+    () =>
+      new Set(
+        customStyles
+          .filter((custom) =>
+            customMatchesCurrent(custom, value, style, animation),
+          )
+          .map((custom) => custom.styleId),
+      ),
+    [customStyles, value, style, animation],
+  );
+
+  interface CardEntry {
+    cardKey: string;
+    spec: SubtitlePackPreviewSpec;
+    /** Override source of one miniature: the draft, or the saved bundle. */
+    cardStyle: SubtitleStyle | null;
+    custom?: UserSubtitleStyle;
+    selected: boolean;
+  }
+  const entries: CardEntry[] = [
+    ...specs.map((spec) => ({
+      cardKey: spec.id ?? "smart",
+      spec,
+      cardStyle: style,
+      selected: value === spec.id && matchedCustomIds.size === 0,
+    })),
+    ...customStyles.map((custom) => {
+      const base =
+        specs.find((spec) => spec.id === (custom.packId ?? null)) ?? specs[0];
+      return {
+        cardKey: custom.styleId,
+        spec: {
+          ...base,
+          entrance: custom.animation?.entrance ?? base.entrance,
+          loop: custom.animation?.loop ?? base.loop,
+        },
+        cardStyle: custom.style ?? null,
+        custom,
+        selected: matchedCustomIds.has(custom.styleId),
+      };
+    }),
+  ];
+
+  const currentBundle = (
+    name: string,
+    description = "",
+  ): UserSubtitleStyleBundle => ({
+    name,
+    description,
+    packId: value,
+    style: style ?? null,
+    animation: animation ?? null,
+  });
+
+  const handleSave = () => {
+    saveUserSubtitleStyle(currentBundle(saveName.trim(), saveDesc.trim()))
+      .then(() => {
+        setSaveOpen(false);
+        refreshCustom();
+      })
+      .catch(() => undefined);
+  };
+  const handleUpdate = (custom: UserSubtitleStyle) => {
+    updateUserSubtitleStyle(
+      custom.styleId,
+      currentBundle(custom.name, custom.description ?? ""),
+    )
+      .then(refreshCustom)
+      .catch(() => undefined);
+  };
+  const handleDelete = (custom: UserSubtitleStyle) => {
+    deleteUserSubtitleStyle(custom.styleId)
+      .then(refreshCustom)
+      .catch(() => undefined);
+  };
 
   return (
     <div className="flex items-stretch gap-2 overflow-x-auto pb-1">
       <style>{PREVIEW_KEYFRAMES}</style>
-      {specs.map((spec) => {
-        const cardKey = spec.id ?? "smart";
-        const selected = value === spec.id;
-        const stroke = Math.max(0, spec.strokeScale * strokeScale);
-        const plate = plateWithOpacity(spec.plate, bgOpacity);
+      {entries.map((entry) => {
+        const { spec, custom } = entry;
+        const cardKey = entry.cardKey;
+        const selected = entry.selected;
+        const cardColour = entry.cardStyle?.color || "#ffffff";
+        const cardFontScale = entry.cardStyle?.fontScale ?? 1;
+        const stroke = Math.max(
+          0,
+          spec.strokeScale * (entry.cardStyle?.strokeScale ?? 1),
+        );
+        const cardBgOpacity = entry.cardStyle?.backgroundOpacity ?? null;
+        const plate = plateWithOpacity(spec.plate, cardBgOpacity);
         const wordsStyle: CSSProperties = {
-          color: colour,
+          color: cardColour,
           fontFamily: spec.fontFamily,
-          fontSize: `${(15 * fontScale).toFixed(1)}px`,
+          fontSize: `${(15 * cardFontScale).toFixed(1)}px`,
           fontWeight: spec.fontWeight,
           lineHeight: spec.lineHeight,
           letterSpacing: spec.letterSpacing,
-          textShadow: captionShadowStack(stroke, spec.glow, colour),
+          textShadow: captionShadowStack(stroke, spec.glow, cardColour),
           ...(plate
             ? {
                 display: "inline-block",
@@ -300,24 +454,47 @@ export function SubtitleTemplatePicker({
         const plateAlpha = parseFloat(spec.plate.split(",")[3] ?? "0") || 0;
         const plateText = !spec.plate
           ? t("home.subtitlePreviewPlateNone")
-          : bgOpacity === 0
+          : cardBgOpacity === 0
             ? t("home.subtitlePreviewPlateOff")
             : t("home.subtitlePreviewPlatePct", {
-                percent: Math.round((bgOpacity ?? plateAlpha) * 100),
+                percent: Math.round((cardBgOpacity ?? plateAlpha) * 100),
               });
-        return (
+        // The footnote speaks the user's language: the raw entrance id
+        // (soft_fade / pop / ...) reads as machine noise next to the pills.
+        const entranceKey = CAPTION_ENTRANCE_CHOICES.find(
+          (choice) => choice.id === spec.entrance,
+        )?.key;
+        // The miniature plate is always footage-dark, so the chips carry
+        // their own light ground; theme vars vanish against it.
+        const actionClass =
+          "cursor-pointer rounded bg-white/90 px-1.5 py-0.5 text-[10px] leading-4 shadow transition-colors hover:bg-white";
+        const cardButton = (
           <button
-            key={cardKey}
+            key={custom ? undefined : cardKey}
             type="button"
             aria-pressed={selected}
-            onClick={() => onChange(spec.id)}
+            onClick={() => {
+              if (!custom) {
+                onChange(spec.id);
+                return;
+              }
+              if (onSelectCustom) onSelectCustom(custom);
+              else onChange(custom.packId ?? null);
+              // A snapshot equal to the current picks changes nothing on
+              // screen; the toast answers the click either way.
+              message.success(
+                t("home.subtitleCustomApplied", { name: custom.name }),
+              );
+            }}
             onMouseEnter={() =>
               setReplay((current) => ({
                 ...current,
                 [cardKey]: (current[cardKey] ?? 0) + 1,
               }))
             }
-            className={`flex min-w-[168px] flex-1 cursor-pointer flex-col gap-1 rounded-lg border p-2 text-left transition-colors ${
+            className={`flex flex-col gap-1 rounded-lg border p-2 text-left transition-colors ${
+              custom ? "h-full w-full" : "min-w-[168px] flex-1"
+            } ${
               selected
                 ? "border-[var(--color-text-primary)] bg-[rgba(43,27,0,0.06)] dark:bg-white/10"
                 : "border-transparent bg-[rgba(43,27,0,0.03)] hover:bg-[rgba(43,27,0,0.06)] dark:bg-white/5 dark:hover:bg-white/10"
@@ -347,11 +524,17 @@ export function SubtitleTemplatePicker({
                 </span>
               </span>
             </span>
-            <span className="text-xs font-semibold text-[var(--color-text-primary)]">
-              {t(subtitlePackNameKey(spec.id))}
+            <span className="flex items-center gap-1 text-xs font-semibold text-[var(--color-text-primary)]">
+              {custom ? custom.name : t(subtitlePackNameKey(spec.id))}
+              {custom ? (
+                <span className="rounded border border-[var(--color-border)] px-1 text-[10px] font-normal leading-4 text-[var(--color-text-tertiary)]">
+                  {t("home.subtitleCustomBadge")}
+                </span>
+              ) : null}
             </span>
             <span className="text-[11px] leading-4 text-[var(--color-text-tertiary)]">
-              {t(subtitlePackDescKey(spec.id))}
+              {custom?.description ||
+                t(subtitlePackDescKey(custom ? (custom.packId ?? null) : spec.id))}
             </span>
             <span className="font-mono text-[10px] leading-[14px] text-[var(--color-text-tertiary)]">
               {t("home.subtitlePreviewMeta", {
@@ -360,13 +543,79 @@ export function SubtitleTemplatePicker({
                 spacing: spec.letterSpacing,
                 stroke: stroke.toFixed(2),
                 plate: plateText,
-                entrance: spec.entrance,
+                entrance: entranceKey ? t(entranceKey) : spec.entrance,
                 loop: spec.loop ? t("home.subtitlePreviewLoop") : "",
               })}
             </span>
           </button>
         );
+        if (!custom) return cardButton;
+        return (
+          <div key={cardKey} className="group relative min-w-[168px] flex-1">
+            <Tooltip title={t("home.subtitleCustomCardHint")}>
+              {cardButton}
+            </Tooltip>
+            {/* Always on: hover-only hid them from discovery.  Above the
+                miniature's z-[1] plate, or clicks land on the preview. */}
+            <span className="absolute right-1 top-1 z-[2] flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => handleUpdate(custom)}
+                className={`${actionClass} text-gray-700 hover:text-gray-900`}
+              >
+                {t("home.subtitleCustomUpdate")}
+              </button>
+              <Popconfirm
+                title={t("home.subtitleCustomDeleteConfirm")}
+                okText={t("home.subtitleCustomDelete")}
+                cancelText={t("common.cancel")}
+                onConfirm={() => handleDelete(custom)}
+              >
+                <button
+                  type="button"
+                  className={`${actionClass} text-red-600 hover:text-red-700`}
+                >
+                  {t("home.subtitleCustomDelete")}
+                </button>
+              </Popconfirm>
+            </span>
+          </div>
+        );
       })}
+      {onSelectCustom ? (
+        <button
+          type="button"
+          onClick={() => {
+            setSaveName("");
+            setSaveDesc("");
+            setSaveOpen(true);
+          }}
+          className="flex min-w-[120px] flex-1 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-[var(--color-border)] p-2 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:border-[var(--color-text-secondary)] hover:text-[var(--color-text-secondary)]"
+        >
+          + {t("home.subtitleCustomSave")}
+        </button>
+      ) : null}
+      <Modal
+        title={t("home.subtitleCustomSaveTitle")}
+        open={saveOpen}
+        onCancel={() => setSaveOpen(false)}
+        onOk={handleSave}
+        okText={t("common.ok")}
+        cancelText={t("common.cancel")}
+        okButtonProps={{ disabled: !saveName.trim() }}
+      >
+        <Input
+          value={saveName}
+          onChange={(event) => setSaveName(event.target.value)}
+          placeholder={t("home.subtitleCustomName")}
+        />
+        <Input
+          className="mt-2"
+          value={saveDesc}
+          onChange={(event) => setSaveDesc(event.target.value)}
+          placeholder={t("home.subtitleCustomDesc")}
+        />
+      </Modal>
     </div>
   );
 }
