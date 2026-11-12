@@ -162,6 +162,23 @@ describe("SubtitleSettingsPicker", () => {
     });
   });
 
+  it("takes a motion pick back to the pack default", async () => {
+    const view = renderPicker({
+      policy: "auto",
+      animation: { entrance: "slide" },
+      onAnimationChange: vi.fn(),
+    });
+    await pickOption("自动");
+    await expectWindow(true);
+
+    // The lit pill toggles back off, and an emptied policy reads as null.
+    fireEvent.click(screen.getByRole("button", { name: "滑入" }));
+    expect(view.onAnimationChange).toHaveBeenLastCalledWith(null);
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复默认" }));
+    expect(view.onAnimationChange).toHaveBeenLastCalledWith(null);
+  });
+
   it("hides the motion picker when the host cannot persist it", async () => {
     renderPicker({ policy: "auto" });
     await pickOption("自动");

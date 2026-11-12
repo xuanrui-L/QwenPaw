@@ -39,7 +39,7 @@ interface SubtitleSettingsPickerProps {
    * without a change callback hides the picker (a pick that cannot land).
    */
   animation?: SubtitleAnimationPolicy | null;
-  onAnimationChange?: (animation: SubtitleAnimationPolicy) => void;
+  onAnimationChange?: (animation: SubtitleAnimationPolicy | null) => void;
   /** Same dropdown chrome as the resolution and ratio pills beside it. */
   selectClassNames?: SelectProps["classNames"];
 }
@@ -142,6 +142,12 @@ export default function SubtitleSettingsPicker({
             value={template}
             onChange={onTemplateChange}
             style={style}
+            animation={animation}
+            onSelectCustom={(custom) => {
+              onTemplateChange(custom.packId ?? null);
+              onStyleChange(custom.style ?? null);
+              onAnimationChange?.(custom.animation ?? null);
+            }}
           />
 
           <div className="mt-4 border-t border-[var(--color-border)] pt-3">
@@ -153,6 +159,7 @@ export default function SubtitleSettingsPicker({
               <SubtitleAnimationControls
                 value={animation}
                 onChange={onAnimationChange}
+                allowClear
               />
             </div>
           )}
