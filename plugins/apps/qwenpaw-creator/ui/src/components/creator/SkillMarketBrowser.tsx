@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Button, Input, Modal, Spin, message } from "antd";
+import { Button, Input, Modal, Spin, message, type InputRef } from "antd";
 import {
   Download,
   Globe,
@@ -49,6 +49,12 @@ export default function SkillMarketBrowser({
   const { t, i18n } = useTranslation();
   const lang = i18n.language || "en";
   const [query, setQuery] = useState("");
+  /**
+   * The search term the rendered results actually belong to. ``query`` is only
+   * an input draft; paging must never pick it up, or page 2 of an unsubmitted
+   * term would be appended to another term's results.
+   */
+  const [committedQuery, setCommittedQuery] = useState("");
   const [results, setResults] = useState<MarketSkillResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
@@ -58,7 +64,7 @@ export default function SkillMarketBrowser({
   const [installed, setInstalled] = useState<Set<string>>(new Set());
   const searchSeqRef = useRef(0);
   const resultsRef = useRef<MarketSkillResult[]>([]);
-  const inputRef = useRef<Input>(null);
+  const inputRef = useRef<InputRef>(null);
   // Synchronous guard so rapid double-clicks cannot pass the installing
   // check before React commits the first setInstalling update.
   const installingRef = useRef<Set<string>>(new Set());
@@ -91,6 +97,11 @@ export default function SkillMarketBrowser({
         setResults(accumulated);
         setHasMore(res.has_more);
         setSearched(true);
+        // Both the page and the term advance only once a response arrived, so
+        // a failed request leaves them at the last good value and the next
+        // click retries the page that failed instead of skipping it.
+        setPage(searchPage);
+        setCommittedQuery(searchQuery);
       } catch {
         if (seq !== searchSeqRef.current) return;
         message.error(t("skills.marketSearchFailed"));
@@ -104,17 +115,12 @@ export default function SkillMarketBrowser({
   );
 
   const handleSearch = useCallback(() => {
-    setPage(1);
     void doSearch(query, 1);
   }, [query, doSearch]);
 
   const handleLoadMore = useCallback(() => {
-    setPage((prev) => {
-      const nextPage = prev + 1;
-      void doSearch(query, nextPage);
-      return nextPage;
-    });
-  }, [query, doSearch]);
+    void doSearch(committedQuery, page + 1);
+  }, [committedQuery, page, doSearch]);
 
   const handleInstall = useCallback(
     async (item: MarketSkillResult) => {
@@ -153,6 +159,7 @@ export default function SkillMarketBrowser({
   useEffect(() => {
     if (open) {
       setQuery("");
+      setCommittedQuery("");
       setResults([]);
       resultsRef.current = [];
       setSearched(false);
@@ -191,7 +198,7 @@ export default function SkillMarketBrowser({
       {/* Search bar */}
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <Input
-          ref={inputRef as any}
+          ref={inputRef}
           value={query}
           placeholder={t("skills.marketSearchPlaceholder")}
           prefix={
