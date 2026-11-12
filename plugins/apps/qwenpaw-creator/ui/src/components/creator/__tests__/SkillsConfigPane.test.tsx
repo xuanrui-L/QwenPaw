@@ -190,10 +190,15 @@ async function openUrlImportDialog(): Promise<void> {
   await screen.findByRole("dialog");
 }
 
+// The example typed by these tests, deliberately different from the field's
+// own placeholder example.
 const _URL_INPUT = "https://skills.sh/owner/repo/skill";
 
+// Match the placeholder by shape instead of literal text: the component's
+// example URL is product copy that moves with the recommended market, and a
+// hard-coded copy of it here would only fail once the test already broke.
 function urlInput(): HTMLElement {
-  return screen.getByPlaceholderText(_URL_INPUT);
+  return within(screen.getByRole("dialog")).getByPlaceholderText(/^https:\/\//);
 }
 
 function importNameInput(): HTMLElement {
