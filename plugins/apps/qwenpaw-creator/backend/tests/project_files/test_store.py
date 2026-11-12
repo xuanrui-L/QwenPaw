@@ -76,6 +76,82 @@ def test_create_read_list_replace_and_delete(tmp_path):
     assert [item.project_id for item in store.list()] == ["project-a"]
 
 
+def test_listing_serves_from_summary_cache_without_reading(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A warm listing must not read, migrate or validate any document.
+
+    ``list()`` used to load every Project to build one card each -- measured
+    34 MB and 0.7 s across eight Projects, on every home-page load and every
+    return from a Project. The summary record is keyed on ``project.json``'s
+    ``(mtime_ns, size)``, so a real commit still forces the full read.
+    """
+
+    store = ProjectStore(tmp_path.resolve())
+    store.create(_project("project-a", "A"))
+
+    reads: list[str] = []
+    real_read = store.read
+
+    def spy_read(project_id):
+        reads.append(project_id)
+        return real_read(project_id)
+
+    monkeypatch.setattr(store, "read", spy_read)
+
+    first = store.list()
+    assert reads == ["project-a"]  # cold: the document has to be read
+
+    reads.clear()
+    assert store.list() == first  # warm: served from the record
+    assert reads == []
+
+    snapshot = real_read("project-a")
+    store.replace(
+        "project-a",
+        _next(snapshot.project, name="Renamed"),
+        expected_etag=snapshot.etag,
+    )
+    reads.clear()
+    third = store.list()
+    assert reads == ["project-a"]  # the moved document missed the cache
+    assert third[0].name == "Renamed"
+
+
+def test_a_damaged_summary_record_is_only_a_cache_miss(tmp_path) -> None:
+    store = ProjectStore(tmp_path.resolve())
+    store.create(_project("project-a", "A"))
+    store.list()
+
+    record = store.project_root("project-a") / "runtime" / "summary.json"
+    record.write_text("{not json", encoding="utf-8")
+
+    assert store.list()[0].name == "A"
+
+
+def test_summary_cache_can_be_switched_off(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CREATOR_LIST_SUMMARY_CACHE", "0")
+    store = ProjectStore(tmp_path.resolve())
+    store.create(_project("project-a", "A"))
+
+    reads: list[str] = []
+    real_read = store.read
+
+    def spy_read(project_id):
+        reads.append(project_id)
+        return real_read(project_id)
+
+    monkeypatch.setattr(store, "read", spy_read)
+
+    store.list()
+    store.list()
+    assert reads == ["project-a", "project-a"]
+
+
 def test_delete_returns_after_atomic_hide_without_waiting_for_tree_cleanup(
     tmp_path,
     monkeypatch,
@@ -423,3 +499,148 @@ def test_detach_clears_intelligence_pointer_when_selected_version_deleted(
     # (the old code left this as "iv1", dangling at write time).
     assert survivor.current_intelligence_version_id is None
     assert "iv1" not in detached.assets.intelligence_versions_by_id
+
+
+def _publish_asset_index(
+    store: ProjectStore,
+    project_id: str,
+    uris: list[str],
+) -> None:
+    """Publish one Project whose asset index points at *uris*.
+
+    Both write and read run :meth:`ProjectStore._validate_asset_paths`, so this
+    is the shape the containment rule has to accept or refuse.
+    """
+
+    current = store.read(project_id)
+    raw = current.project.model_dump(mode="json")
+    raw["generation"] = current.project.generation + 1
+    raw["updated_at"] = "2026-07-15T08:00:01Z"
+    raw["assets"]["files_by_id"] = {
+        f"file-{index}": {
+            "file_id": f"file-{index}",
+            "kind": "other",
+            "relative_uri": uri,
+            "sha256": "a" * 64,
+            "size_bytes": 1,
+            "media_type": "application/octet-stream",
+            "created_at": "2026-07-15T08:00:00Z",
+        }
+        for index, uri in enumerate(uris)
+    }
+    store.replace(
+        project_id,
+        Project.model_validate(raw),
+        expected_etag=current.etag,
+    )
+
+
+def test_asset_rule_accepts_everything_the_resolve_rule_accepted(tmp_path):
+    store = ProjectStore((tmp_path / "store").resolve())
+    store.create(_project("project-ok"))
+    project_root = store.project_root("project-ok")
+    artifacts = project_root / "assets" / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / "real.bin").write_bytes(b"x")
+
+    _publish_asset_index(
+        store,
+        "project-ok",
+        [
+            "assets/artifacts/real.bin",
+            "assets/artifacts/missing.bin",
+            "assets/uploads/note.txt",
+        ],
+    )
+
+    assert store.read("project-ok").project.generation == 1
+
+
+def test_asset_rule_still_refuses_a_leaf_link_that_leaves_assets(
+    tmp_path,
+    file_symlink,
+):
+    store = ProjectStore((tmp_path / "store").resolve())
+    store.create(_project("project-leaf"))
+    project_root = store.project_root("project-leaf")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"y")
+    link = project_root / "assets" / "leak.bin"
+    file_symlink(outside, link)
+
+    with pytest.raises(UnsafeProjectPath, match="escapes"):
+        _publish_asset_index(store, "project-leaf", ["assets/leak.bin"])
+
+
+def test_asset_rule_accepts_a_leaf_link_that_stays_inside_assets(
+    tmp_path,
+    file_symlink,
+):
+    store = ProjectStore((tmp_path / "store").resolve())
+    store.create(_project("project-inner"))
+    project_root = store.project_root("project-inner")
+    artifacts = project_root / "assets" / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    target = artifacts / "real.bin"
+    target.write_bytes(b"x")
+    file_symlink(target, project_root / "assets" / "alias.bin")
+
+    _publish_asset_index(store, "project-inner", ["assets/alias.bin"])
+
+    assert store.read("project-inner").project.generation == 1
+
+
+def test_asset_rule_refuses_a_directory_link_above_the_leaf(
+    tmp_path,
+    directory_link,
+):
+    """The per-parent resolve must catch a redirect that is not the leaf.
+
+    ``assets/uploads`` pointing outside the Project is exactly what the old
+    per-file ``resolve()`` refused, so caching resolved parents may not soften
+    it.
+    """
+
+    store = ProjectStore((tmp_path / "store").resolve())
+    store.create(_project("project-dirlink"))
+    project_root = store.project_root("project-dirlink")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "real.bin").write_bytes(b"y")
+    directory_link(outside, project_root / "assets" / "uploads")
+
+    with pytest.raises(UnsafeProjectPath, match="escapes"):
+        _publish_asset_index(
+            store,
+            "project-dirlink",
+            ["assets/uploads/real.bin"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("relative_uri", "expected"),
+    (
+        ("assets/artifacts/file.bin", ("assets", "artifacts", "file.bin")),
+        (
+            "assets/sub/../artifacts/file.bin",
+            ("assets", "artifacts", "file.bin"),
+        ),
+        ("assets/./file.bin", ("assets", "file.bin")),
+        ("assets", ("assets",)),
+        ("x/../assets/file.bin", ("assets", "file.bin")),
+    ),
+)
+def test_lexical_asset_parts_accepts_uris_that_return_inside(
+    relative_uri,
+    expected,
+):
+    assert store_module._lexical_asset_parts(relative_uri) == expected
+
+
+@pytest.mark.parametrize(
+    "relative_uri",
+    ("", "/etc/passwd", "../outside", "assets/../../escape", "media/file.bin"),
+)
+def test_lexical_asset_parts_refuses_every_form_of_escape(relative_uri):
+    with pytest.raises(UnsafeProjectPath, match="escapes"):
+        store_module._lexical_asset_parts(relative_uri)
