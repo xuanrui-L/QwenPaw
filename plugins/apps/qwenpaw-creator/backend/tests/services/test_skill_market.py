@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import types
 from dataclasses import dataclass
 
@@ -76,7 +77,12 @@ def _install_fake_service(monkeypatch, providers, capture):
         )
 
     module = types.ModuleType("qwenpaw.market.service")
-    module.list_providers = lambda: list(providers)
+
+    def list_providers():
+        capture["providers_thread"] = threading.current_thread()
+        return list(providers)
+
+    module.list_providers = list_providers
     module.search_market = search_market
     monkeypatch.setitem(sys.modules, "qwenpaw.market.service", module)
 
@@ -105,6 +111,29 @@ def test_search_survives_a_host_without_a_provider_registry(
     assert [r.slug for r in results] == ["demo-skill"]
     assert has_more is True
     assert totals == {"acme": 42}
+
+
+def test_provider_discovery_runs_off_the_event_loop(
+    monkeypatch,
+) -> None:
+    """Asking providers whether they are usable never blocks the loop.
+
+    ``available()`` can read the environment and import an optional backend.
+    The providers route already offloads that lookup; search has to match, or
+    one slow provider would stall every other request in the process.
+    """
+
+    capture: dict = {}
+    _install_fake_service(monkeypatch, [_Provider("acme")], capture)
+
+    async def scenario() -> threading.Thread:
+        loop_thread = threading.current_thread()
+        await skill_market.search_skills("demo")
+        return loop_thread
+
+    loop_thread = _run(scenario())
+
+    assert capture["providers_thread"] is not loop_thread
 
 
 def test_unavailable_and_unbrowsable_providers_are_excluded(
