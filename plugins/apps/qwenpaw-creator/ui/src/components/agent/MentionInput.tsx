@@ -1,4 +1,10 @@
-import { forwardRef, useImperativeHandle, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import type {
   ClipboardEvent as ReactClipboardEvent,
   KeyboardEvent as ReactKeyboardEvent,
@@ -53,6 +59,13 @@ interface MentionInputProps {
   onMentionNavigate?: (direction: 1 | -1) => void;
   onMentionConfirm?: () => void;
   onMentionClose?: () => void;
+  /**
+   * Fires once, as the editor unmounts, with its structured draft (null when
+   * empty). The parent cannot read the handle from its own cleanup: passive
+   * effect teardown runs after refs are detached, so only the editor itself
+   * can serialize its content on the way out.
+   */
+  onUnmountDraft?: (draft: MentionInputDraft | null) => void;
 }
 
 // Kept as complete literals so Tailwind includes classes injected into the editor DOM.
@@ -188,12 +201,17 @@ const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
       onMentionNavigate,
       onMentionConfirm,
       onMentionClose,
+      onUnmountDraft,
     },
     ref,
   ) {
     const { t } = useTranslation();
     const resolvedPlaceholder = placeholder ?? t("agent.inputPlaceholder");
     const editorRef = useRef<HTMLDivElement>(null);
+    // The draft as of the last serialization. Unmount reporting must not read
+    // the DOM: React detaches refs before the passive cleanup runs, so the
+    // editor is already gone by the time this component is torn down.
+    const latestDraft = useRef<MentionInputDraft>([]);
     const savedRange = useRef<Range | null>(null);
     const composing = useRef(false);
     const [empty, setEmpty] = useState(true);
@@ -223,6 +241,7 @@ const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
           content.refs.length === 0 &&
           content.selections.length === 0,
       );
+      latestDraft.current = content.draft;
       onChange?.(content.text, {
         text: content.text,
         refs: content.refs,
@@ -412,6 +431,15 @@ const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
       }
       saveRange();
     };
+
+    useEffect(
+      () => () => {
+        if (!onUnmountDraft) return;
+        const draft = latestDraft.current;
+        onUnmountDraft(draft.length ? draft : null);
+      },
+      [onUnmountDraft],
+    );
 
     useImperativeHandle(ref, () => ({
       getContent: () => {

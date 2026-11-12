@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -1126,3 +1127,74 @@ def test_sse_replay_drops_historical_deltas_and_keeps_lifecycle(tmp_path):
     ]
     # Gaps are expected and safe: the client cursor compares with `>`.
     assert seqs == [1, 4, 5]
+
+
+def test_preflight_scene_review_surfaces_a_failed_repair(
+    monkeypatch,
+) -> None:
+    """A repair that cannot finish must answer the caller, not the log.
+
+    Review #243: the route answered 202 with a Task id that never came into
+    existence, because the repair runs later and its failure had nowhere to
+    go -- polling that id returns 404 forever.
+    """
+
+    # pylint: disable=protected-access
+    import api.file_execution_routes as routes
+    from services.render_review import scene_review
+
+    calls: list[str] = []
+
+    class _Projects:
+        def read(self, _project_id):
+            return SimpleNamespace(
+                project=SimpleNamespace(
+                    timelines=SimpleNamespace(items={"main": object()}),
+                ),
+            )
+
+    services = SimpleNamespace(projects=_Projects())
+    monkeypatch.setattr(
+        scene_review,
+        "collect_scene_review_targets",
+        lambda _timeline: (["scene:hall"], []),
+    )
+
+    async def failing(*_args, **_kwargs):
+        calls.append("reviewed")
+        raise RuntimeError("VLM unavailable")
+
+    monkeypatch.setattr(scene_review, "auto_review_stale_scenes", failing)
+
+    with pytest.raises(RuntimeError, match="VLM unavailable"):
+        asyncio.run(
+            routes._preflight_scene_review(services, "project-1", "main"),
+        )
+    assert calls == ["reviewed"]
+
+    # Nothing stale means no repair call: the precheck must not add work to
+    # an export that does not need it.
+    calls.clear()
+    monkeypatch.setattr(
+        scene_review,
+        "collect_scene_review_targets",
+        lambda _timeline: ([], []),
+    )
+    asyncio.run(routes._preflight_scene_review(services, "project-1", "main"))
+    assert not calls
+
+    # An exhausted budget is late, not wrong: the drive repeats the sweep.
+    monkeypatch.setattr(
+        scene_review,
+        "collect_scene_review_targets",
+        lambda _timeline: (["scene:hall"], []),
+    )
+
+    async def slow(*_args, **_kwargs):
+        calls.append("slow")
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(scene_review, "auto_review_stale_scenes", slow)
+    monkeypatch.setattr(routes, "ADMISSION_REVIEW_BUDGET_SECONDS", 0.01)
+    asyncio.run(routes._preflight_scene_review(services, "project-1", "main"))
+    assert calls == ["slow"]

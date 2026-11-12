@@ -53,6 +53,7 @@ _ENV_FLAG = "CREATOR_MEM_PROBE"
 _ENV_INTERVAL = "CREATOR_MEM_PROBE_INTERVAL"
 _ENV_TOP = "CREATOR_MEM_PROBE_TOP"
 _ENV_DIR = "CREATOR_MEM_PROBE_DIR"
+_ENV_PY = "CREATOR_MEM_PROBE_PY"
 
 _DEFAULT_INTERVAL_SECONDS = 5.0
 _DEFAULT_TOP_SITES = 6
@@ -383,12 +384,22 @@ def start_probe(data_root: Path | None = None) -> bool:
         return True
     if not _truthy(os.environ.get(_ENV_FLAG)):
         return False
-    import tracemalloc
+    # Python allocation tracing is its own switch, off by default. It is not a
+    # passive observer: tracemalloc.start() records a traceback for every
+    # allocation the interpreter makes, and profiling a live container with two
+    # Projects generating measured 5.75 s of a 30 s GIL window (19%) inside
+    # take_snapshot and _group_by -- while RSS, the number that actually
+    # answers "will this OOM", costs one /proc read. Leave it off in the field
+    # and turn it on for a deliberate memory hunt.
+    trace_python = _truthy(os.environ.get(_ENV_PY))
+    if trace_python:
+        import tracemalloc
 
     with _state_lock:
         _started_at = time.monotonic()
-        tracemalloc.start()
-        _baseline = tracemalloc.take_snapshot()
+        if trace_python:
+            tracemalloc.start()
+            _baseline = tracemalloc.take_snapshot()
         directory = (
             Path(os.environ[_ENV_DIR]).expanduser()
             if os.environ.get(_ENV_DIR)
@@ -411,9 +422,11 @@ def start_probe(data_root: Path | None = None) -> bool:
             daemon=True,
         ).start()
     logger.info(
-        "memory probe ON | interval=%ss output=%s (set %s=0 to silence)",
+        "memory probe ON | interval=%ss output=%s python_tracing=%s "
+        "(set %s=0 to silence)",
         interval,
         _output,
+        "on" if trace_python else "off",
         _ENV_FLAG,
     )
     return True

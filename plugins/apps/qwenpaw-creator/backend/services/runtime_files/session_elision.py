@@ -22,6 +22,8 @@ product actually runs.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import sys
@@ -31,6 +33,8 @@ from pathlib import Path
 from typing import Any
 
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
+from services.runtime_files.jsonl_store import DurableJsonlStore
+from services.runtime_files.models import CreatorMessageRecord
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +289,58 @@ async def _run_one(
     return True, text
 
 
+def sha256_of_file(path: Path) -> str:
+    """Digest of a staged candidate; the elision child uses the same helper."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _candidate_plans(output: str) -> list[Path]:
+    """The PLAN lines a child printed, one per staged session file."""
+
+    return [
+        Path(line.split(" ", 1)[1])
+        for line in output.splitlines()
+        if line.startswith("PLAN ")
+    ]
+
+
+def _apply_candidate_plan(plan_path: Path) -> str:
+    """Swap a staged collapse in, inside the append path's own lock.
+
+    The elision child cannot join this process's write boundary, so the swap
+    lives here, where message appends take the same lock. Re-verify the live
+    tail against the seq the child read and the candidate's digest before
+    replacing; anything that moved discards the candidate and says why, and
+    the next maintenance pass gets another chance.
+    """
+
+    raw = json.loads(plan_path.read_text(encoding="utf-8"))
+    target = Path(raw["target"])
+    candidate = Path(raw["candidate"])
+    try:
+        store = DurableJsonlStore(target, CreatorMessageRecord)
+        with store._lock():  # pylint: disable=protected-access
+            current = store.read_all()
+            if not current or current[-1].seq != raw["expected_last_seq"]:
+                return f"refused: {target.name} moved after the child read it"
+            if candidate.stat().st_size != raw["bytes"]:
+                return f"refused: candidate size changed for {target.name}"
+            if sha256_of_file(candidate) != raw["sha256"]:
+                return f"refused: candidate digest changed for {target.name}"
+            os.replace(candidate, target)
+        return f"swapped {target.name}"
+    except OSError as exc:
+        return f"refused: {target.name}: {exc}"
+    finally:
+        candidate.unlink(missing_ok=True)
+        plan_path.unlink(missing_ok=True)
+
+
 def _tail(text: str) -> str:
     """The last few lines of a dead child, one line of which is the reason.
 
@@ -338,6 +394,11 @@ async def elide_stored_conversations(services: Any) -> ElisionSummary:
         if not ok:
             failures.append(f"{project_name}: {detail}")
             continue
+        notes = [
+            _apply_candidate_plan(plan) for plan in _candidate_plans(detail)
+        ]
+        if notes:
+            detail = f"{detail} | {'; '.join(notes)}"
         after = sum(
             path.stat().st_size if path.exists() else 0 for path in paths
         )

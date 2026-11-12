@@ -13,6 +13,7 @@ import re
 from typing import Any
 from uuid import uuid4
 
+from . import idempotency_ledger
 from .atomic_store import (
     AtomicJsonRecordStore,
     CreateIfAbsentJsonStore,
@@ -234,6 +235,13 @@ class IdempotencyRecordStore:
             idempotency_key,
             created,
         )
+        if created:
+            # Transaction GC reads this ledger before deleting a Project's
+            # settled transactions: an IN_PROGRESS reservation still needs the
+            # transaction as the durable witness for replaying that request's
+            # response, and a record cannot be traced back from its id
+            # (review #243).
+            idempotency_ledger.mark_open(self.root, record.record_id)
         return IdempotencyReservation(record=record, created=created)
 
     @staticmethod
@@ -300,6 +308,7 @@ class IdempotencyRecordStore:
             )
 
         result = store.update(transition).value
+        idempotency_ledger.mark_closed(self.root, result.record_id)
         logger.debug(
             "idempotency completed: owner=%s scope=%s key=%s",
             owner_id,
@@ -354,6 +363,7 @@ class IdempotencyRecordStore:
             )
 
         result = store.update(transition).value
+        idempotency_ledger.mark_closed(self.root, result.record_id)
         logger.debug(
             "idempotency failed: owner=%s scope=%s key=%s",
             owner_id,

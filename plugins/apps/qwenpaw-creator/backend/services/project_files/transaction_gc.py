@@ -48,6 +48,7 @@ from services.media_files.task_scratch import (
     read_scratch_baseline,
 )
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
+from services.runtime_files import idempotency_ledger
 from services.runtime_files.path_safety import is_link_path
 
 from .transaction_index import drop_transaction_index
@@ -171,6 +172,51 @@ def _eligible_candidates(
     return candidates
 
 
+def _open_reservation_ids(transactions_root: Path) -> frozenset[str]:
+    """Transactions an IN_PROGRESS idempotency reservation still needs.
+
+    A PATCH that published its Project but failed to record the HTTP result
+    replays that result from the transaction directory. Deleting it first
+    turns the retry into a 409 and writes FAILED over work that really
+    completed, so the sweep holds those back (review #243). The ledger is
+    rebuilt from the records whenever it cannot be trusted.
+    """
+
+    return idempotency_ledger.open_transaction_ids(
+        transactions_root.parent / "commands" / "idempotency",
+    )
+
+
+def _surplus_candidates(
+    transactions_root: Path,
+    baseline: datetime | None,
+    kept: bool,
+    retention: int,
+    protected: frozenset[str] = frozenset(),
+) -> list[tuple[float, Path, int]]:
+    """Exactly what a sweep would remove: the newest ``retention`` stay.
+
+    Both the storage profile and the collector must answer from this one
+    ordering. The delete loop keeps the newest by mtime, so a profile that
+    truncated the raw directory listing instead reported a different set: the
+    home page then showed a pending size under the cap with no way to confirm
+    it, while the real sweep stopped on a surplus above that cap.
+
+    Protected transactions are dropped before the cut, so they neither get
+    deleted nor consume one of the retained slots.
+    """
+
+    candidates = _eligible_candidates(transactions_root, baseline, kept)
+    if protected:
+        candidates = [
+            item for item in candidates if item[1].name not in protected
+        ]
+    if len(candidates) <= retention:
+        return []
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[retention:]
+
+
 def surplus_transaction_bytes(
     project_root: Path,
     *,
@@ -187,10 +233,14 @@ def surplus_transaction_bytes(
         return 0
     kept = history_reclaim_kept(project_root)
     baseline = read_scratch_baseline(Path(project_root))
-    candidates = _eligible_candidates(transactions_root, baseline, kept)
-    if len(candidates) <= retention:
-        return 0
-    return sum(size for _mtime_v, _entry, size in candidates[retention:])
+    surplus = _surplus_candidates(
+        transactions_root,
+        baseline,
+        kept,
+        retention,
+        _open_reservation_ids(transactions_root),
+    )
+    return sum(size for _mtime_value, _entry, size in surplus)
 
 
 def collect_project_transactions(
@@ -220,22 +270,31 @@ def collect_project_transactions(
         # sweep stamps it this boot, so the next one can collect.  A Project
         # whose history is not kept needs no such proof at all.
         return (0, 0)
-    candidates = _eligible_candidates(transactions_root, baseline, kept)
-    if len(candidates) <= retention:
+    surplus = _surplus_candidates(
+        transactions_root,
+        baseline,
+        kept,
+        retention,
+        _open_reservation_ids(transactions_root),
+    )
+    if not surplus:
         return (0, 0)
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    surplus = candidates[retention:]
-    if enforce_cap and report is not None:
-        projected = sum(size for _mtime_v, _entry, size in surplus)
+    # The cap protects the Project's history; whether a caller wants statistics
+    # is a separate question. Gating it on ``report`` made the startup scan
+    # wait for confirmation while the commit-triggered sweep -- which passes
+    # no report -- deleted the same surplus unconfirmed.
+    if enforce_cap:
+        projected = sum(size for _mtime_value, _entry, size in surplus)
         if (
             projected > auto_reclaim_max_bytes()
             and read_reclaim_confirmation(project_root) is None
         ):
-            report["skipped_bytes"] = projected
+            if report is not None:
+                report["skipped_bytes"] = projected
             return (0, 0)
     removed = 0
     removed_bytes = 0
-    for _mtime_value, entry, size in candidates[retention:]:
+    for _mtime_value, entry, size in surplus:
         if budget is not None and not budget.may_spend(size):
             break
         shutil.rmtree(entry, ignore_errors=True)

@@ -432,6 +432,62 @@ def _timeline_has_text_overlays_without_motion(
     )
 
 
+ADMISSION_REVIEW_BUDGET_SECONDS = 120.0
+
+
+async def _preflight_scene_review(
+    services: CreatorFileServices,
+    project_id: str,
+    timeline_id: str,
+) -> None:
+    """Repair stale scene locks before promising a Task id, but never hang.
+
+    The repair runs inside execute_file_local_media_command, which is after
+    this route has already answered 202 with an id whose Task does not exist
+    yet: when the repair fails -- a VLM outage, a frame extraction error -- no
+    Task carries that failure and the client polls forever for an id that will
+    never appear (review #243). Doing it here lets a real failure answer the
+    caller as an error instead.
+
+    Moving it after Task creation is not an option: the scene gate resolves
+    against the Project the repair just changed, so a post-admit review would
+    reject the first export outright and make the user press it twice.
+
+    A spent budget is not a failure. The same sweep runs again inside the
+    drive, so an unusually slow Project is late rather than wrong.
+    """
+
+    from services.render_review.scene_review import (
+        auto_review_stale_scenes,
+        collect_scene_review_targets,
+    )
+
+    snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    timeline = snapshot.project.timelines.items.get(timeline_id)
+    if timeline is None:
+        return
+    stale, drafts = collect_scene_review_targets(timeline)
+    if not (stale or drafts):
+        return
+    try:
+        await asyncio.wait_for(
+            auto_review_stale_scenes(
+                services,
+                project_id=project_id,
+                timeline_ref=f"timeline:{timeline_id}",
+                timeline=timeline,
+            ),
+            timeout=ADMISSION_REVIEW_BUDGET_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        _logger.warning(
+            "compose preflight review exceeded %ss for %s; continuing in the "
+            "background, where its failure would not be observable",
+            ADMISSION_REVIEW_BUDGET_SECONDS,
+            _log_safe(project_id),
+        )
+
+
 @router.post(
     "/timelines/{timeline_id}/render",
     status_code=status.HTTP_202_ACCEPTED,
@@ -529,6 +585,7 @@ async def render_timeline(
             target_ref=target_ref,
             enforce_scene_gate=False,
         )
+        await _preflight_scene_review(services, project_id, timeline_id)
 
         async def drive() -> None:
             try:

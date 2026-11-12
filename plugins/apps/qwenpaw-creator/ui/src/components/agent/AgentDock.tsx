@@ -1125,6 +1125,10 @@ export default function AgentDock({
   const width = useAgentDockUiStore((state) => state.width);
   const height = useAgentDockUiStore((state) => state.height);
   const draft = useAgentDockUiStore((state) => state.draft);
+  const unsentDraft = useAgentDockUiStore((state) => state.unsentDraft);
+  const setUnsentDraft = useAgentDockUiStore(
+    (state) => state.setUnsentDraft,
+  );
   const selectionAttachment = useAgentDockUiStore((state) => state.selection);
   const setOpen = useAgentDockUiStore((state) => state.setOpen);
   const setTab = useAgentDockUiStore((state) => state.setTab);
@@ -1173,6 +1177,13 @@ export default function AgentDock({
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const stopping = useCreatorSessionStore((state) => state.stopping);
   const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
+  const replayUntilSeq = useCreatorSessionStore(
+    (state) => state.replayUntilSeq,
+  );
+  const lastEventSeq = useCreatorSessionStore((state) => state.lastEventSeq);
+  const refreshSession = useCreatorSessionStore(
+    (state) => state.refreshSession,
+  );
   const stopAllAgents = useCreatorSessionStore((state) => state.stopAllAgents);
   const connectionState = useCreatorSessionStore(
     (state) => state.connectionState,
@@ -1229,11 +1240,26 @@ export default function AgentDock({
     session &&
       ["RUNNING", "RESUMING", "INTERRUPT_REQUESTED"].includes(session.status),
   );
+  // A fresh view replays the session's history, and the four sources below
+  // land at different moments (measured: /session 2.8s, /tasks 3.0s,
+  // /specialist-runs 3.3s, the replay itself 5.2-10.4s). Until it catches up
+  // they describe the run's PAST intermediate states, not the present one: a
+  // Project whose session had already ended in ERROR rendered as stoppable
+  // three times inside 1.5s, because the replay was passing through the
+  // WAITING_EXECUTION_AUTH stretch of its own history. The status label
+  // already defers to replay; the button must too, or the two disagree and the
+  // dock visibly flickers between 发送 and 停止.
+  // Same composite test as the status label: a replay that has already passed
+  // its boundary must not keep the dock in the pre-replay shape. An unknown
+  // boundary (0) defers to isReplaying, which is the old behaviour.
+  const replayOutstanding =
+    isReplaying && lastEventSeq < (replayUntilSeq || Number.POSITIVE_INFINITY);
   const stoppable =
-    Object.values(subagentActivities).some((activity) => !activity.completed) ||
-    tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status)) ||
-    runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)) ||
-    Boolean(session && STOPPABLE_SESSION_STATUSES.includes(session.status));
+    !replayOutstanding &&
+    (Object.values(subagentActivities).some((activity) => !activity.completed) ||
+      tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status)) ||
+      runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)) ||
+      Boolean(session && STOPPABLE_SESSION_STATUSES.includes(session.status)));
   // Derived once for every tool row: a row only asks whether the main session
   // has settled, so a boolean keeps their memo effective across the session
   // updates that do not change that answer.
@@ -1482,6 +1508,8 @@ export default function AgentDock({
         hasQueuedInput: queued.some((item) => item.state !== "failed"),
         messages,
         isReplaying,
+        lastEventSeq,
+        replayUntilSeq,
         subagentActivities,
         toolCalls,
         mainThinking,
@@ -1497,6 +1525,8 @@ export default function AgentDock({
       queued,
       messages,
       isReplaying,
+      lastEventSeq,
+      replayUntilSeq,
       subagentActivities,
       toolCalls,
       mainThinking,
@@ -1710,6 +1740,20 @@ export default function AgentDock({
 
   const suppressFollow = isReplaying && connectionState === "connected";
 
+  // Replay rebuilds what the event stream said, but the authoritative session
+  // row is not part of that stream. Without this the corrected status waits
+  // for the next ~10s poll batch -- measured: replay settled at 10.4s only
+  // because a poll happened to land at that moment -- and every consumer of
+  // session.status shows a historical value in between. Ask once, immediately,
+  // when the replay says it is caught up.
+  const prevReplayForRefresh = useRef(isReplaying);
+  useEffect(() => {
+    const settled = prevReplayForRefresh.current && !isReplaying;
+    prevReplayForRefresh.current = isReplaying;
+    if (!settled || !open) return;
+    void refreshSession().catch(() => undefined);
+  }, [isReplaying, open, refreshSession]);
+
   useLayoutEffect(() => {
     const replayJustEnded = prevIsReplaying.current && !isReplaying;
     prevIsReplaying.current = isReplaying;
@@ -1801,7 +1845,23 @@ export default function AgentDock({
     if (!open || !draft || inputRef.current?.getContent().text) return;
     inputRef.current?.setText(draft);
     setCanSend(Boolean(draft.trim()));
-  }, [draft, open]);
+    // An explicit injection takes over the box, so a stashed unsent draft has
+    // been superseded and must not resurface on the next open.
+    setUnsentDraft(null);
+  }, [draft, open, setUnsentDraft]);
+
+  // Folding or unmounting unmounts the input, and live typing never reaches
+  // the store, so an unsent instruction used to vanish with the component
+  // (review #243). The editor reports its own structured draft on the way out
+  // via onUnmountDraft below: a passive cleanup here would run after the
+  // handle's ref is already detached, so the parent cannot read it in time.
+
+  useEffect(() => {
+    if (!open || !unsentDraft || draft) return;
+    if (inputRef.current?.getContent().text) return;
+    inputRef.current?.setDraft(unsentDraft);
+    setCanSend(Boolean(inputRef.current?.getContent().text.trim()));
+  }, [open, unsentDraft, draft]);
 
   useEffect(() => {
     if (!open || !selectionAttachment) return;
@@ -2187,6 +2247,7 @@ export default function AgentDock({
       ) === submittedSignature
     ) {
       inputRef.current?.clear();
+      setUnsentDraft(null);
       setCanSend(false);
       inlineRefsSignature.current = "";
       setInlineRefs([]);
@@ -2969,6 +3030,7 @@ export default function AgentDock({
                   onMentionNavigate={navigateMention}
                   onMentionConfirm={confirmMention}
                   onMentionClose={() => setMentionQuery(null)}
+                  onUnmountDraft={setUnsentDraft}
                 />
                 {(stoppable || stopping) &&
                 !canSend &&

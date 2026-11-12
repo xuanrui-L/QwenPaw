@@ -6597,3 +6597,28 @@ def test_startup_sweep_discovers_ids_without_reading_documents(
 
     asyncio.run(scenario())
     assert calls == []
+
+
+def test_transient_run_failures_are_classified_by_type_not_wording() -> None:
+    """Lock contention must count as retryable, and wording must not decide.
+
+    Field case: an export died on LockTimeoutError inside the catch-all
+    branch, which hardcoded retryable=False, so YOLO never retried a failure
+    that had changed nothing at all -- the Project sat at 本次执行未完成 with
+    nothing willing to try again.
+
+    The other half matters equally: a provider refusal or a validation fault
+    must not be swept into this bucket, because those wait for a human by
+    design.
+    """
+
+    from domain.errors import ValidationError
+    from services.runtime_files.errors import LockTimeoutError
+
+    transient = FileCreatorAgentRuntime.TRANSIENT_RUN_FAILURES
+    assert LockTimeoutError in transient
+    assert TimeoutError in transient
+    assert ConnectionError in transient
+    # One entry covers the lock family, so no message matching is needed.
+    assert issubclass(LockTimeoutError, TimeoutError)
+    assert not issubclass(ValidationError, transient)

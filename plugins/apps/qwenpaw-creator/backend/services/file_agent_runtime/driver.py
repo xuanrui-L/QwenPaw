@@ -3374,7 +3374,13 @@ class FileCreatorAgentRuntime:
                 message,
                 code="AGENT_RUN_FAILED",
                 message_text=f"{type(exc).__name__}: {exc}",
-                retryable=False,
+                # This catch-all bucket also holds LockTimeoutError, whose run
+                # died before it changed anything. Marking every unexpected
+                # error non-retryable meant YOLO refused to resume exactly the
+                # faults with no side effects to reason about: a field export
+                # sat at 本次执行未完成 because the first attempt lost a lock
+                # race, and nothing would try again.
+                retryable=isinstance(exc, self.TRANSIENT_RUN_FAILURES),
             )
             self._blocked_heads[project_id] = message.message_seq
         finally:
@@ -8712,6 +8718,13 @@ class FileCreatorAgentRuntime:
     YOLO_RESUME_MAX_CONSECUTIVE = 5
     YOLO_RESUME_MAX_UNATTENDED = 10
     PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE = 5
+    # Failures that leave Project state untouched and so deserve another
+    # attempt: lock contention, transport timeouts, connection resets.
+    # LockTimeoutError already subclasses TimeoutError, covering that family.
+    # Membership is by type, never by wording -- text matching has burned this
+    # repo twice (an nginx 504 phrase escaped a substring rule; an ASP code
+    # was swallowed by a formatted detail).
+    TRANSIENT_RUN_FAILURES = (LockTimeoutError, TimeoutError, ConnectionError)
 
     async def _notify_auto_resume_paused(
         self,
@@ -8996,13 +9009,30 @@ class FileCreatorAgentRuntime:
                 separators=(",", ":"),
             ).encode("utf-8"),
         ).hexdigest()[:16]
-        memo_key = (
-            conversation_id,
-            snapshot.generation,
-            graph_digest,
-            actionable_fingerprint,
-            message_head,
-        )
+
+        def _pause_memo(message_head_value: int) -> tuple[Any, ...]:
+            """One shape for both sides of the pause memo.
+
+            The comparison here and the store after the notice must agree
+            exactly. They were two hand-written tuples, and adding a component
+            to one silently disabled the other -- so the shape lives once.
+            """
+
+            return (
+                conversation_id,
+                snapshot.generation,
+                graph_digest,
+                actionable_fingerprint,
+                message_head_value,
+                # The branches below act differently under auto_approve (YOLO),
+                # and switching the saved mode moves none of the values above:
+                # without this the memo keeps short-circuiting and a user who
+                # chose to continue automatically stays on the paused result of
+                # the mode they just replaced.
+                auto_approve,
+            )
+
+        memo_key = _pause_memo(message_head)
         if self._auto_resume_pause_memo.get(project_id) == memo_key:
             return
         messages = await asyncio.to_thread(
@@ -9170,11 +9200,7 @@ class FileCreatorAgentRuntime:
             )
             # Store the head the notice landed at (or the unchanged one it was
             # deduped against) so the next tick can prove nothing moved.
-            self._auto_resume_pause_memo[project_id] = (
-                conversation_id,
-                snapshot.generation,
-                graph_digest,
-                actionable_fingerprint,
+            self._auto_resume_pause_memo[project_id] = _pause_memo(
                 await asyncio.to_thread(
                     self.sessions.last_message_seq,
                     project_id,

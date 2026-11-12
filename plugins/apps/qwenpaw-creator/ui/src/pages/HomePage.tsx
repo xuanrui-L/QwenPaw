@@ -707,13 +707,26 @@ export default function HomePage() {
             </section>
 
             {loading ? (
+              /* Same grid as the real cards, so the list neither reflows when
+                 the response lands nor reads as a dead page: measured, this
+                 region stayed blank for 11-12s under load with a single line
+                 of text, which users read as a hang. */
               <div
                 data-onboarding-id="project-list"
-                className="flex items-center justify-center rounded-lg border border-[#EAE9E7] bg-white py-28 dark:border-[var(--color-border)] dark:bg-[var(--color-bg-card)]"
+                data-project-skeleton="1"
+                aria-hidden
+                className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
               >
-                <div className="text-sm text-[var(--color-text-secondary)]">
-                  {t("common.loading")}
-                </div>
+                {Array.from({ length: 8 }, (_, index) => (
+                  <div
+                    key={index}
+                    className="animate-pulse rounded-lg border border-[#EAE9E7] bg-white p-4 dark:border-[var(--color-border)] dark:bg-[var(--color-bg-card)]"
+                  >
+                    <div className="mb-3 h-[132px] rounded bg-[var(--color-bg-secondary)]" />
+                    <div className="mb-2 h-4 w-3/4 rounded bg-[var(--color-bg-secondary)]" />
+                    <div className="h-3 w-1/2 rounded bg-[var(--color-bg-secondary)]" />
+                  </div>
+                ))}
               </div>
             ) : projects.length === 0 ? (
               <div

@@ -52,6 +52,9 @@ from services.runtime_files.jsonl_store import (  # noqa: E402
     DurableJsonlStore,
     JsonlEnvelope,
 )
+from services.runtime_files.session_elision import (  # noqa: E402
+    sha256_of_file,
+)
 from services.runtime_files.models import (  # noqa: E402
     CreatorMessageRecord,
     MessageContentPart,
@@ -252,26 +255,39 @@ def _prune_backups(target: Path, stem: str) -> None:
             print(f"  warning: stale backup kept: {stale} ({exc})")
 
 
-def _rewrite(decision: SessionDecision) -> None:
-    """Swap the collapsed records in, under the store's own lock."""
+def _stage_candidate(decision: SessionDecision) -> Path:
+    """Stage the collapsed records beside the live file; never swap here.
+
+    This process holds no lock the backend respects while the backend appends,
+    so a swap from here could overwrite a message the parent accepted between
+    the child's read and its replace -- losing confirmed input and handing its
+    seq to the next message. The child therefore writes a candidate, verifies
+    the candidate itself, and leaves a plan naming the seq it read to and the
+    candidate's digest; the parent, which shares the append path's write
+    boundary, re-verifies and swaps.
+    """
 
     path = decision.path
-    store = DurableJsonlStore(path, CreatorMessageRecord)
-    temp = path.with_name(f".{path.name}.eliding")
-    temp.unlink(missing_ok=True)
-    writer = DurableJsonlStore(temp, CreatorMessageRecord)
-    try:
-        for envelope, record in zip(decision.envelopes, decision.records):
-            writer.append(record, written_at=envelope.written_at)
-        with store._lock():
-            current = store.read_all()
-            if not current or current[-1].seq != decision.envelopes[-1].seq:
-                raise RuntimeError(
-                    f"{path} grew while being collapsed; refusing to swap",
-                )
-            os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
+    candidate = path.with_name(f".{path.name}.eliding")
+    candidate.unlink(missing_ok=True)
+    writer = DurableJsonlStore(candidate, CreatorMessageRecord)
+    for envelope, record in zip(decision.envelopes, decision.records):
+        writer.append(record, written_at=envelope.written_at)
+    _verify(candidate)
+    plan = path.with_name(f".{path.name}.eliding-plan.json")
+    plan.write_bytes(
+        canonical_json_bytes(
+            {
+                "target": str(path),
+                "candidate": str(candidate),
+                "expected_last_seq": decision.envelopes[-1].seq,
+                "sha256": sha256_of_file(candidate),
+                "bytes": candidate.stat().st_size,
+            },
+        ),
+    )
+    print(f"PLAN {plan}")
+    return plan
 
 
 def _verify(path: Path) -> None:
@@ -320,8 +336,7 @@ def main() -> int:
         if args.dry_run:
             continue
         backup = _backup(path, data_root, backup_root)
-        _rewrite(decision)
-        _verify(path)
+        _stage_candidate(decision)
         print(f"  backup: {backup}")
 
     if not touched:

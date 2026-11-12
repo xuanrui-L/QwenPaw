@@ -603,3 +603,145 @@ def test_the_on_demand_reclaim_ignores_the_cap(tmp_path, monkeypatch):
     assert summary.removed_transactions == 1
     assert summary.skipped_projects == 0
     assert not directory.is_dir()
+
+
+def test_the_cap_applies_when_the_caller_asks_for_no_report(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Confirmation protects the history regardless of who wants statistics.
+
+    Review #243: the cap check was gated on ``report is not None``, so the same
+    Project waited for a human at startup while the commit-triggered sweep --
+    which passes no report -- deleted that surplus unconfirmed.
+    """
+
+    project_root = _managed(tmp_path)
+    _transaction(
+        project_root,
+        "txn-new",
+        "RUNTIME_FINALIZED",
+        age_days=30,
+    )
+    _transaction(
+        project_root,
+        "txn-old",
+        "RUNTIME_FINALIZED",
+        age_days=1,
+        body_bytes=5_000,
+    )
+    monkeypatch.setenv(
+        "CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES",
+        "1000",
+    )
+
+    reported: dict = {}
+    assert collect_project_transactions(
+        project_root,
+        retention=1,
+        report=reported,
+    ) == (0, 0)
+    # The whole directory counts, journal.json included, so this is a floor.
+    assert reported["skipped_bytes"] >= 5_000
+
+    # The runtime path passes no report at all: same refusal, no deletions.
+    assert collect_project_transactions(project_root, retention=1) == (0, 0)
+
+
+def test_profile_and_sweep_agree_when_listing_order_is_not_mtime_order(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """One sorted surplus, computed once, answers both questions.
+
+    Review #243: the profile truncated the raw directory listing while the
+    collector kept the newest entries by mtime. With the oldest transaction
+    also the largest, the home page reported a pending size under the cap and
+    offered no way to confirm it, while the sweep stopped on a surplus above
+    that cap.
+    """
+
+    project_root = _managed(tmp_path)
+    newest = _transaction(
+        project_root,
+        "txn-newest-small",
+        "RUNTIME_FINALIZED",
+        age_days=30,
+    )
+    oldest_big = _transaction(
+        project_root,
+        "txn-oldest-large",
+        "RUNTIME_FINALIZED",
+        age_days=1,
+        body_bytes=8_000,
+    )
+    # Directory order that disagrees with mtime order, which is what made the
+    # two paths report different numbers.
+    monkeypatch.setattr(
+        transaction_gc,
+        "_eligible_candidates",
+        lambda root, baseline, kept: [
+            (transaction_gc._mtime(oldest_big), oldest_big, 8_000),
+            (transaction_gc._mtime(newest), newest, 128),
+        ],
+    )
+    monkeypatch.setenv(
+        "CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES",
+        "1000",
+    )
+
+    reported: dict = {}
+    collect_project_transactions(
+        project_root,
+        retention=1,
+        report=reported,
+    )
+
+    assert reported["skipped_bytes"] == 8_000
+    assert (
+        transaction_gc.surplus_transaction_bytes(
+            project_root,
+            retention=1,
+        )
+        == reported["skipped_bytes"]
+    )
+
+
+def test_an_unsettled_reservation_keeps_its_transaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """GC must not delete the witness a retrying PATCH still needs.
+
+    Review #243: the Project published, then the idempotency completion
+    failed, leaving the record IN_PROGRESS. Sweeping its transaction turned
+    the retry into a 409 and wrote FAILED over work that had really completed.
+    """
+
+    project_root = _managed(tmp_path)
+    protected = _transaction(
+        project_root,
+        "txn-open",
+        "RUNTIME_FINALIZED",
+        age_days=1,
+    )
+    settled = _transaction(
+        project_root,
+        "txn-plain",
+        "RUNTIME_FINALIZED",
+        age_days=2,
+    )
+    monkeypatch.setattr(
+        transaction_gc,
+        "_open_reservation_ids",
+        lambda _root: frozenset({"txn-open"}),
+    )
+
+    removed, _removed_bytes = collect_project_transactions(
+        project_root,
+        retention=0,
+    )
+
+    assert removed == 1
+    assert protected.is_dir()
+    assert not settled.exists()

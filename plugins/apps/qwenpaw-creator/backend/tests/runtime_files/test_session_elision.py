@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 import gzip
 import importlib.util
@@ -16,6 +17,11 @@ import pytest
 
 from services.media_files import task_scratch
 from services.runtime_files import session_elision
+from services.runtime_files.jsonl_store import DurableJsonlStore
+from services.runtime_files.models import (
+    CreatorMessageRecord,
+    MessageContentPart,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -357,3 +363,92 @@ def test_the_size_ceiling_stands_even_for_a_confirmed_project(
     assert summary.oversize_files == 1
     assert summary.files == 0
     assert calls == []
+
+
+def _message(seq: int) -> CreatorMessageRecord:
+    return CreatorMessageRecord(
+        message_id=f"msg-{seq}",
+        project_id="project-1",
+        creator_session_id="session-1",
+        conversation_id="conversation-1",
+        message_seq=seq,
+        role="user",
+        content_parts=[MessageContentPart(type="text", text=f"text {seq}")],
+    )
+
+
+def _live_store(tmp_path):
+    path = tmp_path / "messages.jsonl"
+    store = DurableJsonlStore(path, CreatorMessageRecord)
+    for seq in (1, 2, 3):
+        store.append(_message(seq))
+    return path, store
+
+
+def _stage(tmp_path, path, seqs):
+    candidate = path.with_name(".messages.jsonl.eliding")
+    writer = DurableJsonlStore(candidate, CreatorMessageRecord)
+    for seq in seqs:
+        writer.append(_message(seq))
+    plan = path.with_name(".messages.jsonl.eliding-plan.json")
+    plan.write_text(
+        json.dumps(
+            {
+                "target": str(path),
+                "candidate": str(candidate),
+                "expected_last_seq": 3,
+                "sha256": session_elision.sha256_of_file(candidate),
+                "bytes": candidate.stat().st_size,
+            },
+        ),
+        encoding="utf-8",
+    )
+    return candidate, plan
+
+
+def test_a_message_appended_after_the_child_read_survives_the_swap(
+    tmp_path,
+) -> None:
+    """The deterministic regression review #243 asked for.
+
+    The child staged its collapse against seq 3; the parent accepted a fourth
+    message before applying the plan. Swapping then would delete confirmed
+    input and hand seq 4 to the next append, so the plan must be refused and
+    the live file left exactly as the parent wrote it.
+    """
+
+    path, store = _live_store(tmp_path)
+    candidate, plan = _stage(tmp_path, path, [1])
+
+    store.append(_message(4))
+
+    note = session_elision._apply_candidate_plan(plan)
+
+    assert note.startswith("refused")
+    assert [item.seq for item in store.read_all()] == [1, 2, 3, 4]
+    assert not candidate.exists()
+    assert not plan.exists()
+
+
+def test_an_unchanged_live_file_is_swapped_to_the_candidate(tmp_path) -> None:
+    path, store = _live_store(tmp_path)
+    candidate, plan = _stage(tmp_path, path, [1])
+
+    note = session_elision._apply_candidate_plan(plan)
+
+    assert note.startswith("swapped")
+    assert [item.seq for item in store.read_all()] == [1]
+    assert not candidate.exists()
+    assert not plan.exists()
+
+
+def test_a_candidate_changed_on_disk_is_refused(tmp_path) -> None:
+    path, store = _live_store(tmp_path)
+    candidate, plan = _stage(tmp_path, path, [1])
+    candidate.write_bytes(candidate.read_bytes() + b"tampered\n")
+
+    note = session_elision._apply_candidate_plan(plan)
+
+    assert note.startswith("refused")
+    assert [item.seq for item in store.read_all()] == [1, 2, 3]
+    assert not plan.exists()

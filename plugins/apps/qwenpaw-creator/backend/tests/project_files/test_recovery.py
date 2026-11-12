@@ -1096,3 +1096,37 @@ def test_the_light_terminal_audit_can_be_switched_off(
     recover(store)
 
     assert calls, "with the light audit off the first boot audits in full"
+
+
+def test_live_snapshot_cache_does_not_outlive_one_recovery_call(
+    tmp_path,
+) -> None:
+    """A pass may reuse a live snapshot; the next pass may not inherit it.
+
+    Review #243: this coordinator is long-lived, so a generation cached by the
+    startup audit let a later compensation read judge an already-published
+    transaction as still unpublished and mark it ABORTED, leaving the runtime
+    one generation behind.
+    """
+
+    store = ProjectStore(tmp_path.resolve())
+    store.create(Project.new(project_id="project-1", name="One"))
+    coordinator = ProjectCommitRecoveryCoordinator(store)
+
+    reads: list[str] = []
+    real_read = store.read
+
+    def spy(project_id):
+        reads.append(project_id)
+        return real_read(project_id)
+
+    store.read = spy
+
+    coordinator.recover_project("project-1")
+    first = len(reads)
+    coordinator.recover_project("project-1")
+
+    # The second pass re-read rather than trusting the first pass's snapshot.
+    assert len(reads) > first
+    # pylint: disable-next=protected-access
+    assert not coordinator._current_cache

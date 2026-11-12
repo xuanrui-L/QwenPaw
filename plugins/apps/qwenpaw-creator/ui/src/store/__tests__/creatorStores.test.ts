@@ -751,4 +751,31 @@ describe("bounded frontend caches", () => {
       tools: {},
     });
   });
+
+  it("does not let replayed status history flip the live session status", () => {
+    // The flicker this guards: a first view replays the run's own
+    // session.status_changed events. Writing them into the live session made
+    // the failure notice under the conversation -- whose condition is
+    // status === ERROR -- unmount and remount 8 times inside 830 ms on a real
+    // Project, which users report as "this part keeps refreshing". The
+    // authoritative status already arrived with the snapshot the stream was
+    // opened from, so in-boundary transitions are history, not news.
+    seed({
+      isReplaying: true,
+      replayUntilSeq: 10,
+      session: sessionView({ status: "ERROR" }),
+    });
+
+    ingest(
+      ev(1, "session.status_changed", { status: "RUNNING" }),
+      ev(2, "session.status_changed", { status: "WAITING_EXECUTION_AUTH" }),
+    );
+
+    expect(store().session?.status).toBe("ERROR");
+
+    // Past the boundary a transition is news again.
+    ingest(ev(11, "session.status_changed", { status: "IDLE" }));
+    expect(store().session?.status).toBe("IDLE");
+  });
+
 });

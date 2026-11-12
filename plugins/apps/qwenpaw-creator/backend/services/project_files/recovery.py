@@ -259,10 +259,20 @@ class ProjectCommitRecoveryCoordinator:
         *,
         _lifecycle_lock_held: bool = False,
     ) -> ProjectRecoveryReport:
-        if _lifecycle_lock_held:
-            return self._recover_project_lifecycle_locked(project_id)
-        with self.store.lifecycle_lock(project_id):
-            return self._recover_project_lifecycle_locked(project_id)
+        # A live snapshot may be reused within one pass, never across passes.
+        # This coordinator is long-lived, so a generation cached by the startup
+        # audit let a later HTTP compensation read judge an already-published
+        # PREPARED transaction as unpublished and mark it ABORTED, leaving the
+        # runtime behind. Clearing on entry and exit keeps the cache scoped to
+        # exactly the call that holds the lock.
+        self._current_cache.pop(project_id, None)
+        try:
+            if _lifecycle_lock_held:
+                return self._recover_project_lifecycle_locked(project_id)
+            with self.store.lifecycle_lock(project_id):
+                return self._recover_project_lifecycle_locked(project_id)
+        finally:
+            self._current_cache.pop(project_id, None)
 
     def _recover_project_lifecycle_locked(
         self,

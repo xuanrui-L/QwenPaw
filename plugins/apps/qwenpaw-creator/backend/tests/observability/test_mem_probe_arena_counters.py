@@ -77,3 +77,51 @@ def test_minor_faults_survive_spaces_in_comm(monkeypatch) -> None:
     ) = mem_probe._minor_fault_metrics()  # pylint: disable=protected-access
     assert faults == 18907
     assert rate is not None and rate >= 0
+
+
+def test_python_tracing_stays_off_until_asked(tmp_path, monkeypatch) -> None:
+    """The probe must not become the load it is measuring.
+
+    tracemalloc.start() records a traceback for every allocation the
+    interpreter makes: a live container with two Projects generating spent
+    5.75 s of a 30 s GIL window inside take_snapshot and _group_by, while
+    RSS -- the number that actually answers "will this OOM" -- costs one
+    /proc read.
+    """
+
+    import tracemalloc
+
+    monkeypatch.setenv("CREATOR_MEM_PROBE", "1")
+    monkeypatch.delenv("CREATOR_MEM_PROBE_PY", raising=False)
+    monkeypatch.setattr(mem_probe, "_enabled", False)
+    monkeypatch.setattr(mem_probe, "_baseline", None)
+    monkeypatch.setattr(mem_probe, "_output", None)
+
+    assert mem_probe.start_probe(tmp_path) is True
+    try:
+        assert tracemalloc.is_tracing() is False
+        assert mem_probe._baseline is None
+    finally:
+        mem_probe.stop_probe()
+
+
+def test_python_tracing_can_be_turned_on_for_a_memory_hunt(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The capability stays available, just not always paid for."""
+
+    import tracemalloc
+
+    monkeypatch.setenv("CREATOR_MEM_PROBE", "1")
+    monkeypatch.setenv("CREATOR_MEM_PROBE_PY", "1")
+    monkeypatch.setattr(mem_probe, "_enabled", False)
+    monkeypatch.setattr(mem_probe, "_baseline", None)
+    monkeypatch.setattr(mem_probe, "_output", None)
+
+    assert mem_probe.start_probe(tmp_path) is True
+    try:
+        assert tracemalloc.is_tracing() is True
+        assert mem_probe._baseline is not None
+    finally:
+        mem_probe.stop_probe()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -216,12 +217,23 @@ def _assemble(
         )
         export_root = services.projects.root / "exports"
         export_root.mkdir(parents=True, exist_ok=True)
+        # The archive carries every private media file of a Project, so it must
+        # not be readable by other local accounts while it waits to be
+        # downloaded: mkdir's mode passes through umask and open("wb") defaults
+        # to 0644, which on a shared data root would let anyone with a path
+        # into it copy the whole cut. Both are set explicitly instead.
+        os.chmod(export_root, 0o700)
         archive_path = (
             export_root / f"{project_id}-interactive-{uuid4().hex}.zip"
         )
         written = False
         try:
-            with archive_path.open("wb") as handle:
+            descriptor = os.open(
+                archive_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            with os.fdopen(descriptor, "wb") as handle:
                 write_interactive_bundle(
                     plan,
                     handle,

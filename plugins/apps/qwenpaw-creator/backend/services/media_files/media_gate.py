@@ -388,6 +388,24 @@ def kill_group(
     here -- while the handle still exists.
     """
 
+    if not _GROUPS_SUPPORTED:
+        # Windows has neither SIGKILL nor process groups, and merely building
+        # that signal tuple raises AttributeError before any OSError fallback
+        # could run: the child stayed alive while the gate had already
+        # released its permit. Fall back to terminate() then kill(), each with
+        # its own bounded wait, so a timeout keeps its deadline.
+        for step in (process.terminate, process.kill):
+            try:
+                step()
+            except OSError:
+                pass
+            deadline = time.monotonic() + grace_seconds
+            while process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if process.poll() is not None:
+                return
+        return
+
     for signal_number in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(os.getpgid(process.pid), signal_number)

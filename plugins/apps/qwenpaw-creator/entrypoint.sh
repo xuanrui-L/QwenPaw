@@ -76,9 +76,15 @@ export QWENPAW_PORT="${QWENPAW_PORT:-8088}"
 # of the lock-free benefit at 256 MB of arena ground; raise it only if
 # malloc contention shows up in CPU.
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-4}"
-# The image bundles the Chromium revision this build's playwright pins, so
-# HTML source understanding works out of the box; set 0 to keep the reader off.
-export CREATOR_DOC_READER_WEB_ENABLED="${CREATOR_DOC_READER_WEB_ENABLED:-1}"
+# HTML source understanding stays OFF by default until the renderer is actually
+# isolated. The image does bundle the Chromium this build's playwright pins, but
+# vendor/media_toolkit/renderers/web.py opens file:// documents without blocking
+# subresources: an uploaded HTML can pull in files the service process can read
+# outside the document directory, and reach loopback/private networks through
+# image subresources, carrying those responses into later screenshots and model
+# input. A local-path check on the entry point does not constrain any of that.
+# Set 1 only once a verifiable resource allowlist/deny policy exists.
+export CREATOR_DOC_READER_WEB_ENABLED="${CREATOR_DOC_READER_WEB_ENABLED:-0}"
 warn_if_auth_off_container_bind
 
 envsubst '${QWENPAW_PORT}' \
