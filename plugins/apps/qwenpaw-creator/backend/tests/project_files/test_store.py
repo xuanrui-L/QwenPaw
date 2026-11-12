@@ -152,6 +152,68 @@ def test_summary_cache_can_be_switched_off(
     assert reads == ["project-a", "project-a"]
 
 
+def test_summary_cache_refuses_to_stamp_an_old_snapshot_with_a_new_document(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A commit landing between read and cache must not freeze the old card.
+
+    Regression for review #243 P2 (also the sole blocker on #255): the
+    previous ``_cache_summary`` re-statted ``project.json`` *after* the
+    snapshot had been read, so a legitimate commit that slipped into that
+    window paired the old summary with the new fingerprint. Every later
+    ``list()`` matched the fingerprint and served the stale card until the
+    next write happened to invalidate it -- not the transient skew list()
+    is allowed elsewhere, but a permanent misread of a legal change.
+    """
+
+    store = ProjectStore(tmp_path.resolve())
+    store.create(_project("project-a", "Old"))
+
+    real_cover = store_module._cover_reference
+    racing = [False]
+
+    def cover_then_commit(project):
+        # ``_cover_reference`` is what list() calls between read() and
+        # building the summary, so firing the commit here reproduces the
+        # exact race window the review named without needing a real thread.
+        if not racing[0]:
+            racing[0] = True
+            snapshot = store.read("project-a")
+            store.replace(
+                "project-a",
+                _next(snapshot.project, name="New"),
+                expected_etag=snapshot.etag,
+            )
+        return real_cover(project)
+
+    monkeypatch.setattr(store_module, "_cover_reference", cover_then_commit)
+
+    first = store.list()
+    # list() reports the snapshot it actually read; that skew is allowed.
+    assert first[0].name == "Old"
+
+    # What must not happen is caching that stale snapshot under the new
+    # document's fingerprint. The fix skips the write when the live stamp
+    # no longer matches the one taken before read.
+    second = store.list()
+    assert second[0].name == "New"
+
+    # A third listing is warm again from the corrected summary, so the
+    # refusal was one turn and not a permanent bypass.
+    reads: list[str] = []
+    real_read = store.read
+
+    def spy_read(project_id):
+        reads.append(project_id)
+        return real_read(project_id)
+
+    monkeypatch.setattr(store, "read", spy_read)
+    third = store.list()
+    assert third[0].name == "New"
+    assert reads == []
+
+
 def test_delete_returns_after_atomic_hide_without_waiting_for_tree_cleanup(
     tmp_path,
     monkeypatch,
