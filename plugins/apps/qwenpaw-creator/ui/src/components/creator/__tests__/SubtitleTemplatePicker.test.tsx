@@ -128,7 +128,7 @@ describe("SubtitleTemplatePicker", () => {
       "Kaiti",
     );
     // The footnote names the face it now paints.
-    expect(screen.getAllByText(/手写/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/楷体/).length).toBeGreaterThan(0);
 
     // Auto hands the cards back to each pack's own typography.
     rerender(<Harness style={{ fontFamily: "default" }} />);

@@ -463,11 +463,13 @@ export function SubtitleTemplatePicker({
             (ENTRANCE_ANIMATION[spec.entrance] ?? "capAppear .14s linear both") +
             (spec.loop ? ",capBreath 9.6s ease-in-out .45s infinite" : ""),
         };
+        // Name the face the way the font picker above names it, so the
+        // footnote never asks a reader to decode sans/serif vocabulary.
         const family = cardFontFamily.includes("Songti")
-          ? t("home.subtitlePreviewFamilySerif")
+          ? t("home.subtitleStyleFontSong")
           : cardFontFamily.includes("Kaiti")
-            ? t("home.subtitlePreviewFamilyHand")
-            : t("home.subtitlePreviewFamilySans");
+            ? t("home.subtitleStyleFontKai")
+            : t("home.subtitleStyleFontHei");
         // Name the pack's numeric weight the way 字号 names its size, so the
         // footnote reads 特粗/粗/半粗 instead of a bare 800/700/600.
         const weightLabel =
