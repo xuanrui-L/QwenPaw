@@ -2,6 +2,7 @@
 # flake8: noqa: E501
 """Three-layer audio separation: required roles, the narration-voiced
 overlap gate, shot placement, and the v8->v9 role migration."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -19,7 +20,6 @@ from services.project_files.serialization import (
     canonical_json_bytes,
     load_project_json,
 )
-
 
 pytestmark = pytest.mark.unit
 
@@ -255,7 +255,7 @@ def test_v8_migration_stamps_roles_and_the_result_stays_loadable() -> None:
     assert elements["audio-clear"]["creation"]["role"] == "sfx"
     assert elements["audio-explicit"]["creation"]["role"] == "bgm"
     assert "role" not in elements["r2v-1"]["creation"]
-    assert migrated["schema_version"] == 9
+    assert migrated["schema_version"] == 10
     Project.model_validate(migrated)  # loadable, or the migration failed
 
 
@@ -293,6 +293,7 @@ def test_pre_merge_v9_document_missing_roles_is_repaired_on_load() -> None:
             role="bgm",
         ),
     )
+    raw["schema_version"] = 9  # simulate pre-merge v9 export shape
     assert raw["schema_version"] == 9  # the exact failing import shape
 
     # The archive-import path parses JSON and calls load_project_document.
@@ -329,16 +330,30 @@ def test_v9_document_with_roles_is_not_altered_by_the_repair() -> None:
             role="narration",
         ),
     )
+    raw["schema_version"] = 9  # simulate pre-merge v9 export shape
     assert raw["schema_version"] == 9
 
-    # Not merely equal: the old code deep-copied the whole document on every
-    # load (measured 0.26 s of a 0.42 s read, and a read runs on every HTTP
-    # listing, every scheduler tick and the startup sweep). The repairs rebuild
-    # only the containers they actually change, so an untouched Timeline must
-    # still be the very object that came in.
+    # v9→v10 migration bumps the version even when no overlays exist,
+    # but nothing else changes for a role-complete audio document. The
+    # migration path deep-copies (every migration runs against its own
+    # candidate), so identity is not part of this contract.
     migrated = migrate_project_document(raw)
+    assert migrated["schema_version"] == 10
+    del migrated["schema_version"]
+    del raw["schema_version"]
+    assert migrated == raw
+
+    # Not merely equal, though: the old code deep-copied the whole document
+    # on every load (measured 0.26 s of a 0.42 s read, and a read runs on
+    # every HTTP listing, every scheduler tick and the startup sweep). A
+    # document already at the current version takes the same-version
+    # repair path, which rebuilds only the containers it actually
+    # changes, so an untouched Timeline must still be the very object
+    # that came in.
+    raw["schema_version"] = 10
+    same_version = migrate_project_document(raw)
     assert (
-        migrated["timelines"]["items"]["timeline:main"]
+        same_version["timelines"]["items"]["timeline:main"]
         is raw["timelines"]["items"]["timeline:main"]
     )
 
@@ -653,11 +668,15 @@ def test_legacy_double_narration_keeps_the_newest_take_not_id_order() -> None:
         "logical_asset_id": "logical-audio-2",
         "created_at": "2026-09-01T08:00:00Z",  # the re-voice, synthesized later
     }
+    raw["schema_version"] = 9  # simulate pre-merge v9 export shape
     assert raw["schema_version"] == 9
 
     # Writing the same pair directly is still rejected (no repair on write).
     with pytest.raises(ValidationError, match="two narration tracks"):
-        Project.model_validate(raw)
+        # Write path requires current schema version
+        v10_raw = dict(raw)
+        v10_raw["schema_version"] = 10
+        Project.model_validate(v10_raw)
 
     # Loading repairs it: newest take kept, older take muted.
     project = load_project_json(json.dumps(raw))

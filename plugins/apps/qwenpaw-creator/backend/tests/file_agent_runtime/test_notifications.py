@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=protected-access,use-implicit-booleaness-not-comparison
 """Runtime notification bus: steer/inject delivery and idempotency."""
+
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -659,6 +661,18 @@ def test_idle_flush_budget_exhausts_and_resets_on_human(
         notifications_module,
         "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
         0.0,
+    )
+    # setup_logger parks this logger behind ``propagate = False``, and
+    # caplog only sees records that reach the root handler. Whether the
+    # assertion below held used to depend on which earlier test in the
+    # run happened to flip propagation back -- order-sensitive green.
+    # Pin it explicitly so the capture is deterministic in any order
+    # (surfaced by the merge with dev/interactive-video reordering
+    # collection; not a behaviour change to the code under test).
+    monkeypatch.setattr(
+        logging.getLogger("creator.notifications"),
+        "propagate",
+        True,
     )
     for index in range(notifications_module.NOTIFY_IDLE_FLUSH_BUDGET):
         services.sessions.append_message(

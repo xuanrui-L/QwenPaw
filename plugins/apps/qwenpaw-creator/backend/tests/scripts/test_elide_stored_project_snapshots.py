@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from services.file_agent_runtime import driver
+from services.runtime_files import session_elision
 from services.runtime_files.jsonl_store import DurableJsonlStore
 from services.runtime_files.models import CreatorMessageRecord
 
@@ -21,6 +22,18 @@ pytestmark = pytest.mark.unit
 
 PROJECT_ID = "project-under-test"
 FILLER = "x" * 4096
+
+
+def _candidate(path: Path) -> Path:
+    """The staged collapse the script leaves beside the live file."""
+
+    return path.with_name(f".{path.name}.eliding")
+
+
+def _plan(path: Path) -> Path:
+    """The swap plan: last seq the script read + candidate digest."""
+
+    return path.with_name(f".{path.name}.eliding-plan.json")
 
 
 def _snapshot_text(generation: int, etag: str) -> str:
@@ -117,7 +130,15 @@ def test_superseded_snapshots_become_the_receipts_the_runtime_already_shows(
 
     assert _run(monkeypatch, "--data-root", str(tmp_path)) == 0
 
-    collapsed = _read(path)
+    # The script stages a candidate and never swaps the live file itself:
+    # the runtime parent owns the append path's write boundary and does
+    # the swap after re-verifying the plan (review #243 P1). The durable
+    # file is therefore untouched here, and the collapsed shape lives in
+    # the candidate.
+    assert [item.message_seq for item in _read(path)] == [
+        item.message_seq for item in original
+    ]
+    collapsed = _read(_candidate(path))
     assert [item.message_seq for item in collapsed] == [
         item.message_seq for item in original
     ]
@@ -138,9 +159,13 @@ def test_superseded_snapshots_become_the_receipts_the_runtime_already_shows(
     # The newest echo stays the authoritative materialized snapshot.
     assert "resultKind" not in collapsed[-1].metadata
     assert json.loads(collapsed[-1].content_parts[0].text)["project"]
-    assert path.stat().st_size < sum(
+    assert _candidate(path).stat().st_size < sum(
         len(_snapshot_text(index, f"etag-{index}")) for index in range(1, 4)
     )
+    # The plan names what the parent must re-verify before swapping.
+    plan = json.loads(_plan(path).read_text(encoding="utf-8"))
+    assert plan["target"] == str(path)
+    assert plan["expected_last_seq"] == 4
 
 
 def test_a_collapsed_file_is_left_alone_on_the_next_run(
@@ -150,6 +175,12 @@ def test_a_collapsed_file_is_left_alone_on_the_next_run(
 ) -> None:
     path = _seed_session(tmp_path, 3)
     assert _run(monkeypatch, "--data-root", str(tmp_path)) == 0
+    # The parent side of the protocol: re-verify the plan and swap the
+    # staged candidate in. Only after that swap does "already collapsed"
+    # become observable to the next script run.
+    assert session_elision._apply_candidate_plan(_plan(path)) == (
+        f"swapped {path.name}"
+    )
     after_first = path.read_bytes()
     backups = sorted(
         (tmp_path / elide.BACKUP_SUBDIR).rglob(f"*{elide.BACKUP_SUFFIX}"),
@@ -173,14 +204,19 @@ def test_the_original_file_is_backed_up_before_the_swap(
     assert _run(monkeypatch, "--data-root", str(tmp_path)) == 0
 
     # The backup is compressed and timestamped now: one copy per pass, named
-    # by the moment it was taken, and it must still give the bytes back.
+    # by the moment it was taken, and it must still give the bytes back. It
+    # is taken before the candidate is even staged, so no matter when the
+    # parent swaps, the pre-collapse bytes are already aside.
     backups = sorted(
         (tmp_path / elide.BACKUP_SUBDIR).rglob(f"*{elide.BACKUP_SUFFIX}"),
     )
     assert len(backups) == 1
     with gzip.open(backups[0], "rb") as handle:
         assert handle.read() == before
-    assert path.read_bytes() != before
+    # The script itself never rewrites the live file -- the staged
+    # candidate carries the collapse and waits for the parent's swap.
+    assert path.read_bytes() == before
+    assert _candidate(path).read_bytes() != before
 
 
 def test_a_second_project_is_outside_the_requested_scope(
@@ -204,16 +240,32 @@ def test_a_second_project_is_outside_the_requested_scope(
     assert path.read_bytes() == before
 
 
-def test_a_file_growing_midflight_is_refused(tmp_path) -> None:
+def test_a_file_growing_midflight_is_refused(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A stream that moves between staging and swap is never overwritten.
+
+    The growth check moved to the parent with the two-phase protocol: the
+    script records the last seq it read in the plan, and the swap re-reads
+    the live tail inside the append path's own lock (review #243 P1). A
+    message appended after the script ran makes the plan stale; the parent
+    refuses, discards the candidate, and says why.
+    """
+
     path = _seed_session(tmp_path, 2)
-    decision = elide._decide(path)
-    assert decision is not None and decision.changed
+    assert _run(monkeypatch, "--data-root", str(tmp_path)) == 0
+    plan = _plan(path)
+    assert plan.exists()
+
     store = DurableJsonlStore(path, CreatorMessageRecord)
     store.append(_snapshot_message(seq=9, generation=9))
 
-    with pytest.raises(RuntimeError, match="grew while being collapsed"):
-        elide._rewrite(decision)
+    outcome = session_elision._apply_candidate_plan(plan)
 
-    # The refusal leaves the durable file and its lock directory intact.
+    assert outcome == f"refused: {path.name} moved after the child read it"
+    # The refusal leaves the durable file intact -- including the message
+    # that arrived mid-flight -- and cleans both staged artifacts up.
     assert [item.message_seq for item in _read(path)][-1] == 9
-    assert not path.with_name(f".{path.name}.eliding").exists()
+    assert not _candidate(path).exists()
+    assert not plan.exists()
