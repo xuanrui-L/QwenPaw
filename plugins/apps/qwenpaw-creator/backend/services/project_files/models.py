@@ -134,6 +134,10 @@ class SubtitleStyle(StrictModel):
     # a pack without a plate stays plate-free whatever this says, so the value
     # can never promise a block the renderer will not paint.
     background_opacity: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Subtitle font-family id (see overlay._SUBTITLE_FONT_FAMILIES).  None or
+    # "default" keeps the historical auto-detected sans CJK face, so an
+    # untouched project renders byte for byte as before.
+    font_family: Literal["default", "song", "hei", "kai"] | None = None
 
 
 class SubtitleAnimation(StrictModel):

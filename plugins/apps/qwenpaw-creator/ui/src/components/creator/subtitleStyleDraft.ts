@@ -1,6 +1,7 @@
 import type {
   ProjectSettingsDocument,
   SubtitleAnimationPolicy,
+  SubtitleFontFamily,
   SubtitleStyle,
   SubtitleStyleUpdateRequest,
 } from "@/contracts/creator";
@@ -39,6 +40,7 @@ export function subtitleStyleFromSettings(
     fontScale: stored.font_scale ?? null,
     strokeScale: stored.stroke_scale ?? null,
     backgroundOpacity: stored.background_opacity ?? null,
+    fontFamily: (stored.font_family ?? null) as SubtitleFontFamily | null,
   };
 }
 
@@ -59,6 +61,7 @@ const blankStyle = (): Required<SubtitleStyle> => ({
   fontScale: null,
   strokeScale: null,
   backgroundOpacity: null,
+  fontFamily: null,
 });
 
 function styleDiffers(
@@ -71,7 +74,8 @@ function styleDiffers(
     mine.color !== live.color ||
     mine.fontScale !== live.fontScale ||
     mine.strokeScale !== live.strokeScale ||
-    mine.backgroundOpacity !== live.backgroundOpacity
+    mine.backgroundOpacity !== live.backgroundOpacity ||
+    mine.fontFamily !== live.fontFamily
   );
 }
 

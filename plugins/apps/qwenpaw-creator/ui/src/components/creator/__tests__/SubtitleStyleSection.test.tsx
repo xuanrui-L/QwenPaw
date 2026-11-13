@@ -149,6 +149,7 @@ describe("SubtitleStyleSection", () => {
 
     expect(view.draft().style).toEqual({
       color: "#FFE066",
+      fontFamily: null,
       fontScale: null,
       strokeScale: null,
       backgroundOpacity: null,
@@ -294,6 +295,7 @@ describe("subtitleStyleFromSettings", () => {
       ),
     ).toEqual({
       color: null,
+      fontFamily: null,
       fontScale: 0.85,
       strokeScale: null,
       backgroundOpacity: 0.3,

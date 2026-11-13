@@ -3,6 +3,13 @@ import type { CreatorSessionStatus } from "./sessions";
 export type CreatorScenario = "short_drama" | "video_edit" | "general";
 
 /**
+ * Typeface id for the standard subtitle bar. `default`/null keeps the
+ * renderer's auto-detected sans CJK face; the rest map to the bundled system
+ * faces in the backend `overlay._SUBTITLE_FONT_FAMILIES`.
+ */
+export type SubtitleFontFamily = "default" | "song" | "hei" | "kai";
+
+/**
  * User overrides for the standard subtitle bar. Every field is optional:
  * `null`/absent keeps the renderer default, so an untouched project looks
  * exactly as before. Applied by the deterministic plain-subtitle renderer
@@ -22,6 +29,8 @@ export interface SubtitleStyle {
    * every value.
    */
   backgroundOpacity?: number | null;
+  /** Typeface id; null/`default` = the auto-detected sans CJK face. */
+  fontFamily?: SubtitleFontFamily | null;
 }
 
 /**

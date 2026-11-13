@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import type { SubtitleStyle } from "@/contracts/creator";
+import type { SubtitleFontFamily, SubtitleStyle } from "@/contracts/creator";
 
 /**
  * Colour / font-size / outline / background-block overrides for the standard
@@ -23,6 +23,26 @@ const COLOR_SWATCHES: string[] = [
   "#C4B5FD",
   "#1F2937",
 ];
+
+/** Typeface choices; ``null`` is the renderer's auto sans CJK face. */
+const FONT_CHOICES: Array<{ id: SubtitleFontFamily | null; key: string }> = [
+  { id: null, key: "home.subtitleStyleFontAuto" },
+  { id: "song", key: "home.subtitleStyleFontSong" },
+  { id: "hei", key: "home.subtitleStyleFontHei" },
+  { id: "kai", key: "home.subtitleStyleFontKai" },
+];
+
+/**
+ * Per-family CSS stack so each pill previews its own face, the way the colour
+ * swatches preview their colour.  Mirrors ``overlay._SUBTITLE_FONT_FAMILIES``
+ * and the preview layer's stacks; the auto face (``null``) inherits the UI
+ * sans, exactly what the renderer auto-detects.
+ */
+const FONT_PREVIEW_STACKS: Record<string, string> = {
+  song: '"Songti SC", "SimSun", "Noto Serif CJK SC", serif',
+  hei: '"PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif',
+  kai: '"Kaiti SC", "KaiTi", "STKaiti", "Noto Serif CJK SC", serif',
+};
 
 /** Font-size multiplier choices; ``null`` is the fitted base size. */
 const SIZE_CHOICES: Array<{ id: number | null; key: string }> = [
@@ -65,6 +85,7 @@ export function SubtitleStyleControls({
   const { t } = useTranslation();
 
   const color = value?.color ?? null;
+  const fontFamily = value?.fontFamily ?? null;
   const fontScale = value?.fontScale ?? null;
   const strokeScale = value?.strokeScale ?? null;
   const backgroundOpacity = value?.backgroundOpacity ?? null;
@@ -73,6 +94,8 @@ export function SubtitleStyleControls({
   const emit = (patch: Partial<SubtitleStyle>) => {
     const next: SubtitleStyle = {
       color: patch.color !== undefined ? patch.color : color,
+      fontFamily:
+        patch.fontFamily !== undefined ? patch.fontFamily : fontFamily,
       fontScale: patch.fontScale !== undefined ? patch.fontScale : fontScale,
       strokeScale:
         patch.strokeScale !== undefined ? patch.strokeScale : strokeScale,
@@ -83,6 +106,7 @@ export function SubtitleStyleControls({
     };
     const isDefault =
       next.color == null &&
+      next.fontFamily == null &&
       next.fontScale == null &&
       next.strokeScale == null &&
       next.backgroundOpacity == null;
@@ -98,9 +122,22 @@ export function SubtitleStyleControls({
 
   return (
     <div className="flex flex-col gap-2">
-      <span className="text-[11px] font-semibold text-[var(--color-text-tertiary)]">
-        {t("home.subtitleStyle")}
-      </span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold text-[var(--color-text-tertiary)]">
+          {t("home.subtitleStyle")}
+        </span>
+        {/* Mirrors the motion picker's 恢复默认: offered only while an override
+            is stated, and it drops the whole style object back to null. */}
+        {value != null ? (
+          <button
+            type="button"
+            onClick={() => onChange(null)}
+            className="cursor-pointer text-[11px] text-[var(--color-text-tertiary)] underline-offset-2 transition-colors hover:text-[var(--color-text-secondary)] hover:underline"
+          >
+            {t("home.subtitleStyleReset")}
+          </button>
+        ) : null}
+      </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         {/* Colour */}
@@ -132,6 +169,32 @@ export function SubtitleStyleControls({
               style={{ backgroundColor: swatch }}
             />
           ))}
+        </div>
+
+        {/* Font family */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] text-[var(--color-text-tertiary)]">
+            {t("home.subtitleStyleFont")}
+          </span>
+          {FONT_CHOICES.map((choice) => {
+            const selected = fontFamily === choice.id;
+            return (
+              <button
+                key={choice.key}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => emit({ fontFamily: choice.id })}
+                className={`${pillBase} ${selected ? pillOn : pillOff}`}
+                style={
+                  choice.id
+                    ? { fontFamily: FONT_PREVIEW_STACKS[choice.id] }
+                    : undefined
+                }
+              >
+                {t(choice.key)}
+              </button>
+            );
+          })}
         </div>
 
         {/* Font size */}

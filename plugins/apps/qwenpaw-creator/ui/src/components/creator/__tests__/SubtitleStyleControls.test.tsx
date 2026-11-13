@@ -46,6 +46,7 @@ describe("SubtitleStyleControls", () => {
 
     expect(emitted.at(-1)).toEqual({
       color: "#FFE066",
+      fontFamily: null,
       fontScale: 1.25,
       strokeScale: 0,
       backgroundOpacity: null,
@@ -66,6 +67,7 @@ describe("SubtitleStyleControls", () => {
     await user.click(screen.getByText("无底板"));
     expect(emitted.at(-1)).toEqual({
       color: null,
+      fontFamily: null,
       fontScale: null,
       strokeScale: null,
       backgroundOpacity: 0,
@@ -90,5 +92,36 @@ describe("SubtitleStyleControls", () => {
 
     await user.click(screen.getByText("默认"));
     expect(emitted.at(-1)).toBeNull();
+  });
+
+  it("offers 恢复默认 only while an override is stated, and it clears all", async () => {
+    const user = userEvent.setup();
+    const emitted: Array<SubtitleStyle | null> = [];
+    render(<Harness onEmit={(style) => emitted.push(style)} />);
+
+    // An untouched style has nothing to reset, so the button stays away — the
+    // same rule the motion picker's 恢复默认 follows.
+    expect(screen.queryByRole("button", { name: "恢复默认" })).toBeNull();
+
+    await user.click(screen.getByLabelText("#FFE066"));
+    await user.click(screen.getByRole("button", { name: "恢复默认" }));
+    expect(emitted.at(-1)).toBeNull();
+    expect(screen.queryByRole("button", { name: "恢复默认" })).toBeNull();
+  });
+
+  it("paints each font pill in its own face, the auto one inheriting", () => {
+    render(<Harness />);
+    expect(
+      screen.getByRole("button", { name: "宋体" }).style.fontFamily,
+    ).toContain("Songti SC");
+    expect(
+      screen.getByRole("button", { name: "黑体" }).style.fontFamily,
+    ).toContain("PingFang SC");
+    expect(
+      screen.getByRole("button", { name: "楷体" }).style.fontFamily,
+    ).toContain("Kaiti SC");
+    expect(
+      screen.getByRole("button", { name: "默认字体" }).style.fontFamily,
+    ).toBe("");
   });
 });

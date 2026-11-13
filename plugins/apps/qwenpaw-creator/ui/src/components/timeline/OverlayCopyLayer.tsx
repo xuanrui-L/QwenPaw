@@ -24,6 +24,15 @@ const VIBE_EMOJI: Record<string, string> = {
 const CJK_FONT_STACK =
   '"PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif';
 
+// Per-family preview stacks mirroring the backend _SUBTITLE_FONT_FAMILIES; the
+// auto face (null/default/unknown) keeps the historical sans stack, so an
+// untouched project previews exactly as before.
+const SUBTITLE_FONT_STACKS: Record<string, string> = {
+  song: '"Songti SC", "SimSun", "Noto Serif CJK SC", serif',
+  hei: CJK_FONT_STACK,
+  kai: '"Kaiti SC", "KaiTi", "STKaiti", "Noto Serif CJK SC", serif',
+};
+
 let sharedMeasureContext: CanvasRenderingContext2D | null = null;
 
 function measureWidth(text: string, fontSize: number): number {
@@ -352,6 +361,9 @@ export function PlainCaption({
   };
   const fontScale = clampScale(style?.font_scale, 0.6, 1.8);
   const strokeScale = clampScale(style?.stroke_scale, 0, 3);
+  const fontStack =
+    SUBTITLE_FONT_STACKS[String(style?.font_family ?? "").toLowerCase()] ??
+    CJK_FONT_STACK;
   // The hint draws its own neutral block because it does not know the pack's
   // alpha; a stated pick is different — it is exactly what the cut will do, so
   // 无底板 must drop the block here as well instead of contradicting the pick.
@@ -426,7 +438,7 @@ export function PlainCaption({
             y={padding + index * lh + fontSize * 0.86}
             textAnchor="middle"
             fontSize={fontSize}
-            fontFamily={CJK_FONT_STACK}
+            fontFamily={fontStack}
             fill={fillColor}
             stroke="#000000"
             strokeWidth={

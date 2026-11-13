@@ -10,6 +10,7 @@ pixels over a prepared media segment.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import glob
 import math
 import os
 import re
@@ -91,6 +92,81 @@ def _punctuation_hugs_baseline(font_path: str, size: int = 48) -> bool:
     return (
         comma[3] >= hanzi[3] - tolerance and quote[1] <= hanzi[1] + tolerance
     )
+
+
+# User-chosen subtitle faces, keyed by the ``font_family`` id the style bar
+# persists.  Each entry lists candidate faces across macOS / Linux / Windows;
+# ``{WINDIR}`` expands to the Windows fonts root at resolve time.  "default"
+# is deliberately absent: it (and any unknown id) falls through to
+# ``_find_cjk_font``'s auto sans face, so an untouched project renders byte
+# for byte as before.
+_SUBTITLE_FONT_FAMILIES: dict[str, tuple[str, ...]] = {
+    # 宋体 — serif, the classic print face.  Current macOS ships the face
+    # under Supplemental/ (the bare path only exists on older releases).
+    "song": (
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        "/System/Library/Fonts/Songti.ttc",
+        "/System/Library/Fonts/Supplemental/STSong.ttf",
+        "/System/Library/Fonts/STSong.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSerifCJK-Regular.ttc",
+        "{WINDIR}/Fonts/simsun.ttc",
+    ),
+    # 黑体 — sans, pinned per OS (the family the auto face already prefers).
+    "hei": (
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "{WINDIR}/Fonts/msyh.ttc",
+        "{WINDIR}/Fonts/simhei.ttf",
+    ),
+    # 楷体 — script, for a handwritten read.  On macOS 13+ Kaiti only ships
+    # as an on-demand asset under AssetsV2, whose directory name is an
+    # opaque hash — the glob picks it up wherever the system cached it.
+    "kai": (
+        "/System/Library/Fonts/Supplemental/Kaiti.ttc",
+        "/System/Library/Fonts/Kaiti.ttc",
+        "/System/Library/Fonts/Supplemental/STKaiti.ttf",
+        "/System/Library/Fonts/STKaiti.ttf",
+        "/System/Library/AssetsV2/com_apple_MobileAsset_Font8/*/AssetData/Kaiti.ttc",
+        "/usr/share/fonts/truetype/arphic/ukai.ttc",
+        "{WINDIR}/Fonts/simkai.ttf",
+    ),
+}
+
+
+def _resolve_subtitle_font(family: object) -> str | None:
+    """Pick a subtitle face for a user ``font_family`` id.
+
+    ``None`` / ``"default"`` / any unknown id keeps ``_find_cjk_font``'s auto
+    sans face.  A named family prefers its own faces (rejecting ones whose
+    punctuation floats mid-em, exactly like the auto picker) and falls back to
+    the auto face when none of them are installed, so a font pick can never
+    leave a subtitle unrenderable.
+    """
+
+    faces = _SUBTITLE_FONT_FAMILIES.get(str(family or "").strip().lower())
+    if not faces:
+        return _find_cjk_font()
+    windir = os.environ.get("WINDIR", "C:/Windows")
+    existing: list[str] = []
+    for face in faces:
+        expanded = face.replace("{WINDIR}", windir)
+        # On-demand macOS faces (Kaiti…) sit under opaque asset hashes, so
+        # a candidate may be a glob; plain paths stay literal.
+        matches = (
+            sorted(glob.glob(expanded))
+            if glob.has_magic(expanded)
+            else [expanded]
+        )
+        existing.extend(path for path in matches if Path(path).exists())
+    for path in existing:
+        if _punctuation_hugs_baseline(path):
+            return path
+    return existing[0] if existing else _find_cjk_font()
 
 
 def _placement_values(
@@ -320,7 +396,10 @@ def _render_plain_subtitle_png(
     box_width, box_height = int(values["box_width"]), int(values["box_height"])
     layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
-    font_path = _find_cjk_font()
+    font_family = (
+        style.get("font_family") if isinstance(style, Mapping) else None
+    )
+    font_path = _resolve_subtitle_font(font_family)
     padding = max(3, round(min(box_width, box_height) * 0.06))
     available_width = max(1, box_width - 2 * padding)
     available_height = max(1, box_height - 2 * padding)
