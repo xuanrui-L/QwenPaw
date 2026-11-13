@@ -41,6 +41,7 @@ describe("subtitleStyleBaseFrom", () => {
       packId: "variety_pop",
       style: {
         color: "#FFE066",
+        fontFamily: null,
         fontScale: null,
         strokeScale: 0,
         backgroundOpacity: 0.3,

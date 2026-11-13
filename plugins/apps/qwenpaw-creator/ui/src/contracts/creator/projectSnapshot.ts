@@ -12,6 +12,8 @@ export interface SubtitleStyleDocument extends ProjectJsonRecord {
   font_scale?: number | null;
   stroke_scale?: number | null;
   background_opacity?: number | null;
+  /** Typeface id (see backend overlay._SUBTITLE_FONT_FAMILIES); null = auto. */
+  font_family?: string | null;
 }
 
 export interface ProjectSettingsDocument extends ProjectJsonRecord {

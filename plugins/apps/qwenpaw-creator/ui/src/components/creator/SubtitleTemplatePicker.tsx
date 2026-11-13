@@ -451,6 +451,18 @@ export function SubtitleTemplatePicker({
           : spec.fontFamily.includes("Kaiti")
             ? t("home.subtitlePreviewFamilyHand")
             : t("home.subtitlePreviewFamilySans");
+        // Name the pack's numeric weight the way 字号 names its size, so the
+        // footnote reads 特粗/粗/半粗 instead of a bare 800/700/600.
+        const weightLabel =
+          spec.fontWeight >= 750
+            ? t("home.subtitlePreviewWeightExtrabold")
+            : spec.fontWeight >= 650
+              ? t("home.subtitlePreviewWeightBold")
+              : spec.fontWeight >= 550
+                ? t("home.subtitlePreviewWeightSemibold")
+                : spec.fontWeight >= 450
+                  ? t("home.subtitlePreviewWeightMedium")
+                  : t("home.subtitlePreviewWeightRegular");
         const plateAlpha = parseFloat(spec.plate.split(",")[3] ?? "0") || 0;
         const plateText = !spec.plate
           ? t("home.subtitlePreviewPlateNone")
@@ -539,7 +551,7 @@ export function SubtitleTemplatePicker({
             <span className="font-mono text-[10px] leading-[14px] text-[var(--color-text-tertiary)]">
               {t("home.subtitlePreviewMeta", {
                 family,
-                weight: spec.fontWeight,
+                weight: weightLabel,
                 spacing: spec.letterSpacing,
                 stroke: stroke.toFixed(2),
                 plate: plateText,

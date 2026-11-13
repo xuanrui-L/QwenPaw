@@ -570,6 +570,7 @@ def test_project_create_persists_the_subtitle_style_overrides(
         "fontScale": 1.25,
         "strokeScale": 0.0,
         "backgroundOpacity": 0.3,
+        "fontFamily": None,
     }
 
 

@@ -214,6 +214,20 @@ _LEGACY_CAPTION_FAMILY = (
     "sans-serif"
 )
 
+# Mirrors the front-end preview stacks (OverlayCopyLayer.SUBTITLE_FONT_STACKS)
+# and ``overlay._SUBTITLE_FONT_FAMILIES``: one CSS stack per persisted
+# ``font_family`` id.  Only an explicit pick overrides the pack's own face;
+# ``None`` / "default" / unknown ids keep the pack / legacy family, so an
+# untouched project emits exactly the document it used to.
+_SUBTITLE_FONT_CSS_STACKS = {
+    "song": '"Songti SC","SimSun","Noto Serif CJK SC",serif',
+    "hei": (
+        '"PingFang SC","Hiragino Sans GB","Noto Sans CJK SC",'
+        '"Microsoft YaHei",sans-serif'
+    ),
+    "kai": '"Kaiti SC","KaiTi","STKaiti","Noto Serif CJK SC",serif',
+}
+
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -464,7 +478,14 @@ def render_caption_template(
         bool(pack and pack.get("glow")),
         colour if colour.startswith("#") else "#ffffff",
     )
-    family = (
+    user_family = (
+        _SUBTITLE_FONT_CSS_STACKS.get(
+            str(style.get("font_family") or "").strip().lower()
+        )
+        if isinstance(style, Mapping)
+        else None
+    )
+    family = user_family or (
         str(pack.get("fontFamily"))
         if pack and pack.get("fontFamily")
         else _LEGACY_CAPTION_FAMILY

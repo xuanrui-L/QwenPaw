@@ -991,6 +991,24 @@ export default function ElementDetail({
           </div>
         )}
 
+        {/* How a subtitle looks is the first thing its editor is about, so the
+            style bar sits in the open above 更多设置 rather than folded inside
+            it.  A pick only lands in the local draft: the 应用修改 button at the
+            top is what writes it back and asks for a recompose, so browsing the
+            options can never redraw every caption on its own. */}
+        {captionCreation && subtitleStyleHosted && (
+          <SubtitleStyleSection
+            settings={project.settings}
+            base={subtitleStyleBase}
+            draft={subtitleStylePicked}
+            onDraftChange={setSubtitleStyleDraft}
+            motionOwned={subtitleMotionOwned}
+            elementScoped
+            showMotion
+            busy={subtitleStyleBusy || applying}
+          />
+        )}
+
         {/* 编辑表单不属于设计稿的概览层，折叠在「更多设置」中。 */}
         <details data-element-detail-advanced className="group">
           <summary className="flex cursor-pointer list-none items-center gap-1 text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] [&::-webkit-details-marker]:hidden">
@@ -998,24 +1016,6 @@ export default function ElementDetail({
             {t("elementDetail.advancedSettings")}
           </summary>
           <div className="space-y-4 pt-3">
-            {/* How a subtitle looks is the first thing its editor is about, so
-                the style bar leads the advanced form and timing, layer and
-                wording follow.  A pick only lands in the local draft: the
-                应用修改 button at the top is what writes it back and asks for
-                a recompose, so browsing the options can never redraw every
-                caption on its own. */}
-            {captionCreation && subtitleStyleHosted && (
-              <SubtitleStyleSection
-                settings={project.settings}
-                base={subtitleStyleBase}
-                draft={subtitleStylePicked}
-                onDraftChange={setSubtitleStyleDraft}
-                motionOwned={subtitleMotionOwned}
-                elementScoped
-                showMotion
-                busy={subtitleStyleBusy || applying}
-              />
-            )}
             <section className="rounded-xl border border-[var(--color-border)] p-3">
               {!showsTimeLayerEditors && (
                 <>

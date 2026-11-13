@@ -3,7 +3,11 @@
 
 import pytest
 
+from services.media_files import overlay
+from services.media_files.motion_templates import render_caption_template
 from services.media_files.overlay import (
+    _find_cjk_font,
+    _resolve_subtitle_font,
     _subtitle_pack_painter,
     _subtitle_style_values,
 )
@@ -74,6 +78,21 @@ class TestSubtitleStyleModel:
         assert restored.subtitle_style.font_scale == 1.25
         assert restored.subtitle_style.stroke_scale == 0.0
 
+    def test_font_family_defaults_to_none_and_round_trips(self) -> None:
+        assert SubtitleStyle().font_family is None
+        settings = ProjectSettings(
+            subtitle_style=SubtitleStyle(font_family="song"),
+        )
+        restored = ProjectSettings.model_validate(
+            settings.model_dump(mode="json"),
+        )
+        assert restored.subtitle_style is not None
+        assert restored.subtitle_style.font_family == "song"
+
+    def test_unknown_font_family_is_rejected(self) -> None:
+        with pytest.raises(Exception):
+            SubtitleStyle.model_validate({"font_family": "comic-sans"})
+
     @pytest.mark.parametrize(
         "payload",
         [
@@ -87,6 +106,75 @@ class TestSubtitleStyleModel:
     def test_out_of_range_values_are_rejected(self, payload: dict) -> None:
         with pytest.raises(Exception):
             SubtitleStyle.model_validate(payload)
+
+
+class TestResolveSubtitleFont:
+    """A font-family id maps to an installed face, else the auto sans face."""
+
+    def test_auto_and_unknown_ids_keep_the_auto_face(self) -> None:
+        fallback = _find_cjk_font()
+        assert _resolve_subtitle_font(None) == fallback
+        assert _resolve_subtitle_font("default") == fallback
+        assert _resolve_subtitle_font("DEFAULT") == fallback
+        assert _resolve_subtitle_font("") == fallback
+        assert _resolve_subtitle_font("comic-sans") == fallback
+
+    def test_a_named_family_prefers_an_installed_face(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        present = tmp_path / "present.ttf"
+        present.write_bytes(b"dummy")
+        missing = str(tmp_path / "missing.ttf")
+        monkeypatch.setitem(
+            overlay._SUBTITLE_FONT_FAMILIES,
+            "song",
+            (missing, str(present)),
+        )
+        # Neither dummy face hugs the baseline, so the resolver settles on the
+        # first candidate that exists instead of the auto face.
+        monkeypatch.setattr(
+            overlay,
+            "_punctuation_hugs_baseline",
+            lambda *args, **kwargs: False,
+        )
+        assert _resolve_subtitle_font("song") == str(present)
+
+    def test_a_named_family_with_no_face_installed_falls_back(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.setitem(
+            overlay._SUBTITLE_FONT_FAMILIES,
+            "kai",
+            (str(tmp_path / "absent.ttf"),),
+        )
+        assert _resolve_subtitle_font("kai") == _find_cjk_font()
+
+    def test_a_glob_candidate_matches_on_demand_asset_caches(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        # macOS caches on-demand faces (Kaiti…) under opaque asset hashes;
+        # the resolver has to expand the glob instead of stat()-ing it.
+        cache = tmp_path / "hash.asset" / "AssetData"
+        cache.mkdir(parents=True)
+        present = cache / "Kaiti.ttc"
+        present.write_bytes(b"dummy")
+        monkeypatch.setitem(
+            overlay._SUBTITLE_FONT_FAMILIES,
+            "kai",
+            (str(tmp_path / "*" / "AssetData" / "Kaiti.ttc"),),
+        )
+        monkeypatch.setattr(
+            overlay,
+            "_punctuation_hugs_baseline",
+            lambda *args, **kwargs: False,
+        )
+        assert _resolve_subtitle_font("kai") == str(present)
 
 
 class TestSubtitlePlatePainter:
@@ -129,3 +217,24 @@ class TestSubtitlePlatePainter:
             )[1]
             is None
         )
+
+
+class TestCaptionTemplateFontFamily:
+    """An explicit font pick rides into the HTML caption document."""
+
+    def test_a_user_pick_replaces_the_pack_face(self) -> None:
+        html = render_caption_template("你好", style={"font_family": "song"})
+        assert '"Songti SC"' in html
+
+    def test_no_pick_keeps_the_legacy_family(self) -> None:
+        html = render_caption_template("你好")
+        assert '"Songti SC"' not in html
+        assert '"Noto Sans CJK SC"' in html
+
+    @pytest.mark.parametrize("family", ["default", "comic-sans", ""])
+    def test_default_and_unknown_ids_keep_the_legacy_family(
+        self,
+        family: str,
+    ) -> None:
+        html = render_caption_template("你好", style={"font_family": family})
+        assert '"Songti SC"' not in html

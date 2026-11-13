@@ -75,6 +75,10 @@ class SubtitleStylePolicy(StrictModel):
         ge=0.0,
         le=1.0,
     )
+    font_family: Literal["default", "song", "hei", "kai"] | None = Field(
+        default=None,
+        alias="fontFamily",
+    )
 
 
 class SubtitleAnimationPolicy(StrictModel):

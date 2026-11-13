@@ -798,6 +798,7 @@ async def set_subtitle_style(
                 or style_model.font_scale is not None
                 or style_model.stroke_scale is not None
                 or style_model.background_opacity is not None
+                or style_model.font_family is not None
             ):
                 # "No overrides" is stored as no style object at all, so an
                 # untouched project keeps serialising exactly as it did.
