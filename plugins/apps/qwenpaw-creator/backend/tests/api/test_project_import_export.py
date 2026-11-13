@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+import logging
 import zipfile
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -533,8 +534,7 @@ def test_windows_extraction_renames_illegal_member_and_rewrites_registry(
         / "project-1/assets/source-intelligence/source_cat_cam_1/index.json"
     ).is_file()
     assert not (
-        destination
-        / "project-1/assets/source-intelligence/source:cat_cam_1"
+        destination / "project-1/assets/source-intelligence/source:cat_cam_1"
     ).exists()
     assert (destination / "project-1/assets/clip.mp4").read_text() == (
         "binary"
@@ -567,6 +567,95 @@ def test_windows_extraction_skips_registry_rewrite_for_skill_bundles(
     destination = tmp_path / "out"
     project_archive.extract_archive(path, destination)
     assert (destination / "my_skill/SKILL.md").read_text() == "# hello"
+
+
+def test_windows_registry_rewrite_is_atomic_and_canonical(
+    tmp_path,
+    monkeypatch,
+):
+    """CR feedback: the rewrite must publish atomically in canonical form.
+
+    A truncated project.json left behind by a crash mid-rewrite would be
+    published by the example flow, which only checks ``is_file()``. The
+    on-disk bytes also have to match the canonical pretty form (indent 2
+    plus a final newline) so tooling diffing project.json stays quiet.
+    """
+    path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "project-1/project.json",
+            json.dumps(
+                {
+                    "assets": {
+                        "files_by_id": {
+                            "f": {
+                                "relative_uri": "assets/source:a/x.json",
+                            },
+                        },
+                    },
+                },
+            ),
+        )
+        archive.writestr("project-1/assets/source:a/x.json", "{}")
+    monkeypatch.setattr(
+        project_archive,
+        "sys",
+        SimpleNamespace(platform="win32"),
+    )
+    destination = tmp_path / "out"
+    project_archive.extract_archive(path, destination)
+
+    project_dir = destination / "project-1"
+    raw = (project_dir / "project.json").read_text(encoding="utf-8")
+    assert raw.endswith("}\n")
+    assert (
+        json.loads(raw)["assets"]["files_by_id"]["f"]["relative_uri"]
+        == "assets/source_a/x.json"
+    )
+    # The temp file used for the atomic replace never survives.
+    assert not list(project_dir.glob("*.tmp"))
+
+
+def test_windows_registry_rewrite_skip_is_logged_not_fatal(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """CR feedback: substitutions with an unreadable registry must warn.
+
+    The rename already happened on disk; silently returning would leave
+    dangling relative_uris with nothing in creator.log to explain them.
+    """
+    path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("project-1/project.json", "not json at all")
+        archive.writestr("project-1/assets/source:a/x.json", "{}")
+    monkeypatch.setattr(
+        project_archive,
+        "sys",
+        SimpleNamespace(platform="win32"),
+    )
+    destination = tmp_path / "out"
+    # Creator loggers stop propagating at the ``qwenpaw.creator`` family,
+    # so caplog's root handler never sees them; attach it directly.
+    archive_logger = logging.getLogger(
+        "qwenpaw.creator.project_files.archive",
+    )
+    archive_logger.addHandler(caplog.handler)
+    try:
+        project_archive.extract_archive(path, destination)
+    finally:
+        archive_logger.removeHandler(caplog.handler)
+
+    assert any(
+        "skipped Windows relative_uri rewrite" in record.getMessage()
+        for record in caplog.records
+    )
+    # Extraction still succeeds and the corrupt registry is left as-is.
+    assert (destination / "project-1/assets/source_a/x.json").is_file()
+    assert (
+        destination / "project-1/project.json"
+    ).read_text() == "not json at all"
 
 
 def test_sanitize_windows_part_is_idempotent_and_total():

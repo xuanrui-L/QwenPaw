@@ -11,13 +11,21 @@ import re
 import stat
 import sys
 from typing import NamedTuple
+from uuid import uuid4
 import zipfile
 
 from domain.errors import BadRequestError
+from services.runtime_files.atomic_store import atomic_replace_path
 from services.runtime_files.path_safety import is_link_stat
 from .models import Project
 
 logger = logging.getLogger("qwenpaw.creator.project_files.archive")
+
+
+def _log_safe(value: object) -> str:
+    """Neutralize CR/LF in archive-provided values before logging."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
 
 # Multi-episode Projects include media plus revision history. Keep explicit
 # upload/extraction bounds, shared by export, rather than rejecting our own
@@ -75,12 +83,24 @@ def _rewrite_project_relative_uris(project_json: Path) -> int:
     Only the registry path field is touched; logical identifiers such as
     ``source_id``, the ``sources.items`` dict keys and the ``order``
     arrays are JSON-internal and legal on every platform. Returns how
-    many entries changed, so the caller can log the summary once.
+    many entries changed, so the caller can log the summary once. The
+    rewrite is published through a same-directory temp file plus
+    ``atomic_replace_path``: a crash mid-rewrite must never leave the
+    example flow a truncated registry it would publish on ``is_file()``.
     """
 
     try:
         data = json.loads(project_json.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        # Substitutions already happened on disk; a registry we cannot
+        # reconcile would leave dangling relative_uris, so make the skip
+        # observable instead of silent.
+        logger.warning(
+            "skipped Windows relative_uri rewrite, project.json is "
+            "unreadable or unparseable: %s (%s)",
+            _log_safe(project_json),
+            exc,
+        )
         return 0
     if not isinstance(data, dict):
         return 0
@@ -105,10 +125,16 @@ def _rewrite_project_relative_uris(project_json: Path) -> int:
             changed += 1
     if not changed:
         return 0
-    project_json.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    # Match the canonical on-disk form (serialization.canonical_json_bytes
+    # with pretty=True): indent=2 plus a final newline.
+    payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    temporary = project_json.with_suffix(f".{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        atomic_replace_path(temporary, project_json)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     return changed
 
 
@@ -282,7 +308,7 @@ def _report_windows_substitutions(
 
     sample = sorted(
         (
-            f"{original.as_posix()} -> {rewritten.as_posix()}"
+            f"{_log_safe(original.as_posix())} -> {rewritten.as_posix()}"
             for original, rewritten in substitutions.items()
         ),
     )
