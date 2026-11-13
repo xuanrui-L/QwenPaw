@@ -174,18 +174,29 @@ _CONTEXT_OVERFLOW_MARKER_GROUPS: tuple[tuple[str, ...], ...] = (
 )
 
 
-def is_context_overflow_error(exc: Exception) -> bool:
-    """Return whether *exc* is a provider refusal for an oversized input."""
-    status = _host_extract_status_code(exc)
-    error_str = str(exc).lower()
-    if status != 400 and "error code: 400" not in error_str:
-        return False
+def _matches_overflow_markers(error_str: str) -> bool:
+    """Whether *error_str* names an overflow by a marker or a marker group.
+
+    The platform classifies some refusals with one phrase and others only
+    with a group of phrases that must all appear. Both the bare-400
+    classifier and the widened 413/422/text-only path scan through this one
+    helper so neither can drift from the other.
+    """
     if any(marker in error_str for marker in CONTEXT_OVERFLOW_MARKERS):
         return True
     return any(
         all(marker in error_str for marker in marker_group)
         for marker_group in _CONTEXT_OVERFLOW_MARKER_GROUPS
     )
+
+
+def is_context_overflow_error(exc: Exception) -> bool:
+    """Return whether *exc* is a provider refusal for an oversized input."""
+    status = _host_extract_status_code(exc)
+    error_str = str(exc).lower()
+    if status != 400 and "error code: 400" not in error_str:
+        return False
+    return _matches_overflow_markers(error_str)
 
 
 logger = setup_logger("creator.model_client")
@@ -353,14 +364,15 @@ def is_context_length_error(exc: Exception) -> bool:
     marker list cannot be argued with here.  This plugin also has to
     survive gateways that answer 413/422 (or only leak text, no status at
     all) where the SDK path answers a bare 400, so those cases widen via
-    the same marker list rather than a second list.
+    the same marker list rather than a second list - and they scan the
+    marker groups too, so a group-only refusal is not dropped just because
+    its status is not a bare 400.
     """
     if is_context_overflow_error(exc):
         return True
     if _provider_http_status(exc) not in (None, 400, 413, 422):
         return False
-    lowered = str(exc).casefold()
-    return any(marker in lowered for marker in CONTEXT_OVERFLOW_MARKERS)
+    return _matches_overflow_markers(str(exc).casefold())
 
 
 def _rate_limit_retry_delay(attempt: int) -> float:
@@ -1554,6 +1566,13 @@ class AgentScopeAgentChatClient:
             raise ModelContextUnfitError(
                 "\n".join((str(exc), *demotion_notes)),
             ) from exc
+        # ``max_bytes`` is the caller's ``_context_budget_bytes``: the 384 KB
+        # transport floor on a top-level turn, not the effective
+        # token-window budget ``prepare_bytes`` may have derived. Halving the
+        # floor therefore over-compresses a large window on purpose - a
+        # strictly smaller request cannot re-trigger the refusal, and it
+        # mirrors the host's forced-trigger semantics; the rebuilt request is
+        # measured again by the byte and token gates before it is sent.
         forced_budget = max(1024, max_bytes // 2)
         rebuilt, forced_note = self._fit_refused_request(
             messages,
@@ -1599,7 +1618,10 @@ class AgentScopeAgentChatClient:
         # ~4 MB of plain text, so a 384 KB transport floor would refuse
         # every substantial request before the provider ever sees it.  Only
         # the top-level call derives this ceiling from the token window;
-        # recovery paths already carry a tightened budget.
+        # recovery paths already carry a tightened budget. Equality with the
+        # transport floor is therefore the sentinel for "top-level call":
+        # every recovery step halves its budget before it recurses, so a
+        # recovery path never hands MODEL_INPUT_BYTES back in here.
         if token_budget is None or _context_budget_bytes != MODEL_INPUT_BYTES:
             prepare_bytes = _context_budget_bytes
         else:

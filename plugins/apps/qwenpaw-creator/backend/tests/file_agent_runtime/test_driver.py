@@ -969,6 +969,73 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
     )
 
 
+def test_specialist_multi_tool_turn_is_rejected_before_any_dispatch(
+    tmp_path,
+) -> None:
+    """The delegate loop refuses two tool calls in one turn.
+
+    This guard is what keeps a recall_media user row from ever splitting
+    an assistant/tool group: with at most one call per turn, the row can
+    only follow the pair, never sit between two tool results. The source
+    anchors in test_media_vault.py cannot see that timing, so drive the
+    real delegate loop and pin the guard's behavior.
+    """
+    parent_turn = 0
+
+    async def callback(_messages, tools):
+        nonlocal parent_turn
+        names = {item["function"]["name"] for item in tools}
+        if "delegate_to_agent" not in names:
+            # Specialist turn: two calls in one turn. The guard fires before
+            # dispatch, so the names only need to be on the manifest.
+            picked = [item["function"]["name"] for item in tools][:2]
+            return AgentModelTurn(
+                tool_calls=tuple(
+                    AgentToolCall(
+                        call_id=f"multi-{index}",
+                        name=name,
+                        arguments={},
+                    )
+                    for index, name in enumerate(picked, start=1)
+                ),
+            )
+        parent_turn += 1
+        if parent_turn == 1:
+            return _delegate_call(
+                "delegate-multi-tool",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="编排 Timeline 选段",
+            )
+        return AgentModelTurn(content="专员回合被拒绝，当前运行已结束。")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="生成角色图",
+        )
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: (
+                (runs := driver.executions.list_specialist_runs(PROJECT_ID))
+                and runs[0].status.value == "FAILED"
+            ),
+        )
+        await _wait_consumed(services)
+        await driver.wait_until_idle(PROJECT_ID)
+        specialist = driver.executions.list_specialist_runs(PROJECT_ID)[0]
+        await driver.stop()
+        return specialist
+
+    specialist = asyncio.run(scenario())
+    assert specialist.status.value == "FAILED"
+    assert "returned more than one tool call in one turn" in (
+        specialist.final_summary_text or ""
+    )
+
+
 def test_run_review_feedback_allows_one_successful_repair_delegation(
     tmp_path,
 ) -> None:

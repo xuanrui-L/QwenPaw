@@ -405,6 +405,33 @@ def test_archived_index_stays_recallable_when_the_map_folds():
     )
 
 
+def test_host_map_fallback_scrubs_host_wording_without_the_banner():
+    """A banner-less host render must not leak its Creator-hostile prose.
+
+    ``_split_host_map_body`` slices at the first ``====`` banner. If a host
+    upgrade changes the render and the banner disappears, the fallback used
+    to return the whole preamble naming a ``conversation_history`` table and
+    an "advanced Python recall tool" a Creator session does not have.
+    Creator already prepends its own guidance, so the fallback scrubs those
+    names instead of echoing them.
+    """
+    host_render = (
+        "[context compressed] The turns below were evicted from the live "
+        "window but remain durable in conversation_history.\n"
+        "\n"
+        "For advanced recall (sessions, custom SQL) use a more advanced "
+        "Python recall tool if one is available to you.\n"
+        "1 . old turn\n"
+    )
+
+    body = model_context._split_host_map_body(host_render)
+
+    assert "conversation_history" not in body
+    assert "advanced Python recall tool" not in body
+    assert "the durable conversation store" in body
+    assert "1 . old turn" in body
+
+
 def test_continuation_summary_rides_on_the_elision_when_supplied():
     """The prose state cache is attached only when a caller produced one.
 
@@ -3050,9 +3077,8 @@ def test_local_classifier_recognizes_provider_token_group_refusal():
     """A sentence only the plugin's group scan can catch, asserted on the
     consumer path.
 
-    The fallback inside ``is_context_length_error`` matches single markers;
-    this refusal has no single marker from that list, so a green here
-    proves the classifier itself (not the fallback) is wired in.
+    This refusal has no single marker from the list, so a green here proves
+    the marker-group scan (not just single-marker matching) is wired in.
     """
 
     class _GatewayRefusal(Exception):
@@ -3064,6 +3090,33 @@ def test_local_classifier_recognizes_provider_token_group_refusal():
     )
     assert model_client.is_context_overflow_error(refusal)
     assert is_context_length_error(refusal)
+
+
+@pytest.mark.parametrize("status", [413, 422, None])
+def test_group_only_length_refusal_is_understood_on_the_widened_path(status):
+    """The 413/422/text-only path must scan marker groups too.
+
+    ``is_context_overflow_error`` gates on a bare 400, so a group-only
+    refusal never reaches its group scan there. The widened path used to
+    check single markers only and dropped these silently; both paths now
+    share one scan.
+    """
+
+    class _GatewayRefusal(Exception):
+        pass
+
+    message = (
+        "The input token count (290000) exceeds the maximum number of "
+        "tokens allowed by the model"
+    )
+    exc = _GatewayRefusal(
+        f"Error code: {status}: {message}" if status else message,
+    )
+    if status is not None:
+        exc.status_code = status
+
+    assert not model_client.is_context_overflow_error(exc)
+    assert is_context_length_error(exc)
 
 
 def test_local_classifier_keeps_non_overflow_400s_out_of_recovery():
