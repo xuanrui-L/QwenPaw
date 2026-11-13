@@ -1999,6 +1999,14 @@ class FfmpegLocalMediaRunner:
             # ...and the chosen style pack, whose typography the fallback PNG
             # has to agree with.
             "subtitle_template": raw.get("subtitle_template"),
+            # ...and the caption's own entrance/exit/loop pick, so a
+            # compose-time fallback burns the animation the user chose
+            # instead of silently reverting to the pack's signature motion.
+            "caption_animation": (
+                dict(raw["caption_animation"])
+                if isinstance(raw.get("caption_animation"), Mapping)
+                else None
+            ),
         }
 
     def _probe_video_size(self, path: Path) -> tuple[int, int]:
