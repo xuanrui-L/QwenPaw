@@ -116,6 +116,49 @@ describe("SubtitleTemplatePicker", () => {
     );
   });
 
+  it("drafts the picked face onto every card so the font previews live", () => {
+    const { container, rerender } = render(
+      <Harness style={{ fontFamily: "kai" }} />,
+    );
+    // Every miniature speaks the draft face, not just the pack that ships it.
+    expect(previewWords(container, "variety_pop").style.fontFamily).toContain(
+      "Kaiti",
+    );
+    expect(previewWords(container, "cinematic").style.fontFamily).toContain(
+      "Kaiti",
+    );
+    // The footnote names the face it now paints.
+    expect(screen.getAllByText(/手写/).length).toBeGreaterThan(0);
+
+    // Auto hands the cards back to each pack's own typography.
+    rerender(<Harness style={{ fontFamily: "default" }} />);
+    expect(previewWords(container, "cinematic").style.fontFamily).toContain(
+      "Songti",
+    );
+    expect(previewWords(container, "variety_pop").style.fontFamily).toContain(
+      "PingFang",
+    );
+  });
+
+  it("paints a saved bundle's own face on its card", async () => {
+    vi.mocked(listUserSubtitleStyles).mockResolvedValue({
+      items: [{ ...CUSTOM, style: { fontFamily: "song" as const } }],
+    });
+    const { container } = render(
+      <SubtitleTemplatePicker
+        value="variety_pop"
+        onChange={vi.fn()}
+        onSelectCustom={vi.fn()}
+      />,
+    );
+    await screen.findByText("我的综艺字");
+    // The bundle saved a serif pick; its own card must not fall back to the
+    // base pack's sans face.
+    expect(previewWords(container, "user:abc").style.fontFamily).toContain(
+      "Songti",
+    );
+  });
+
   it("falls back to the mirror when the preview endpoint is unreachable", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("offline"));
     vi.stubGlobal("fetch", fetchMock);
