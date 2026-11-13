@@ -94,7 +94,7 @@ export const SUBTITLE_TEMPLATE_PACKS: SubtitlePackPreviewSpec[] = [
     letterSpacing: "0.04em",
     lineHeight: 1.45,
     strokeScale: 0.5,
-    tiltDeg: -1.6,
+    tiltDeg: 0,
     plate: "rgba(255,248,232,0.5)",
     plateRadius: "0.18em",
     glow: false,
