@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import mimetypes
+import os
 from pathlib import Path, PurePosixPath
 import secrets
 import shutil
@@ -146,7 +147,12 @@ from services.external_skills import (
     render_external_skills_context,
     view_skill as view_external_skill,
 )
-from services.observability import report_error, trace_event, traced_async
+from services.observability import (
+    mem_probe,
+    report_error,
+    trace_event,
+    traced_async,
+)
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
     CHARACTER_VOICE_TOOL_NAME,
@@ -218,7 +224,7 @@ from .production_status import (
     production_summary,
 )
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
-from .work_graph import WorkNodeStatus, derive_work_graph
+from .work_graph import WorkGraph, WorkNodeStatus, derive_work_graph
 from .model_context import (
     MEDIA_OBSERVATION_SOURCE,
     MEDIA_RECALL_SOURCE,
@@ -659,7 +665,10 @@ def _specialist_waiting_review_summary(
             "审阅通过后由主 Agent 修复必要字段，Runtime 会根据 Element 状态"
             "自动继续调度，无需重新委派。"
         )
-    return f"{target} 的产物已生成，后续步骤尚未开始。请先完成审阅；" "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
+    return (
+        f"{target} 的产物已生成，后续步骤尚未开始。请先完成审阅；"
+        "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
+    )
 
 
 def _timelines_have_plan(project: Any, target_refs: list[str]) -> bool:
@@ -1621,8 +1630,7 @@ class _LoopResult:
 class _RunFence(Protocol):
     """Liveness gate asserted at model/tool/commit boundaries."""
 
-    def assert_alive(self) -> None:
-        ...
+    def assert_alive(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -1770,6 +1778,19 @@ class FileCreatorAgentRuntime:
         self._specialist_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._interrupt_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._blocked_heads: dict[str, int] = {}
+        # Last fused pause per Project: (conversation, generation, graph
+        # statuses, actionable fingerprint, message head seq).  A fuse verdict
+        # is a pure function of those five, so an unchanged tuple means the
+        # notice already persisted still stands -- the tick may skip the two
+        # full-history message reads and the duplicate Project read entirely.
+        # In-process only: a restart re-evaluates once and the persisted
+        # ``executionPauseKey`` dedupe keeps the visible notice singular.
+        self._auto_resume_pause_memo: dict[str, tuple[Any, ...]] = {}
+        # Per Project quiet-tick fingerprint: (monotonic time, signature).  Lets
+        # an idle Project cost a handful of stats per tick instead of a Project
+        # parse, a task scan and a work-graph derivation (§9.6 of
+        # docs/oom-triage.md: 13 Projects were 543 ms of that every 1.8 s).
+        self._reconcile_quiet: dict[str, tuple[float, Any, str]] = {}
         # Durable-interrupt stall tracking: project -> (run_id, first seen
         # monotonic time).  A RUNNING run with no local handle normally
         # belongs to another live process, but when that owner died before
@@ -1961,63 +1982,77 @@ class FileCreatorAgentRuntime:
             # ownerless leftover, which only holds while this process has
             # dispatched nothing yet.
             try:
-                summaries = await asyncio.to_thread(
-                    self.services.projects.list,
+                # Discovery, not list(): the sweep needs identities only, while
+                # list() fully reads and validates every Project document
+                # first (measured 34 MB across eight Projects, 0.26 s of it one
+                # unconditional deepcopy) before the dispatcher even exists.
+                # Corrupt Projects stay in scope on purpose -- naming them is
+                # what discovery exists for, and every step below is guarded
+                # individually. Bundled examples are excluded so the set still
+                # matches what list() reported.
+                project_ids = await asyncio.to_thread(
+                    self.services.projects.discover_project_ids,
+                    include_builtin_examples=False,
                 )
             except Exception:  # noqa: BLE001 - sweep must never block startup
-                summaries = []
-            for summary in summaries:
+                project_ids = ()
+            for project_id in project_ids:
                 # Retire obsolete, non-billing waits before recovering a run.
                 # Keep the audit records; never auto-approve media execution.
                 try:
                     await asyncio.to_thread(
                         retire_legacy_plan_checkpoints,
                         self.executions,
-                        summary.project_id,
+                        project_id,
                     )
                 except Exception:  # pylint: disable=broad-except
                     logger.exception(
                         "startup plan checkpoint retirement failed for %s",
-                        summary.project_id,
+                        project_id,
                     )
-                self.work_scheduler.wake(summary.project_id)
+                self.work_scheduler.wake(project_id)
                 try:
                     # Any surviving INJECTED record belongs to a run that
                     # died with the previous process; return it to PENDING
                     # so it rides along with the startup resume digest.
                     await self.notifications.reopen_all_injected(
-                        summary.project_id,
+                        project_id,
                     )
                 except Exception:  # pylint: disable=broad-except
                     logger.exception(
                         "startup injected-notification reopen failed for %s",
-                        summary.project_id,
+                        project_id,
                     )
                 try:
-                    await self._resume_interrupted_run(summary.project_id)
+                    await self._resume_interrupted_run(project_id)
                 except Exception:  # pylint: disable=broad-except
                     logger.exception(
                         "startup interrupted-run resume failed for %s",
-                        summary.project_id,
+                        project_id,
                     )
                 # Safety net after the crash-zombie settlement above:
                 # non-terminal runs it declined (interrupt pending,
                 # terminal goal, lost lease, older records) still must
                 # not survive the restart as phantom activity.
                 try:
-                    await self._reclaim_startup_orphans(summary.project_id)
+                    await self._reclaim_startup_orphans(project_id)
                 except Exception:  # pylint: disable=broad-except
                     logger.exception(
                         "startup orphan reclaim failed for %s",
-                        summary.project_id,
+                        project_id,
                     )
                 try:
-                    await self._reclaim_specialist_orphans(summary.project_id)
+                    await self._reclaim_specialist_orphans(project_id)
                 except Exception:  # pylint: disable=broad-except
                     logger.exception(
                         "startup specialist orphan reclaim failed for %s",
-                        summary.project_id,
+                        project_id,
                     )
+                # Yield between Projects: the sweep runs before the dispatcher
+                # and every step above is a blocking to_thread call, so
+                # without this a boot holds the interpreter through all
+                # Projects in turn while HTTP readers queue behind it.
+                await asyncio.sleep(0)
             if self._stopping:
                 # stop() raced the sweep; starting the dispatcher now would
                 # leave an unowned task running after stop() returned.
@@ -2787,11 +2822,141 @@ class FileCreatorAgentRuntime:
         session = await self._converge_resolved_review(project_id, session)
         return session
 
+    # How long a Project may be treated as quiet before the reconcile chain is
+    # forced to run once more, even if every stamp below still matches.  The
+    # idle-notification escape valve ages on wall-clock
+    # (NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS = 120s), so a ceiling an order of
+    # magnitude smaller cannot delay it meaningfully, and it bounds any change
+    # this process cannot observe (a peer writing inside the tick window).
+    _RECONCILE_QUIET_CEILING_SECONDS = 15.0
+
+    def _durable_stamp(self, project_id: str, session_id: str) -> Any | None:
+        """Stat-only fingerprint of the durable state a tick would read.
+
+        An atomic replace-write renames into its parent directory, so the
+        parent's mtime already carries it; the two streams this path appends to
+        are statted by name because appending leaves the parent alone.
+        ``None`` means the Project cannot be fingerprinted and must never be
+        treated as quiet.
+        """
+
+        def stamp(path: Path) -> tuple[int, int] | None:
+            try:
+                info = path.stat()
+            except OSError:
+                return None
+            return (info.st_mtime_ns, info.st_size)
+
+        root = self.services.projects.project_root(project_id)
+        runtime = root / "runtime"
+        parts: list[Any] = [("project", stamp(root / "project.json"))]
+        try:
+            children = sorted(runtime.iterdir(), key=lambda item: item.name)
+        except OSError:
+            return None
+        for entry in children:
+            parts.append((entry.name, stamp(entry)))
+        session_dir = runtime / "sessions" / session_id
+        for name in ("session.json", "messages.jsonl"):
+            parts.append((f"sessions/{name}", stamp(session_dir / name)))
+        return parts
+
+    async def _reconcile_durable_unchanged(self, project_id: str) -> bool:
+        """Whether the stat-only fingerprint still matches what we projected.
+
+        ``_reconcile_is_quiet`` proves the chain would repeat itself, but it can
+        only decide after loading the Session -- so an idle Project paid one
+        shared-lock read of ``session.json`` on every tick, and eight Projects'
+        worth of those reads queued behind every HTTP reader in the same thread
+        pool (measured: ``/projects`` took 2.3-3.2 s with nothing but the driver
+        running, and 6.7-7.1 s whenever the whole set aged out together).
+
+        The remembered signature's first element is a stat fingerprint that
+        covers ``session.json`` by mtime and size, so an unchanged fingerprint
+        means the Session cannot have moved -- including writes from a peer
+        process, which is the case this ceiling exists to bound. Anything the
+        veto conditions read (``active_run_id``, status, the message counters)
+        lives in that same file.
+        """
+
+        remembered = self._reconcile_quiet.get(project_id)
+        if not remembered or len(remembered) != 3:
+            return False
+        projected_at, signature, session_id = remembered
+        if (
+            time.monotonic() - projected_at
+            >= self._RECONCILE_QUIET_CEILING_SECONDS
+        ):
+            return False
+        durable = await asyncio.to_thread(
+            self._durable_stamp,
+            project_id,
+            session_id,
+        )
+        return durable is not None and durable == signature[0]
+
+    async def _reconcile_is_quiet(self, project_id: str, session: Any) -> bool:
+        """Return True when the whole reconcile chain would repeat itself.
+
+        Only three conditions veto the cache, because they are the ones time or
+        this process -- not the filesystem -- can change: a run launched here,
+        a Session holding a cross-process lease (the orphan grace ages on the
+        clock), and a Session still settling.  A parked head message is *not* a
+        veto: its identity is part of the signature, so the tick re-runs the
+        moment the head moves and can still skip while the verdict is
+        "deliberately not launching".
+        """
+
+        if self._active.get(project_id) is not None:
+            return False
+        if session.active_run_id is not None:
+            return False
+        if session.status is not CreatorSessionStatus.IDLE:
+            return False
+        durable = await asyncio.to_thread(
+            self._durable_stamp,
+            project_id,
+            session.session_id,
+        )
+        if durable is None:
+            self._reconcile_quiet.pop(project_id, None)
+            return False
+        signature = (
+            durable,
+            session.last_consumed_message_seq,
+            session.last_message_seq,
+            session.queued_user_message_count,
+            self._blocked_heads.get(project_id),
+            get_media_review_mode(),
+            get_image_model_name(),
+            get_video_model_name(),
+        )
+        now = time.monotonic()
+        remembered = self._reconcile_quiet.get(project_id)
+        if (
+            remembered is not None
+            and remembered[1] == signature
+            and now - remembered[0] < self._RECONCILE_QUIET_CEILING_SECONDS
+        ):
+            return True
+        self._reconcile_quiet[project_id] = (
+            now,
+            signature,
+            session.session_id,
+        )
+        return False
+
     async def _reconcile_project(self, project_id: str) -> None:
         handle = self._active.get(project_id)
         if handle is not None and handle.task.done():
             self._active.pop(project_id, None)
             handle = None
+        # A run launched here vetoes every cache below, so only an idle
+        # coordinator may take the shortcut.
+        if handle is None and await self._reconcile_durable_unchanged(
+            project_id,
+        ):
+            return
         # Snapshot read (shared lock, session.json only): reconcile only needs
         # status + head pointers to decide whether to launch a run, and the
         # full event-stream recovery of get_project_session costs ~1s on large
@@ -2808,6 +2973,11 @@ class FileCreatorAgentRuntime:
             handle,
         )
         if session is None:
+            return
+        if await self._reconcile_is_quiet(project_id, session):
+            # Nothing durable moved since the last projection: the pending
+            # scan, the outbox read and the work-graph derivation below would
+            # produce the same answer from the same bytes.
             return
         pending = await asyncio.to_thread(
             self.sessions.list_messages,
@@ -3473,7 +3643,13 @@ class FileCreatorAgentRuntime:
                 message,
                 code="AGENT_RUN_FAILED",
                 message_text=f"{type(exc).__name__}: {exc}",
-                retryable=False,
+                # This catch-all bucket also holds LockTimeoutError, whose run
+                # died before it changed anything. Marking every unexpected
+                # error non-retryable meant YOLO refused to resume exactly the
+                # faults with no side effects to reason about: a field export
+                # sat at 本次执行未完成 because the first attempt lost a lock
+                # race, and nothing would try again.
+                retryable=isinstance(exc, self.TRANSIENT_RUN_FAILURES),
             )
             self._blocked_heads[project_id] = message.message_seq
         finally:
@@ -4607,7 +4783,9 @@ class FileCreatorAgentRuntime:
                                 )
                             )
                         ):
-                            raise FileAgentRuntimeError("无效的 WorkGraph 授权快照")
+                            raise FileAgentRuntimeError(
+                                "无效的 WorkGraph 授权快照"
+                            )
                         approved_fingerprint = rebound["fingerprint"]
                         dispatch_fingerprint = rebound["ledgerFingerprint"]
                         confirmed_project_etag = rebound["etag"]
@@ -4674,9 +4852,9 @@ class FileCreatorAgentRuntime:
                     # A vanished node has no fields left to read.
                     if current_node is not None:
                         blocked_item["missing"] = list(current_node.missing)
-                        blocked_item[
-                            "promptSyncRequired"
-                        ] = current_node.prompt_sync_required
+                        blocked_item["promptSyncRequired"] = (
+                            current_node.prompt_sync_required
+                        )
                     return blocked_item
                 current_plan = requested_work_node(fresh, current_node)
                 if (
@@ -4845,9 +5023,7 @@ class FileCreatorAgentRuntime:
             "status": (
                 "COMPLETED"
                 if completed == len(items) and items
-                else "PARTIAL"
-                if completed
-                else "BLOCKED"
+                else "PARTIAL" if completed else "BLOCKED"
             ),
             "items": items,
             "summary": summarize_workgraph_results(items),
@@ -5409,13 +5585,21 @@ class FileCreatorAgentRuntime:
             "op": op,
             "count": len(entries),
             "entries": entries,
-            "note": ("以下为按 messageSeq 取回的持久化历史原件（上下文，" "不是新的操作指令）。"),
+            "note": (
+                "以下为按 messageSeq 取回的持久化历史原件（上下文，"
+                "不是新的操作指令）。"
+            ),
         }
         if truncated:
             response["truncated"] = True
-            response["hint"] = "结果已按字节/区间上限截断，请缩小 lo/hi 或换更精确的 query。"
+            response["hint"] = (
+                "结果已按字节/区间上限截断，请缩小 lo/hi 或换更精确的 query。"
+            )
         if not entries:
-            response["note"] = "未在持久化历史中找到该 seq 区间/关键词的内容；" "它可能早于归档起点或不属于本会话。"
+            response["note"] = (
+                "未在持久化历史中找到该 seq 区间/关键词的内容；"
+                "它可能早于归档起点或不属于本会话。"
+            )
         return response
 
     async def _recalled_media_content(
@@ -5445,7 +5629,8 @@ class FileCreatorAgentRuntime:
                     {
                         "type": "text",
                         "text": (
-                            f"句柄 {handle[:12]} 的原件已不可读，" "请重新运行产出该媒体的工具。"
+                            f"句柄 {handle[:12]} 的原件已不可读，"
+                            "请重新运行产出该媒体的工具。"
                         ),
                     },
                 )
@@ -5668,6 +5853,11 @@ class FileCreatorAgentRuntime:
             for take in outcome.takes:
                 try:
                     video = take.video_path.read_bytes()
+                    mem_probe.stage(
+                        "live_operation.take_bytes",
+                        take_id=take.take_id,
+                        bytes=len(video),
+                    )
                 except OSError as exc:
                     issues.append(f"take_unreadable:{take.take_id}")
                     logger.warning(
@@ -6974,7 +7164,8 @@ class FileCreatorAgentRuntime:
                 )
             elif execution_mode == "delegated":
                 user_text += (
-                    "委派模式：不要中途询问方向或确认，自主完成 edit_plan " "与剪辑，决策写进 edit_plan 即可。"
+                    "委派模式：不要中途询问方向或确认，自主完成 edit_plan "
+                    "与剪辑，决策写进 edit_plan 即可。"
                 )
             elif execution_mode == "fine_tuning":
                 user_text += (
@@ -7693,7 +7884,8 @@ class FileCreatorAgentRuntime:
                             {
                                 "type": "text",
                                 "text": (
-                                    "以下是 recall_media 取回的原生媒体，" "内容与降级前一致。"
+                                    "以下是 recall_media 取回的原生媒体，"
+                                    "内容与降级前一致。"
                                 ),
                             },
                             *recall_parts,
@@ -7752,7 +7944,8 @@ class FileCreatorAgentRuntime:
                             {
                                 "type": "text",
                                 "text": (
-                                    "视频帧图注入失败，请基于工具返回的" f"摘要继续或缩小窗口重试：{exc}"
+                                    "视频帧图注入失败，请基于工具返回的"
+                                    f"摘要继续或缩小窗口重试：{exc}"
                                 ),
                             },
                         ]
@@ -7804,7 +7997,10 @@ class FileCreatorAgentRuntime:
                         page_content = [
                             {
                                 "type": "text",
-                                "text": ("文档页图注入失败，请基于工具返回的" f"文本摘要继续：{exc}"),
+                                "text": (
+                                    "文档页图注入失败，请基于工具返回的"
+                                    f"文本摘要继续：{exc}"
+                                ),
                             },
                         ]
                     if page_parts:
@@ -9088,15 +9284,18 @@ class FileCreatorAgentRuntime:
         result: Mapping[str, Any],
         failed: bool = False,
     ) -> None:
-        raw_result = json.dumps(
-            result,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
         result_kind = _runtime_action_result_kind(
             tool_name,
             result,
             failed=failed,
+        )
+        stored_result: Mapping[str, Any] = result
+        if result_kind == _PROJECT_SNAPSHOT_RESULT_KIND:
+            stored_result = _durable_project_echo(result)
+        raw_result = json.dumps(
+            stored_result,
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         appended = await self._persist_session_append(
             f"{project_id}: tool result",
@@ -9205,6 +9404,13 @@ class FileCreatorAgentRuntime:
     YOLO_RESUME_MAX_CONSECUTIVE = 5
     YOLO_RESUME_MAX_UNATTENDED = 10
     PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE = 5
+    # Failures that leave Project state untouched and so deserve another
+    # attempt: lock contention, transport timeouts, connection resets.
+    # LockTimeoutError already subclasses TimeoutError, covering that family.
+    # Membership is by type, never by wording -- text matching has burned this
+    # repo twice (an nginx 504 phrase escaped a substring rule; an ASP code
+    # was swallowed by a formatted detail).
+    TRANSIENT_RUN_FAILURES = (LockTimeoutError, TimeoutError, ConnectionError)
 
     async def _notify_auto_resume_paused(
         self,
@@ -9223,37 +9429,42 @@ class FileCreatorAgentRuntime:
         it must neither wake the model nor reset the unattended resume fuse.
         Existing message.completed delivery also restores it after reconnect.
         """
-        messages = await asyncio.to_thread(
-            self.sessions.list_messages,
-            project_id,
-            session_id,
-            after_seq=0,
-            limit=None,
-        )
         automatic_sources = {
             self.YOLO_RESUME_SOURCE,
             self.PROMPT_CONTRACT_RESUME_SOURCE,
             self.MAINLINE_RESUME_SOURCE,
             NOTIFICATION_SOURCE,
         }
-        anchor = next(
-            (
-                item.message_seq
-                for item in reversed(messages)
-                if item.role == "user" and item.source not in automatic_sources
-            ),
-            0,
+        # Both questions here are tail questions -- the anchor is the newest
+        # human turn, and the dedupe asks whether this pause key was already
+        # filed.  Answering them from a full read cost the Session's entire
+        # stream (606 MB observed in the field) on exactly the Sessions that
+        # pause the most.
+        anchor_record = await asyncio.to_thread(
+            self.sessions.find_recent_message,
+            project_id,
+            session_id,
+            where=lambda item: item.role == "user"
+            and item.source not in automatic_sources,
         )
+        anchor = anchor_record.message_seq if anchor_record is not None else 0
         pause_key = f"{conversation_id}:{anchor}:{reason}"
-        if any(
-            item.metadata.get("executionPauseKey") == pause_key
-            for item in messages
-        ):
+        filed = await asyncio.to_thread(
+            self.sessions.find_recent_message,
+            project_id,
+            session_id,
+            where=lambda item: item.metadata.get("executionPauseKey")
+            == pause_key,
+        )
+        if filed is not None:
             return
         text = "自动创作已暂停，作品尚未完成。\n\n" + explanation
         if unfinished:
             text += "\n\n仍待处理：" + "、".join(unfinished[:6]) + "。"
-        text += "\n已提交的后台任务仍会继续处理，可在创作总览查看结果。" "请检查并修复阻塞后，发送新的创作指令即可继续。"
+        text += (
+            "\n已提交的后台任务仍会继续处理，可在创作总览查看结果。"
+            "请检查并修复阻塞后，发送新的创作指令即可继续。"
+        )
         appended = await self._persist_session_append(
             f"{project_id}: automatic creation paused",
             self.sessions.append_message,
@@ -9294,6 +9505,9 @@ class FileCreatorAgentRuntime:
         conversation_id: str,
         run_id: str,
         after_failure: bool = False,
+        snapshot: Any | None = None,
+        task_records: Sequence[Any] | None = None,
+        graph: WorkGraph | None = None,
     ) -> None:
         """Return unfinished scheduler state to the main Agent.
 
@@ -9310,6 +9524,18 @@ class FileCreatorAgentRuntime:
         elements yet must still resume. Outside auto_approve such a failure
         still queues only the free prompt repair; paid continuation keeps
         waiting for a human.
+
+        The fuse below only counts resumes inside one uninterrupted runtime
+        streak, so a human message used to re-arm it: the same unchanged gap
+        came back right after any unrelated chat turn and the Agent re-read
+        the same shots again. Every resume therefore persists the fingerprint
+        of the gap it asked about plus the DONE set at that moment, and a
+        repeat is dropped while that fingerprint, the project generation and
+        the DONE set are all unchanged.
+        ``snapshot``/``task_records``/``graph`` let a caller that already paid
+        for this projection hand it over; the per-second reconcile tick derived
+        them microseconds earlier for the same Project, and re-deriving doubled
+        the cost of every fused resume.
         """
 
         from .manual_regeneration_hold import ManualRegenerationHoldStore
@@ -9329,25 +9555,30 @@ class FileCreatorAgentRuntime:
             # human decision settle before inferring missing follow-up work;
             # its normal review follow-up will resume the agent afterwards.
             return
-        try:
-            snapshot = await asyncio.to_thread(
-                self.services.projects.read,
-                project_id,
+        if snapshot is None:
+            try:
+                snapshot = await asyncio.to_thread(
+                    self.services.projects.read,
+                    project_id,
+                )
+            except Exception:  # pylint: disable=broad-except
+                return
+        if task_records is None:
+            try:
+                records = await asyncio.to_thread(
+                    self.executions.list_tasks,
+                    project_id,
+                )
+            except Exception:  # pylint: disable=broad-except
+                records = []
+        else:
+            records = list(task_records)
+        if graph is None:
+            graph = derive_work_graph(
+                snapshot.project,
+                tasks=records,
+                media_models=(get_image_model_name(), get_video_model_name()),
             )
-        except Exception:  # pylint: disable=broad-except
-            return
-        try:
-            records = await asyncio.to_thread(
-                self.executions.list_tasks,
-                project_id,
-            )
-        except Exception:  # pylint: disable=broad-except
-            records = []
-        graph = derive_work_graph(
-            snapshot.project,
-            tasks=records,
-            media_models=(get_image_model_name(), get_video_model_name()),
-        )
         unfinished_nodes = graph.unfinished()
         if not unfinished_nodes and not after_failure:
             return
@@ -9416,6 +9647,83 @@ class FileCreatorAgentRuntime:
             )
             reasons.append(f"{node.label}（{why}）")
         unfinished = [node.label for node in feedback_nodes]
+        actionable_fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    (
+                        node.node_id,
+                        node.status.value,
+                        sorted(node.missing),
+                        node.error,
+                        node.dispatch_fingerprint,
+                        node.regeneration_of,
+                    )
+                    for node in sorted(
+                        feedback_nodes,
+                        key=lambda node: node.node_id,
+                    )
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()[:32]
+        # A fuse verdict depends on exactly five things: this conversation, the
+        # Project generation, the graph's node statuses, the actionable
+        # fingerprint and the message head.  While none of them move the
+        # persisted notice still stands, so the tick must not rebuild a history
+        # whose answer it already has -- an idle fused Project was doing that
+        # ~28 times a minute (§10 of docs/oom-triage.md).  Statuses belong in
+        # the key because a media task can finish without a Project write: the
+        # DONE set is the progress signal and the generation alone would miss
+        # it.  A model-name change is the one input not covered here; it is
+        # reached only by a settings write, which also moves the head.
+        message_head = await asyncio.to_thread(
+            self.sessions.last_message_seq,
+            project_id,
+            session_id,
+        )
+        graph_digest = hashlib.sha256(
+            json.dumps(
+                [
+                    (
+                        node.node_id,
+                        node.status.value,
+                    )
+                    for node in sorted(
+                        graph.nodes,
+                        key=lambda node: node.node_id,
+                    )
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()[:16]
+
+        def _pause_memo(message_head_value: int) -> tuple[Any, ...]:
+            """One shape for both sides of the pause memo.
+
+            The comparison here and the store after the notice must agree
+            exactly. They were two hand-written tuples, and adding a component
+            to one silently disabled the other -- so the shape lives once.
+            """
+
+            return (
+                conversation_id,
+                snapshot.generation,
+                graph_digest,
+                actionable_fingerprint,
+                message_head_value,
+                # The branches below act differently under auto_approve (YOLO),
+                # and switching the saved mode moves none of the values above:
+                # without this the memo keeps short-circuiting and a user who
+                # chose to continue automatically stays on the paused result of
+                # the mode they just replaced.
+                auto_approve,
+            )
+
+        memo_key = _pause_memo(message_head)
+        if self._auto_resume_pause_memo.get(project_id) == memo_key:
+            return
         messages = await asyncio.to_thread(
             self.sessions.list_messages,
             project_id,
@@ -9485,26 +9793,51 @@ class FileCreatorAgentRuntime:
             for node in graph.nodes
             if node.status is WorkNodeStatus.DONE
         }
-        actionable_fingerprint = hashlib.sha256(
-            json.dumps(
-                [
-                    (
-                        node.node_id,
-                        node.status.value,
-                        sorted(node.missing),
-                        node.error,
-                        node.dispatch_fingerprint,
-                        node.regeneration_of,
+        # A human turn used to be a full reset. The fingerprint covers exactly
+        # the nodes/missing/errors this resume text asks about, so an identical
+        # fingerprint on an unchanged project generation means the previous
+        # instruction is still unanswered — re-sending it only burns model
+        # turns. Any real write bumps the generation, any gate change moves the
+        # fingerprint and any new DONE node counts as progress, so the
+        # suppression releases itself. Transient failures bypass it: their
+        # resume died before it could act.
+        if not after_failure:
+            latest_resume = None
+            spans_human_turn = False
+            for item in reversed(messages):
+                if item.role != "user":
+                    continue
+                if item.source in {
+                    self.YOLO_RESUME_SOURCE,
+                    self.PROMPT_CONTRACT_RESUME_SOURCE,
+                }:
+                    latest_resume = item
+                    break
+                if item.source in {
+                    self.MAINLINE_RESUME_SOURCE,
+                    NOTIFICATION_SOURCE,
+                }:
+                    continue
+                spans_human_turn = True
+            if spans_human_turn and latest_resume is not None:
+                previous_done = set(
+                    latest_resume.metadata.get("doneNodeIdsAtResume") or (),
+                )
+                if (
+                    latest_resume.source == active_resume_source
+                    and latest_resume.metadata.get("projectGeneration")
+                    == snapshot.generation
+                    and latest_resume.metadata.get("actionableFingerprint")
+                    == actionable_fingerprint
+                    and not completed_now - previous_done
+                ):
+                    logger.info(
+                        "%s skipped for %s: gap unchanged since message %s",
+                        active_resume_source,
+                        project_id,
+                        latest_resume.message_seq,
                     )
-                    for node in sorted(
-                        feedback_nodes,
-                        key=lambda node: node.node_id,
-                    )
-                ],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-        ).hexdigest()[:32]
+                    return
         unproductive_resumes = resume_streak
         no_progress = False
         if checkpoint_valid:
@@ -9531,10 +9864,14 @@ class FileCreatorAgentRuntime:
         pause_reason = None
         if unattended_resumes >= self.YOLO_RESUME_MAX_UNATTENDED:
             pause_reason = "unattended_budget"
-            pause_explanation = "自上次人工输入以来，已达到 10 次自动续跑上限。"
+            pause_explanation = (
+                "自上次人工输入以来，已达到 10 次自动续跑上限。"
+            )
         elif unproductive_resumes >= resume_limit:
             pause_reason = "consecutive_resume_limit"
-            pause_explanation = "自动修复预算已耗尽，连续 5 轮续跑未确认新的节点完成进展。"
+            pause_explanation = (
+                "自动修复预算已耗尽，连续 5 轮续跑未确认新的节点完成进展。"
+            )
         elif no_progress:
             pause_reason = "no_committed_progress"
             pause_explanation = "未检测到新的节点完成进展，待处理状态未变；已停止重复的自动修复提醒。"
@@ -9554,7 +9891,17 @@ class FileCreatorAgentRuntime:
                 explanation=pause_explanation,
                 unfinished=reasons,
             )
+            # Store the head the notice landed at (or the unchanged one it was
+            # deduped against) so the next tick can prove nothing moved.
+            self._auto_resume_pause_memo[project_id] = _pause_memo(
+                await asyncio.to_thread(
+                    self.sessions.last_message_seq,
+                    project_id,
+                    session_id,
+                ),
+            )
             return
+        self._auto_resume_pause_memo.pop(project_id, None)
         if after_failure and auto_approve:
             text = (
                 "【系统自动消息 · YOLO 持续执行】上一回合因瞬态故障中止"
@@ -9578,7 +9925,9 @@ class FileCreatorAgentRuntime:
                 )
             else:
                 opening = (
-                    "上一回合因瞬态故障中止（如模型空响应或传输抖动）" if after_failure else "主线回合已结束"
+                    "上一回合因瞬态故障中止（如模型空响应或传输抖动）"
+                    if after_failure
+                    else "主线回合已结束"
                 )
                 text = (
                     f"【系统自动消息 · Prompt 合同修复】{opening}，但调度器"
@@ -9587,6 +9936,16 @@ class FileCreatorAgentRuntime:
                     + "\nR2V prompt 由你直接负责；请只修复上述"
                     " Project 字段并重新核对，保留已经完成的工作。"
                 )
+        if any(node.prompt_sync_required for node in feedback_nodes):
+            # The plan/prompt gate only clears through a real text edit or an
+            # explicit keep-current decision. Without naming that decision the
+            # model can only re-read the same shots until the resume fuse
+            # trips.
+            text += (
+                "\n若你已核对某个镜头的叙述与提示词，确认现有提示词仍然准确、"
+                "无需改写，请调用 confirm_prompt_sync（stage 指定 storyboard 或 "
+                "video）记录该结论；不要反复 read_project 复核同一镜头。"
+            )
         message_source = (
             self.YOLO_RESUME_SOURCE
             if auto_approve
@@ -9611,6 +9970,8 @@ class FileCreatorAgentRuntime:
             metadata={
                 "resumeAfterRunId": run_id,
                 "projectGeneration": snapshot.generation,
+                "actionableFingerprint": actionable_fingerprint,
+                "doneNodeIdsAtResume": sorted(completed_now),
                 "unfinishedElements": unfinished,
                 "modelRequiredNodes": [
                     node.node_id for node in feedback_nodes[:12]
@@ -9703,12 +10064,18 @@ class FileCreatorAgentRuntime:
                 return
         # Wake the scheduler to dispatch any READY nodes or retry preparations.
         self.work_scheduler.wake(project_id)
-        # Queue a YOLO resume for items requiring model intervention.
+        # Queue a YOLO resume for items requiring model intervention.  Hand it
+        # the projection this tick already paid for: re-reading the Project and
+        # re-deriving the graph made every fused Project cost two ticks' worth
+        # of work for the same bytes.
         await self._queue_yolo_completion_resume(
             project_id=project_id,
             session_id=session.session_id,
             conversation_id=last.conversation_id,
             run_id=last.run_id,
+            snapshot=snapshot,
+            task_records=task_records,
+            graph=graph,
         )
 
     async def _queue_mainline_resume(
@@ -9750,26 +10117,20 @@ class FileCreatorAgentRuntime:
             AgentRunStatus.FAILED,
         }:
             return
-        messages = await asyncio.to_thread(
-            self.sessions.list_messages,
+        queued = await asyncio.to_thread(
+            self.sessions.find_recent_message,
             project_id,
             session_id,
-            after_seq=0,
-            limit=None,
+            where=lambda item: item.source == self.MAINLINE_RESUME_SOURCE
+            and item.metadata.get("resumeAfterRunId") == intervention_run_id,
         )
-        if any(
-            item.source == self.MAINLINE_RESUME_SOURCE
-            and item.metadata.get("resumeAfterRunId") == intervention_run_id
-            for item in messages
-        ):
+        if queued is not None:
             return
-        mainline_request = next(
-            (
-                item
-                for item in messages
-                if item.message_seq == interrupted.caused_by_message_seq
-            ),
-            None,
+        mainline_request = await asyncio.to_thread(
+            self.sessions.message_at,
+            project_id,
+            session_id,
+            message_seq=interrupted.caused_by_message_seq or 0,
         )
         mainline_goal = (
             _message_text(mainline_request)
@@ -10536,7 +10897,10 @@ def _artifact_selection_note(
     label = str(selection.get("label") or selection.get("field") or slot_id)
     slot = project.assets.artifact_slots_by_id.get(slot_id)
     if slot is None:
-        return f"[选区提示] 「{label}」引用的 artifact 槽位 {slot_id} 已不存在，" "请让用户重新选择。"
+        return (
+            f"[选区提示] 「{label}」引用的 artifact 槽位 {slot_id} 已不存在，"
+            "请让用户重新选择。"
+        )
     if slot.selected_version_id != version_id:
         return (
             f"[选区提示] 「{label}」选区所在版本已过期："
@@ -10828,6 +11192,43 @@ def _message_text(
 # changes to reconstruct current state. Durable Runtime history keeps every
 # original byte.
 _SNAPSHOT_SOURCE = "runtime_action_result"
+
+_TOOL_ECHO_DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def tool_echo_receipt_enabled() -> bool:
+    """Whether a durable Project echo stores the bounded view, not the bytes.
+
+    Every ``read_project`` / ``jq_project`` / ``patch_project`` result used to
+    be appended verbatim, so the conversation kept every intermediate state of
+    the Project forever (observed: 96% of a 284 MB ``messages.jsonl``, and the
+    page reader paid it on every open).  Nothing the model can still be shown
+    depends on that surplus: the wire context and the rebuilt history already
+    collapse these records with :func:`project_snapshot_view` and receipts.
+
+    This changes what is *persisted*, so it needs an emergency switch: set
+    ``CREATOR_TOOL_ECHO_RECEIPT=0`` to go back to byte-for-byte retention.
+    """
+
+    raw = os.environ.get("CREATOR_TOOL_ECHO_RECEIPT", "")
+    return raw.strip().casefold() not in _TOOL_ECHO_DISABLED_VALUES
+
+
+def _durable_project_echo(
+    result: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """The Project snapshot exactly as durable conversation history keeps it.
+
+    The projection is the one the ephemeral wire context already builds for the
+    newest snapshot: frozen history timelines get indexed instead of copied, and
+    the payload stays bounded.  Identifiers the metadata column carries
+    (generation, etag, changedPointers) survive untouched, and a later snapshot
+    still collapses this record to a receipt when the model context is rebuilt.
+    """
+
+    if not tool_echo_receipt_enabled():
+        return result
+    return project_snapshot_view(result)
 
 
 @dataclass(frozen=True)

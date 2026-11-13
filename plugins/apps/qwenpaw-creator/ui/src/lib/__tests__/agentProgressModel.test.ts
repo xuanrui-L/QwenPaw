@@ -213,3 +213,88 @@ describe("creation overview reconciles admitted work and durable task progress",
     expect(result.counts).toMatchObject({ running: 0, completed: 1 });
   });
 });
+
+describe("orphaned admissions reaped by recovery", () => {
+  it("hides a recovery-reaped orphan run instead of boarding it forever", () => {
+    // The field Project carried a QUEUED Run whose process died before its
+    // Task existed; recovery cancels it at boot. It never executed anything,
+    // so the overview must not keep it as an operation needing a person.
+    const result = model(
+      [],
+      [],
+      [
+        run({
+          id: "orphan-run",
+          status: "CANCELLED",
+          finalSummaryText:
+            "ORPHANED_QUEUED_RUN: the process that admitted this Run ended " +
+            "before its Task existed; no executor can dispatch it",
+          taskRefs: [],
+        }),
+      ],
+    );
+
+    expect(items(result)).toHaveLength(0);
+    expect(result.counts.total).toBe(0);
+  });
+
+  it("keeps a person-cancelled run on the board", () => {
+    const result = model(
+      [],
+      [],
+      [
+        run({
+          id: "stopped-run",
+          status: "CANCELLED",
+          finalSummaryText: "stopped by the author",
+          taskRefs: [],
+        }),
+      ],
+    );
+
+    expect(items(result)).toHaveLength(1);
+    expect(result.counts.attention).toBe(1);
+  });
+});
+
+describe("retried source understanding", () => {
+  it("hides an unsuccessful attempt once a later re-run of the same target succeeded", () => {
+    const old = run({
+      id: "src-old",
+      role: "source_intelligence_agent",
+      status: "FAILED",
+      targetRefs: ["asset:a1"],
+      createdAt: "2026-10-12T00:00:00Z",
+    });
+    const fresh = run({
+      id: "src-new",
+      role: "source_intelligence_agent",
+      status: "SUCCEEDED",
+      targetRefs: ["asset:a1"],
+      createdAt: "2026-11-03T00:00:00Z",
+    });
+
+    const result = model([], [], [old, fresh]);
+    const ids = items(result).map((item) => item.id);
+
+    expect(ids).not.toContain("run:src-old");
+    expect(ids).toContain("run:src-new");
+    expect(result.counts.attention).toBe(0);
+    expect(result.counts.completed).toBe(1);
+  });
+
+  it("keeps an unsuccessful attempt while no later run succeeded", () => {
+    const old = run({
+      id: "src-only",
+      role: "source_intelligence_agent",
+      status: "BLOCKED",
+      targetRefs: ["asset:a2"],
+      createdAt: "2026-10-12T00:00:00Z",
+    });
+
+    const result = model([], [], [old]);
+
+    expect(items(result).map((item) => item.id)).toContain("run:src-only");
+    expect(result.counts.attention).toBe(1);
+  });
+});

@@ -568,7 +568,22 @@ export default function PlanPage() {
     void refresh();
     // Compose progress polling shares the project lock with the compose
     // task itself; keep the tick slow and visibility-aware.
-    const stop = startVisiblePolling(() => void refresh(), 1_500);
+    //
+    // Fast only while something is actually running. An idle Project page
+    // used to ask every 1.5 s forever, and each answer costs the backend a
+    // Project read plus a Task scan -- the same reader stream that starves
+    // writers into lock timeouts.
+    const stop = startVisiblePolling(
+      () => void refresh(),
+      () => {
+        const active = useCreatorTaskViewStore
+          .getState()
+          .tasks.some(
+            (task) => task.status === "QUEUED" || task.status === "RUNNING",
+          );
+        return active ? 1_500 : 10_000;
+      },
+    );
     return () => {
       disposed = true;
       stop();
@@ -751,7 +766,8 @@ export default function PlanPage() {
       } else if (response.editImpact?.regenerationRequired) {
         message.success(t("plan.applySuccessRegenRequired"));
       } else if (response.editImpact?.renderTimelineIds.length) {
-        message.success(t("plan.applySuccessPreviewUpdated"));
+        // Same rule as the drag path: a user edit never triggers a render.
+        message.success(t("plan.applySuccessComposeWaiting"));
       } else {
         message.success(t("plan.applySuccess"));
       }

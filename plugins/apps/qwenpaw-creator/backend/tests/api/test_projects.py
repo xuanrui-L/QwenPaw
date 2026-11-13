@@ -453,6 +453,51 @@ def test_project_create_persists_title_provenance(
     assert project.name_source == source
 
 
+def test_project_list_answers_active_task_badge_for_the_whole_page(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """One response carries the badge: no per-Project /tasks fan-out.
+
+    The home page used to issue GET /tasks once per Project and render nothing
+    until the slowest returned. ``hasActiveTask`` is answered by the listing
+    itself, so the card state must match the durable Task status exactly.
+    """
+
+    from domain.enums import TaskKind, TaskStatus
+    from services.runtime_files.execution_models import TaskRecord
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    async def scenario(client):
+        busy = await client.post(
+            "/projects",
+            json=_create_payload("project-list-badge-busy", "有在跑的任务"),
+        )
+        quiet = await client.post(
+            "/projects",
+            json=_create_payload("project-list-badge-quiet", "没有任务"),
+        )
+        store = ProjectExecutionStore(api_runtime_root)
+        store.create_task(
+            TaskRecord(
+                task_id="task-badge",
+                project_id=busy.json()["projectId"],
+                kind=TaskKind.IMAGE_GENERATION,
+                status=TaskStatus.QUEUED,
+                request_fingerprint="sha256:" + "b" * 64,
+            ),
+        )
+        return busy, quiet, await client.get("/projects")
+
+    busy, quiet, listed = run_scenario(app, scenario)
+    assert busy.status_code == 201 and quiet.status_code == 201
+    flags = {
+        item["name"]: item["hasActiveTask"] for item in listed.json()["items"]
+    }
+    assert flags == {"有在跑的任务": True, "没有任务": False}
+
+
 def test_project_create_keeps_the_subtitle_policy_off_unless_asked(
     app,
     api_runtime_root,
@@ -880,9 +925,9 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
         def durable() -> str:
             """The committed ``project.json`` text at this exact step."""
 
-            return (
-                api_runtime_root / project_id / "project.json"
-            ).read_text(encoding="utf-8")
+            return (api_runtime_root / project_id / "project.json").read_text(
+                encoding="utf-8"
+            )
 
         unknown = await client.patch(
             f"/projects/{project_id}/subtitles/style",
@@ -1020,9 +1065,9 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
     assert declined.status_code == 200, declined.text
     assert declined.json()["skippedNonTemplate"] == 1
     assert declined.json()["redrawnDocuments"] == 0
-    declined_elements = stored(after_decline).timelines.items[
-        "timeline:main"
-    ].elements_by_id
+    declined_elements = (
+        stored(after_decline).timelines.items["timeline:main"].elements_by_id
+    )
     assert declined_elements["free"].creation.prompt == ""
     assert "x" * 64 in (declined_elements["free"].creation.motion.html or "")
 
@@ -1051,7 +1096,9 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
     assert back.settings.subtitle_style is None
     back_elements = back.timelines.items["timeline:main"].elements_by_id
     assert back_elements["caption"].creation.prompt == ""
-    assert back_elements["authored"].creation.prompt == "手写意图：这里要安静一点"
+    assert (
+        back_elements["authored"].creation.prompt == "手写意图：这里要安静一点"
+    )
     back_motion = back_elements["caption"].creation.motion
     assert back_motion.entrance == "soft_fade"
     assert "caption_animation=soft_fade/none/0" in back_motion.design_notes

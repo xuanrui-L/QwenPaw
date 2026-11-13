@@ -73,6 +73,23 @@ RUN PYPI_HOST=$(echo "${PYPI_INDEX_URL}" | sed -E 's|https?://([^/]+).*|\1|') &&
     --trusted-host "${PYPI_HOST}" \
     -r /app/bundled-plugins/qwenpaw-creator/requirements.txt
 
+# Sampling profiler, shipped in the image so a live container can be profiled
+# without pip-installing into a running service. It reads another process's
+# memory, so the container must also start with --cap-add=SYS_PTRACE; without
+# that capability py-spy fails with EPERM, which is the only failure mode.
+RUN PYPI_HOST=$(echo "${PYPI_INDEX_URL}" | sed -E 's|https?://([^/]+).*|\1|') && \
+    uv pip install --no-cache-dir \
+    --index-url "${PYPI_INDEX_URL}" \
+    --trusted-host "${PYPI_HOST}" \
+    py-spy
+
+# Creator's document reader renders HTML sources through Playwright. The base
+# image already ships a system Chromium and exports
+# PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, which the web renderer honours via
+# executable_path, so the image needs no browser download of its own. Local
+# (non-Docker) installs must run `python -m playwright install chromium` once,
+# as requirements.txt notes.
+
 # Override entrypoint to auto-install Creator plugin on startup.
 COPY --chmod=755 plugins/apps/qwenpaw-creator/entrypoint.sh /entrypoint-creator.sh
 

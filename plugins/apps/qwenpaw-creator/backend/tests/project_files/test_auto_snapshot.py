@@ -7,6 +7,8 @@ import pytest
 
 from services.project_files import snapshot_restore_hold
 from services.project_files.auto_snapshot import (
+    _AUTO_SNAPSHOT_DESCRIPTION,
+    _AUTO_SNAPSHOT_RETENTION,
     _next_snapshot_id,
     _timeline_element_changes,
     auto_snapshot_timelines,
@@ -527,3 +529,133 @@ class TestSnapshotProjectValidation:
         ]["outputs"]["main"]["slot_id"] = "element:missing:main"
         with pytest.raises(Exception, match="ArtifactSlot"):
             Project.model_validate(raw)
+
+
+class TestAutoSnapshotRetention:
+    """Minting a baseline also bounds how many baselines the Project keeps."""
+
+    @staticmethod
+    def _seed_auto_snapshots(
+        doc: dict,
+        count: int,
+        *,
+        start: int = 1,
+    ) -> list[str]:
+        items = doc["timelines"]["items"]
+        order = doc["timelines"]["order"]
+        seeded = []
+        for index in range(start, start + count):
+            sid = f"snapshot:{TL}:{index}"
+            frozen = copy.deepcopy(items[TL])
+            frozen["timeline_id"] = sid
+            frozen["description"] = _AUTO_SNAPSHOT_DESCRIPTION
+            frozen["elements_by_id"] = {
+                f"{sid}:{elem_id}": dict(
+                    element,
+                    element_id=f"{sid}:{elem_id}",
+                )
+                for elem_id, element in frozen["elements_by_id"].items()
+            }
+            items[sid] = frozen
+            order.append(sid)
+            seeded.append(sid)
+        return seeded
+
+    @staticmethod
+    def _changed_candidate(base: dict) -> dict:
+        candidate = copy.deepcopy(base)
+        _elems(candidate)[ELEM]["label"] = "Modified"
+        return candidate
+
+    def test_within_cap_keeps_every_snapshot(self):
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        self._seed_auto_snapshots(base, _AUTO_SNAPSHOT_RETENTION - 1)
+        candidate = self._changed_candidate(base)
+
+        assert auto_snapshot_timelines(base, candidate) == [TL]
+
+        survivors = [
+            key
+            for key in candidate["timelines"]["items"]
+            if key.startswith("snapshot:")
+        ]
+        assert len(survivors) == _AUTO_SNAPSHOT_RETENTION
+
+    def test_oldest_auto_snapshots_are_dropped_first(self):
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        self._seed_auto_snapshots(base, _AUTO_SNAPSHOT_RETENTION)
+        candidate = self._changed_candidate(base)
+
+        auto_snapshot_timelines(base, candidate)
+
+        items = candidate["timelines"]["items"]
+        # The seed filled the cap, so the new baseline evicted the oldest.
+        assert f"snapshot:{TL}:1" not in items
+        assert f"snapshot:{TL}:{_AUTO_SNAPSHOT_RETENTION + 1}" in items
+        assert len(items) == 1 + _AUTO_SNAPSHOT_RETENTION
+
+    def test_pruned_snapshots_leave_the_timeline_order(self):
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        self._seed_auto_snapshots(base, _AUTO_SNAPSHOT_RETENTION + 2)
+        candidate = self._changed_candidate(base)
+
+        auto_snapshot_timelines(base, candidate)
+
+        order = candidate["timelines"]["order"]
+        items = candidate["timelines"]["items"]
+        assert set(order) == set(items)
+        assert _AUTO_SNAPSHOT_RETENTION == len(
+            [key for key in order if key.startswith("snapshot:")],
+        )
+
+    def test_manual_snapshots_are_exempt(self):
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        seeded = self._seed_auto_snapshots(base, _AUTO_SNAPSHOT_RETENTION + 1)
+        manual = seeded[0]
+        base["timelines"]["items"][manual]["description"] = "交付前留档"
+        candidate = self._changed_candidate(base)
+
+        auto_snapshot_timelines(base, candidate)
+
+        items = candidate["timelines"]["items"]
+        assert manual in items
+        assert f"snapshot:{TL}:2" not in items
+
+    def test_pruned_snapshots_do_not_reuse_ids(self):
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        self._seed_auto_snapshots(base, _AUTO_SNAPSHOT_RETENTION + 5)
+        candidate = self._changed_candidate(base)
+
+        auto_snapshot_timelines(base, candidate)
+
+        # _next_snapshot_id counts the highest surviving suffix, so eviction
+        # must never mint an id a restored copy or an export still references.
+        assert f"snapshot:{TL}:{_AUTO_SNAPSHOT_RETENTION + 6}" in (
+            candidate["timelines"]["items"]
+        )
+
+    def test_project_stays_valid_after_pruning(self):
+        from services.project_files.models import Project
+
+        # Reuse the sibling test's fixture builder: it is test scaffolding,
+        # not a production API, so the protected access is deliberate.
+        # pylint: disable=protected-access
+        base = TestSnapshotProjectValidation._project_with_output()
+        self._seed_auto_snapshots(base, _AUTO_SNAPSHOT_RETENTION + 3)
+        candidate = copy.deepcopy(base)
+        candidate["timelines"]["items"][TL]["elements_by_id"]["element-1"][
+            "label"
+        ] = "Modified"
+
+        auto_snapshot_timelines(base, candidate)
+
+        Project.model_validate(candidate)
+        # Live plus the retained window: the surplus history is gone from the
+        # document, not merely hidden from the panel.
+        assert (
+            len(candidate["timelines"]["items"])
+            == 1 + _AUTO_SNAPSHOT_RETENTION
+        )
+        assert set(candidate["timelines"]["order"]) == set(
+            candidate["timelines"]["items"],
+        )

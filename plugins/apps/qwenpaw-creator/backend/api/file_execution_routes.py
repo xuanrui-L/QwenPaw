@@ -47,7 +47,6 @@ from .dependencies import (
     semantic_etag,
 )
 
-
 router = APIRouter(
     prefix="/projects/{project_id}",
     tags=["runtime-files"],
@@ -148,6 +147,7 @@ def _task_view(task: TaskRecord) -> dict[str, Any]:
         "targetRef": target_ref,
         "status": task.status.value,
         "progress": task.progress,
+        "lastAttemptSeq": task.last_attempt_seq,
         "completedElements": task.metadata.get("completedElements"),
         "totalElements": task.metadata.get("totalElements"),
         "resultRefs": task.output_refs,
@@ -431,6 +431,89 @@ def _timeline_has_text_overlays_without_motion(
     )
 
 
+ADMISSION_REVIEW_BUDGET_SECONDS = 120.0
+
+
+async def _preflight_scene_review(
+    services: CreatorFileServices,
+    project_id: str,
+    timeline_id: str,
+) -> None:
+    """Repair stale scene locks before promising a Task id, but never hang.
+
+    The repair runs inside execute_file_local_media_command, which is after
+    this route has already answered 202 with an id whose Task does not exist
+    yet: when the repair fails -- a VLM outage, a frame extraction error -- no
+    Task carries that failure and the client polls forever for an id that will
+    never appear (review #243). Doing it here lets a real failure answer the
+    caller as an error instead.
+
+    Moving it after Task creation is not an option: the scene gate resolves
+    against the Project the repair just changed, so a post-admit review would
+    reject the first export outright and make the user press it twice.
+
+    A spent budget is not a benign outcome either. ``auto_review_stale_scenes``
+    was cancelled by ``wait_for``, so the scenes it had not reached are still
+    blocked; the drive's scene gate refuses, and no Task carries that
+    refusal -- the same 202-plus-phantom-Task defect (review #243 P1-3
+    remaining half). Refuse admission on the timeout path too, naming
+    the scenes we were about to sweep so the user learns which
+    Projects need another pass before pressing "成片".
+    """
+
+    from services.render_review.scene_review import (
+        auto_review_stale_scenes,
+        collect_scene_review_targets,
+    )
+
+    snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    timeline = snapshot.project.timelines.items.get(timeline_id)
+    if timeline is None:
+        return
+    stale, drafts = collect_scene_review_targets(timeline)
+    if not (stale or drafts):
+        return
+    targets = [str(scene_id) for scene_id in (*drafts, *stale)]
+    try:
+        remaining = await asyncio.wait_for(
+            auto_review_stale_scenes(
+                services,
+                project_id=project_id,
+                timeline_ref=f"timeline:{timeline_id}",
+                timeline=timeline,
+            ),
+            timeout=ADMISSION_REVIEW_BUDGET_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        _logger.warning(
+            "compose preflight review exceeded %ss for %s; refusing "
+            "admission because the drive has no Task to carry a later "
+            "scene-gate failure",
+            ADMISSION_REVIEW_BUDGET_SECONDS,
+            _log_safe(project_id),
+        )
+        raise ConflictError(
+            f"场景自动重审超过 {ADMISSION_REVIEW_BUDGET_SECONDS:.0f} 秒预算："
+            + "、".join(targets)
+            + "；请稍后重试或手动触发重审。",
+            details={
+                "code": "SCENE_REVIEW_TIMEOUT",
+                "scenes": targets,
+                "budgetSeconds": ADMISSION_REVIEW_BUDGET_SECONDS,
+            },
+        ) from None
+    if remaining:
+        raise ConflictError(
+            "场景自动重审未能修复："
+            + "、".join(str(scene_id) for scene_id in remaining)
+            + "；请稍后重试或手动触发重审。",
+            details={
+                "code": "SCENE_REVIEW_INCOMPLETE",
+                "scenes": [str(scene_id) for scene_id in remaining],
+            },
+        )
+
+
 @router.post(
     "/timelines/{timeline_id}/render",
     status_code=status.HTTP_202_ACCEPTED,
@@ -514,13 +597,21 @@ async def render_timeline(
         # Task that never exists. Pre-validate the execution plan
         # synchronously so structural problems (e.g. Overlay stacking the
         # local runner cannot handle) return 400 to the caller directly.
+        #
+        # The scene-loop gate is excluded: an expired scene lock is repaired
+        # by auto_review_stale_scenes inside execute_file_local_media_command,
+        # which runs after this precheck. Enforcing it here would answer
+        # every user-initiated export with 422 before that repair could ever
+        # run, so the export could only proceed through the Agent pipeline.
         await asyncio.to_thread(
             validate_local_media_execution,
             services,
             project_id=project_id,
             command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
             target_ref=target_ref,
+            enforce_scene_gate=False,
         )
+        await _preflight_scene_review(services, project_id, timeline_id)
 
         async def drive() -> None:
             try:
@@ -824,12 +915,16 @@ async def _decide_authorization(
                 ) != script_fingerprint(
                     snapshot.project,
                 ):
-                    raise ConflictError("剧本已更新，请重新请求并确认当前版本。")
+                    raise ConflictError(
+                        "剧本已更新，请重新请求并确认当前版本。"
+                    )
             if (
                 decision.get("provider") != current.requested_provider
                 or decision.get("model") != current.requested_model
             ):
-                raise ConflictError("批准的 provider/model 必须与原执行请求一致")
+                raise ConflictError(
+                    "批准的 provider/model 必须与原执行请求一致"
+                )
             requested_candidates = current.requested_candidates or 1
             if int(decision.get("maxCandidates") or 0) > requested_candidates:
                 raise ConflictError("批准的候选数量不能超过原执行请求")
@@ -838,13 +933,13 @@ async def _decide_authorization(
                     decision.get("promptPointer") is None
                     or (current.scope or {}).get("workGraph") is not None
                 ):
-                    decision[
-                        "workGraph"
-                    ] = await _rebind_workgraph_authorization(
-                        services,
-                        store,
-                        current,
-                        decision["projectEtag"],
+                    decision["workGraph"] = (
+                        await _rebind_workgraph_authorization(
+                            services,
+                            store,
+                            current,
+                            decision["projectEtag"],
+                        )
                     )
                 else:
                     from services.project_files.approved_prompt import (
@@ -857,13 +952,17 @@ async def _decide_authorization(
                     )
                     expected = semantic_etag(decision["projectEtag"])
                     if snapshot.etag != expected:
-                        raise ConflictError("已保存的项目快照已改变，请重新查看后批准。")
+                        raise ConflictError(
+                            "已保存的项目快照已改变，请重新查看后批准。"
+                        )
                     saved = saved_authorization_prompt(
                         snapshot.project,
                         current,
                     )
                     if saved["pointer"] != decision["promptPointer"]:
-                        raise ConflictError("授权卡的提示词目标与执行目标不一致。")
+                        raise ConflictError(
+                            "授权卡的提示词目标与执行目标不一致。"
+                        )
                     decision["savedPrompt"] = {
                         "etag": snapshot.etag,
                         **saved,

@@ -33,6 +33,7 @@ from models.provider_errors import retryable_for_status
 from models.retry_timing import backoff_seconds
 from models.reference_markers import ReferenceMarkerSpec
 from services.runtime_files.atomic_store import atomic_replace_bytes
+from services.observability import mem_probe
 from utils.logger import setup_logger
 from utils.exceptions import ModelError
 from utils.paths import media_url_for, unique_task_work_path
@@ -510,6 +511,12 @@ def persist_image_bytes(img_bytes: bytes, model_name: str, source: str) -> str:
             model_name=model_name,
         )
     image_path = unique_task_work_path("images", ".png", prefix="img_")
+    mem_probe.stage(
+        "image.provider_bytes",
+        source=source,
+        bytes=len(img_bytes),
+        model_name=model_name,
+    )
     atomic_replace_bytes(image_path, img_bytes)
     result_url = media_url_for(image_path)
     logger.info(

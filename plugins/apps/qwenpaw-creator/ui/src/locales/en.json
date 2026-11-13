@@ -834,6 +834,7 @@
     "applySuccess": "Changes applied",
     "applySuccessRegenRequired": "Changes applied; related results marked for regeneration",
     "applySuccessPreviewUpdated": "Changes applied; live preview updated, final cut will recompose",
+    "applySuccessComposeWaiting": "Changes applied; live preview updated, and the final cut is out of date \u2014 press Final Cut to recompose it.",
     "applyFailed": "Apply failed: {{detail}}",
     "unsavedChanges": "Unsaved changes",
     "unsavedChangesDesc": "Page drafts will be discarded when you leave. You can go back and click \"Apply Changes\" first.",
@@ -1280,6 +1281,8 @@
   "workGraph": {
     "manuallyHeld": "Manually paused",
     "manualHoldNotice": "Manual regeneration has paused downstream automatic production.",
+    "strandedAdmission": "{{count}} production request(s) were admitted but never started; resubmit them.",
+    "strandedResubmit": "Resubmit",
     "resume": "Resume automatic production",
     "resumeConfirm": "Resuming will restart downstream automatic generation and may incur media generation costs. Resume automatic production?",
     "resumeStale": "The pause has changed. Review the latest state and confirm resume again.",
@@ -1577,6 +1580,7 @@
     "selectRow": "Select entire row",
     "timingAppliedRegenRequired": "Timing adjustments applied; related generation results marked for regeneration",
     "timingAppliedRecomposing": "Timing adjustments applied; recomposing final cut",
+    "timingAppliedComposeWaiting": "Timing applied; the final cut is out of date \u2014 press Final Cut to recompose it.",
     "timingApplied": "Timing adjustments applied",
     "applyTimingFailed": "Failed to apply timing adjustments: {{detail}}",
     "undoCancelled": "Timeline was updated by other changes, undo cancelled to avoid overwriting new content",
@@ -2616,5 +2620,13 @@
     "attempt": "Retry {{attempt}} / {{max}}",
     "backoff": "Retrying in {{seconds}}s",
     "responding": "Waiting for the model response"
+  },
+  "storage": {
+    "pendingHint": "{{size}} of settled history is waiting for your confirmation",
+    "confirmButton": "Confirm and free",
+    "confirmTitle": "Free {{size}} of settled history in \"{{name}}\"?",
+    "confirmBody": "The automatic sweep stepped back from this Project because its settled history grew past the threshold. Confirming records your decision and runs the same two sweeps right now, deleting the finished sessions and transactions that make up the bytes.",
+    "confirmed": "Freed {{size}} of settled history",
+    "failed": "Could not free the settled history: {{message}}"
   }
 }

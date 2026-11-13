@@ -1777,7 +1777,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             ),
             None,
         )
-        final_slot = next(
+        selected_final = next(
             (
                 slot.selected_version_id
                 for slot_id, slot in (
@@ -1789,8 +1789,16 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             ),
             None,
         )
-        if final_slot is not None:
-            version = project.assets.artifact_versions_by_id.get(final_slot)
+        # A cut existed for this Timeline even if it is about to be judged
+        # superseded: that is what separates "never composed" (compose it, the
+        # deliverable does not exist yet) from "composed, now stale"
+        # (re-compose only on request).
+        superseded_final = selected_final is not None
+        final_slot = selected_final
+        if selected_final is not None:
+            version = project.assets.artifact_versions_by_id.get(
+                selected_final,
+            )
             if version is not None and (
                 getattr(version, "stale", False)
                 or not _final_render_reads_current_versions(project, version)
@@ -1802,6 +1810,30 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             status = WorkNodeStatus.GATED
         elif final_slot:
             status = WorkNodeStatus.DONE
+        elif superseded_final:
+            # An edit superseded a cut that already exists. Composing again
+            # is only worth its cost when somebody asked: in co-creation the
+            # "成片" button is that ask. The field showed what auto-compose
+            # does instead — five renders inside five minutes on 2026-11-05,
+            # four of them discarded as PROJECT_INPUT_SNAPSHOT_STALE because
+            # the timeline moved again before the render landed. STALE also
+            # stays out of the scheduler's hands: `ready_media_nodes` only
+            # takes READY, and `regeneration_nodes` additionally requires a
+            # regeneration_of marker this node never carries.
+            # Delegated (YOLO) runs keep auto-composing — unattended delivery
+            # to the final cut is the whole point of that mode.
+            # Local import: models.config pulls in nothing that would
+            # close a cycle back onto the work graph.
+            from models.config import (
+                EXECUTION_MODE_DELEGATED,
+                get_execution_mode,
+            )
+
+            status = (
+                WorkNodeStatus.READY
+                if get_execution_mode() == EXECUTION_MODE_DELEGATED
+                else WorkNodeStatus.STALE
+            )
         else:
             status = WorkNodeStatus.READY
         add(

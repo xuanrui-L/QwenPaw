@@ -1753,4 +1753,120 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
 
     expect(historyCalls(calls)).toBe(0);
   });
+
+  it("keeps an unsent draft across a fold and reopen", async () => {
+    // Review #243: folding unmounts the input and live typing never reaches
+    // the store, so the unsent instruction used to vanish with the component.
+    renderDock();
+    const box = composerBox();
+    fireEvent.input(box, {
+      target: { textContent: "Keep this unsent instruction" },
+    });
+    expect(box.textContent).toBe("Keep this unsent instruction");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
+    expect(useAgentDockUiStore.getState().unsentDraft).toEqual({
+      projectId: "p1",
+      content: ["Keep this unsent instruction"],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
+    await waitFor(() => {
+      expect(composerBox().textContent).toBe("Keep this unsent instruction");
+    });
+  });
+
+  it("does not restore an unsent draft that belongs to another Project", async () => {
+    // Review #243 blocking #5: the stash used to be untagged, so a
+    // Project switch that unmounted the dock (which fired
+    // onUnmountDraft) followed by a mount on a different Project would
+    // hand A's half-typed instruction to B's composer -- and one
+    // Enter key would send it to the wrong session.
+    useAgentDockUiStore.setState({
+      unsentDraft: {
+        projectId: "p-other",
+        content: ["Leaked from another Project"],
+      },
+    });
+    renderDock();
+
+    // The stash is preserved for its own Project but never applied.
+    expect(composerBox().textContent ?? "").toBe("");
+    expect(useAgentDockUiStore.getState().unsentDraft?.projectId).toBe(
+      "p-other",
+    );
+  });
+
+  it("prefers the edited draft over a one-shot injection on reopen", async () => {
+    // Review #243 P2: BlueprintScriptPanel request-changes sets store.draft
+    // once, and the old effect re-applied that value every time the dock
+    // reopened against an empty input -- silently overwriting whatever the
+    // user had typed after the injection. The injection is now consumed
+    // after it lands, so unsentDraft wins on the next fold/reopen.
+    renderDock();
+    useAgentDockUiStore.getState().setDraft("Original injection");
+    await waitFor(() =>
+      expect(composerBox().textContent).toBe("Original injection"),
+    );
+    // Consume the injection: store.draft is cleared once it has landed.
+    expect(useAgentDockUiStore.getState().draft).toBe("");
+
+    fireEvent.input(composerBox(), {
+      target: { textContent: "Edited instruction" },
+    });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
+    expect(useAgentDockUiStore.getState().unsentDraft).toEqual({
+      projectId: "p1",
+      content: ["Edited instruction"],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
+    await waitFor(() =>
+      expect(composerBox().textContent).toBe("Edited instruction"),
+    );
+  });
+
+  it("holds the composer button at 发送 while a replay is still catching up", () => {
+    // The measured defect: a Project whose session had already ended in ERROR
+    // flipped this button to 停止所有 Agent three times inside 1.5s, because
+    // the four sources behind `stoppable` land at different moments and the
+    // replay walks through the run's own WAITING_EXECUTION_AUTH history.
+    useCreatorSessionStore.setState({
+      isReplaying: true,
+      session: {
+        id: "session-1",
+        projectId: "p1",
+        status: "WAITING_EXECUTION_AUTH",
+        activeGoalId: null,
+        lastMessageSeq: 3,
+        lastConsumedMessageSeq: 3,
+        lastEventSeq: 10,
+        error: null,
+      } as never,
+    });
+    renderDock();
+
+    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "停止所有 Agent" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("re-reads the authoritative session the moment a replay catches up", async () => {
+    // Replay replays events, not the session row. Without this the corrected
+    // status only arrives with the next ~10s poll batch.
+    const refresh = vi.fn(async () => undefined);
+    useCreatorSessionStore.setState({
+      isReplaying: true,
+      refreshSession: refresh,
+    });
+    renderDock();
+
+    useCreatorSessionStore.setState({ isReplaying: false });
+
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  });
 });

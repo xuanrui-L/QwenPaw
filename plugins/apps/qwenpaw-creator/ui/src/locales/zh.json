@@ -834,6 +834,7 @@
     "applySuccess": "修改已应用",
     "applySuccessRegenRequired": "修改已应用；相关生成结果已标记为需要重新生成",
     "applySuccessPreviewUpdated": "修改已应用；实时预览已更新，成片将重新合成",
+    "applySuccessComposeWaiting": "修改已应用；实时预览已更新，成片已过期，点「成片」重新合成",
     "applyFailed": "应用修改失败：{{detail}}",
     "unsavedChanges": "还有未应用的修改",
     "unsavedChangesDesc": "离开后这些页面草稿会被放弃。你也可以先返回并点击\"应用修改\"。",
@@ -1280,6 +1281,8 @@
   "workGraph": {
     "manuallyHeld": "手动暂停",
     "manualHoldNotice": "手动重生成已暂停后续自动制作。",
+    "strandedAdmission": "制作请求未被受理（{{count}} 项已准入但从未开始执行），可重新提交。",
+    "strandedResubmit": "重新提交",
     "resume": "恢复自动制作",
     "resumeConfirm": "恢复后将继续下游自动生成，可能产生媒体生成费用。确认恢复自动制作？",
     "resumeStale": "暂停状态已更新，请查看最新状态后重新确认恢复。",
@@ -1577,6 +1580,7 @@
     "selectRow": "选取整行",
     "timingAppliedRegenRequired": "时间调整已应用；相关生成结果已标记为需要重新生成",
     "timingAppliedRecomposing": "时间调整已应用；正在重新合成成片",
+    "timingAppliedComposeWaiting": "时间调整已应用；成片已过期，点「成片」重新合成",
     "timingApplied": "时间调整已应用",
     "applyTimingFailed": "应用时间调整失败：{{detail}}",
     "undoCancelled": "时间线已被其他修改更新，已取消撤销以免覆盖新内容",
@@ -2616,5 +2620,13 @@
     "attempt": "第 {{attempt}} / {{max}} 次重试",
     "backoff": "{{seconds}} 秒后重试",
     "responding": "等待模型响应"
+  },
+  "storage": {
+    "pendingHint": "已有 {{size}} 沉淀历史等待你确认",
+    "confirmButton": "确认并释放",
+    "confirmTitle": "释放「{{name}}」中 {{size}} 的沉淀历史？",
+    "confirmBody": "该项目的沉淀历史超过了阈值，自动清理已主动停下。确认后会把你的决定记录在案，并立刻执行同样的两项清理，删除构成这些字节的已沉淀会话与事务。",
+    "confirmed": "已释放 {{size}} 沉淀历史",
+    "failed": "无法释放沉淀历史：{{message}}"
   }
 }

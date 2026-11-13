@@ -331,6 +331,75 @@ describe("bounded frontend caches", () => {
     );
   });
 
+  it("keeps a replayed delta prefix for a run whose message is not yet durable", async () => {
+    // Review #243 P2: the backend deliberately keeps an active run's
+    // historical deltas because those messages have no durable projection
+    // yet. The frontend's replay filter was discarding them anyway, so a
+    // returning user saw the reply missing its opening stretch -- replay
+    // delta0 "Hello " was dropped and only live delta1 "world" survived.
+    const routes = bootstrapRoutes({
+      messages: [],
+      session: { lastMessageSeq: 0, lastEventSeq: 2, status: "RUNNING" },
+    });
+    routes[0].response.json = { items: [], nextBefore: null } as never;
+    installMockFetch(routes);
+    await store().bootstrap("p1");
+    expect(store().isReplaying).toBe(true);
+    expect(store().lastEventSeq).toBe(0);
+
+    ingest(
+      ev(1, "agent.run.started", { runId: "run-1" }),
+      ev(2, "agent.message_delta", {
+        messageId: "assistant-partial",
+        runId: "run-1",
+        deltaIndex: 0,
+        delta: "Hello ",
+      }),
+    );
+    expect(store().isReplaying).toBe(false);
+
+    ingest(
+      ev(3, "agent.message_delta", {
+        messageId: "assistant-partial",
+        runId: "run-1",
+        deltaIndex: 1,
+        delta: "world",
+      }),
+    );
+    const streaming = store().streamingAssistantMessages["assistant-partial"];
+    expect(streaming.deltas[0]).toBe("Hello ");
+    expect(streaming.deltas[1]).toBe("world");
+  });
+
+  it("still folds a replayed delta whose message is already durable", () => {
+    // The historicalReplay filter had a real job: not build a streaming
+    // bubble on top of a message the tail load already contains. That
+    // path is guarded here so removing the broader replay filter (above)
+    // does not let duplication back in.
+    seed({
+      messages: [
+        msg({
+          messageId: "already-durable",
+          messageSeq: 1,
+          role: "assistant",
+        }),
+      ],
+      isReplaying: true,
+      replayUntilSeq: 10,
+      events: [],
+    });
+    ingest(
+      ev(1, "agent.message_delta", {
+        messageId: "already-durable",
+        deltaIndex: 0,
+        delta: "duplicate tail",
+      }),
+    );
+    expect(
+      store().streamingAssistantMessages["already-durable"],
+    ).toBeUndefined();
+  });
+
   it("does not confuse a concrete Task progress number with AgentStatusBar progress", () => {
     const progress = {
       phase: "timeline_edit" as const,
@@ -750,5 +819,31 @@ describe("bounded frontend caches", () => {
       messages: {},
       tools: {},
     });
+  });
+
+  it("does not let replayed status history flip the live session status", () => {
+    // The flicker this guards: a first view replays the run's own
+    // session.status_changed events. Writing them into the live session made
+    // the failure notice under the conversation -- whose condition is
+    // status === ERROR -- unmount and remount 8 times inside 830 ms on a real
+    // Project, which users report as "this part keeps refreshing". The
+    // authoritative status already arrived with the snapshot the stream was
+    // opened from, so in-boundary transitions are history, not news.
+    seed({
+      isReplaying: true,
+      replayUntilSeq: 10,
+      session: sessionView({ status: "ERROR" }),
+    });
+
+    ingest(
+      ev(1, "session.status_changed", { status: "RUNNING" }),
+      ev(2, "session.status_changed", { status: "WAITING_EXECUTION_AUTH" }),
+    );
+
+    expect(store().session?.status).toBe("ERROR");
+
+    // Past the boundary a transition is news again.
+    ingest(ev(11, "session.status_changed", { status: "IDLE" }));
+    expect(store().session?.status).toBe("IDLE");
   });
 });

@@ -580,6 +580,24 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
   const superseded = new Set(
     input.runs.map((run) => run.supersedesRunId).filter(Boolean),
   );
+  // A later successful re-run owns the outcome: the earlier unsuccessful
+  // attempt against the same target is history, not an open item. Runs carry
+  // no explicit supersedes link for retries, so the same-target rule the task
+  // projection uses below is mirrored here.
+  const sameRefs = (left: string[], right: string[]) =>
+    left.length > 0 &&
+    left.length === right.length &&
+    [...left].sort().join("\u0000") === [...right].sort().join("\u0000");
+  const retriedSuccessfully = (run: SpecialistRunView) =>
+    ["FAILED", "BLOCKED", "STALE", "CANCELLED"].includes(run.status) &&
+    input.runs.some(
+      (other) =>
+        other.id !== run.id &&
+        other.status === "SUCCEEDED" &&
+        other.role === run.role &&
+        sameRefs(other.targetRefs ?? [], run.targetRefs ?? []) &&
+        isLater(other, run),
+    );
   const onlySnapshotTargets = (refs: string[]) =>
     refs.length > 0 &&
     refs.every(
@@ -597,7 +615,9 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
     );
   const runs = input.runs.filter(
     (run) =>
-      !superseded.has(run.id) && !onlySnapshotTargets(run.targetRefs ?? []),
+      !superseded.has(run.id) &&
+      !retriedSuccessfully(run) &&
+      !onlySnapshotTargets(run.targetRefs ?? []),
   );
   const visibleRunIds = new Set<string>();
   for (const run of runs) {
@@ -605,6 +625,18 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
       (task) =>
         task.specialistRunId === run.id || run.taskRefs?.includes(task.id),
     );
+    // Recovery reaps admissions that outlived their process before a Task
+    // existed (ORPHANED_QUEUED_RUN). Nothing ever executed, no task carries
+    // the outcome, and the target is already satisfied or failed elsewhere:
+    // listing it as an operation would keep a dead enqueue on the board
+    // forever, which is exactly the "waiting" row this projection exists to
+    // prevent.
+    if (
+      run.status === "CANCELLED" &&
+      linkedTasks.length === 0 &&
+      (run.finalSummaryText ?? "").startsWith("ORPHANED_QUEUED_RUN")
+    )
+      continue;
     if (
       !["RUNNING_MODEL", "WAITING_AUTHORIZATION", "BLOCKED"].includes(
         run.status,

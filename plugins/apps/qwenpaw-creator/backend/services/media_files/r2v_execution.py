@@ -129,7 +129,10 @@ from services.runtime_files.execution_store import (
 )
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 from services.runtime_files.path_safety import is_link_stat
-from services.runtime_files.reconciliation import reconcile_terminal_task_runs
+from services.runtime_files.reconciliation import (
+    reconcile_orphaned_queued_runs,
+    reconcile_terminal_task_runs,
+)
 
 # pylint: disable=no-name-in-module
 from utils.logger import setup_logger
@@ -5307,6 +5310,16 @@ class FileR2VExecutionService:
             self.services.root,
             self.services.projects.discover_project_ids(),
         )
+        orphaned = await asyncio.to_thread(
+            reconcile_orphaned_queued_runs,
+            self.services.root,
+            self.services.projects.discover_project_ids(),
+        )
+        if orphaned.cancelled_count:
+            logger.warning(
+                "orphaned queued Runs cancelled at startup: %s",
+                ", ".join(orphaned.cancelled_run_ids),
+            )
         return recovered
 
     async def shutdown(self) -> None:

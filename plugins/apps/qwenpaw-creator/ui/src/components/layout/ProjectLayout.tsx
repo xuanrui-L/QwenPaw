@@ -295,7 +295,14 @@ export default function ProjectLayout() {
     // Every poll holds the shared project lock; slower, visibility-aware
     // ticks keep the reader stream from starving project writers. Join slow
     // reads instead of adding another request on every interval/focus event.
-    const stop = startVisiblePolling(poll, 2_000);
+    //
+    // This loop only ever asks for PENDING authorizations, so an empty result
+    // means there is nothing for a human to decide and the discovery tick can
+    // relax. It is not pushed further than 5 s because a freshly created
+    // authorization is exactly what the user is waiting to see.
+    const stop = startVisiblePolling(poll, () =>
+      useExecutionAuthorizationStore.getState().items.length > 0 ? 2_000 : 5_000,
+    );
     return () => {
       stop();
       const current = useExecutionAuthorizationStore.getState();

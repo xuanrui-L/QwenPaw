@@ -157,6 +157,7 @@ def test_manifest_and_invoke_expose_only_model_owned_arguments(tmp_path):
         "jq_project",
         "patch_project",
         "elements_at",
+        "confirm_prompt_sync",
     )
     jq_parameters = schemas["jq_project"]["parameters"]
     assert set(jq_parameters["properties"]) == {
@@ -410,3 +411,29 @@ def test_cut_advisory_hints_off_boundary_endpoints(tmp_path, monkeypatch):
     # Human/front-end commits (no round_id) never receive the nudge.
     human = _tools(store)
     assert human._cut_boundary_advisory(base.project, _result(after)) is None
+
+
+def test_jq_null_write_hint_names_the_rerooted_path() -> None:
+    """A non-nullable field written as null must say what produced it.
+
+    Models hit this by re-rooting: after ``| .interactive_presentation``
+    they keep writing ``.interactive_presentation.screens``, jq reads that
+    one level deeper than it exists, and the absent path evaluates to null.
+    """
+
+    payload = Project.new(project_id="project-1", name="Hint").model_dump(
+        mode="json",
+    )
+    payload["interactive_presentation"] = {
+        "design_prompt": "盘点",
+        "screens": None,
+        "cover_fingerprint": None,
+    }
+    with pytest.raises(ValidationError) as raised:
+        Project.model_validate(payload)
+
+    text = agent_tools_module._translate_project_schema_error(raised.value)
+
+    assert "screens 被写成 null" in text
+    assert "cover_fingerprint 被写成 null" in text
+    assert "`.字段名`" in text

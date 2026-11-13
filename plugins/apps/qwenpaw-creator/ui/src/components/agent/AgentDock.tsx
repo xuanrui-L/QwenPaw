@@ -102,7 +102,11 @@ import AgentWaitHint from "./AgentWaitHint";
 import AgentActivityIndicator from "./AgentActivityIndicator";
 import DecisionTray from "./DecisionTray";
 import FeedbackModal from "@/components/creator/FeedbackModal";
-import MentionInput, { type MentionInputHandle } from "./MentionInput";
+import MentionInput, {
+  type MentionInputContent,
+  type MentionInputDraft,
+  type MentionInputHandle,
+} from "./MentionInput";
 import { reviewPendingUnits } from "./FileProjectReviewPanel";
 import OnboardingHint from "@/components/onboarding/OnboardingHint";
 import { useTranslation } from "react-i18next";
@@ -696,13 +700,65 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
   );
 }
 
-function ToolCallCard({ data }: { data: ToolCallPresentation }) {
-  const { t } = useTranslation();
-  const session = useCreatorSessionStore((state) => state.session);
-  const activity = useCreatorSessionStore(
-    (state) => state.subagentActivities[data.actionId],
-  );
+/**
+ * Delegated-only detail that needs the Project snapshot.
+ *
+ * Kept as its own subscriber so the ~every-tool-card path stays free of the
+ * snapshot: a plain `read_project` row must not re-render when the Project
+ * identity changes, and only specialist rows read it at all.
+ */
+function SpecialistTargets({ refs }: { refs: string[] }) {
   const project = useProjectSnapshotStore((state) => state.project);
+  if (refs.length === 0) return null;
+  return (
+    <div className="agent-targets">
+      {refs.map((ref) => (
+        <span key={ref}>{creatorTargetLabel(ref, project)}</span>
+      ))}
+    </div>
+  );
+}
+
+function SpecialistPreview({ activity }: { activity: SubagentActivity }) {
+  const project = useProjectSnapshotStore((state) => state.project);
+  const latestMessage =
+    activity &&
+    Object.values(activity.messages).sort(
+      (a, b) => b.firstEventSeq - a.firstEventSeq,
+    )[0];
+  const preview = latestMessage
+    ? publicAssistantText(subagentMessageText(latestMessage), {
+        streaming: !latestMessage.completed,
+        project,
+      })
+    : "";
+  if (!preview) return null;
+  return (
+    <div data-subagent-public-preview className="agent-specialist-preview">
+      <MarkdownContent compact>{preview}</MarkdownContent>
+    </div>
+  );
+}
+
+/**
+ * One tool-activity row.
+ *
+ * Receives `sessionSettled` as a boolean rather than the session object: the
+ * row only tests membership in a status set, and a boolean prop keeps memo
+ * effective across session updates that do not change that answer. A large
+ * project holds hundreds of these rows, so per-store-subscription fan-out and
+ * per-render `publicAssistantText` both used to dominate interaction time.
+ */
+const ToolCallCard = memo(function ToolCallCard({
+  data,
+  activity,
+  sessionSettled,
+}: {
+  data: ToolCallPresentation;
+  activity?: SubagentActivity;
+  sessionSettled: boolean;
+}) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const delegated = data.tool === "delegate_to_agent" || Boolean(activity);
   const role = creatorRoleLabel(
@@ -723,9 +779,7 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
         )
       ? "failed"
       : "cancelled"
-    : data.status === "started" &&
-      session &&
-      ["IDLE", "ERROR", "CANCELLED"].includes(session.status)
+    : data.status === "started" && sessionSettled
     ? "unknown"
     : data.status;
   const activeTool =
@@ -752,17 +806,6 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
       : !activity && data.executing !== true
       ? t("agentActivity.preparing")
       : statusCopy(status);
-  const latestMessage =
-    activity &&
-    Object.values(activity.messages).sort(
-      (a, b) => b.firstEventSeq - a.firstEventSeq,
-    )[0];
-  const preview = latestMessage
-    ? publicAssistantText(subagentMessageText(latestMessage), {
-        streaming: !latestMessage.completed,
-        project,
-      })
-    : "";
   return (
     <div
       data-agent-tool={data.actionId}
@@ -814,23 +857,13 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           </button>
         )}
       </div>
-      {delegated && targets.length > 0 && (
-        <div className="agent-targets">
-          {targets.map((ref) => (
-            <span key={ref}>{creatorTargetLabel(ref, project)}</span>
-          ))}
-        </div>
-      )}
+      {delegated && <SpecialistTargets refs={targets} />}
       {activeTool && status === "started" && (
         <p className="agent-specialist-subtitle">
           {creatorToolLabel(activeTool.tool, activeTool.arguments)}
         </p>
       )}
-      {!expanded && preview && (
-        <div data-subagent-public-preview className="agent-specialist-preview">
-          <MarkdownContent compact>{preview}</MarkdownContent>
-        </div>
-      )}
+      {!expanded && activity && <SpecialistPreview activity={activity} />}
       {status === "failed" && (
         <p className="agent-activity-notice">
           {t("agentActivity.toolFailureHint")}
@@ -844,7 +877,7 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
       {expanded && activity && <SubagentActivityBubble activity={activity} />}
     </div>
   );
-}
+});
 
 function refTypeLabel(type: RefSearchItem["type"]): string {
   const labels: Record<RefSearchItem["type"], string> = {
@@ -1093,6 +1126,8 @@ export default function AgentDock({
   const width = useAgentDockUiStore((state) => state.width);
   const height = useAgentDockUiStore((state) => state.height);
   const draft = useAgentDockUiStore((state) => state.draft);
+  const unsentDraft = useAgentDockUiStore((state) => state.unsentDraft);
+  const setUnsentDraft = useAgentDockUiStore((state) => state.setUnsentDraft);
   const selectionAttachment = useAgentDockUiStore((state) => state.selection);
   const setOpen = useAgentDockUiStore((state) => state.setOpen);
   const setTab = useAgentDockUiStore((state) => state.setTab);
@@ -1141,6 +1176,13 @@ export default function AgentDock({
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const stopping = useCreatorSessionStore((state) => state.stopping);
   const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
+  const replayUntilSeq = useCreatorSessionStore(
+    (state) => state.replayUntilSeq,
+  );
+  const lastEventSeq = useCreatorSessionStore((state) => state.lastEventSeq);
+  const refreshSession = useCreatorSessionStore(
+    (state) => state.refreshSession,
+  );
   const stopAllAgents = useCreatorSessionStore((state) => state.stopAllAgents);
   const connectionState = useCreatorSessionStore(
     (state) => state.connectionState,
@@ -1197,11 +1239,34 @@ export default function AgentDock({
     session &&
       ["RUNNING", "RESUMING", "INTERRUPT_REQUESTED"].includes(session.status),
   );
+  // A fresh view replays the session's history, and the four sources below
+  // land at different moments (measured: /session 2.8s, /tasks 3.0s,
+  // /specialist-runs 3.3s, the replay itself 5.2-10.4s). Until it catches up
+  // they describe the run's PAST intermediate states, not the present one: a
+  // Project whose session had already ended in ERROR rendered as stoppable
+  // three times inside 1.5s, because the replay was passing through the
+  // WAITING_EXECUTION_AUTH stretch of its own history. The status label
+  // already defers to replay; the button must too, or the two disagree and the
+  // dock visibly flickers between 发送 and 停止.
+  // Same composite test as the status label: a replay that has already passed
+  // its boundary must not keep the dock in the pre-replay shape. An unknown
+  // boundary (0) defers to isReplaying, which is the old behaviour.
+  const replayOutstanding =
+    isReplaying && lastEventSeq < (replayUntilSeq || Number.POSITIVE_INFINITY);
   const stoppable =
-    Object.values(subagentActivities).some((activity) => !activity.completed) ||
-    tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status)) ||
-    runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)) ||
-    Boolean(session && STOPPABLE_SESSION_STATUSES.includes(session.status));
+    !replayOutstanding &&
+    (Object.values(subagentActivities).some(
+      (activity) => !activity.completed,
+    ) ||
+      tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status)) ||
+      runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)) ||
+      Boolean(session && STOPPABLE_SESSION_STATUSES.includes(session.status)));
+  // Derived once for every tool row: a row only asks whether the main session
+  // has settled, so a boolean keeps their memo effective across the session
+  // updates that do not change that answer.
+  const sessionSettled = Boolean(
+    session && ["IDLE", "ERROR", "CANCELLED"].includes(session.status),
+  );
   const showWorkspace = tab === "activity";
 
   const currentProject = useRef(projectId);
@@ -1223,18 +1288,37 @@ export default function AgentDock({
   const [canSend, setCanSend] = useState(false);
   const [rateLimitResuming, setRateLimitResuming] = useState(false);
   const [inlineRefs, setInlineRefs] = useState<string[]>([]);
+  // Last refs written into `inlineRefs`, kept out of render state so it can
+  // gate the update without becoming a dependency of itself.
+  const inlineRefsSignature = useRef("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionOptions, setMentionOptions] = useState<RefSearchItem[]>([]);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const previousProjectId = useRef<string | null>(null);
   useEffect(() => {
     setRemovedContextRefs([]);
     setRateLimitResuming(false);
     setPendingUploads([]);
     setUploadingAssets(false);
     setInterruptedDraft(null);
+    // Navigation between Projects must not carry the previous composer's
+    // in-memory state across. The unsent-draft stash is tagged with its
+    // producing Project (review #243 blocking #5) so a legitimate
+    // return-to-A still restores A's instruction; only the switch away
+    // from a Project wipes what the current mount shows. Doing this on
+    // first mount would erase the stash before the restore effect even
+    // got a chance to compare Project ids.
+    if (
+      previousProjectId.current !== null &&
+      previousProjectId.current !== projectId
+    ) {
+      setUnsentDraft(null);
+      inputRef.current?.clear();
+    }
+    previousProjectId.current = projectId;
     submissionVersion.current += 1;
     projectLifecycleVersion.current += 1;
-  }, [projectId]);
+  }, [projectId, setUnsentDraft]);
   const [showJump, setShowJump] = useState(false);
   const inputRef = useRef<MentionInputHandle>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -1441,6 +1525,8 @@ export default function AgentDock({
         hasQueuedInput: queued.some((item) => item.state !== "failed"),
         messages,
         isReplaying,
+        lastEventSeq,
+        replayUntilSeq,
         subagentActivities,
         toolCalls,
         mainThinking,
@@ -1456,6 +1542,8 @@ export default function AgentDock({
       queued,
       messages,
       isReplaying,
+      lastEventSeq,
+      replayUntilSeq,
       subagentActivities,
       toolCalls,
       mainThinking,
@@ -1669,6 +1757,20 @@ export default function AgentDock({
 
   const suppressFollow = isReplaying && connectionState === "connected";
 
+  // Replay rebuilds what the event stream said, but the authoritative session
+  // row is not part of that stream. Without this the corrected status waits
+  // for the next ~10s poll batch -- measured: replay settled at 10.4s only
+  // because a poll happened to land at that moment -- and every consumer of
+  // session.status shows a historical value in between. Ask once, immediately,
+  // when the replay says it is caught up.
+  const prevReplayForRefresh = useRef(isReplaying);
+  useEffect(() => {
+    const settled = prevReplayForRefresh.current && !isReplaying;
+    prevReplayForRefresh.current = isReplaying;
+    if (!settled || !open) return;
+    void refreshSession().catch(() => undefined);
+  }, [isReplaying, open, refreshSession]);
+
   useLayoutEffect(() => {
     const replayJustEnded = prevIsReplaying.current && !isReplaying;
     prevIsReplaying.current = isReplaying;
@@ -1760,7 +1862,48 @@ export default function AgentDock({
     if (!open || !draft || inputRef.current?.getContent().text) return;
     inputRef.current?.setText(draft);
     setCanSend(Boolean(draft.trim()));
-  }, [draft, open]);
+    // Consume the injection. Callers only set ``draft`` on the intent that
+    // spawned it (BlueprintScriptPanel request-changes), and leaving the
+    // value on the store meant the next fold + reopen re-fired this effect
+    // against a now-empty box, silently overwriting the user's edited
+    // text with the original injection (review #243 P2). Clearing here also
+    // lets the unsent-draft effect below see that no injection is pending,
+    // so the stash is restored on the reopen instead of the older prompt.
+    setDraft("");
+    // A fresh injection supersedes any stashed unsent draft.
+    setUnsentDraft(null);
+  }, [draft, open, setDraft, setUnsentDraft]);
+
+  // Folding or unmounting unmounts the input, and live typing never reaches
+  // the store, so an unsent instruction used to vanish with the component
+  // (review #243). The editor reports its own structured draft on the way out
+  // via onUnmountDraft below: a passive cleanup here would run after the
+  // handle's ref is already detached, so the parent cannot read it in time.
+
+  // MentionInput's unmount effect keys off the callback identity, so a
+  // fresh arrow per render would re-register the cleanup and call it
+  // every commit (the store write then loops back through Zustand).
+  // Memoizing here lets it fire only on the real fold/unmount, and the
+  // Project-tag keeps the review #243 blocking #5 guarantee: the stash
+  // names the Project it belongs to so another route cannot restore it.
+  const stashUnmountedDraft = useCallback(
+    (content: MentionInputDraft | null) =>
+      setUnsentDraft(content ? { projectId, content } : null),
+    [projectId, setUnsentDraft],
+  );
+
+  useEffect(() => {
+    if (!open || !unsentDraft || draft) return;
+    // A stash from a different Project is not this composer's business.
+    // Navigation between Projects can unmount the dock on the way out
+    // (which fires onUnmountDraft) and mount a fresh one on the way in;
+    // restoring across that boundary hands Project A's half-typed
+    // instruction to Project B's session (review #243 blocking #5).
+    if (unsentDraft.projectId !== projectId) return;
+    if (inputRef.current?.getContent().text) return;
+    inputRef.current?.setDraft(unsentDraft.content);
+    setCanSend(Boolean(inputRef.current?.getContent().text.trim()));
+  }, [open, unsentDraft, draft, projectId]);
 
   useEffect(() => {
     if (!open || !selectionAttachment) return;
@@ -1918,11 +2061,20 @@ export default function AgentDock({
     setShowJump(false);
   };
 
-  const handleInputChange = (text: string) => {
-    const content = inputRef.current?.getContent();
-    setCanSend(Boolean(content?.text.trim()));
-    setInlineRefs(content?.refs.map((item) => item.ref) ?? []);
-    setDraft(text);
+  const handleInputChange = (_text: string, content: MentionInputContent) => {
+    setCanSend(Boolean(content.text.trim()));
+    // Compare before setting: allocating a fresh array on every keystroke made
+    // the dock re-render per character even when the referenced objects never
+    // changed. The refs already came from this keystroke's serialization, so
+    // there is no second getContent() DOM walk either.
+    const signature = content.refs.map((item) => item.ref).join("\u0000");
+    if (signature !== inlineRefsSignature.current) {
+      inlineRefsSignature.current = signature;
+      setInlineRefs(content.refs.map((item) => item.ref));
+    }
+    // The live text intentionally never reaches the store. `draft` is only the
+    // external-injection channel consumed below; writing every keystroke into
+    // it re-rendered this whole dock, and every tool card inside it, per key.
   };
 
   const pickMention = (item: RefSearchItem) => {
@@ -1964,7 +2116,15 @@ export default function AgentDock({
     useCreatorInteractionStore.getState().setSelection(null);
     setSelectionAttachment(null);
     inputRef.current?.clearMentions();
-    handleInputChange(inputRef.current?.getContent().text ?? "");
+    // Read back the post-clear content explicitly rather than relying on the
+    // refresh() inside clearMentions: same values as that notification, so the
+    // signature gate makes this a no-op while the ref stays non-null-safe.
+    const cleared = inputRef.current?.getContent() ?? {
+      text: "",
+      refs: [],
+      selections: [],
+    };
+    handleInputChange(cleared.text, cleared);
   };
 
   const submit = async () => {
@@ -2129,7 +2289,9 @@ export default function AgentDock({
       ) === submittedSignature
     ) {
       inputRef.current?.clear();
+      setUnsentDraft(null);
       setCanSend(false);
+      inlineRefsSignature.current = "";
       setInlineRefs([]);
       setDraft("");
       setMentionQuery(null);
@@ -2435,14 +2597,24 @@ export default function AgentDock({
                         <ConversationMessage item={item} />
                         {(toolCallsByMessage.get(item.messageId) ?? []).map(
                           (call) => (
-                            <ToolCallCard key={call.actionId} data={call} />
+                            <ToolCallCard
+                              key={call.actionId}
+                              data={call}
+                              activity={subagentActivities[call.actionId]}
+                              sessionSettled={sessionSettled}
+                            />
                           ),
                         )}
                       </Fragment>
                     ))}
                     {conversationFlow.turns.length === 0 &&
                       unanchoredToolCalls.map((call) => (
-                        <ToolCallCard key={call.actionId} data={call} />
+                        <ToolCallCard
+                          key={call.actionId}
+                          data={call}
+                          activity={subagentActivities[call.actionId]}
+                          sessionSettled={sessionSettled}
+                        />
                       ))}
                   </div>
                 )}
@@ -2465,14 +2637,24 @@ export default function AgentDock({
                             <ConversationMessage item={item} />
                             {(toolCallsByMessage.get(item.messageId) ?? []).map(
                               (call) => (
-                                <ToolCallCard key={call.actionId} data={call} />
+                                <ToolCallCard
+                                  key={call.actionId}
+                                  data={call}
+                                  activity={subagentActivities[call.actionId]}
+                                  sessionSettled={sessionSettled}
+                                />
                               ),
                             )}
                           </Fragment>
                         ))}
                         {latest &&
                           unanchoredToolCalls.map((call) => (
-                            <ToolCallCard key={call.actionId} data={call} />
+                            <ToolCallCard
+                              key={call.actionId}
+                              data={call}
+                              activity={subagentActivities[call.actionId]}
+                              sessionSettled={sessionSettled}
+                            />
                           ))}
                       </div>
                     </div>
@@ -2895,6 +3077,7 @@ export default function AgentDock({
                   onMentionNavigate={navigateMention}
                   onMentionConfirm={confirmMention}
                   onMentionClose={() => setMentionQuery(null)}
+                  onUnmountDraft={stashUnmountedDraft}
                 />
                 {(stoppable || stopping) &&
                 !canSend &&
