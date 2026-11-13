@@ -1359,7 +1359,7 @@ SUBTITLE_TEMPLATE_PACKS: dict[str, dict[str, object]] = {
         "description": "Vlog/日常/手账：纸纹手写与情绪光晕",
         "caption_order": ("handwritten_note", "glow_breath", "ink_reveal"),
         "style_line": (
-            "治愈手写：楷体手写气质、轻微左倾、奶油纸色底板，"
+            "治愈手写：楷体手写气质、奶油纸色底板，"
             "打字机式逐字浮现后静止"
         ),
         "typography": {
@@ -1368,7 +1368,7 @@ SUBTITLE_TEMPLATE_PACKS: dict[str, dict[str, object]] = {
             "letterSpacing": "0.04em",
             "lineHeight": 1.45,
             "strokeScale": 0.5,
-            "tiltDeg": -1.6,
+            "tiltDeg": 0.0,
             "plate": "rgba(255,248,232,0.5)",
             "plateRadius": "0.18em",
         },
