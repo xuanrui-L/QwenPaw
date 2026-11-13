@@ -1030,8 +1030,12 @@ def is_carried_project_view(message: Mapping[str, Any]) -> bool:
 # and *which seq* to recall it by, instead of leaving a bare count that no
 # one can act on. The dropped turns are already out of the byte gate by the
 # time the map is built, so it rides on top of the result rather than inside
-# that gate; it is therefore hard-bounded here - a fixed per-block line cap
-# and a character budget - so it can never re-inflate the budget it relieves.
+# that gate. It is hard-bounded here - a fixed per-block line cap and a
+# character budget - but that bound (``ARCHIVED_INDEX_CHAR_BUDGET`` plus the
+# preamble, ~3.4KB) is larger than the 256-byte headroom the compaction loop
+# reserves, so the combined history view can still sit up to one bounded map
+# above ``HISTORY_BYTES``. The outer byte and token gates measure the
+# serialized request again, so the overshoot stays bounded and safe.
 _ARCHIVED_HEADLINE_CHARS = 120
 _ARCHIVED_INDEX_MAX_LINES = 24
 # The host odometer is folded to this character budget for the model view.
@@ -1084,7 +1088,23 @@ def _split_host_map_body(rendered: str) -> str:
     for offset, line in enumerate(lines):
         if line.startswith("===="):
             return "\n".join(lines[offset:])
-    return rendered
+    # The banner is gone because the host changed how it renders. Creator
+    # still prepends its own recall guidance, so scrub the host-only store
+    # and tool names rather than echo a table and a tool that do not exist.
+    return (
+        rendered.replace(
+            "conversation_history",
+            "the durable conversation store",
+        )
+        .replace(
+            "a more advanced Python recall tool",
+            "the recall_history tool",
+        )
+        .replace(
+            "advanced Python recall tool",
+            "recall_history tool",
+        )
+    )
 
 
 def _render_archived_index(
