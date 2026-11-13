@@ -261,6 +261,10 @@ export default function HomePage() {
   const [view, setView] = useState<HomeView>("create");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [projectListError, setProjectListError] = useState<string | null>(null);
+  const projectRequestSequence = useRef(0);
+  const projectListMounted = useRef(false);
+  const projectRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [previewProject, setPreviewProject] = useState<ProjectSummary | null>(
     null,
   );
@@ -297,32 +301,67 @@ export default function HomePage() {
 
   const fetchProjects = useCallback(
     async (sort: SortField = sortBy, order: "asc" | "desc" = sortOrder) => {
-      try {
-        const data = await listProjects(100, 0, sort, order);
-        const projectList = data.items || [];
-        // One response carries both the cards and the "working" badge: the
-        // listing answers hasActiveTask for every Project, so the page renders
-        // as soon as it arrives instead of waiting on a per-Project /tasks
-        // round trip for each card.
-        setProjects(projectList);
-        setProjectsWithActiveTasks(
-          new Set(
-            projectList
-              .filter((project) => project.hasActiveTask)
-              .map((project) => project.projectId),
-          ),
-        );
-      } catch {
-        message.error(t("home.loadFailed"));
-      } finally {
-        setLoading(false);
-      }
+      if (!projectListMounted.current) return;
+      const sequence = ++projectRequestSequence.current;
+      if (projectRetryTimer.current !== null)
+        clearTimeout(projectRetryTimer.current);
+      setLoading(true);
+      setProjectListError(null);
+      const load = async (attempt: number): Promise<void> => {
+        if (sequence !== projectRequestSequence.current) return;
+        try {
+          const data = await listProjects(100, 0, sort, order);
+          if (sequence !== projectRequestSequence.current) return;
+          const projectList = data.items || [];
+          setProjects(projectList);
+          setProjectsWithActiveTasks(
+            new Set(
+              projectList
+                .filter((project) => project.hasActiveTask)
+                .map((project) => project.projectId),
+            ),
+          );
+          setProjectListError(null);
+          setLoading(false);
+        } catch (error) {
+          if (sequence !== projectRequestSequence.current) return;
+          const preparing =
+            error instanceof CreatorHttpError &&
+            error.code === "RUNTIME_PREPARING";
+          setProjectListError(
+            preparing
+              ? t(
+                  attempt < 10
+                    ? "home.preparingProjects"
+                    : "home.preparingProjectsTimeout",
+                )
+              : error instanceof Error
+              ? error.message
+              : t("home.loadFailed"),
+          );
+          setLoading(false);
+          if (preparing && attempt < 10) {
+            projectRetryTimer.current = setTimeout(
+              () => void load(attempt + 1),
+              2000,
+            );
+          }
+        }
+      };
+      await load(0);
     },
     [sortBy, sortOrder, t],
   );
 
   useEffect(() => {
+    projectListMounted.current = true;
     void fetchProjects();
+    return () => {
+      projectListMounted.current = false;
+      projectRequestSequence.current += 1;
+      if (projectRetryTimer.current !== null)
+        clearTimeout(projectRetryTimer.current);
+    };
   }, [fetchProjects]);
 
   const fetchStorage = useCallback(async () => {
@@ -493,16 +532,14 @@ export default function HomePage() {
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       const value = e.target.value as SortField;
       setSortBy(value);
-      fetchProjects(value, sortOrder);
     },
-    [fetchProjects, sortOrder],
+    [],
   );
 
   const handleSortOrderToggle = useCallback(() => {
     const newOrder = sortOrder === "asc" ? "desc" : "asc";
     setSortOrder(newOrder);
-    fetchProjects(sortBy, newOrder);
-  }, [fetchProjects, sortBy, sortOrder]);
+  }, [sortOrder]);
 
   const formatDate = useCallback((dateStr: string) => {
     const date = new Date(dateStr);
@@ -706,7 +743,28 @@ export default function HomePage() {
               </div>
             </section>
 
-            {loading ? (
+            {projectListError && (
+              <div
+                role="alert"
+                className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning-soft)]/50 p-4"
+              >
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
+                    {t("home.loadFailed")}
+                  </h2>
+                  <p className="mt-1 break-words text-sm text-[var(--color-text-secondary)]">
+                    {projectListError}
+                  </p>
+                </div>
+                <Button
+                  aria-label={t("common.retry")}
+                  onClick={() => void fetchProjects()}
+                >
+                  {t("common.retry")}
+                </Button>
+              </div>
+            )}
+            {loading && projects.length === 0 ? (
               /* Same grid as the real cards, so the list neither reflows when
                  the response lands nor reads as a dead page: measured, this
                  region stayed blank for 11-12s under load with a single line
@@ -728,7 +786,7 @@ export default function HomePage() {
                   </div>
                 ))}
               </div>
-            ) : projects.length === 0 ? (
+            ) : projects.length === 0 && !projectListError ? (
               <div
                 data-onboarding-id="project-list"
                 className="flex flex-col items-center justify-center rounded-lg border border-[#EAE9E7] bg-white px-6 py-28 text-center dark:border-[var(--color-border)] dark:bg-[var(--color-bg-card)]"

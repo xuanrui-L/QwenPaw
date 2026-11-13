@@ -93,7 +93,6 @@ from services.runtime_files.locking import CrossProcessFileLock
 from services.runtime_files.session_store import (
     ProjectRuntimeBootstrap,
     RuntimeSessionNotFound,
-    SessionStoreError,
 )
 from services.storage_root import require_creator_data_root
 from services.project_files.serialization import load_project_json
@@ -131,7 +130,7 @@ router = APIRouter(
     tags=["projects"],
     route_class=_RemovedProjectPutRoute,
 )
-archive_router = APIRouter(
+storage_router = APIRouter(
     prefix="/projects",
     tags=["projects"],
     route_class=CreatorErrorRoute,
@@ -339,7 +338,7 @@ def _existing_copy_receipt(
     return {"projectId": target_project_id}
 
 
-@router.get("")
+@storage_router.get("")
 async def list_projects(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -368,7 +367,7 @@ async def list_projects(
                 session_status: str | None = session.status.value
             except RuntimeSessionNotFound:
                 session_status = None
-            except SessionStoreError as exc:
+            except (RuntimeFileError, OSError) as exc:
                 # One project's corrupt session record (field run
                 # 2026-08-25: a session claiming another project) must not
                 # take the whole listing down; surface the project without
@@ -386,7 +385,7 @@ async def list_projects(
             # the whole page.
             try:
                 tasks = executions.list_tasks(item.project_id)
-            except RuntimeFileError as exc:
+            except (RuntimeFileError, OSError) as exc:
                 logger.warning(
                     "project list: task scan failed for %s: %s",
                     item.project_id,
@@ -762,6 +761,7 @@ async def set_subtitle_style(
     descriptions — never overwriting wording a user or an agent wrote.
     """
 
+    # pylint: disable=too-many-branches,too-many-statements
     from services.media_files.informal_launch_template import (
         uses_informal_launch_captions,
     )
@@ -799,8 +799,7 @@ async def set_subtitle_style(
             or "subtitle_style" in request.model_fields_set
         ):
             raise ValidationError(
-                "elementIds 只能配合入场/出场/循环选择；"
-                "风格包与覆盖样式始终作用于全项目字幕。",
+                "elementIds 只能配合入场/出场/循环选择；风格包与覆盖样式始终作用于全项目字幕。",
             )
         # A present key is authoritative, so the UI can also go back:
         # ``null``/``""`` mean smart recommend and an explicit ``null`` style
@@ -845,6 +844,7 @@ async def set_subtitle_style(
             stored, indexed = externalize_motion_document(document, file_store)
             indexed_files[indexed.file_id] = indexed
             return stored.model_dump(mode="json")
+
         timelines = candidate["timelines"]["items"]
         # The caption boxes are validated against the same canvas the design
         # pass and the renderer use, so a switch here cannot bake a document
@@ -1257,7 +1257,7 @@ async def copy_project(
 # pylint: enable=too-many-statements
 
 
-@archive_router.get("/{project_id}/export")
+@storage_router.get("/{project_id}/export")
 async def export_project(
     project_id: str,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
@@ -1444,7 +1444,7 @@ async def _run_import(upload) -> str:
         )
 
 
-@archive_router.post("/import")
+@storage_router.post("/import")
 async def import_project(
     request: Request,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),

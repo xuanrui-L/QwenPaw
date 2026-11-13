@@ -60,8 +60,11 @@ async def _import(client, filename, archive):
     )
 
 
-@pytest.mark.parametrize("invalid_config", [False, True])
-def test_archive_transfer_does_not_depend_on_current_model_settings(
+@pytest.mark.parametrize(
+    "invalid_config",
+    [False, True, "invalid-json", "invalid-provider", "null-model"],
+)
+def test_listing_and_archive_transfer_ignore_current_model_settings(
     app,
     api_runtime_root,
     monkeypatch,
@@ -98,6 +101,12 @@ def test_archive_transfer_does_not_depend_on_current_model_settings(
                 },
             ),
         )
+        if invalid_config == "invalid-json":
+            config_path.write_text("{broken")
+        elif invalid_config == "invalid-provider":
+            config_path.write_text('{"asr": {"provider": "unsupported"}}')
+        elif invalid_config == "null-model":
+            config_path.write_text('{"llm": {"model_name": null}}')
         config_before = config_path.read_bytes()
         imported = await _import(client, "backup.zip", exported.content)
         assert imported.status_code == 200, imported.text
@@ -107,12 +116,11 @@ def test_archive_transfer_does_not_depend_on_current_model_settings(
         assert config_path.read_bytes() == config_before
         reexported = await _export(client, project_id)
         assert reexported.status_code == 200, reexported.text
-        if not invalid_config:
-            listed = await client.get("/projects")
-            assert listed.status_code == 200
-            assert [item["projectId"] for item in listed.json()["items"]] == [
-                project_id,
-            ]
+        listed = await client.get("/projects")
+        assert listed.status_code == 200, listed.text
+        assert [item["projectId"] for item in listed.json()["items"]] == [
+            project_id,
+        ]
 
     run_scenario(app, scenario)
 

@@ -177,6 +177,8 @@
     "recreateFailed": "Failed to get recreate parameters",
     "projectGone": "Project no longer exists; it may have been deleted elsewhere",
     "loadFailed": "Failed to load project list",
+    "preparingProjects": "Projects are recovering. Retrying shortly.",
+    "preparingProjectsTimeout": "Project recovery is still in progress. Please retry shortly.",
     "notSet": "Not set",
     "previewFinal": "Preview {{name}} final",
     "deleteProject": "Delete {{name}}",

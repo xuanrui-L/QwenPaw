@@ -422,7 +422,12 @@ class AtomicJsonRecordStore(Generic[T]):
                     f"{self.model_type!r}",
                 )
             return cast(T, validator(value))
-        except (PydanticValidationError, RuntimeFileValidationError) as exc:
+        except (
+            PydanticValidationError,
+            RuntimeFileValidationError,
+            OverflowError,
+            RecursionError,
+        ) as exc:
             if from_disk:
                 raise CorruptRecordError(self.path, str(exc)) from exc
             raise RuntimeFileValidationError(
@@ -469,7 +474,7 @@ class AtomicJsonRecordStore(Generic[T]):
             raise RecordNotFoundError(self.path) from exc
         try:
             value = self._decode_document(raw)
-        except (UnicodeDecodeError, ValueError) as exc:
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             logger.error("atomic_store corruption: %s: %s", self.path, exc)
             raise CorruptRecordError(self.path, str(exc)) from exc
         validated = self._validate(value, from_disk=True)

@@ -35,7 +35,7 @@ from .model_routes import bind_creator_tool_config
 from .model_routes import router as model_router
 from .observability_routes import router as observability_router
 from .project_file_routes import router as project_files_router
-from .project_routes import archive_router
+from .project_routes import storage_router
 from .project_routes import router as projects_router
 from .skill_routes import router as skill_router
 from .subtitle_style_routes import router as subtitle_styles_router
@@ -54,7 +54,7 @@ router = APIRouter(
     dependencies=[Depends(bind_creator_trace_request)],
     route_class=CreatorErrorRoute,
 )
-router.include_router(archive_router)
+router.include_router(storage_router)
 # A storage report is a diagnostic: it must also survive invalid model settings.
 router.include_router(storage_profile_router)
 configured_router = APIRouter(

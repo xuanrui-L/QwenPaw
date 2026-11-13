@@ -634,7 +634,10 @@ def test_disabled_narration_does_not_gate_overlap() -> None:
     Project.model_validate(raw)
 
 
-def test_legacy_double_narration_keeps_the_newest_take_not_id_order() -> None:
+@pytest.mark.parametrize("duration", [5000, 5000.0, "5000"])
+def test_legacy_double_narration_keeps_the_newest_take_not_id_order(
+    duration,
+) -> None:
     """A project saved before the double-voice gate must still OPEN, and the
     repair must keep the take the user actually re-voiced to.
 
@@ -668,6 +671,10 @@ def test_legacy_double_narration_keeps_the_newest_take_not_id_order() -> None:
         "logical_asset_id": "logical-audio-2",
         "created_at": "2026-09-01T08:00:00Z",  # the re-voice, synthesized later
     }
+    for element in raw["timelines"]["items"]["timeline:main"][
+        "elements_by_id"
+    ].values():
+        element["span"]["duration_tick"] = duration
     raw["schema_version"] = 9  # simulate pre-merge v9 export shape
     assert raw["schema_version"] == 9
 
