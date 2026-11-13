@@ -38,6 +38,47 @@ function rowKey(item: MarketSkillResult): string {
   return `${item.source}-${item.slug}`;
 }
 
+/**
+ * Where a row's install identity is remembered. React state dies with the
+ * pane: settings renders ``{activePane === "skills" && <SkillsConfigPane />}``,
+ * so switching panes rebuilds this component and would forget which name a
+ * renamed row installed. Browser storage is scoped to the origin, and one
+ * origin is one running Creator instance.
+ *
+ * The memory is inert on its own: a row only counts as installed while the
+ * name it remembers is still in the library, so a deleted skill frees its row
+ * again and nothing has to prune this map.
+ */
+const ROW_MEMORY_KEY = "qwenpaw.creator.skillMarket.installedRows";
+
+function readRowMemory(): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(ROW_MEMORY_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const memory: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "string") memory[key] = value;
+    }
+    return memory;
+  } catch {
+    // Disabled, unparsable or blocked storage degrades to "nothing
+    // remembered"; it must never turn into a failed install.
+    return {};
+  }
+}
+
+function writeRowMemory(memory: Record<string, string>): void {
+  try {
+    window.localStorage.setItem(ROW_MEMORY_KEY, JSON.stringify(memory));
+  } catch {
+    // Same here: this opening still works, only the next one forgets.
+  }
+}
+
 interface SkillMarketBrowserProps {
   open: boolean;
   onClose: () => void;
@@ -71,21 +112,21 @@ export default function SkillMarketBrowser({
   /** Skills this session installed, on top of the pane's library. */
   const [localInstalled, setLocalInstalled] = useState<Set<string>>(new Set());
   /**
-   * Row identity to the name that was really installed. A folded install name
-   * never matches the market row's label, so the row needs its own memory to
-   * stop offering an install the backend refuses. It outlives a single opening
-   * on purpose: the pane reports installed names, never rows, so dropping it
-   * would make every renamed skill look installable again after a reopen. The
-   * mapping only marks a row installed while that name is still in the library
-   * (see ``isRowInstalled``), so deleting the skill clears it by itself.
+   * Row identity to the name that was really installed, restored from browser
+   * storage because the pane can be torn down between openings. A folded
+   * install name never matches the market row's label, so this is the only
+   * thing that can tell the two apart.
    */
-  const [rowInstallNames, setRowInstallNames] = useState<
-    Record<string, string>
-  >({});
+  const [rowInstallNames, setRowInstallNames] =
+    useState<Record<string, string>>(readRowMemory);
   const [providers, setProviders] = useState<MarketProvider[]>([]);
   const searchSeqRef = useRef(0);
   const resultsRef = useRef<MarketSkillResult[]>([]);
   const inputRef = useRef<InputRef>(null);
+  // Synchronous mirror of ``rowInstallNames``: installing is the only writer,
+  // and writing storage inside a state updater would repeat under StrictMode
+  // replays the way a request side effect would.
+  const rowInstallNamesRef = useRef<Record<string, string>>(rowInstallNames);
   // Synchronous guard so rapid double-clicks cannot pass the installing
   // check before React commits the first setInstalling update.
   const installingRef = useRef<Set<string>>(new Set());
@@ -195,7 +236,15 @@ export default function SkillMarketBrowser({
         // so the overlay, the toast and the rename notice must speak about the
         // name that was really installed rather than the row's label.
         setLocalInstalled((prev) => new Set(prev).add(res.name));
-        setRowInstallNames((prev) => ({ ...prev, [rowKey(item)]: res.name }));
+        // One write path, outside the updater, so a StrictMode replay cannot
+        // persist the same entry twice or interleave with the ref mirror.
+        const nextMemory = {
+          ...rowInstallNamesRef.current,
+          [rowKey(item)]: res.name,
+        };
+        rowInstallNamesRef.current = nextMemory;
+        setRowInstallNames(nextMemory);
+        writeRowMemory(nextMemory);
         message.success(`${t("skills.importUrlSuccess")}: ${res.name}`);
         if (res.renamed_from) {
           message.warning(
@@ -236,7 +285,7 @@ export default function SkillMarketBrowser({
       setPage(1);
       // The pane's list is refetched on every install, so this session's
       // bridge would keep reporting "installed" for a skill deleted
-      // meanwhile. The row-to-name map stays: it is validated against the
+      // meanwhile. The row-to-name memory stays: it is validated against the
       // library on every render, so only skills that still exist match.
       setLocalInstalled(new Set());
       void doSearch("", 1);
