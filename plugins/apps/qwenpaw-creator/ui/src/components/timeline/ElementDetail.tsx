@@ -1017,7 +1017,7 @@ export default function ElementDetail({
           </summary>
           <div className="space-y-4 pt-3">
             <section className="rounded-xl border border-[var(--color-border)] p-3">
-              {!showsTimeLayerEditors && (
+              {showsTimeLayerEditors && (
                 <>
                   <div className="mb-3">
                     <h4 className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
