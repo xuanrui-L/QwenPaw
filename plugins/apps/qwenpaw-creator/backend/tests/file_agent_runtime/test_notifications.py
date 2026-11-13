@@ -663,12 +663,14 @@ def test_idle_flush_budget_exhausts_and_resets_on_human(
         0.0,
     )
     # setup_logger parks this logger behind ``propagate = False``, and
-    # caplog only sees records that reach the root handler. Whether the
-    # assertion below held used to depend on which earlier test in the
-    # run happened to flip propagation back -- order-sensitive green.
-    # Pin it explicitly so the capture is deterministic in any order
-    # (surfaced by the merge with dev/interactive-video reordering
-    # collection; not a behaviour change to the code under test).
+    # caplog only reaches the root handler. Whether the assertion below
+    # held used to depend on which earlier test in the run happened to
+    # flip propagation back -- order-sensitive green. Pin it explicitly so
+    # the capture is deterministic in any order (surfaced by the merge with
+    # dev/interactive-video reordering collection; not a behaviour change
+    # to the code under test). pytest >= 9.1 *also* captures a
+    # non-propagating logger directly, so with this pin the same record
+    # arrives twice; the count below therefore dedupes by record identity.
     monkeypatch.setattr(
         logging.getLogger("creator.notifications"),
         "propagate",
@@ -698,12 +700,16 @@ def test_idle_flush_budget_exhausts_and_resets_on_human(
         # attempt may scan and log — later ticks short-circuit silently.
         for _ in range(3):
             assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is False
-    assert (
-        sum(
-            "idle flush skipped" in record.message for record in caplog.records
-        )
-        == 1
-    )
+    # Same LogRecord instance twice is a pytest artefact, not a second log
+    # statement: count distinct records so a genuine duplicate still fails.
+    skipped: list[logging.LogRecord] = []
+    for record in caplog.records:
+        if "idle flush skipped" not in record.message:
+            continue
+        if any(record is prior for prior in skipped):
+            continue
+        skipped.append(record)
+    assert len(skipped) == 1
     assert len(bus.store.pending_records(PROJECT_ID)) == 1
 
     if human_act == "typed":
