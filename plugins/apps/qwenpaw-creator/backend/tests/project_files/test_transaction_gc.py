@@ -952,3 +952,93 @@ def test_gc_reclaims_through_an_atomic_rename_not_a_partial_rmtree(
         p for p in transactions_root.iterdir() if p.name.startswith(".")
     ]
     assert not lingering
+
+
+def test_a_partially_deleted_tombstone_is_reclaimed_by_the_next_sweep(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """An interrupted tombstone delete must not leak the bytes forever.
+
+    Review #243 r4548690102 follow-up: ``_atomic_reclaim`` renames then
+    ``rmtree``s. If the rmtree is interrupted after the journal is gone
+    but a large snapshot file remains, the old code returned success and
+    counted the full size as freed -- while the leftover tombstone, now
+    journal-less, could never pass the journal-based eligibility check
+    again, so its bytes leaked across every future sweep. The reviewer's
+    fault injection: first GC = (1, 1330) with ``large-project.json``
+    surviving, second GC = (0, 0), file still on disk.
+
+    Now ``_atomic_reclaim`` reports "moved out of scan" separately from
+    "bytes actually released", and ``_purge_tombstones`` reclaims any
+    ``.deleted-*`` leftover by name, independent of its journal.
+    """
+
+    project_root = _managed(tmp_path)
+    doomed = _transaction(
+        project_root,
+        "txn-doomed",
+        "RUNTIME_FINALIZED",
+        age_days=2,
+        body_bytes=4096,
+    )
+    transactions_root = project_root / "runtime" / "transactions"
+
+    real_rmtree = transaction_gc.shutil.rmtree
+    state = {"tripped": False}
+
+    def partial_rmtree(path, *args, **kwargs):
+        # First delete attempt (the tombstone inside _atomic_reclaim)
+        # removes only the journal and leaves the big file, mimicking an
+        # interrupted sweep.
+        if not state["tripped"] and path.name.startswith(
+            transaction_gc.TOMBSTONE_PREFIX
+        ):
+            state["tripped"] = True
+            (path / "journal.json").unlink(missing_ok=True)
+            return
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(transaction_gc.shutil, "rmtree", partial_rmtree)
+
+    first_removed, first_bytes = collect_project_transactions(
+        project_root,
+        retention=0,
+    )
+
+    assert state["tripped"], "the sweep never reached the tombstone delete"
+    assert doomed.exists() is False
+    tombstones = [
+        p
+        for p in transactions_root.iterdir()
+        if p.name.startswith(transaction_gc.TOMBSTONE_PREFIX)
+    ]
+    assert (
+        len(tombstones) == 1
+    ), "the interrupted tombstone must survive round 1"
+    tombstone = tombstones[0]
+    assert not (tombstone / "journal.json").exists()
+    assert any(
+        child.is_file() and child.stat().st_size > 0
+        for child in tombstone.iterdir()
+    ), "a large file must remain to represent the leaked bytes"
+    # Moved out of the scan (counted) but the disk is not released, so
+    # the byte tally must not claim it was.
+    assert first_removed == 1
+    assert first_bytes == 0
+
+    # Round two with a healthy rmtree: the journal-less tombstone cannot
+    # be picked up by the eligibility scan, so only the name-based purge
+    # can reclaim it.
+    monkeypatch.setattr(transaction_gc.shutil, "rmtree", real_rmtree)
+    second_removed, second_bytes = collect_project_transactions(
+        project_root,
+        retention=0,
+    )
+
+    assert not tombstone.exists(), (
+        "the leftover tombstone was never reclaimed -- exactly the leak "
+        "the fix promises to close"
+    )
+    assert second_removed >= 1
+    assert second_bytes > 0

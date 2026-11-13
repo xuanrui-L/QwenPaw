@@ -66,6 +66,10 @@ TERMINAL_TRANSACTION_SWEEP_THRESHOLD = 100
 
 TRANSACTIONS_DIR_NAME = "transactions"
 JOURNAL_FILE_NAME = "journal.json"
+# A reclaimed transaction is renamed under this prefix before deletion, so
+# the commit scan never observes a half-deleted directory. Leading dot keeps
+# it out of ``list_transaction_ids`` and the surplus enumerator.
+TOMBSTONE_PREFIX = ".deleted-"
 
 # The only states this module will delete. Anything else -- including a state
 # this build does not know yet -- is preserved.
@@ -244,21 +248,31 @@ def surplus_transaction_bytes(
     return sum(size for _mtime_value, _entry, size in surplus)
 
 
-def _atomic_reclaim(entry: Path) -> bool:
+def _atomic_reclaim(entry: Path) -> tuple[bool, bool]:
     """Move one transaction directory to a hidden tombstone, then delete.
 
-    The rename is atomic within the same filesystem, so a concurrent
-    commit scan sees either the original directory intact or
-    ``FileNotFoundError`` on ``lstat`` and never the intermediate
-    ``shutil.rmtree`` state where ``journal.json`` has already been
-    unlinked while the parent directory still exists. The tombstone
-    name starts with a dot so ``list_transaction_ids`` and the surplus
-    enumerator both skip it by their existing rule. A cross-device
-    rename (OSError EXDEV) falls back to a direct rmtree, which keeps
-    the older behaviour as a last resort.
+    Returns ``(hidden_from_scan, fully_removed)``. The rename is atomic
+    within the same filesystem, so once it succeeds the original path is
+    gone from the commit scan's view no matter what follows --
+    ``hidden_from_scan`` is True and correctness (the scan never sees a
+    half-deleted transaction) is guaranteed. ``fully_removed`` reports
+    whether the bytes actually left the disk, which the caller uses so a
+    partial delete is never counted as reclaimed space.
+
+    The tombstone name starts with a dot so ``list_transaction_ids`` and
+    the surplus enumerator skip it by their existing rule; a leftover
+    from an interrupted ``rmtree`` here is reclaimed by
+    :func:`_purge_tombstones` on the next sweep, not by the
+    journal-based path (the journal is the first thing that delete
+    removes, so it can never qualify again). A cross-device rename
+    (EXDEV) falls back to in-place ``rmtree``; if that also leaves
+    something behind, ``hidden_from_scan`` is False because the original
+    directory is still where the scan looks.
     """
 
-    tombstone = entry.with_name(f".deleted-{entry.name}-{uuid4().hex}")
+    tombstone = entry.with_name(
+        f"{TOMBSTONE_PREFIX}{entry.name}-{uuid4().hex}"
+    )
     try:
         os.rename(entry, tombstone)
     except OSError as exc:
@@ -269,20 +283,53 @@ def _atomic_reclaim(entry: Path) -> bool:
             entry,
         )
         shutil.rmtree(entry, ignore_errors=True)
-        if entry.exists():
+        survived = entry.exists()
+        if survived:
             logger.warning("transaction directory survived removal: %s", entry)
-            return False
-        return True
+        return (not survived, not survived)
     shutil.rmtree(tombstone, ignore_errors=True)
     if tombstone.exists():
-        # The rename already moved the tree out of the scan's view, so a
-        # surviving tombstone is a disk cost, not a correctness one; the
-        # next sweep picks it up again.
+        # Out of the scan's view (correct), but the disk is not yet
+        # reclaimed; _purge_tombstones finishes it on the next sweep.
         logger.warning(
             "transaction tombstone cleanup deferred to next sweep: %s",
             tombstone,
         )
-    return True
+        return (True, False)
+    return (True, True)
+
+
+def _purge_tombstones(transactions_root: Path) -> tuple[int, int]:
+    """Delete leftover ``.deleted-*`` tombstones; return (count, bytes).
+
+    Review #243 r4548690102 follow-up: ``_atomic_reclaim`` renames a
+    transaction to a tombstone and then ``rmtree``s it, but that delete
+    can be interrupted part-way -- journal gone first, a large snapshot
+    file left behind. Such a tombstone is invisible to the journal-based
+    eligibility check (its journal no longer exists, so it never reads
+    as terminal), so the old "the next sweep picks it up" comment had no
+    code behind it and the bytes leaked forever. Purging by name is
+    idempotent and independent of content: any surviving
+    ``.deleted-*`` directory is, by construction, already moved out of
+    the scan's view and safe to remove.
+    """
+
+    purged = 0
+    freed_bytes = 0
+    for tombstone in transactions_root.glob(TOMBSTONE_PREFIX + "*"):
+        if not tombstone.is_dir() or is_link_path(tombstone):
+            continue
+        size = _directory_bytes(tombstone)
+        shutil.rmtree(tombstone, ignore_errors=True)
+        if tombstone.exists():
+            logger.warning(
+                "transaction tombstone still present after purge: %s",
+                tombstone,
+            )
+            continue
+        purged += 1
+        freed_bytes += size
+    return (purged, freed_bytes)
 
 
 def collect_project_transactions(
@@ -304,6 +351,11 @@ def collect_project_transactions(
     transactions_root = Path(project_root) / "runtime" / TRANSACTIONS_DIR_NAME
     if not transactions_root.is_dir():
         return (0, 0)
+    # Finish any tombstone an earlier sweep renamed but could not fully
+    # delete, independent of the journal-based eligibility below -- the
+    # bytes it holds are already out of the scan's view and this is the
+    # only path that can ever reclaim them (review #243 r4548690102).
+    purged, purged_bytes = _purge_tombstones(transactions_root)
     kept = history_reclaim_kept(project_root)
     baseline = read_scratch_baseline(Path(project_root))
     if baseline is None and kept:
@@ -311,7 +363,7 @@ def collect_project_transactions(
         # than its start, and an unrecorded start proves nothing; the scratch
         # sweep stamps it this boot, so the next one can collect.  A Project
         # whose history is not kept needs no such proof at all.
-        return (0, 0)
+        return (purged, purged_bytes)
     surplus = _surplus_candidates(
         transactions_root,
         baseline,
@@ -320,7 +372,7 @@ def collect_project_transactions(
         _open_reservation_ids(transactions_root),
     )
     if not surplus:
-        return (0, 0)
+        return (purged, purged_bytes)
     # The cap protects the Project's history; whether a caller wants statistics
     # is a separate question. Gating it on ``report`` made the startup scan
     # wait for confirmation while the commit-triggered sweep -- which passes
@@ -333,7 +385,7 @@ def collect_project_transactions(
         ):
             if report is not None:
                 report["skipped_bytes"] = projected
-            return (0, 0)
+            return (purged, purged_bytes)
     removed = 0
     removed_bytes = 0
     for _mtime_value, entry, size in surplus:
@@ -350,16 +402,28 @@ def collect_project_transactions(
         # all -- ``list_transaction_ids`` skips leading-dot entries and
         # ``entry.lstat`` on the original name raises FileNotFoundError.
         # Then, and only then, do we rmtree the moved tree.
-        if not _atomic_reclaim(entry):
+        hidden, fully_removed = _atomic_reclaim(entry)
+        if not hidden:
+            # Still where the scan looks: reclaiming it here would be
+            # pointless, and counting it would be a lie. Try again next
+            # sweep.
             continue
         if budget is not None:
             budget.charge(size)
+        # ``removed`` counts transactions moved out of the retained set
+        # (correctness: the scan no longer sees them); ``removed_bytes``
+        # only counts space actually released from disk. A renamed-but-
+        # not-yet-deleted tombstone is removed without releasing bytes
+        # this round -- _purge_tombstones reclaims them next sweep, so
+        # neither count is inflated and nothing leaks (review #243
+        # r4548690102 follow-up).
         removed += 1
-        removed_bytes += size
+        if fully_removed:
+            removed_bytes += size
     if removed:
         # The listing the commit path cached no longer matches the directory.
         drop_transaction_index(transactions_root)
-    return (removed, removed_bytes)
+    return (removed + purged, removed_bytes + purged_bytes)
 
 
 def collect_terminal_transactions(

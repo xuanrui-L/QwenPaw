@@ -43,43 +43,150 @@ REPLAY_SKIP_TYPES = frozenset(
     },
 )
 
-#: Byte markers of those types, matched on the raw line before any parsing.
-#: Canonical JSON writes no space after the colon; both spellings are matched
-#: so a future encoder change degrades to "parse it", never to "keep it".
-#:
-#: Anchored to the outer record's key ordering (``event_type`` is followed
-#: immediately by ``message_id`` because both are sort-keys on
-#: SessionEventRecord), not the bare ``"event_type":"<type>"`` substring.
-#: A tool-completed envelope whose ``result`` field happens to contain a
-#: legitimate JSON blob like ``{"event_type":"agent.message_delta"}``
-#: used to match the loose pattern, so the byte classifier threw away the
-#: whole lifecycle record and the persistent tool state a fresh view
-#: rebuilds its ToolCallCard from never reached the client (review #243
-#: r4548690038). Nesting a fake ``message_id`` after a fake event_type is
-#: theoretically possible but requires an attacker who already knows the
-#: envelope schema; the parse-time filter still runs on non-matching
-#: lines, so a false negative costs bytes, never correctness.
-REPLAY_SKIP_LINE_MARKERS: tuple[bytes, ...] = tuple(
-    pattern
-    for name in sorted(REPLAY_SKIP_TYPES)
-    for pattern in (
-        f'"event_type":"{name}","message_id":'.encode("ascii"),
-        f'"event_type": "{name}", "message_id":'.encode("ascii"),
-    )
-)
+#: Byte marker that opens the record object. Canonical JSON is sorted, so
+#: ``record`` is always the envelope's first key and this prefix is stable.
+_RECORD_PREFIX = b'"record":{'
+
+
+def _read_json_string(line: bytes, pos: int) -> tuple[str | None, int]:
+    """Read a JSON string starting at ``line[pos] == '\"'``.
+
+    Returns ``(value, index_after)``; ``value`` is ``None`` if the bytes
+    are not a well-formed string (an unexpected layout means the caller
+    should fall back to a full parse, not decide from a partial read).
+    """
+
+    n = len(line)
+    if pos >= n or line[pos] != 0x22:
+        return None, pos
+    start = pos + 1
+    index = start
+    while index < n:
+        byte = line[index]
+        if byte == 0x5C:  # backslash, skip escaped char
+            index += 2
+            continue
+        if byte == 0x22:  # closing quote
+            try:
+                return line[start:index].decode("utf-8"), index + 1
+            except UnicodeDecodeError:
+                return None, index + 1
+        index += 1
+    return None, n
+
+
+def _skip_value(line: bytes, pos: int) -> int:
+    """Advance past one JSON value at ``pos``; returns the next index.
+
+    Depth/quote tracking means an object or array value (payload, result,
+    anything nested) is skipped whole rather than scanned key-by-key, so
+    an ``event_type`` buried inside a result cannot be mistaken for the
+    record's own.
+    """
+
+    n = len(line)
+    while pos < n and line[pos] in (0x20, 0x09):
+        pos += 1
+    if pos >= n:
+        return n
+    first = line[pos]
+    if first == 0x22:  # string
+        _value, pos = _read_json_string(line, pos)
+        return pos
+    if first in (0x7B, 0x5B):  # { or [
+        depth = 0
+        in_string = False
+        escaped = False
+        while pos < n:
+            byte = line[pos]
+            if escaped:
+                escaped = False
+            elif in_string:
+                if byte == 0x5C:
+                    escaped = True
+                elif byte == 0x22:
+                    in_string = False
+            elif byte == 0x22:
+                in_string = True
+            elif byte in (0x7B, 0x5B):
+                depth += 1
+            elif byte in (0x7D, 0x5D):
+                depth -= 1
+                if depth == 0:
+                    return pos + 1
+            pos += 1
+        return n
+    # number / true / false / null: run to the next delimiter
+    while pos < n and line[pos] not in (0x2C, 0x7D, 0x5D, 0x20, 0x09):
+        pos += 1
+    return pos
+
+
+def _outer_event_type(line: bytes) -> str | None:
+    """The envelope's own ``record.event_type``, or None when unsure.
+
+    Review #243 r4548690038 follow-up: matching ``"event_type":"<type>"``
+    anywhere in the line (even paired with an adjacent ``message_id``)
+    is not an outer anchor. A ``subagent.tool_completed`` payload whose
+    ``result`` legitimately embeds an event record -- with its own
+    ``event_seq``/``event_type``/``message_id`` keys, produced simply by
+    copying a message into the tool output, no attacker required --
+    matched the substring and the whole lifecycle record was dropped, so
+    a fresh view lost the persistent tool state it rebuilds its
+    ToolCallCard from. Depth is what distinguishes nesting; adjacency is
+    not.
+
+    Scan the ``record`` object's top-level keys in sorted order and
+    return the value of its ``event_type``. Because ``event_type`` sorts
+    before ``message_id``/``payload``, the giant ``result`` bytes are
+    never touched: the walk stops at the first match. Any unexpected
+    shape returns ``None`` so the caller keeps the line and the
+    authoritative ``filter_replay_events`` (which reads the parsed
+    ``event.event_type``) makes the drop decision.
+    """
+
+    prefix_at = line.find(_RECORD_PREFIX)
+    if prefix_at < 0:
+        return None
+    pos = prefix_at + len(_RECORD_PREFIX)
+    n = len(line)
+    while pos < n:
+        while pos < n and line[pos] in (0x2C, 0x20, 0x09):
+            pos += 1
+        if pos >= n or line[pos] != 0x22:
+            # A non-key byte at record top level, or the record ended
+            # (``}``) before we saw event_type: not a droppable delta.
+            return None
+        key, pos = _read_json_string(line, pos)
+        if key is None:
+            return None
+        while pos < n and line[pos] in (0x20, 0x09):
+            pos += 1
+        if pos >= n or line[pos] != 0x3A:  # ':'
+            return None
+        pos += 1
+        if key == "event_type":
+            value, _ = _read_json_string(line, pos)
+            return value
+        pos = _skip_value(line, pos)
+    return None
 
 
 def replay_noise_line(line: bytes) -> bool:
-    """Whether one raw line is streaming noise the replay is going to drop.
+    """Whether one raw line is a streaming delta the replay is going to drop.
 
-    Classifying before parsing matters more than the bytes the drop saves: a
-    field session's 146 MB stream holds 70,942 deltas, and parsing each one to
-    throw it away kept a single replay busy for over 90 seconds, which is what
-    made every other endpoint on the same process wait 7-23 seconds while a
-    Project page was open.
+    Classifying before parsing matters more than the bytes the drop
+    saves: a field session's 146 MB stream holds 70,942 deltas, and
+    parsing each one to throw it away kept a single replay busy for over
+    90 seconds, which is what made every other endpoint on the same
+    process wait 7-23 seconds while a Project page was open. The
+    classifier only ever drops a line whose *outer* ``event_type`` (see
+    :func:`_outer_event_type`) is a known delta type, so a lifecycle
+    record with an embedded event in its ``result`` is never mistaken
+    for noise.
     """
 
-    return any(marker in line for marker in REPLAY_SKIP_LINE_MARKERS)
+    return _outer_event_type(line) in REPLAY_SKIP_TYPES
 
 
 def make_replay_noise_line(
@@ -115,8 +222,13 @@ def make_replay_noise_line(
     )
 
     def is_noise(line: bytes) -> bool:
-        if not any(marker in line for marker in REPLAY_SKIP_LINE_MARKERS):
+        if _outer_event_type(line) not in REPLAY_SKIP_TYPES:
             return False
+        # The active-set check stays a substring test on purpose: a
+        # false positive here only keeps a delta that could have been
+        # dropped (a slightly larger stream), never drops a lifecycle
+        # record. The correctness-critical decision -- what counts as a
+        # delta -- is depth-checked above; this half fails safe.
         return not any(marker in line for marker in active_markers)
 
     return is_noise

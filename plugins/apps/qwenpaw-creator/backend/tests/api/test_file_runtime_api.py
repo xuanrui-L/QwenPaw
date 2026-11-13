@@ -396,6 +396,98 @@ def test_replay_deltas_of_an_active_run_survive_the_byte_layer_filter(
     assert 3 not in seqs
 
 
+def test_lifecycle_event_embedding_an_event_record_survives_the_filter(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A tool_completed whose result carries a whole event is delivered.
+
+    Review #243 r4548690038 follow-up: the byte-level classifier used to
+    substring-match ``"event_type":"<type>"`` (then even with an adjacent
+    ``message_id``), so a ``subagent.tool_completed`` whose ``result``
+    legitimately embeds an event record -- the reviewer's exact probe:
+    ``{"event_type":"agent.message_delta","message_id":"nested-example"}``
+    -- was dropped as noise at the byte layer, before the parse-time
+    filter (which reads the real outer event type and would have kept
+    it) ever ran. The client lost the persistent tool state it rebuilds
+    its ToolCallCard from. The classifier now inspects only the
+    envelope's own record at depth 1.
+    """
+
+    _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
+    store = services.sessions
+
+    def append(event_type, payload):
+        return store.append_event(
+            "project-1",
+            "session-1",
+            event_type=event_type,
+            actor="agent",
+            payload=payload,
+        )
+
+    append("agent.run.started", {"runId": "run-1"})
+    append(
+        "subagent.tool_completed",
+        {
+            "runId": "run-1",
+            "toolCallId": "call-1",
+            # A result that embeds a full event record, so the line
+            # reproduces both keys in canonical order -- the exact
+            # shape the loose matcher used to fall for.
+            "result": {
+                "event_seq": 99,
+                "event_type": "agent.message_delta",
+                "message_id": "nested-example",
+                "delta": "copied",
+            },
+        },
+    )
+    append("agent.run.completed", {"runId": "run-1"})
+    # A genuine historical delta with no active run is still dropped,
+    # proving the fix did not just disable the classifier.
+    append(
+        "agent.message_delta",
+        {"runId": "run-settled", "messageId": "m", "delta": "gone"},
+    )
+
+    monkeypatch.setattr(
+        file_session_routes,
+        "_active_specialist_run_ids",
+        lambda *_args, **_kwargs: set(),
+    )
+
+    class Connection:
+        polls = 0
+
+        async def is_disconnected(self):
+            self.polls += 1
+            return self.polls > 4
+
+    async def scenario() -> list[tuple[int, str]]:
+        response = await stream_events(
+            "project-1",
+            Connection(),
+            after=0,
+            last_event_id=None,
+            services=services,
+        )
+        seen: list[tuple[int, str]] = []
+        async for chunk in response.body_iterator:
+            seq, kind = _parse_sse_id_type(chunk)
+            seen.append((seq, kind))
+        return seen
+
+    events = asyncio.run(scenario())
+    kinds = [kind for _, kind in events]
+    assert "subagent.tool_completed" in kinds, (
+        f"a tool_completed embedding an event record was dropped as "
+        f"replay noise: {events}"
+    )
+    # The genuine settled-run delta with no active run is still filtered.
+    assert "agent.message_delta" not in kinds
+
+
 def test_interrupt_is_persisted_before_process_local_cancellation(
     tmp_path,
     monkeypatch,

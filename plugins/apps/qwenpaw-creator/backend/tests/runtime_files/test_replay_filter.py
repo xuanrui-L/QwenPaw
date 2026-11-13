@@ -157,73 +157,102 @@ def test_only_delta_types_are_in_the_skip_set() -> None:
 def test_byte_classifier_ignores_a_nested_event_type_in_a_result() -> None:
     """A lifecycle record whose result embeds a delta JSON is not noise.
 
-    Review #243 r4548690038: the byte classifier used to substring-match
-    ``"event_type":"agent.message_delta"`` anywhere on the line, so a
-    ``subagent.tool_completed`` envelope whose ``result`` field carried a
-    legitimate JSON blob with that same key pair was dropped as noise
-    -- losing the persistent tool state that a fresh view rebuilds its
-    ToolCallCard from. The marker is now anchored to the outer record's
-    canonical key ordering (``event_type`` immediately followed by
-    ``message_id``), which a nested result cannot reproduce.
+    Review #243 r4548690038 follow-up: matching
+    ``"event_type":"<type>","message_id":`` anywhere on the line was
+    still not an outer anchor -- a result that copies a whole event
+    record reproduces both keys in canonical order and would drop the
+    lifecycle envelope. The classifier now reads the *record's own*
+    ``event_type`` at depth 1, so any embedded event-shaped object --
+    whether serialized as a nested dict or as a JSON string -- can no
+    longer trigger the drop. Adjacent fields prove nothing about
+    hierarchy; depth does.
     """
 
-    outer_lifecycle = json.dumps(
-        {
-            "record": {
-                "actor": "file_agent_runtime",
-                "created_at": "2026-11-13T00:00:00+00:00",
-                "creator_session_id": SESSION,
-                "event_id": "event-2",
-                "event_seq": 2,
-                "event_type": "subagent.tool_completed",
-                "message_id": None,
-                "payload": {
-                    "runId": "run-1",
-                    "toolCallId": "call-1",
-                    # A result that legitimately carries the very bytes
-                    # the loose marker used to match anywhere on the line.
-                    "result": json.dumps(
-                        {
-                            "event_type": "agent.message_delta",
-                            "delta": "nested",
-                        },
-                    ),
-                },
-                "project_id": PROJECT,
-                "round_id": None,
+    def _envelope(record: dict, seq: int) -> bytes:
+        return json.dumps(
+            {
+                "record": record,
+                "seq": seq,
+                "written_at": "2026-11-13T00:00:00+00:00",
             },
-            "seq": 2,
-            "written_at": "2026-11-13T00:00:00+00:00",
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
 
-    assert replay_noise_line(outer_lifecycle) is False, (
-        "a tool_completed whose result embeds an event_type JSON must "
-        "not be classified as streaming noise -- the whole lifecycle "
-        "record would disappear from the replay"
+    embedded_event = {
+        "actor": "file_agent_runtime",
+        "created_at": "2026-11-13T00:00:00+00:00",
+        "creator_session_id": SESSION,
+        "event_id": "event-nested",
+        "event_seq": 99,
+        # The reviewer's strengthened probe: an inner object that
+        # reproduces the very adjacent pair the previous fix anchored
+        # on, produced simply by copying a message into the tool output.
+        "event_type": "agent.message_delta",
+        "message_id": "nested-example",
+        "payload": {"runId": "run-1", "delta": "nested"},
+        "project_id": PROJECT,
+        "round_id": None,
+    }
+
+    # Case 1: the embedded event is a real nested object (dict), so
+    # canonical sort_keys emits ``event_seq, event_type, message_id``
+    # with no escaping -- the pair the loose matcher keyed on.
+    nested_object = _envelope(
+        {
+            "actor": "file_agent_runtime",
+            "created_at": "2026-11-13T00:00:00+00:00",
+            "creator_session_id": SESSION,
+            "event_id": "event-2",
+            "event_seq": 2,
+            "event_type": "subagent.tool_completed",
+            "message_id": None,
+            "payload": {"runId": "run-1", "result": embedded_event},
+            "project_id": PROJECT,
+            "round_id": None,
+        },
+        seq=2,
+    )
+    assert replay_noise_line(nested_object) is False, (
+        "a tool_completed whose result embeds a full event record must "
+        "not be classified as streaming noise"
     )
 
-    # An actual outer delta is still classified as noise.
-    outer_delta = json.dumps(
+    # Case 2: the same embedded event serialized as a JSON string.
+    nested_string = _envelope(
         {
-            "record": {
-                "actor": "file_agent_runtime",
-                "created_at": "2026-11-13T00:00:00+00:00",
-                "creator_session_id": SESSION,
-                "event_id": "event-3",
-                "event_seq": 3,
-                "event_type": "agent.message_delta",
-                "message_id": "msg-1",
-                "payload": {"runId": "run-1", "delta": "hi"},
-                "project_id": PROJECT,
-                "round_id": None,
+            "actor": "file_agent_runtime",
+            "created_at": "2026-11-13T00:00:00+00:00",
+            "creator_session_id": SESSION,
+            "event_id": "event-2b",
+            "event_seq": 2,
+            "event_type": "subagent.tool_completed",
+            "message_id": None,
+            "payload": {
+                "runId": "run-1",
+                "result": json.dumps(embedded_event, sort_keys=True),
             },
-            "seq": 3,
-            "written_at": "2026-11-13T00:00:00+00:00",
+            "project_id": PROJECT,
+            "round_id": None,
         },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+        seq=2,
+    )
+    assert replay_noise_line(nested_string) is False
+
+    # A real outer delta is still classified as noise.
+    outer_delta = _envelope(
+        {
+            "actor": "file_agent_runtime",
+            "created_at": "2026-11-13T00:00:00+00:00",
+            "creator_session_id": SESSION,
+            "event_id": "event-3",
+            "event_seq": 3,
+            "event_type": "agent.message_delta",
+            "message_id": "msg-1",
+            "payload": {"runId": "run-1", "delta": "hi"},
+            "project_id": PROJECT,
+            "round_id": None,
+        },
+        seq=3,
+    )
     assert replay_noise_line(outer_delta) is True
