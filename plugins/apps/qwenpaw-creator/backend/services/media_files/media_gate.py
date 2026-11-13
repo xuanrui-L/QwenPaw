@@ -422,26 +422,45 @@ def kill_group(
             return
 
 
-def _close_pipes(process: subprocess.Popen) -> None:
-    """Force-close the child's stdout/stderr pipes.
+def abandon_streams(process: subprocess.Popen) -> None:
+    """Detach the child's pipes *without* closing them from this thread.
 
-    A grandchild that inherited the pipe (Windows: kill_group cannot reach
-    it because there is no process group; POSIX: same when the grandchild
-    outlived the group) keeps ``communicate()`` blocked even after the
-    direct child is reaped. Closing the read ends locally unblocks the
-    wait: the reader sees EOF regardless of who is still holding the write
-    end open. Bounded follow-up ``communicate()`` plus this close is what
-    keeps the media_gate permit from being held forever (review #243
-    r4548690072).
+    Why not close: on Windows ``Popen.communicate`` drains each pipe from
+    a daemon ``_readerthread`` that sits inside ``BufferedReader.read()``
+    for as long as any process (a grandchild the group-kill cannot reach)
+    keeps the write end open. That read holds the buffer's internal lock
+    the whole time, and every close path waits on it:
+
+    - ``stream.close()`` from this thread (review #243 r4548690072,
+      re-confirmed by the buffered-pipe probe in r4559333554: ~1.5 s
+      block until the writer closed on a timer -- unbounded without it);
+    - ``Popen.__exit__``, which closes ``stdout``/``stderr`` on the way
+      out of the ``with`` block;
+    - refcount dealloc of the process object, whose io finalizer closes
+      the same buffers (this is what bites ``local_execution._run``,
+      which holds no ``with`` block).
+
+    Detaching fixes all three at once: ``__exit__`` skips ``None``
+    attributes, and the dealloc of a ``None`` attribute closes nothing.
+    Ownership of each stream passes to whoever is actually blocked on
+    it -- the Windows reader thread closes its own file handle when the
+    read finally ends (CPython ``_readerthread`` ends with ``fh.close()``),
+    and on POSIX, where ``communicate`` is selector-based and no thread
+    holds the lock, dropping the last reference closes the fd promptly
+    through the normal finalizer. Either way this thread never waits on
+    a pipe lock again, so the gate permit is released on a bounded
+    clock no matter how long the descendant lives.
+
+    Residual cost, stated honestly: if the write end never closes, the
+    reader thread and its two pipe fds stay alive until it does (daemon
+    threads, so process exit is never blocked). No portable stdlib
+    primitive can reclaim a pipe whose write end a live foreign process
+    holds; what must be bounded is *this* thread, and now it is.
     """
 
-    for stream in (process.stdout, process.stderr):
-        if stream is None:
-            continue
-        try:
-            stream.close()
-        except OSError:
-            pass
+    for name in ("stdout", "stderr"):
+        if getattr(process, name, None) is not None:
+            setattr(process, name, None)
 
 
 def run(
@@ -474,15 +493,19 @@ def run(
                 kill_group(process)
                 # ``kill_group`` has already sent the strongest portable
                 # signal (SIGKILL on POSIX, ``Popen.kill`` on Windows) and
-                # bounded its own wait; a follow-up ``communicate()``
-                # without a timeout still blocks forever on a grandchild
-                # that inherited the pipe and refuses to exit -- Windows
-                # has no process group to reach it, and POSIX hits the
-                # same thing whenever the child used ``start_new_session``
-                # or the grandchild outlived the group. Bounded, and if
-                # even the bounded wait expires we surface the timeout
-                # with whatever partial output we have and move on so the
-                # permit is released (review #243 r4548690072).
+                # bounded its own wait. The follow-up ``communicate`` is
+                # bounded on every platform (POSIX: selector with a
+                # deadline; Windows: ``join(timeout)`` on the reader
+                # threads), so it can still collect output when the
+                # descendant exits promptly. When it does NOT -- a
+                # grandchild holds the pipe write end open -- the only
+                # remaining waits are the ones ``abandon_streams``
+                # exists to avoid: closing a buffer whose reader thread
+                # is blocked inside ``read()`` waits on that thread's
+                # lock for as long as the write end stays open
+                # (measured with a real buffered-pipe probe, review #243
+                # r4559333554). Detach instead of close, on this path
+                # and on the ``with``-block exit that follows the raise.
                 try:
                     stdout, stderr = process.communicate(
                         timeout=_KILL_GRACE_SECONDS,
@@ -490,7 +513,7 @@ def run(
                 except subprocess.TimeoutExpired as follow_up:
                     stdout = follow_up.output
                     stderr = follow_up.stderr
-                    _close_pipes(process)
+                    abandon_streams(process)
                 raise subprocess.TimeoutExpired(
                     process.args,
                     timeout,

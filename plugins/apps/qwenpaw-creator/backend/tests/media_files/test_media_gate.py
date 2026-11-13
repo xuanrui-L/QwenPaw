@@ -150,10 +150,10 @@ def test_timeout_on_a_platform_without_process_groups_still_releases_the_slot(
     back to ``terminate`` + ``kill`` on the direct child. A grandchild
     that inherited the pipe stays alive, and ``run()`` used to follow
     with an unbounded ``process.communicate()`` -- the permit never
-    released. The follow-up wait is now bounded and the pipes are
-    closed explicitly on the second timeout, so the sweep hands the
-    slot back within ``_KILL_GRACE_SECONDS`` regardless of the
-    descendant's lifetime.
+    released. The follow-up wait is now bounded and the still-held
+    streams are detached (never closed from this thread) on the second
+    timeout, so the sweep hands the slot back within
+    ``_KILL_GRACE_SECONDS`` regardless of the descendant's lifetime.
 
     The branch is exercised by forcing ``_GROUPS_SUPPORTED`` to False
     under POSIX -- same code path Windows takes, no cross-platform
@@ -163,6 +163,7 @@ def test_timeout_on_a_platform_without_process_groups_still_releases_the_slot(
     monkeypatch.setenv(media_gate.ENV_SLOTS, "1")
     media_gate.reset_gate()
     monkeypatch.setattr(media_gate, "_GROUPS_SUPPORTED", False)
+    monkeypatch.setattr(media_gate, "_KILL_GRACE_SECONDS", 0.5)
     marker = tmp_path / "grandchild.pid"
     # Child spawns a grandchild that inherits stdout/stderr and sleeps;
     # killing the direct child leaves the grandchild holding the write
@@ -203,6 +204,166 @@ def test_timeout_on_a_platform_without_process_groups_still_releases_the_slot(
         os.kill(grandchild, 15)
     except ProcessLookupError:
         pass
+
+
+def test_abandon_streams_returns_while_a_reader_thread_holds_the_lock() -> (
+    None
+):
+    """The buffered-pipe primitive probe, on this very machine.
+
+    Review #243 r4559333554: CPython's Windows ``communicate`` drains
+    pipes from daemon reader threads parked inside
+    ``BufferedReader.read()``, holding the buffer's internal lock until
+    the write end closes. The reviewer measured ~1.5 s of ``close()``
+    blockage with a real ``os.pipe`` + background read -- and that is a
+    *lock* effect, not a Windows-only effect, so it reproduces under
+    POSIX too. This test pins the mechanism and the fix in one place:
+
+    1. control: a plain ``close()`` from another thread does NOT return
+       while the read is parked (the hazard the old ``_close_pipes``
+       and ``Popen.__exit__`` both walked into);
+    2. ``abandon_streams`` returns immediately on the very same pipe
+       state, because detaching an attribute never touches the lock;
+    3. once the write end finally closes, the parked read ends and the
+       stream IS closed by its owner -- the handoff leaks nothing.
+    """
+
+    import io
+
+    r_fd, w_fd = os.pipe()
+    try:
+        reader = io.BufferedReader(io.FileIO(r_fd, closefd=True))
+        entered = threading.Event()
+
+        def _hold() -> None:
+            entered.set()
+            try:
+                reader.read()
+            except OSError:
+                pass
+
+        holder = threading.Thread(target=_hold, daemon=True)
+        holder.start()
+        assert entered.wait(2)
+        # Give the parked read time to take the buffer lock.
+        time.sleep(0.3)
+
+        # (1) Control: closing from this side waits on the reader's
+        # lock -- exactly what blocked the main thread on Windows.
+        close_done = threading.Event()
+
+        def _close() -> None:
+            try:
+                reader.close()
+            finally:
+                close_done.set()
+
+        closer = threading.Thread(target=_close, daemon=True)
+        closer.start()
+        assert not close_done.wait(0.5), (
+            "control failed: close() did not block on the parked read's "
+            "lock; this environment cannot demonstrate the hazard"
+        )
+
+        # (2) The fix: detaching never touches the lock, so it returns
+        # immediately even while the pipe is in exactly that state.
+        class _Stub:
+            stdout = None
+            stderr = None
+
+        stub = _Stub()
+        stub.stdout = reader
+        start = time.monotonic()
+        media_gate.abandon_streams(stub)
+        elapsed = time.monotonic() - start
+        assert stub.stdout is None
+        assert stub.stderr is None
+        assert elapsed < 0.5, f"abandon_streams blocked for {elapsed:.2f}s"
+
+        # (3) Release the write end: the parked read reaches EOF, the
+        # blocked closer finally runs, and the stream ends up closed by
+        # its owner -- proof the handoff does not leak the fd.
+        os.close(w_fd)
+        w_fd = -1
+        holder.join(3)
+        closer.join(3)
+        assert not holder.is_alive()
+        assert close_done.is_set()
+        assert reader.closed
+    finally:
+        if w_fd != -1:
+            os.close(w_fd)
+
+
+def test_run_timeout_detaches_the_child_streams(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: after a timeout the pipes are detached, not closed.
+
+    Complements the primitive probe above with the real ``run()`` path.
+    Two things must hold when the follow-up ``communicate`` expires
+    while a grandchild still owns the write end:
+
+    - ``Popen.__exit__`` on the way out of the ``with`` block must not
+      close the streams (it checks ``if self.stdout:``), so the streams
+      have to be ``None`` by the time the ``TimeoutExpired`` propagates;
+    - the permit is released on a bounded clock.
+
+    Together those close the reviewer's r4559333554 finding at the
+    call-site level: no thread of this process waits on a pipe lock
+    that a foreign lifetime controls.
+    """
+
+    monkeypatch.setenv(media_gate.ENV_SLOTS, "1")
+    media_gate.reset_gate()
+    monkeypatch.setattr(media_gate, "_GROUPS_SUPPORTED", False)
+    monkeypatch.setattr(media_gate, "_KILL_GRACE_SECONDS", 0.5)
+
+    instances: list = []
+    real_popen = subprocess.Popen
+
+    class SpyPopen(real_popen):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            instances.append(self)
+
+    monkeypatch.setattr(media_gate.subprocess, "Popen", SpyPopen)
+
+    marker = tmp_path / "grandchild.pid"
+    body = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+        ")\n"
+        "open(sys.argv[1], 'w', encoding='utf-8').write(str(child.pid))\n"
+        "time.sleep(30)\n"
+    )
+    start = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            media_gate.run(
+                _child_script(body) + [str(marker)],
+                timeout=0.3,
+                check=False,
+                capture_output=True,
+            )
+    finally:
+        elapsed = time.monotonic() - start
+        try:
+            grandchild = int(marker.read_text(encoding="utf-8"))
+            os.kill(grandchild, 15)
+        except (OSError, ProcessLookupError, ValueError):
+            pass
+
+    assert instances, "run() never spawned the spy Popen"
+    process = instances[0]
+    # Detached before the ``with`` block exited -- __exit__ saw None and
+    # closed nothing, so it could not wait on any reader-thread lock.
+    assert process.stdout is None
+    assert process.stderr is None
+    assert media_gate.active_count() == 0
+    assert elapsed < 5, f"timeout path took {elapsed:.2f}s -- not bounded"
 
 
 def test_slot_count_prefers_the_environment(

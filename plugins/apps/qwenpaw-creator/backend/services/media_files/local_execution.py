@@ -322,8 +322,9 @@ def _render_element_total(inputs: Sequence[LocalMediaInput]) -> int:
 class LocalMediaRunner(Protocol):
     """Runner boundary.  Implementations write exactly ``spec.output_path``."""
 
-    async def render(self, spec: LocalMediaExecutionSpec) -> Mapping[str, Any]:
-        ...
+    async def render(
+        self, spec: LocalMediaExecutionSpec
+    ) -> Mapping[str, Any]: ...
 
 
 # Unified colour-grade presets applied to the whole composited cut.
@@ -704,8 +705,11 @@ class FfmpegLocalMediaRunner:
             return None
         video_filter = _COLOR_GRADE_FILTERS.get(grade)
         if video_filter is None:
-            return f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: " + ", ".join(
-                sorted(_COLOR_GRADE_FILTERS),
+            return (
+                f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: "
+                + ", ".join(
+                    sorted(_COLOR_GRADE_FILTERS),
+                )
             )
         graded = spec.work_dir / "graded.mp4"
         self._run(
@@ -1539,10 +1543,13 @@ class FfmpegLocalMediaRunner:
                     str(overlay.get("text") or ""),
                 )
             ):
-                reject_informal_launch_fallback(overlay, "动效文档与当前文案不一致")
+                reject_informal_launch_fallback(
+                    overlay, "动效文档与当前文案不一致"
+                )
                 motion = None
                 styled_error = (
-                    f"{overlay['kind']} 动效文档与当前文案不一致，" "已用回退样式渲染最新文案"
+                    f"{overlay['kind']} 动效文档与当前文案不一致，"
+                    "已用回退样式渲染最新文案"
                 )
             if (
                 isinstance(motion, Mapping)
@@ -2364,9 +2371,17 @@ class FfmpegLocalMediaRunner:
                         )
                     except subprocess.TimeoutExpired:
                         # The group has already received the strongest
-                        # portable signal.  Never turn cleanup into another
-                        # unbounded wait.
-                        pass
+                        # portable signal. Never turn cleanup into another
+                        # unbounded wait -- and that includes the wait
+                        # nobody sees: this frame holds no ``with`` block,
+                        # so when the ConflictError below unwinds it, the
+                        # process object's refcount hits zero and its io
+                        # finalizer closes the pipes; on Windows a reader
+                        # thread blocked inside ``read()`` holds the
+                        # buffer lock and that close waits for it (review
+                        # #243 r4548690072). Detaching first makes the
+                        # dealloc close nothing.
+                        media_gate.abandon_streams(process)
                     raise ConflictError(
                         f"ffmpeg 执行超时（{self.timeout_seconds:g} 秒）",
                     ) from exc
@@ -3101,12 +3116,16 @@ def _resolved_fade_seconds(
         else 0.0
     )
     return (
-        creation.fade_in_seconds
-        if creation.fade_in_seconds is not None
-        else default_fade,
-        creation.fade_out_seconds
-        if creation.fade_out_seconds is not None
-        else default_fade,
+        (
+            creation.fade_in_seconds
+            if creation.fade_in_seconds is not None
+            else default_fade
+        ),
+        (
+            creation.fade_out_seconds
+            if creation.fade_out_seconds is not None
+            else default_fade
+        ),
     )
 
 
@@ -3217,10 +3236,12 @@ def _timeline_execution(
                 original_sound=(
                     element.creation.original_sound
                     if isinstance(element.creation, EditCreation)
-                    else "mute"
-                    if getattr(element.creation, "generate_audio", True)
-                    is False
-                    else "preserve"
+                    else (
+                        "mute"
+                        if getattr(element.creation, "generate_audio", True)
+                        is False
+                        else "preserve"
+                    )
                 ),
                 location=(
                     element.location.model_dump(mode="json")
@@ -3744,7 +3765,9 @@ class FileLocalMediaExecutionService:
             raise ConflictError("本地媒体执行服务正在关闭")
         command_value = CreatorCommandType(command)
         if command_value not in _LOCAL_MEDIA_COMMANDS:
-            raise ValidationError(f"不支持的文件本地媒体命令: {command_value.value}")
+            raise ValidationError(
+                f"不支持的文件本地媒体命令: {command_value.value}"
+            )
         ids = self._ids(project_id, idempotency_key)
         command_request_hash = _fingerprint(
             {
@@ -4555,7 +4578,9 @@ class FileLocalMediaExecutionService:
         except AssetAlreadyExists:
             file_store.abandon(staged)
             if not file_store.inspect(indexed).available:
-                raise StorageIntegrityError("稳定本地媒体输出路径已存在但内容不同")
+                raise StorageIntegrityError(
+                    "稳定本地媒体输出路径已存在但内容不同"
+                )
         metadata = {
             "taskId": task.task_id,
             "runId": task.run_id,
@@ -4610,7 +4635,9 @@ class FileLocalMediaExecutionService:
         replayed: bool,
     ) -> FileLocalMediaExecutionResult:
         if not isinstance(task.result, dict):
-            raise StorageIntegrityError("RUNNING 本地媒体 Task 缺少可重放 result")
+            raise StorageIntegrityError(
+                "RUNNING 本地媒体 Task 缺少可重放 result"
+            )
         result = dict(task.result)
 
         def commit_if_live() -> tuple[str, TaskRecord, ProjectSnapshot | None]:
@@ -5002,7 +5029,9 @@ class FileLocalMediaExecutionService:
                 continue
             ids = self._ids(project_id, key)
             if ids["task_id"] != task.task_id:
-                raise StorageIntegrityError("本地媒体 Task 稳定 ID 与 key 不一致")
+                raise StorageIntegrityError(
+                    "本地媒体 Task 稳定 ID 与 key 不一致"
+                )
             if task.status is TaskStatus.RUNNING and task.result is not None:
                 try:
                     await self._converge(task=task, ids=ids, replayed=True)
