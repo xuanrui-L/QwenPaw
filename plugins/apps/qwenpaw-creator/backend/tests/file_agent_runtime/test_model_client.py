@@ -405,15 +405,14 @@ def test_archived_index_stays_recallable_when_the_map_folds():
     )
 
 
-def test_host_map_fallback_scrubs_host_wording_without_the_banner():
-    """A banner-less host render must not leak its Creator-hostile prose.
+def test_banner_less_host_render_reports_no_usable_body():
+    """A host render without its banner has no body boundary to trust.
 
     ``_split_host_map_body`` slices at the first ``====`` banner. If a host
-    upgrade changes the render and the banner disappears, the fallback used
-    to return the whole preamble naming a ``conversation_history`` table and
+    upgrade changes the render and the banner disappears, the preamble and
+    the body can no longer be told apart, so the caller must be told so
+    instead of receiving prose naming a ``conversation_history`` table and
     an "advanced Python recall tool" a Creator session does not have.
-    Creator already prepends its own guidance, so the fallback scrubs those
-    names instead of echoing them.
     """
     host_render = (
         "[context compressed] The turns below were evicted from the live "
@@ -424,12 +423,76 @@ def test_host_map_fallback_scrubs_host_wording_without_the_banner():
         "1 . old turn\n"
     )
 
-    body = model_context._split_host_map_body(host_render)
+    assert model_context._split_host_map_body(host_render) is None
 
-    assert "conversation_history" not in body
-    assert "advanced Python recall tool" not in body
-    assert "the durable conversation store" in body
-    assert "1 . old turn" in body
+
+def test_banner_less_host_render_falls_back_to_creator_map(monkeypatch):
+    """No banner means Creator draws its own map, not the host's prose.
+
+    Prepending Creator's preamble to the whole host render would print the
+    compression notice twice and promise a live-turn banner this call asks
+    the host to omit. The data source is the same archived list, so the
+    flat ``seq . headline`` map keeps every pointer without the prose.
+    """
+
+    class BannerlessLeaf:
+        def __init__(self, *, seq, headline):
+            self.seq = seq
+            self.headline = headline
+
+    class BannerlessIndex:
+        def __init__(self, session_id):
+            self.session_id = session_id
+
+        def add_eviction(self, leaves, *, seq_lo, seq_hi):
+            pass
+
+        def render(self, **_kwargs):
+            return (
+                "[context compressed] The turns below were evicted from "
+                "the live window but remain durable in "
+                "conversation_history. The live turns follow after the "
+                "banner at the end.\n"
+                "For advanced recall (sessions, custom SQL) use a more "
+                "advanced Python recall tool if one is available to you.\n"
+                "1 . old turn\n"
+            )
+
+    monkeypatch.setattr(
+        model_context,
+        "_HOST_EVICTION_INDEX_AVAILABLE",
+        True,
+    )
+    monkeypatch.setattr(
+        model_context,
+        "_HostEvictionIndex",
+        BannerlessIndex,
+    )
+    monkeypatch.setattr(
+        model_context,
+        "_HostEvictionLeaf",
+        BannerlessLeaf,
+    )
+    archived = [
+        {
+            "seq": 7,
+            "role": "user",
+            "source": "initial_goal",
+            "content": [{"type": "text", "text": "keep the hero shot"}],
+        },
+    ]
+
+    map_text, lo, hi = model_context._render_archived_index(archived)
+
+    assert (lo, hi) == (7, 7)
+    # Exactly one compression notice: Creator's own.
+    assert map_text.count("[context compressed]") == 1
+    assert "conversation_history" not in map_text
+    assert "advanced Python recall tool" not in map_text
+    assert "custom SQL" not in map_text
+    assert "banner at the end" not in map_text
+    # Creator's flat format carries the pointer the host prose dropped.
+    assert "7 . \u27e6keep the hero shot\u27e7" in map_text
 
 
 def test_continuation_summary_rides_on_the_elision_when_supplied():

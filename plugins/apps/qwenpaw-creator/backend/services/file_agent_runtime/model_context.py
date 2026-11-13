@@ -1074,7 +1074,7 @@ def _record_headline(item: Mapping[str, Any]) -> str:
     return collapsed[:_ARCHIVED_HEADLINE_CHARS]
 
 
-def _split_host_map_body(rendered: str) -> str:
+def _split_host_map_body(rendered: str) -> str | None:
     """Keep the platform odometer body, drop the host recall preamble.
 
     ``render`` leads with prose naming a ``conversation_history`` table and
@@ -1083,28 +1083,18 @@ def _split_host_map_body(rendered: str) -> str:
     last-resort global span - opens its body with a ``====`` banner and no
     preamble line ever does, so slicing at the first banner keeps exactly the
     map the platform draws while Creator supplies its own preamble.
+
+    ``None`` means no banner was found: a host upgrade changed the render,
+    leaving no trustworthy boundary between that preamble and the body. The
+    caller then keeps Creator's own flat map rather than echo the host's
+    preamble - it names a store and a tool this session does not have, and
+    it describes a live-turn banner the render was asked to omit.
     """
     lines = rendered.splitlines()
     for offset, line in enumerate(lines):
         if line.startswith("===="):
             return "\n".join(lines[offset:])
-    # The banner is gone because the host changed how it renders. Creator
-    # still prepends its own recall guidance, so scrub the host-only store
-    # and tool names rather than echo a table and a tool that do not exist.
-    return (
-        rendered.replace(
-            "conversation_history",
-            "the durable conversation store",
-        )
-        .replace(
-            "a more advanced Python recall tool",
-            "the recall_history tool",
-        )
-        .replace(
-            "advanced Python recall tool",
-            "recall_history tool",
-        )
-    )
+    return None
 
 
 def _render_archived_index(
@@ -1124,10 +1114,12 @@ def _render_archived_index(
     naming just the oldest and newest headlines and throw away the per-turn
     pointers that make the map recallable. ``render`` is folded to a bounded
     character budget and its host-specific preamble is sliced off in favour
-    of Creator's own recall guidance. A standalone plugin install falls back
-    to Creator's flat ``seq . headline`` list; either way the returned text
-    already carries the ``[context compressed]`` preamble, so the caller never
-    wraps it again.
+    of Creator's own recall guidance.
+
+    A standalone plugin install, and a host render whose banner no longer
+    marks the body boundary, both fall back to Creator's flat
+    ``seq . headline`` list; either way the returned text already carries the
+    ``[context compressed]`` preamble, so the caller never wraps it again.
     """
     addressable = [
         item for item in archived if isinstance(item.get("seq"), int)
@@ -1160,11 +1152,13 @@ def _render_archived_index(
             include_live_banner=False,
             detail_char_budget=ARCHIVED_INDEX_CHAR_BUDGET,
         )
-        return (
-            f"{_ARCHIVED_MAP_PREAMBLE}\n{_split_host_map_body(rendered)}",
-            lo,
-            hi,
-        )
+        body = _split_host_map_body(rendered)
+        if body is not None:
+            return f"{_ARCHIVED_MAP_PREAMBLE}\n{body}", lo, hi
+        # A host upgrade that drops the banner leaves no boundary between
+        # its preamble and its body. Fall through to Creator's own map:
+        # echoing the whole render would repeat the compression notice and
+        # describe a live-turn banner this call deliberately omits.
 
     lines: list[str] = []
     shown = addressable
