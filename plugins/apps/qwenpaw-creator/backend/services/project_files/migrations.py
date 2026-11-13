@@ -14,10 +14,13 @@ from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import ValidationError
+
 from utils.logger import setup_logger
 
 from .models import (
     CURRENT_PROJECT_SCHEMA_VERSION,
+    TimelineSpan,
     is_pet_os_bubble,
     is_subtitle_overlay,
 )
@@ -513,11 +516,16 @@ def _element_span_ticks(element: Mapping[str, Any]) -> tuple[int, int] | None:
         return None
     start = span.get("start_tick")
     duration = span.get("duration_tick")
-    if isinstance(start, bool) or not isinstance(start, int):
+    if type(start) is int and type(duration) is int:
+        return start, start + duration
+    try:
+        normalized = TimelineSpan.model_validate(span)
+    except ValidationError:
         return None
-    if isinstance(duration, bool) or not isinstance(duration, int):
-        return None
-    return start, start + duration
+    return (
+        normalized.start_tick,
+        normalized.start_tick + normalized.duration_tick,
+    )
 
 
 def _voiced_spans_v8(

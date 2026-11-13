@@ -2083,6 +2083,12 @@ class ProjectRuntimeSessionStore:
         project_id: str,
     ) -> ProjectRuntimeBootstrap | None:
         sessions_root = self._runtime_root(project_id) / "sessions"
+        if is_link_path(sessions_root) or (
+            sessions_root.exists() and not sessions_root.is_dir()
+        ):
+            raise SessionStoreIntegrityError(
+                "Sessions path must be a real directory",
+            )
         if not sessions_root.exists():
             return None
         session_files: list[Path] = []
@@ -2091,8 +2097,15 @@ class ProjectRuntimeSessionStore:
                 raise SessionStoreIntegrityError(
                     f"Session directory cannot be a symlink: {child}",
                 )
-            if child.is_dir() and (child / "session.json").exists():
-                session_files.append(child / "session.json")
+            if not child.is_dir():
+                continue
+            head = child / "session.json"
+            if is_link_path(head) or (head.exists() and not head.is_file()):
+                raise SessionStoreIntegrityError(
+                    "Session head must be a regular file",
+                )
+            if head.exists():
+                session_files.append(head)
         if not session_files:
             return None
         if len(session_files) != 1:
@@ -2206,8 +2219,16 @@ class ProjectRuntimeSessionStore:
         session_id: str,
     ) -> list[CreatorConversationRecord]:
         root = self._session_root(project_id, session_id) / "conversations"
+        if is_link_path(root):
+            raise SessionStoreIntegrityError(
+                "Conversations directory cannot be a link",
+            )
         if not root.exists():
             return []
+        if not root.is_dir():
+            raise SessionStoreIntegrityError(
+                "Conversations path must be a directory",
+            )
         records: list[CreatorConversationRecord] = []
         for path in sorted(root.glob("*.json")):
             if is_link_path(path) or not path.is_file():

@@ -1391,20 +1391,26 @@ class ProjectStore:
                 "Cannot scan ProjectStore root",
             ) from exc
         for entry in entries:
-            if (
-                entry.name.startswith(".deleted-")
-                or is_link_path(entry)
-                or not entry.is_dir()
-            ):
-                continue
             try:
+                if (
+                    entry.name.startswith(".deleted-")
+                    or is_link_path(entry)
+                    or not entry.is_dir()
+                ):
+                    continue
                 safe_id = _safe_project_id(entry.name)
+                if not (entry / "project.json").exists():
+                    continue
+                if (entry / BUILTIN_EXAMPLE_MARKER).exists():
+                    continue
             except UnsafeProjectPath:
                 continue
-            if not (entry / "project.json").exists():
-                continue
-            # Bundled example Projects never surface in "my projects".
-            if (entry / BUILTIN_EXAMPLE_MARKER).exists():
+            except OSError as exc:
+                logger.warning(
+                    "Skipping unreadable Project %s: %s",
+                    entry.name,
+                    exc,
+                )
                 continue
             cached = (
                 self._cached_summary(entry, safe_id)
@@ -1424,7 +1430,7 @@ class ProjectStore:
             stamp_before_read = _project_json_stamp(entry)
             try:
                 snapshot = self.read(safe_id)
-            except ProjectStoreError as exc:
+            except (ProjectStoreError, OSError) as exc:
                 logger.warning("Skipping corrupt Project %s: %s", safe_id, exc)
                 continue
             cover = _cover_reference(snapshot.project)
@@ -1482,7 +1488,7 @@ class ProjectStore:
             raw = json.loads(
                 (entry / PROJECT_SUMMARY_RECORD).read_text("utf-8"),
             )
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
         if (
             not isinstance(raw, dict)
@@ -1505,6 +1511,16 @@ class ProjectStore:
             present = raw.get(key)
             if present is not None and not isinstance(present, str):
                 return None
+        try:
+            for key in (
+                *SUMMARY_REQUIRED_STR_FIELDS,
+                *SUMMARY_OPTIONAL_STR_FIELDS,
+            ):
+                value = raw.get(key)
+                if isinstance(value, str):
+                    value.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
         generation = raw.get("generation")
         if not isinstance(generation, (int, str)) or isinstance(
             generation,
@@ -1522,9 +1538,7 @@ class ProjectStore:
             }
         except (KeyError, TypeError, ValueError):
             return None
-        if any(
-            value.tzinfo is None for value in parsed_datetimes.values()
-        ):
+        if any(value.tzinfo is None for value in parsed_datetimes.values()):
             return None
         try:
             return ProjectSummary(
@@ -1909,7 +1923,12 @@ class ProjectStore:
             parent = candidate.parent
             resolved_parent = resolved_parents.get(parent)
             if resolved_parent is None:
-                resolved_parent = parent.resolve(strict=False)
+                try:
+                    resolved_parent = parent.resolve(strict=False)
+                except (OSError, RuntimeError) as exc:
+                    raise UnsafeProjectPath(
+                        f"Cannot resolve indexed file parent: {indexed.relative_uri}",
+                    ) from exc
                 resolved_parents[parent] = resolved_parent
             try:
                 resolved_parent.relative_to(resolved_assets)
@@ -1934,7 +1953,7 @@ class ProjectStore:
                     candidate.resolve(strict=False).relative_to(
                         resolved_assets,
                     )
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, RuntimeError) as exc:
                     raise UnsafeProjectPath(
                         f"Indexed file escapes Project assets: "
                         f"{indexed.relative_uri}",

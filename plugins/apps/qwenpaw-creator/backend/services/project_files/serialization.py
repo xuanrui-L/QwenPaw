@@ -13,9 +13,9 @@ import json
 import math
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
-from .migrations import ProjectMigrationError, migrate_project_document
+from .migrations import migrate_project_document
 from .models import Project, R2VCreation
 
 
@@ -235,7 +235,7 @@ def load_project_document(raw: Mapping[str, Any]) -> Project:
     try:
         migrated = migrate_project_document(raw)
         return Project.model_validate(migrated)
-    except (ProjectMigrationError, ValidationError) as exc:
+    except (ValueError, TypeError, OverflowError, RecursionError) as exc:
         raise CanonicalJsonError(
             "project.json does not match the Project schema",
         ) from exc
@@ -289,9 +289,14 @@ def load_project_json_with_source(
     source the ETag was taken over and brick crash recovery.
     """
 
-    raw = _parse_project_json(payload)
-    project = load_project_document(raw)
-    return project, project_document_etag(raw, project=project), raw
+    try:
+        raw = _parse_project_json(payload)
+        project = load_project_document(raw)
+        return project, project_document_etag(raw, project=project), raw
+    except CanonicalJsonError:
+        raise
+    except (ValueError, TypeError, OverflowError, RecursionError) as exc:
+        raise CanonicalJsonError("Invalid Project document") from exc
 
 
 def load_project_json_with_etag(

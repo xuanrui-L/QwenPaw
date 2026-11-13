@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from pathlib import Path
+
+import pytest
 
 from services.project_files.facade import creator_file_services
 from services.project_files.json_pointer import hash_json_value
@@ -273,7 +276,6 @@ def test_project_list_degrades_corrupt_session_instead_of_500(
     ``GET /projects`` into a 500 (field incident: one stale test Project hid
     every other Project from the UI).
     """
-    import json
 
     async def scenario(client):
         healthy = await client.post(
@@ -308,6 +310,208 @@ def test_project_list_degrades_corrupt_session_instead_of_500(
     assert set(by_id) == {healthy_id, corrupt_id}
     assert by_id[corrupt_id]["status"] is None
     assert by_id[healthy_id]["status"] is not None
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "caption_width",
+        "elements",
+        "timeline_items",
+        "unicode",
+        "deep_json",
+        "permission",
+    ],
+)
+def test_invalid_project_does_not_block_listing_or_creation(
+    app,
+    api_runtime_root,
+    run_scenario,
+    corruption,
+    monkeypatch,
+):
+    async def scenario(client):
+        healthy = await client.post(
+            "/projects",
+            json=_create_payload("healthy", "Healthy"),
+        )
+        broken = await client.post(
+            "/projects",
+            json=_create_payload("broken", "Broken"),
+        )
+        healthy_id = healthy.json()["projectId"]
+        broken_id = broken.json()["projectId"]
+        path = api_runtime_root / broken_id / "project.json"
+        raw = json.loads(path.read_bytes())
+        raw["schema_version"] = 9
+        timeline = raw["timelines"]["items"]["timeline:main"]
+        if corruption == "caption_width":
+            timeline["elements_by_id"]["caption"] = {
+                "element_id": "caption",
+                "span": {"start_tick": 0, "duration_tick": 1000},
+                "location": {"width": "100%", "height": 0.2},
+                "creation": {"type": "overlay", "text": "Legacy caption"},
+            }
+        elif corruption == "elements":
+            timeline["elements_by_id"] = "broken"
+        elif corruption == "timeline_items":
+            raw["timelines"]["items"] = [1]
+        elif corruption == "unicode":
+            raw["name"] = "\ud800"
+        payload = json.dumps(raw).encode()
+        if corruption == "deep_json":
+            payload = b"[" * 1100 + b"0" + b"]" * 1100
+        path.write_bytes(payload)
+        if corruption == "permission":
+            real_exists = Path.exists
+
+            def checked_exists(candidate):
+                if candidate == path:
+                    raise PermissionError("Project traversal denied")
+                return real_exists(candidate)
+
+            monkeypatch.setattr(Path, "exists", checked_exists)
+        listed = await client.get("/projects")
+        assert listed.status_code == 200, listed.text
+        assert [item["projectId"] for item in listed.json()["items"]] == [
+            healthy_id,
+        ]
+        created = await client.post(
+            "/projects",
+            json=_create_payload("next", "Next"),
+        )
+        assert created.status_code == 201, created.text
+        assert path.read_bytes() == payload
+
+    run_scenario(app, scenario)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "json",
+        "status",
+        "sequence",
+        "conversation",
+        "session_directory",
+        "sessions_file",
+        "conversations_file",
+        "task_directory",
+    ],
+)
+def test_runtime_corruption_preserves_project_cards(
+    app,
+    api_runtime_root,
+    run_scenario,
+    corruption,
+):
+    async def scenario(client):
+        healthy = await client.post(
+            "/projects",
+            json=_create_payload("runtime-healthy", "Healthy"),
+        )
+        broken = await client.post(
+            "/projects",
+            json=_create_payload("runtime-broken", "Broken"),
+        )
+        healthy_id, broken_id = (
+            healthy.json()["projectId"],
+            broken.json()["projectId"],
+        )
+        project_root = api_runtime_root / broken_id
+        project_before = (project_root / "project.json").read_bytes()
+        sessions = project_root / "runtime" / "sessions"
+        session = next(sessions.iterdir())
+        path = session / "session.json"
+        if corruption == "json":
+            path.write_text("{")
+        elif corruption in {"status", "sequence"}:
+            record = json.loads(path.read_bytes())
+            if corruption == "status":
+                record["status"] = "UNKNOWN"
+            else:
+                record["last_consumed_message_seq"] = (
+                    record["last_message_seq"] + 1
+                )
+            path.write_text(json.dumps(record))
+        elif corruption == "conversation":
+            path = session / "conversations" / "orphan.json"
+            path.write_text("{}")
+        elif corruption == "session_directory":
+            path.rename(session / "original-session.json")
+            path.mkdir()
+        elif corruption in {"sessions_file", "conversations_file"}:
+            path = (
+                sessions
+                if corruption == "sessions_file"
+                else session / "conversations"
+            )
+            path.rename(path.with_name(path.name + "-original"))
+            path.write_text("{}")
+        else:
+            path = (
+                project_root / "runtime" / "tasks" / "old-task" / "task.json"
+            )
+            path.mkdir(parents=True)
+        damaged = path.read_bytes() if path.is_file() else None
+        listed = await client.get("/projects")
+        assert listed.status_code == 200, listed.text
+        cards = {item["projectId"]: item for item in listed.json()["items"]}
+        assert set(cards) == {healthy_id, broken_id}
+        assert cards[healthy_id]["status"] is not None
+        if corruption != "task_directory":
+            assert cards[broken_id]["status"] is None
+        if damaged is not None:
+            assert path.read_bytes() == damaged
+        else:
+            assert path.is_dir()
+        assert (project_root / "project.json").read_bytes() == project_before
+
+    run_scenario(app, scenario)
+
+
+@pytest.mark.parametrize("kind", ["session", "conversation", "task"])
+def test_runtime_timestamp_overflow_does_not_block_listing(
+    app,
+    api_runtime_root,
+    run_scenario,
+    kind,
+):
+    async def scenario(client):
+        created = await client.post(
+            "/projects",
+            json=_create_payload("overflow", "Overflow"),
+        )
+        project_id = created.json()["projectId"]
+        runtime = api_runtime_root / project_id / "runtime"
+        session = next((runtime / "sessions").iterdir())
+        if kind == "task":
+            path = runtime / "tasks" / "task-overflow" / "task.json"
+            path.parent.mkdir(parents=True)
+            record = {
+                "task_id": "task-overflow",
+                "project_id": project_id,
+                "kind": "image_generation",
+                "request_fingerprint": "test",
+            }
+        else:
+            path = (
+                session / "session.json"
+                if kind == "session"
+                else next((session / "conversations").glob("*.json"))
+            )
+            record = json.loads(path.read_bytes())
+        record["created_at"] = "0001-01-01T00:00:00+01:00"
+        payload = json.dumps(record).encode()
+        path.write_bytes(payload)
+        listed = await client.get("/projects")
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["items"][0]["projectId"] == project_id
+        if kind != "task":
+            assert listed.json()["items"][0]["status"] is None
+        assert path.read_bytes() == payload
+
+    run_scenario(app, scenario)
 
 
 def test_parallel_creates_and_copies_never_hit_lock_timeouts(
@@ -852,9 +1056,9 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
         def durable() -> str:
             """The committed ``project.json`` text at this exact step."""
 
-            return (
-                api_runtime_root / project_id / "project.json"
-            ).read_text(encoding="utf-8")
+            return (api_runtime_root / project_id / "project.json").read_text(
+                encoding="utf-8",
+            )
 
         unknown = await client.patch(
             f"/projects/{project_id}/subtitles/style",
@@ -992,9 +1196,9 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
     assert declined.status_code == 200, declined.text
     assert declined.json()["skippedNonTemplate"] == 1
     assert declined.json()["redrawnDocuments"] == 0
-    declined_elements = stored(after_decline).timelines.items[
-        "timeline:main"
-    ].elements_by_id
+    declined_elements = (
+        stored(after_decline).timelines.items["timeline:main"].elements_by_id
+    )
     assert declined_elements["free"].creation.prompt == ""
     assert "x" * 64 in (declined_elements["free"].creation.motion.html or "")
 

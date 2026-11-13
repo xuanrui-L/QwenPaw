@@ -119,15 +119,35 @@ def test_listing_serves_from_summary_cache_without_reading(
     assert third[0].name == "Renamed"
 
 
-def test_a_damaged_summary_record_is_only_a_cache_miss(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "payload",
+    ["{not json", "[" * 1100 + "0" + "]" * 1100],
+)
+def test_a_damaged_summary_record_is_only_a_cache_miss(
+    tmp_path,
+    payload,
+) -> None:
     store = ProjectStore(tmp_path.resolve())
     store.create(_project("project-a", "A"))
     store.list()
 
     record = store.project_root("project-a") / "runtime" / "summary.json"
-    record.write_text("{not json", encoding="utf-8")
+    record.write_text(payload, encoding="utf-8")
 
     assert store.list()[0].name == "A"
+
+
+@pytest.mark.parametrize("field", ["name", "description", "contentType"])
+def test_summary_with_invalid_unicode_is_rebuilt(tmp_path, field):
+    store = ProjectStore(tmp_path.resolve())
+    store.create(_project("project-a", "A"))
+    expected = store.list()
+    record = store.project_root("project-a") / "runtime" / "summary.json"
+    raw = json.loads(record.read_bytes())
+    raw[field] = "\ud800"
+    record.write_text(json.dumps(raw))
+    assert store.list() == expected
+    assert json.loads(record.read_bytes())[field] != "\ud800"
 
 
 def test_a_well_formed_summary_with_a_typed_field_still_degrades_to_a_miss(
@@ -184,9 +204,7 @@ def test_a_cached_naive_timestamp_degrades_to_a_miss(tmp_path) -> None:
     store.create(_project("project-b", "B"))
     store.list()  # warm both summaries
 
-    damaged = (
-        store.project_root("project-a") / "runtime" / "summary.json"
-    )
+    damaged = store.project_root("project-a") / "runtime" / "summary.json"
     payload = json.loads(damaged.read_text(encoding="utf-8"))
     payload["updatedAt"] = "2026-11-12T10:00:00"  # naive but valid string
     damaged.write_text(json.dumps(payload), encoding="utf-8")
@@ -197,9 +215,7 @@ def test_a_cached_naive_timestamp_degrades_to_a_miss(tmp_path) -> None:
     assert names == ["A", "B"]
 
     # Same for createdAt when sorting by creation time.
-    payload["updatedAt"] = (
-        "2026-07-15T08:00:01+00:00"  # restore aware value
-    )
+    payload["updatedAt"] = "2026-07-15T08:00:01+00:00"  # restore aware value
     payload["createdAt"] = "2026-11-12T10:00:00"
     damaged.write_text(json.dumps(payload), encoding="utf-8")
     created_order = store.list(sort_by="created_at")
@@ -671,6 +687,22 @@ def _publish_asset_index(
         Project.model_validate(raw),
         expected_etag=current.etag,
     )
+
+
+def test_cyclic_asset_link_does_not_hide_other_projects(
+    tmp_path,
+    file_symlink,
+):
+    store = ProjectStore((tmp_path / "store").resolve())
+    store.create(_project("project-healthy", "Healthy"))
+    store.create(_project("project-cycle", "Cycle"))
+    _publish_asset_index(store, "project-cycle", ["assets/loop/file.bin"])
+    loop = store.project_root("project-cycle") / "assets" / "loop"
+    file_symlink(loop, loop)
+    with pytest.raises(UnsafeProjectPath):
+        store.read("project-cycle")
+    assert [item.project_id for item in store.list()] == ["project-healthy"]
+    assert loop.is_symlink()
 
 
 def test_asset_rule_accepts_everything_the_resolve_rule_accepted(tmp_path):

@@ -779,7 +779,10 @@ class ProjectExecutionStore:
                         "Runtime tasks directory contains an unsafe entry",
                     )
                 task_id = self._safe(child.name, "task_id")
-                if is_link_path((child / "task.json")):
+                head = child / "task.json"
+                if is_link_path(head) or (
+                    head.exists() and not head.is_file()
+                ):
                     raise UnsafeExecutionPath(
                         "Runtime Task head must be a real file",
                     )
