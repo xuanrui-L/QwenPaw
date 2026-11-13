@@ -231,13 +231,20 @@ const PREVIEW_FRAME_BACKGROUND =
   "radial-gradient(90% 80% at 85% 80%, rgba(64,120,190,0.5), transparent 65%)," +
   "linear-gradient(160deg, #4a5568 0%, #232a36 55%, #10141b 100%)";
 
-/** Normalised signature of the four style overrides, nulls included. */
+/** Normalised signature of the five style overrides, nulls included. */
 function styleSignature(style: SubtitleStyle | null | undefined): string {
   return JSON.stringify({
     color: style?.color ?? null,
     fontScale: style?.fontScale ?? null,
     strokeScale: style?.strokeScale ?? null,
     backgroundOpacity: style?.backgroundOpacity ?? null,
+    // `default` and an absent pick are the same face (the pack's own); any
+    // other id is a real difference a saved card must see, or two bundles
+    // differing only by font both light up.
+    fontFamily:
+      style?.fontFamily && style.fontFamily !== "default"
+        ? style.fontFamily
+        : null,
   });
 }
 
