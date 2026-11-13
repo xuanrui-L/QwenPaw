@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -80,3 +82,55 @@ def test_damaged_files_are_skipped(client, tmp_path) -> None:
     directory.mkdir()
     (directory / "user_bad.json").write_text("{not json", encoding="utf-8")
     assert client.get("/subtitle-packs/custom").json()["items"] == []
+
+
+FONT_BUNDLE = {
+    "name": "宋体标题",
+    "packId": "cinematic",
+    "style": {"fontFamily": "song", "color": "#00ff00"},
+    "animation": {"entrance": "soft_fade"},
+}
+
+
+def test_the_face_pick_survives_save_list_and_reapply(client) -> None:
+    """Re-applying a bundle overwrites the draft style; a dropped face would
+    silently reset the font the bundle was saved with."""
+    created = client.post("/subtitle-packs/custom", json=FONT_BUNDLE)
+    assert created.status_code == 200
+    assert created.json()["style"]["fontFamily"] == "song"
+
+    listed = client.get("/subtitle-packs/custom").json()["items"]
+    assert listed[0]["style"] == {"color": "#00ff00", "fontFamily": "song"}
+
+
+def test_update_replaces_or_clears_the_face(client) -> None:
+    created = client.post("/subtitle-packs/custom", json=FONT_BUNDLE).json()
+    updated = client.put(
+        f"/subtitle-packs/custom/{created['styleId']}",
+        json={**FONT_BUNDLE, "style": {"fontFamily": "kai"}},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["style"] == {"fontFamily": "kai"}
+
+    cleared = client.put(
+        f"/subtitle-packs/custom/{created['styleId']}",
+        json={**FONT_BUNDLE, "style": {}},
+    )
+    assert cleared.json()["style"] == {}
+
+
+def test_legacy_files_without_a_face_still_load(client, tmp_path) -> None:
+    directory = tmp_path / "user-subtitle-styles"
+    directory.mkdir()
+    (directory / "user_old.json").write_text(
+        json.dumps(
+            {
+                "style_id": "user:old",
+                "name": "老风格",
+                "color": "#ff0000",
+            }
+        ),
+        encoding="utf-8",
+    )
+    items = client.get("/subtitle-packs/custom").json()["items"]
+    assert items[0]["style"] == {"color": "#ff0000"}
