@@ -253,6 +253,50 @@ describe("SubtitleTemplatePicker", () => {
     ).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("does not light a bundle whose only difference is the face pick", async () => {
+    vi.mocked(listUserSubtitleStyles).mockResolvedValue({
+      items: [
+        {
+          ...CUSTOM,
+          style: { color: "#ff0000", fontFamily: "song" as const },
+        },
+      ],
+    });
+    render(
+      <SubtitleTemplatePicker
+        value="variety_pop"
+        onChange={vi.fn()}
+        style={{ color: "#ff0000", fontFamily: "kai" }}
+        animation={{ entrance: "pop" }}
+        onSelectCustom={vi.fn()}
+      />,
+    );
+    const card = await screen.findByText("我的综艺字");
+    expect(card.closest("button")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("treats auto and an absent face as the same selection", async () => {
+    vi.mocked(listUserSubtitleStyles).mockResolvedValue({
+      items: [{ ...CUSTOM, style: { color: "#ff0000", fontFamily: null } }],
+    });
+    render(
+      <SubtitleTemplatePicker
+        value="variety_pop"
+        onChange={vi.fn()}
+        style={{ color: "#ff0000", fontFamily: "default" }}
+        animation={{ entrance: "pop" }}
+        onSelectCustom={vi.fn()}
+      />,
+    );
+    const card = await screen.findByText("我的综艺字");
+    const lit = await waitFor(() => {
+      const button = card.closest("button");
+      expect(button).toHaveAttribute("aria-pressed", "true");
+      return button;
+    });
+    expect(lit).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("saves the current picks under a name", async () => {
     const user = userEvent.setup();
     render(
