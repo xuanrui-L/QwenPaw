@@ -71,11 +71,17 @@ export default function SkillMarketBrowser({
   /** Skills this session installed, on top of the pane's library. */
   const [localInstalled, setLocalInstalled] = useState<Set<string>>(new Set());
   /**
-   * Rows this session installed, keyed like the rendered list. A folded
-   * install name never matches the market row's name, so without this the
-   * row would offer a second install that the backend refuses.
+   * Row identity to the name that was really installed. A folded install name
+   * never matches the market row's label, so the row needs its own memory to
+   * stop offering an install the backend refuses. It outlives a single opening
+   * on purpose: the pane reports installed names, never rows, so dropping it
+   * would make every renamed skill look installable again after a reopen. The
+   * mapping only marks a row installed while that name is still in the library
+   * (see ``isRowInstalled``), so deleting the skill clears it by itself.
    */
-  const [installedRows, setInstalledRows] = useState<Set<string>>(new Set());
+  const [rowInstallNames, setRowInstallNames] = useState<
+    Record<string, string>
+  >({});
   const [providers, setProviders] = useState<MarketProvider[]>([]);
   const searchSeqRef = useRef(0);
   const resultsRef = useRef<MarketSkillResult[]>([]);
@@ -122,9 +128,12 @@ export default function SkillMarketBrowser({
   );
 
   const isRowInstalled = useCallback(
-    (item: MarketSkillResult) =>
-      installed.has(item.name) || installedRows.has(rowKey(item)),
-    [installed, installedRows],
+    (item: MarketSkillResult) => {
+      if (installed.has(item.name)) return true;
+      const installedAs = rowInstallNames[rowKey(item)];
+      return installedAs !== undefined && installed.has(installedAs);
+    },
+    [installed, rowInstallNames],
   );
 
   const doSearch = useCallback(
@@ -186,7 +195,7 @@ export default function SkillMarketBrowser({
         // so the overlay, the toast and the rename notice must speak about the
         // name that was really installed rather than the row's label.
         setLocalInstalled((prev) => new Set(prev).add(res.name));
-        setInstalledRows((prev) => new Set(prev).add(rowKey(item)));
+        setRowInstallNames((prev) => ({ ...prev, [rowKey(item)]: res.name }));
         message.success(`${t("skills.importUrlSuccess")}: ${res.name}`);
         if (res.renamed_from) {
           message.warning(
@@ -225,10 +234,11 @@ export default function SkillMarketBrowser({
       setSearched(false);
       setHasMore(false);
       setPage(1);
-      // The pane's list is refetched on every install, so a stale overlay
-      // would keep reporting "installed" for a skill deleted meanwhile.
+      // The pane's list is refetched on every install, so this session's
+      // bridge would keep reporting "installed" for a skill deleted
+      // meanwhile. The row-to-name map stays: it is validated against the
+      // library on every render, so only skills that still exist match.
       setLocalInstalled(new Set());
-      setInstalledRows(new Set());
       void doSearch("", 1);
     }
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps

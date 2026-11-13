@@ -86,20 +86,50 @@ function installResult(name: string, renamedFrom: string | null = null) {
   };
 }
 
+/** The props the pane would pass; `open` is the modal's lifecycle. */
+interface BrowserState {
+  open: boolean;
+  installedNames: string[];
+}
+
 /** motion:false makes the antd Modal mount/unmount synchronously under jsdom. */
-function renderBrowser(installedNames: string[] = []) {
-  const onInstalled = vi.fn();
-  render(
+function browserTree(props: BrowserState, onInstalled: () => void) {
+  return (
     <ConfigProvider theme={{ token: { motion: false } }}>
       <SkillMarketBrowser
-        open
+        open={props.open}
         onClose={vi.fn()}
         onInstalled={onInstalled}
-        installedNames={installedNames}
+        installedNames={props.installedNames}
       />
-    </ConfigProvider>,
+    </ConfigProvider>
   );
+}
+
+function renderBrowser(installedNames: string[] = []) {
+  const onInstalled = vi.fn();
+  render(browserTree({ open: true, installedNames }, onInstalled));
   return { onInstalled };
+}
+
+/**
+ * Render the browser the way its parent does and let a test drive the props,
+ * which is the only way to cross a close/reopen boundary: the install identity
+ * has to survive the modal unmounting, and the library is refetched meanwhile.
+ */
+function renderControlled(installedNames: string[] = []) {
+  const onInstalled = vi.fn();
+  // Accumulate, so a later update builds on what the previous one set instead
+  // of falling back to the first render's props.
+  let state: BrowserState = { open: true, installedNames };
+  const { rerender } = render(browserTree(state, onInstalled));
+  return {
+    onInstalled,
+    update(next: Partial<BrowserState>) {
+      state = { ...state, ...next };
+      rerender(browserTree(state, onInstalled));
+    },
+  };
 }
 
 function searchBox(): HTMLElement {
@@ -339,14 +369,61 @@ describe("SkillMarketBrowser paging", () => {
     );
     expect(onInstalled).toHaveBeenCalled();
     // The refreshed library carries the folded name, which never matches this
-    // row, so the row-level overlay is what keeps a refused second install
-    // from being offered.
+    // row, so the row-to-name map is what keeps a refused second install from
+    // being offered.
     expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(0);
 
     await act(async () => {
       fireEvent.click(buttonByLabel(zh.skills.marketInstalled));
     });
     expect(importUrlMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a renamed install marked after a close and a reopen", async () => {
+    importUrlMock.mockResolvedValue(installResult("my-skill", "My Skill"));
+    const browser = renderControlled();
+    await submitSearch("alpha");
+
+    await act(async () => {
+      fireEvent.click(installButton());
+    });
+
+    // The pane refetched its library after the install and now reports the
+    // folded name; the market catalogue still labels this row "p1-alpha".
+    // Only the row identity can tell that these are the same skill.
+    await act(async () => {
+      browser.update({ open: false, installedNames: ["my-skill"] });
+    });
+    await act(async () => {
+      browser.update({ open: true });
+    });
+    await submitSearch("alpha");
+
+    expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(0);
+    expect(buttonByLabel(zh.skills.marketInstalled)).toBeDisabled();
+  });
+
+  it("offers the install again once the renamed skill left the library", async () => {
+    importUrlMock.mockResolvedValue(installResult("my-skill", "My Skill"));
+    const browser = renderControlled();
+    await submitSearch("alpha");
+
+    await act(async () => {
+      fireEvent.click(installButton());
+    });
+
+    // Deleting the skill must free the row again: the row memory is only
+    // trusted while the library still reports the name it installed.
+    await act(async () => {
+      browser.update({ open: false, installedNames: [] });
+    });
+    await act(async () => {
+      browser.update({ open: true });
+    });
+    await submitSearch("alpha");
+
+    expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(1);
+    expect(buttonsByLabel(zh.skills.marketInstalled)).toHaveLength(0);
   });
 
   it("names the unusable markets together with the host's reason", async () => {
