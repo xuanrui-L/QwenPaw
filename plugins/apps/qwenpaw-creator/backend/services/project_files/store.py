@@ -85,14 +85,23 @@ SUMMARY_REQUIRED_STR_FIELDS: Final = (
     "aspectRatio",
     "resolution",
     "etag",
-    "createdAt",
-    "updatedAt",
 )
 SUMMARY_OPTIONAL_STR_FIELDS: Final = (
     "contentType",
     "coverVersionId",
     "coverVersionSource",
     "finalVideoVersionId",
+)
+# ISO datetimes need more than ``isinstance(str)``: ``datetime.fromisoformat``
+# happily produces a naive value from ``"2026-11-12T10:00:00"`` (no offset),
+# and mixing it with a warm aware datetime in a later listing raises
+# ``TypeError: can't compare offset-naive and offset-aware datetimes`` --
+# outside this method's try/except, in ``list()``'s sort. Every Project
+# document persists in UTC, so a cached timestamp without tzinfo is damage
+# and must fall back to a full read (review #243 / #255 follow-up P2).
+SUMMARY_TZAWARE_DATETIME_FIELDS: Final = (
+    "createdAt",
+    "updatedAt",
 )
 
 
@@ -1217,9 +1226,9 @@ class ProjectStore:
                         source.current_intelligence_version_id
                         in dropped_intel_ids
                     ):
-                        pointer_update["current_intelligence_version_id"] = (
-                            None
-                        )
+                        pointer_update[
+                            "current_intelligence_version_id"
+                        ] = None
                     replaced_sources[source_id] = source.model_copy(
                         update=pointer_update,
                     )
@@ -1301,12 +1310,12 @@ class ProjectStore:
                         for r in (variant.reference_asset_version_ids or [])
                         if r != version_id
                     ]
-                    variant_updates.setdefault(entity_id, {})[variant_id] = (
-                        variant.model_copy(
-                            update={
-                                "reference_asset_version_ids": new_refs,
-                            },
-                        )
+                    variant_updates.setdefault(entity_id, {})[
+                        variant_id
+                    ] = variant.model_copy(
+                        update={
+                            "reference_asset_version_ids": new_refs,
+                        },
                     )
         if variant_updates:
             merged_items = dict(base_entities.items)
@@ -1502,6 +1511,21 @@ class ProjectStore:
             bool,
         ):
             return None
+        # Parse datetimes here and refuse naive values before the
+        # ``ProjectSummary`` construction; the exception that a mixed
+        # naive/aware sort raises lives one call site up and this
+        # method's try/except cannot see it. See the constant's comment.
+        try:
+            parsed_datetimes = {
+                key: datetime.fromisoformat(raw[key])
+                for key in SUMMARY_TZAWARE_DATETIME_FIELDS
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+        if any(
+            value.tzinfo is None for value in parsed_datetimes.values()
+        ):
+            return None
         try:
             return ProjectSummary(
                 project_id=safe_id,
@@ -1512,8 +1536,8 @@ class ProjectStore:
                 resolution=raw["resolution"],
                 content_type=raw["contentType"],
                 generation=int(raw["generation"]),
-                created_at=datetime.fromisoformat(raw["createdAt"]),
-                updated_at=datetime.fromisoformat(raw["updatedAt"]),
+                created_at=parsed_datetimes["createdAt"],
+                updated_at=parsed_datetimes["updatedAt"],
                 etag=raw["etag"],
                 cover_version_id=raw.get("coverVersionId"),
                 cover_version_source=raw.get("coverVersionSource"),
