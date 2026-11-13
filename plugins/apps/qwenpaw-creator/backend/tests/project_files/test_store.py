@@ -166,6 +166,42 @@ def test_a_well_formed_summary_with_a_typed_field_still_degrades_to_a_miss(
     assert store.list()[0].cover_version_id is None
 
 
+def test_a_cached_naive_timestamp_degrades_to_a_miss(tmp_path) -> None:
+    """A UTC-persisted Project must never hand list() a naive datetime.
+
+    Follow-up on review #243 / #255: ``datetime.fromisoformat`` happily
+    parses ``"2026-11-12T10:00:00"`` (no offset) into a naive datetime.
+    Sorting that against a sibling's aware datetime blows up in
+    ``list()``'s compare step, outside this method's try/except -- so
+    one damaged cache row could 500 the whole listing. The check now
+    rejects a cached timestamp without tzinfo, and the test uses two
+    Projects (one valid, one damaged) to reproduce the mixed-type sort
+    the reviewer measured.
+    """
+
+    store = ProjectStore(tmp_path.resolve())
+    store.create(_project("project-a", "A"))
+    store.create(_project("project-b", "B"))
+    store.list()  # warm both summaries
+
+    damaged = store.project_root("project-a") / "runtime" / "summary.json"
+    payload = json.loads(damaged.read_text(encoding="utf-8"))
+    payload["updatedAt"] = "2026-11-12T10:00:00"  # naive but valid string
+    damaged.write_text(json.dumps(payload), encoding="utf-8")
+
+    # Would previously raise TypeError: can't compare offset-naive and
+    # offset-aware datetimes.
+    names = sorted(item.name for item in store.list())
+    assert names == ["A", "B"]
+
+    # Same for createdAt when sorting by creation time.
+    payload["updatedAt"] = "2026-07-15T08:00:01+00:00"  # restore aware value
+    payload["createdAt"] = "2026-11-12T10:00:00"
+    damaged.write_text(json.dumps(payload), encoding="utf-8")
+    created_order = store.list(sort_by="created_at")
+    assert {item.name for item in created_order} == {"A", "B"}
+
+
 def test_summary_cache_can_be_switched_off(
     tmp_path,
     monkeypatch,

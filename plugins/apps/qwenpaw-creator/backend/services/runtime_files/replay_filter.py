@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from typing import Any, Iterable, Sequence
 
 from services.runtime_files.models import SessionEventRecord
@@ -66,6 +67,46 @@ def replay_noise_line(line: bytes) -> bool:
     """
 
     return any(marker in line for marker in REPLAY_SKIP_LINE_MARKERS)
+
+
+def make_replay_noise_line(
+    active_run_ids: Iterable[str] = (),
+) -> "Callable[[bytes], bool]":
+    """Byte-level classifier that spares deltas of still-active runs.
+
+    Review #243 P2: the filter is used before parsing so it cannot see
+    ``event.payload``, but the parse-time ``filter_replay_events`` already
+    exempts non-terminal runs because a live reply has no durable
+    message yet. Applying the byte-level drop to those deltas first
+    meant the exemption never got the chance to fire, and a returning
+    user saw the partial text of an in-flight reply disappear until
+    ``message.completed`` landed. The factory bakes the active run ids
+    into a substring test on the raw bytes; the ids come from the
+    session's non-terminal mainline run and every non-terminal
+    specialist, mirroring the parse-time set exactly.
+
+    An empty active set keeps the original behaviour byte for byte.
+    """
+
+    ids = sorted({run_id for run_id in active_run_ids if run_id})
+    if not ids:
+        return replay_noise_line
+    active_markers: tuple[bytes, ...] = tuple(
+        pattern
+        for run_id in ids
+        for key in ("runId", "parentRunId")
+        for pattern in (
+            f'"{key}":"{run_id}"'.encode("utf-8"),
+            f'"{key}": "{run_id}"'.encode("utf-8"),
+        )
+    )
+
+    def is_noise(line: bytes) -> bool:
+        if not any(marker in line for marker in REPLAY_SKIP_LINE_MARKERS):
+            return False
+        return not any(marker in line for marker in active_markers)
+
+    return is_noise
 
 
 FILTER_ENV = "CREATOR_SSE_REPLAY_FILTER"

@@ -48,8 +48,8 @@ from services.project_files.facade import CreatorFileServices
 from services.runtime_files.errors import JsonlCorruptionError
 from services.runtime_files.replay_filter import (
     filter_replay_events,
+    make_replay_noise_line,
     replay_filter_enabled,
-    replay_noise_line,
     replay_result_max_bytes,
 )
 from services.runtime_files.models import (
@@ -706,30 +706,52 @@ async def stream_events(
         # interpreter for 90+ seconds per replay and starved every other
         # endpoint in the process.
         #
-        # The filter is scoped to the tail at connect time so it stops at
-        # the replay boundary: anything appended while this connection is
-        # held open is a live event the client must see, and a streaming
-        # delta from an in-flight reply is exactly what replay_filter is
-        # trained to drop (review #243 blocking #1 -- without this bound,
-        # a long-lived SSE connection silently lost every live token).
+        # Two correctness guards frame the drop.
+        #
+        # * Replay boundary: anything appended after connect is a live
+        #   event and must reach the client (review #243 blocking #1).
+        # * Active-run exemption: deltas belonging to a run that was
+        #   still in flight when this connection opened have no durable
+        #   message yet, so dropping them blanks a partially written
+        #   reply (review #243 P2). The exemption used to live only in
+        #   the post-parse filter, but the byte-level classifier fired
+        #   first and the exempt events never reached it -- a returning
+        #   user still lost the prefix. Computing the active set before
+        #   constructing the reader lets both layers agree on what to
+        #   spare.
         filter_enabled = replay_filter_enabled()
-        reader = store.event_reader(
-            project_id,
-            session.session_id,
-            after_seq=cursor,
-            skip_noise=replay_noise_line if filter_enabled else None,
-            replay_boundary_seq=(
-                session.last_event_seq if filter_enabled else None
-            ),
-        )
-        active_run_ids = (
-            await asyncio.to_thread(
+        active_run_ids: set[str] = set()
+        if filter_enabled:
+            active_run_ids = await asyncio.to_thread(
                 _active_specialist_run_ids,
                 services,
                 project_id,
             )
-            if filter_enabled
-            else set()
+            # The mainline agent run carries ``agent.message_delta``
+            # events with its own runId, and session.status stays
+            # non-terminal for the whole turn. Terminal states
+            # (IDLE / CANCELLED / ERROR) do clear active_run_id soon
+            # enough that this guard is on the safe side of "too
+            # large": including one extra run means a few extra bytes
+            # on the wire, missing one blanks an in-flight reply.
+            if session.active_run_id is not None and session.status not in {
+                "IDLE",
+                "CANCELLED",
+                "ERROR",
+            }:
+                active_run_ids = active_run_ids | {session.active_run_id}
+        reader = store.event_reader(
+            project_id,
+            session.session_id,
+            after_seq=cursor,
+            skip_noise=(
+                make_replay_noise_line(active_run_ids)
+                if filter_enabled
+                else None
+            ),
+            replay_boundary_seq=(
+                session.last_event_seq if filter_enabled else None
+            ),
         )
         result_max_bytes = replay_result_max_bytes()
         idle_ticks = 0

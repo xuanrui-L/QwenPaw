@@ -185,6 +185,49 @@ def test_a_reserve_retry_republishes_an_entry_the_first_attempt_never_wrote(
     )
 
 
+def test_a_reserve_replay_of_a_settled_record_does_not_reopen_the_ledger(
+    tmp_path,
+) -> None:
+    """Terminal replays must not resurrect a settled txn in the ledger.
+
+    Follow-up on review #243: making mark_open unconditional to close
+    the crash window also fired on reserve() calls that hit an already
+    COMPLETED / FAILED record. project_file_routes replays the cached
+    response for those terminal records without running complete()
+    again, so nothing ever removes the id from the ledger afterwards
+    and the storage-reclaim sweep this PR exists to make reliable
+    silently keeps settled transactions forever. Only an IN_PROGRESS
+    record needs the durable witness, and only IN_PROGRESS republishes
+    the entry.
+    """
+
+    from services.runtime_files import idempotency_ledger
+
+    root = tmp_path / "runtime" / "commands" / "idempotency"
+    request_hash = IdempotencyRecordStore.request_hash({"value": 1})
+    store = IdempotencyRecordStore(root)
+
+    reserved = store.reserve(**KEY, request_hash=request_hash)
+    store.complete(
+        **KEY,
+        request_hash=request_hash,
+        response={"body": {"ok": True}},
+        response_status=200,
+    )
+    # complete() settles the ledger; nothing else should re-add it.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset()
+
+    replay = store.reserve(**KEY, request_hash=request_hash)
+    assert replay.created is False
+    assert replay.record.status is IdempotencyStatus.COMPLETED
+    # Without the status guard the ledger contains the id again and
+    # GC sees the transaction as permanently protected.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset()
+    # Sanity: the record still refers to the same reservation, so a
+    # future caller can still find its response.
+    assert replay.record.record_id == reserved.record.record_id
+
+
 def boundary() -> ReviewBoundary:
     return ReviewBoundary(
         request_message_seq=2,

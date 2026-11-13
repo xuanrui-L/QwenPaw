@@ -287,6 +287,115 @@ def _parse_sse_id_type(chunk: str) -> tuple[int, str]:
     return seq, kind
 
 
+def test_replay_deltas_of_an_active_run_survive_the_byte_layer_filter(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A pre-connect delta of an in-flight run must reach the client.
+
+    Review #243 follow-up P2: the replay-boundary fix stopped the filter
+    from eating live deltas, but on the pre-boundary side the classifier
+    still dropped every delta before the post-parse exemption could
+    see it -- a returning user watched the reply missing its opening
+    stretch until ``message.completed`` arrived. Both layers must
+    agree: the byte-level classifier spares deltas whose ``runId`` is
+    in the active set, and the parse-time filter spares the same set.
+
+    The active-run delta here is the reviewer's exact shape (seq 1 =
+    ``run.started``, seq 2 = delta with the prefix), and a sibling
+    delta from a settled run at seq 3 stays filtered to prove the
+    exemption is bounded by ``active_run_ids``.
+    """
+
+    _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
+    store = services.sessions
+
+    def append(event_type, payload):
+        return store.append_event(
+            "project-1",
+            "session-1",
+            event_type=event_type,
+            actor="agent",
+            payload=payload,
+        )
+
+    append(
+        "agent.run.started",
+        {"runId": "run-active"},
+    )
+    append(
+        "agent.message_delta",
+        {
+            "runId": "run-active",
+            "messageId": "m-active",
+            "deltaIndex": 0,
+            "delta": "prefix",
+        },
+    )
+    # Same boundary-internal delta from a run that is NOT in the active
+    # set at connect -- still should be dropped as replay noise.
+    append(
+        "agent.message_delta",
+        {
+            "runId": "run-settled",
+            "messageId": "m-settled",
+            "deltaIndex": 0,
+            "delta": "should-stay-dropped",
+        },
+    )
+
+    monkeypatch.setattr(
+        file_session_routes,
+        "_active_specialist_run_ids",
+        lambda *_args, **_kwargs: {"run-active"},
+    )
+
+    class Connection:
+        polls = 0
+
+        async def is_disconnected(self):
+            self.polls += 1
+            return self.polls > 4
+
+    async def scenario() -> list[tuple[int, str, str]]:
+        response = await stream_events(
+            "project-1",
+            Connection(),
+            after=0,
+            last_event_id=None,
+            services=services,
+        )
+        seen: list[tuple[int, str, str]] = []
+        async for chunk in response.body_iterator:
+            seq, kind = _parse_sse_id_type(chunk)
+            data = ""
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    data = line.removeprefix("data: ")
+            seen.append((seq, kind, data))
+        return seen
+
+    events = asyncio.run(scenario())
+    seqs = [seq for seq, _, _ in events]
+    assert 1 in seqs  # run.started, always kept
+    # The active run's delta is delivered (fix). Without the change,
+    # seq 2 was filtered here while the parse-time exemption never
+    # got to run.
+    active_delta = next(
+        (data for seq, kind, data in events if seq == 2),
+        None,
+    )
+    assert active_delta is not None, (
+        f"active-run delta was dropped before the parse-time filter "
+        f"could exempt it: {events}"
+    )
+    assert "prefix" in active_delta
+    # The settled run's delta at seq 3 stays filtered -- the exemption
+    # is scoped to ``active_run_ids``, not a blanket "keep every
+    # delta" reversal.
+    assert 3 not in seqs
+
+
 def test_interrupt_is_persisted_before_process_local_cancellation(
     tmp_path,
     monkeypatch,
