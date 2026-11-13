@@ -3,7 +3,7 @@
 
 A custom subtitle style is a named bundle of exactly what the subtitle
 style window can pick: the base style pack, the colour / size / outline /
-plate overrides and the entrance / exit / loop triple.  Applying one is
+plate / face overrides and the entrance / exit / loop triple.  Applying one is
 the same as moving those controls by hand, so the caption renderer never
 learns about custom styles; they live as individual JSON files under
 ``$CREATOR_DATA_ROOT/user-subtitle-styles/``.
@@ -33,6 +33,7 @@ class UserSubtitleStyle(BaseModel):
     font_scale: float | None = None
     stroke_scale: float | None = None
     background_opacity: float | None = None
+    font_family: str | None = None
     entrance: str | None = None
     exit: str | None = None
     loop: bool | None = None

@@ -2,7 +2,7 @@
 """List, save, update and delete user-defined subtitle styles.
 
 A custom style is a named bundle of style-window picks (base pack, the
-four overrides, the motion triple); applying one is just moving those
+five overrides, the motion triple); applying one is just moving those
 controls, so nothing here touches the caption renderer.  Storage lives in
 ``services.media_files.user_subtitle_styles``.
 """
@@ -37,6 +37,7 @@ def _user_item(style: UserSubtitleStyle) -> dict[str, Any]:
             "fontScale": style.font_scale,
             "strokeScale": style.stroke_scale,
             "backgroundOpacity": style.background_opacity,
+            "fontFamily": style.font_family,
         }.items()
         if value is not None
     }
@@ -84,6 +85,7 @@ def _to_model(
         font_scale=style.font_scale if style else None,
         stroke_scale=style.stroke_scale if style else None,
         background_opacity=style.background_opacity if style else None,
+        font_family=style.font_family if style else None,
         entrance=animation.entrance if animation else None,
         exit=animation.exit if animation else None,
         loop=animation.loop if animation else None,
