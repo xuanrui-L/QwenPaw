@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import { Clock3, ImageOff, Loader2 } from "lucide-react";
 import type {
@@ -62,6 +63,17 @@ interface TimelineLivePreviewProps {
   playing: boolean;
   muted: boolean;
   tasks: TaskView[];
+  /**
+   * DOM subtree that owns this canvas's ``--creator-playhead-frac``.
+   * Compare view mounts two canvases with different ``durationTick``;
+   * writing the fraction to ``documentElement`` made the two heads
+   * stomp each other (review #243 r4548690168). The TimelineCanvas
+   * section is passed down here so every rAF frame and every scrub
+   * publishes on a node the sibling canvas cannot read. Falls back to
+   * ``documentElement`` only when the prop is absent (a test harness
+   * that mounts the preview standalone).
+   */
+  playheadScopeRef?: RefObject<HTMLElement | null>;
   onPlayheadChange: (tick: number) => void;
   onPlayingChange: (playing: boolean) => void;
   draft?: boolean;
@@ -558,6 +570,7 @@ export default function TimelineLivePreview({
   playing,
   muted,
   tasks,
+  playheadScopeRef,
   onPlayheadChange,
   onPlayingChange,
   draft = false,
@@ -693,10 +706,9 @@ export default function TimelineLivePreview({
       if (tick >= durationTick) {
         lastEmittedTick.current = durationTick;
         committedTick.current = durationTick;
-        document.documentElement.style.setProperty(
-          PLAYHEAD_FRACTION_VARIABLE,
-          "1.000000",
-        );
+        (
+          playheadScopeRef?.current ?? document.documentElement
+        ).style.setProperty(PLAYHEAD_FRACTION_VARIABLE, "1.000000");
         onPlayheadChange(durationTick);
         onPlayingChange(false);
         return;
@@ -707,7 +719,13 @@ export default function TimelineLivePreview({
       // whole track tree every frame (measured: ~5 DOM mutation batches
       // per pointermove, frame time 16.7 ms -> 33.4 ms), while the
       // compositor can move one element for free.
-      document.documentElement.style.setProperty(
+      //
+      // The variable is scoped to this canvas's DOM subtree (falling back
+      // to documentElement for a test that mounts the preview alone), so
+      // a compare view with a second Canvas of a different duration
+      // cannot overwrite this playhead's fraction (review #243
+      // r4548690168).
+      (playheadScopeRef?.current ?? document.documentElement).style.setProperty(
         PLAYHEAD_FRACTION_VARIABLE,
         (durationTick ? tick / durationTick : 0).toFixed(6),
       );

@@ -150,6 +150,15 @@ export default function TimelineCanvas({
   const patch = useProjectSnapshotStore((state) => state.patch);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
   const commitChain = useRef<Promise<void>>(Promise.resolve());
+  // A compare view mounts two canvases side by side with different
+  // ``durationTick``; their playhead fractions differ every frame. The
+  // rAF clock and the scrub effects used to publish the fraction on
+  // ``document.documentElement``, so both canvases read the last
+  // writer's value and at least one head was misplaced (review #243
+  // important -- r4548690168). Scope the variable to this canvas's own
+  // DOM subtree; descendants inherit via the cascade while siblings
+  // never see each other's writes.
+  const playheadScopeRef = useRef<HTMLElement | null>(null);
   // Undo/redo stacks hold committed edit entries; replays run through the
   // same serialized commit chain. Entries only leave a stack once the
   // replay patch succeeded, so a failed request never loses history.
@@ -673,6 +682,7 @@ export default function TimelineCanvas({
 
   return (
     <section
+      ref={playheadScopeRef}
       data-timeline-panel
       className={
         split
@@ -756,6 +766,7 @@ export default function TimelineCanvas({
               playing={playing}
               muted={muted}
               tasks={tasks}
+              playheadScopeRef={playheadScopeRef}
               onPlayheadChange={onPlayheadChange}
               onPlayingChange={setPlaying}
             />
@@ -1035,6 +1046,7 @@ export default function TimelineCanvas({
           selectedElementId={selectedElementId}
           playbackStates={playbackStates}
           agentWorking={agentWorking.working}
+          playheadScopeRef={playheadScopeRef}
           onPlayheadChange={onPlayheadChange}
           onSelectElement={onSelectElement}
           onActiveElementIdsChange={onActiveElementIdsChange}

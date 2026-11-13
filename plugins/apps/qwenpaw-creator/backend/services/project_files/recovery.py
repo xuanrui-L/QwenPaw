@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import copy
+import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -104,13 +105,27 @@ def light_terminal_audit_enabled() -> bool:
     return raw.casefold() not in _DISABLED_VALUES
 
 
-def _audit_fingerprint(transaction_root: Path) -> dict[str, Any]:
-    """Size and mtime of every frozen file, journal included.
+def _audit_fingerprint(
+    transaction_root: Path,
+    runtime_root: Path | None = None,
+) -> dict[str, Any]:
+    """Size and mtime of every file the audit's conclusion depends on.
 
     Stats only: reading the journal costs a cross-process lock per entry, and
     hashing 30 MB of snapshots would cost the seconds this ledger exists to
     save.  Corruption that preserves both size and mtime is beyond what any
     boot-time audit claims to catch.
+
+    ``runtime_root`` extends the fingerprint past the transaction directory
+    to the two Runtime files the light-audit path reads but the transaction
+    directory does not own: ``state.json`` and the aggregate ChangeRound at
+    ``change-rounds/{round_id}/round.json``. Missing those from the
+    fingerprint cached an ALREADY_FINALIZED outcome even after a crash
+    deleted the Runtime fact it was derived from, and every later boot hit
+    the cache instead of running the repair branch that would have
+    republished them (review #243 r4548690109). Callers that still pass
+    only ``transaction_root`` -- the fingerprint helper's old shape -- keep
+    working byte-for-byte, they just do not see the new coverage.
     """
 
     files = {}
@@ -121,7 +136,47 @@ def _audit_fingerprint(transaction_root: Path) -> dict[str, Any]:
             files[name] = None
             continue
         files[name] = [info.st_size, info.st_mtime_ns]
+    if runtime_root is not None:
+        for label, path in _audit_runtime_dependencies(
+            transaction_root,
+            runtime_root,
+        ).items():
+            try:
+                info = path.lstat()
+            except OSError:
+                files[label] = None
+                continue
+            files[label] = [info.st_size, info.st_mtime_ns]
     return {"files": files}
+
+
+def _audit_runtime_dependencies(
+    transaction_root: Path,
+    runtime_root: Path,
+) -> dict[str, Path]:
+    """Files outside the transaction directory that decide the outcome.
+
+    The aggregate round's path is derived from the transaction's own
+    ``round.json``; if that file is missing or unreadable the light-audit
+    path already refuses to trust it, so the fingerprint simply omits the
+    aggregate entry and the transaction-side fingerprint is what decides.
+    """
+
+    deps = {"runtime-state": runtime_root / "state.json"}
+    try:
+        raw = json.loads(
+            (transaction_root / "round.json").read_text(encoding="utf-8"),
+        )
+    except (OSError, ValueError):
+        return deps
+    if not isinstance(raw, dict):
+        return deps
+    round_id = raw.get("round_id")
+    if isinstance(round_id, str) and round_id:
+        deps["aggregate-round"] = (
+            runtime_root / "change-rounds" / round_id / "round.json"
+        )
+    return deps
 
 
 class RecoveryAction(StrEnum):
@@ -379,7 +434,10 @@ class ProjectCommitRecoveryCoordinator:
         entry = stored.get(transaction_root.name)
         if not isinstance(entry, dict):
             return None
-        if entry.get("fingerprint") != _audit_fingerprint(transaction_root):
+        if entry.get("fingerprint") != _audit_fingerprint(
+            transaction_root,
+            runtime_root,
+        ):
             return None
         for action in RecoveryAction:
             if action.value != entry.get("action"):
@@ -411,7 +469,7 @@ class ProjectCommitRecoveryCoordinator:
 
         stored = self._ledger_table(runtime_root)
         stored[transaction_root.name] = {
-            "fingerprint": _audit_fingerprint(transaction_root),
+            "fingerprint": _audit_fingerprint(transaction_root, runtime_root),
             "action": outcome.action.value,
             "transaction_id": outcome.transaction_id,
             "state_before": (
@@ -1430,9 +1488,9 @@ class ProjectCommitRecoveryCoordinator:
         state = _build_runtime_state(
             inputs=inputs,
             current=current,
-            existing=existing_state.value
-            if existing_state is not None
-            else None,
+            existing=(
+                existing_state.value if existing_state is not None else None
+            ),
             accepted=accepted,
             active_round_id=active_round_id,
         )
@@ -1675,9 +1733,11 @@ class ProjectCommitRecoveryCoordinator:
                     "candidate_generation": current.generation,
                     "candidate_etag": current.etag,
                     "decision_token": secrets.token_urlsafe(24),
-                    "status": ReviewStatus.PENDING
-                    if pending
-                    else ReviewStatus.RESOLVED,
+                    "status": (
+                        ReviewStatus.PENDING
+                        if pending
+                        else ReviewStatus.RESOLVED
+                    ),
                     "operations": operations,
                     "updated_at": _now(),
                 },

@@ -745,3 +745,104 @@ def test_an_unsettled_reservation_keeps_its_transaction(
     assert removed == 1
     assert protected.is_dir()
     assert not settled.exists()
+
+
+def test_a_directory_removed_during_the_commit_scan_is_skipped_not_raised(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """GC reclaiming a settled directory mid-scan must not fake a 409.
+
+    Review #243 r4548690102: the GC uses ``shutil.rmtree`` outside the
+    project-commit-order lock, so a transaction directory can vanish
+    between ``list_transaction_ids`` and the journal read on the commit
+    scan path. The old code treated a missing journal as an integrity
+    failure and raised ``PendingProjectRecoveryError`` (surfaced as 409
+    to every API route); the sweep that legitimately reclaimed settled
+    history therefore poisoned the next commit. The scan now
+    distinguishes "directory gone -- nothing to recover" from "directory
+    present but journal missing -- damage".
+    """
+
+    import shutil
+
+    from services.project_files.commit import (
+        CommitJournalState,
+        PendingProjectRecoveryError,
+        ProjectCommitBoundary,
+        ProjectCommitJournal,
+    )
+
+    project_root = _runtime(tmp_path)
+    transactions_root = project_root / "runtime" / "transactions"
+
+    def _journal(name: str, state: CommitJournalState) -> Path:
+        directory = transactions_root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        moment = (BASELINE + timedelta(days=1)).isoformat()
+        (directory / "journal.json").write_text(
+            json.dumps(
+                {
+                    "transaction_id": name,
+                    "project_id": "project-1",
+                    "state": state.value,
+                    "base_etag": "sha256:base",
+                    "candidate_etag": "sha256:candidate",
+                    "temp_path": f"runtime/transactions/{name}/tmp.json",
+                    "touched_pointers": [],
+                    "created_at": moment,
+                    "updated_at": moment,
+                },
+            ),
+            encoding="utf-8",
+        )
+        return directory
+
+    keep = _journal("txn-keep", CommitJournalState.RUNTIME_FINALIZED)
+    doomed = _journal("txn-doomed", CommitJournalState.RUNTIME_FINALIZED)
+
+    from services.project_files import commit as commit_module
+
+    real_read = commit_module.AtomicJsonRecordStore.read_or_none
+    fired = [False]
+
+    def racy_read(self_store):
+        path = self_store.path
+        if (
+            not fired[0]
+            and path.parent == doomed
+            and path.name == "journal.json"
+        ):
+            fired[0] = True
+            shutil.rmtree(doomed)
+            return None
+        return real_read(self_store)
+
+    monkeypatch.setattr(
+        commit_module.AtomicJsonRecordStore,
+        "read_or_none",
+        racy_read,
+    )
+
+    ProjectCommitBoundary._assert_no_pending_publication(  # noqa: SLF001
+        runtime_root=project_root / "runtime",
+        current_transaction_id="txn-live",
+        authority_etag="sha256:whatever",
+    )
+
+    assert fired[0], "the scan never hit the doomed journal -- test broken"
+    assert keep.is_dir()
+    assert not doomed.exists()
+
+    # A genuinely damaged directory (present, journal missing) still
+    # raises: the fix must not swallow the real integrity failure.
+    corrupt = transactions_root / "txn-corrupt-dir"
+    corrupt.mkdir()
+    monkeypatch.undo()
+    with pytest.raises(PendingProjectRecoveryError, match="has no journal"):
+        ProjectCommitBoundary._assert_no_pending_publication(  # noqa: SLF001
+            runtime_root=project_root / "runtime",
+            current_transaction_id="txn-live",
+            authority_etag="sha256:whatever",
+        )
+    assert corrupt.is_dir()

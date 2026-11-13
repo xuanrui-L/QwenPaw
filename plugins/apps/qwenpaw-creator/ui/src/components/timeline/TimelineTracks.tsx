@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import type { ComponentType, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
@@ -74,6 +75,13 @@ interface TimelineTracksProps {
   selectedElementId: string | null;
   playbackStates: Map<string, ElementPlaybackStatus>;
   agentWorking: boolean;
+  /**
+   * DOM subtree that owns this canvas's ``--creator-playhead-frac``.
+   * See ``TimelineLivePreview``'s prop of the same name -- the compare
+   * view writes from two rAF clocks, and publishing on documentElement
+   * made the second Canvas stomp the first (review #243 r4548690168).
+   */
+  playheadScopeRef?: RefObject<HTMLElement | null>;
   onPlayheadChange: (tick: number) => void;
   onSelectElement: (elementId: string) => void;
   /**
@@ -161,6 +169,7 @@ export default function TimelineTracks({
   selectedElementId,
   playbackStates,
   agentWorking,
+  playheadScopeRef,
   onPlayheadChange,
   onSelectElement,
   onActiveElementIdsChange,
@@ -752,13 +761,17 @@ export default function TimelineTracks({
 
   // Scrubbing and paused seeks arrive through React state while the rAF clock
   // writes this same variable every frame. Both paths publish the same value,
-  // so the playhead can never disagree with the committed tick.
+  // so the playhead can never disagree with the committed tick. The write is
+  // scoped to this canvas's DOM subtree (falling back to documentElement for
+  // a test that mounts the tracks alone), so a sibling Canvas with a
+  // different durationTick cannot stomp this playhead in a compare view
+  // (review #243 r4548690168).
   useEffect(() => {
-    document.documentElement.style.setProperty(
+    (playheadScopeRef?.current ?? document.documentElement).style.setProperty(
       PLAYHEAD_FRACTION_VARIABLE,
       playheadFraction.toFixed(6),
     );
-  }, [playheadFraction]);
+  }, [playheadFraction, playheadScopeRef]);
 
   // Ruler ticks and grid lines depend only on the zoom/duration-derived tick
   // list, not on the playhead or drag state. Memoizing the elements keeps React

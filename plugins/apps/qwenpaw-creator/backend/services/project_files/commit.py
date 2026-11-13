@@ -1185,6 +1185,22 @@ class ProjectCommitBoundary:
             )
             journal = journal_store.read_or_none()
             if journal is None:
+                # Review #243 r4548690102: the GC removes a transaction
+                # directory with ``shutil.rmtree`` without holding the
+                # project-commit-order lock, so the whole directory can
+                # disappear between ``list_transaction_ids`` and the
+                # journal read below. That is not an integrity failure;
+                # it just means the sweep reclaimed a settled history
+                # while this scan was still looking at the previous
+                # listing. Only raise when the directory is still on
+                # disk and the journal inside it is genuinely missing.
+                # The stale ``directory_count`` in the cached index
+                # costs the next commit one more full scan, not
+                # correctness.
+                try:
+                    entry.lstat()
+                except FileNotFoundError:
+                    continue
                 raise PendingProjectRecoveryError(
                     f"Runtime transaction has no journal: {name}",
                 )

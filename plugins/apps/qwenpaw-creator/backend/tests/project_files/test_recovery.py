@@ -51,7 +51,6 @@ from .conftest import (
 )
 from .test_audio_layering import _audio_element, _project_raw
 
-
 pytestmark = pytest.mark.unit
 
 
@@ -1044,6 +1043,49 @@ def test_the_ledger_can_be_switched_off(tmp_path, monkeypatch):
     recover(store)
 
     assert calls, "with the ledger off every boot audits in full"
+
+
+def test_a_missing_runtime_state_invalidates_the_ledger(tmp_path, monkeypatch):
+    """The ledger must notice when a Runtime file the audit read disappears.
+
+    Review #243 r4548690109: the fingerprint used to cover only the seven
+    transaction-directory files, but the cached ALREADY_FINALIZED conclusion
+    is derived from ``state.json`` and the aggregate ``change-rounds/...
+    /round.json`` as well. A crash that deleted those Runtime facts left
+    every later boot hitting the ledger and skipping the repair branch
+    that would have rebuilt them (turning into REPAIRED_FINALIZED_RUNTIME
+    on a cold scan). Losing state.json or the aggregate round now changes
+    the fingerprint, so the audit re-runs instead of reporting the old
+    verdict.
+    """
+
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
+    store = _finalized_store(tmp_path)
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+    recover(store)  # build the ledger
+    calls.clear()
+
+    # Sanity check: without damage the second boot is a cache hit.
+    recover(store)
+    assert not calls
+    calls.clear()
+
+    # Simulate a crash that wiped runtime/state.json after the audit
+    # finished. The transaction directory is untouched, so the old
+    # fingerprint would keep matching and the ledger would keep saying
+    # ALREADY_FINALIZED while a real scan would report
+    # REPAIRED_FINALIZED_RUNTIME.
+    runtime_state = runtime_root(store) / "state.json"
+    runtime_state.unlink()
+
+    report = recover(store)
+
+    assert calls, (
+        "deleting state.json must invalidate the cached verdict; the "
+        "fingerprint still only sees the transaction directory"
+    )
+    assert report.outcomes[0].action is not None
 
 
 def test_a_terminal_entry_is_decided_without_its_snapshots(
