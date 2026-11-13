@@ -16,6 +16,7 @@ import type {
   UserSubtitleStyle,
 } from "@/contracts/creator";
 import { CAPTION_ENTRANCE_CHOICES } from "./SubtitleAnimationControls";
+import { FONT_PREVIEW_STACKS } from "./SubtitleStyleControls";
 
 /**
  * Preview parameters of one subtitle style pack, exactly as the backend's
@@ -425,9 +426,18 @@ export function SubtitleTemplatePicker({
         );
         const cardBgOpacity = entry.cardStyle?.backgroundOpacity ?? null;
         const plate = plateWithOpacity(spec.plate, cardBgOpacity);
+        // Colour, size, outline and plate already speak the draft; the face
+        // was the one control still painted from the pack, so picking 宋体
+        // changed the film but not the card.  Auto keeps the pack's own face,
+        // exactly what the renderer does for a null/default pick.
+        const pickedFamily = entry.cardStyle?.fontFamily ?? null;
+        const cardFontFamily =
+          pickedFamily && FONT_PREVIEW_STACKS[pickedFamily]
+            ? FONT_PREVIEW_STACKS[pickedFamily]
+            : spec.fontFamily;
         const wordsStyle: CSSProperties = {
           color: cardColour,
-          fontFamily: spec.fontFamily,
+          fontFamily: cardFontFamily,
           fontSize: `${(15 * cardFontScale).toFixed(1)}px`,
           fontWeight: spec.fontWeight,
           lineHeight: spec.lineHeight,
@@ -446,9 +456,9 @@ export function SubtitleTemplatePicker({
             (ENTRANCE_ANIMATION[spec.entrance] ?? "capAppear .14s linear both") +
             (spec.loop ? ",capBreath 9.6s ease-in-out .45s infinite" : ""),
         };
-        const family = spec.fontFamily.includes("Songti")
+        const family = cardFontFamily.includes("Songti")
           ? t("home.subtitlePreviewFamilySerif")
-          : spec.fontFamily.includes("Kaiti")
+          : cardFontFamily.includes("Kaiti")
             ? t("home.subtitlePreviewFamilyHand")
             : t("home.subtitlePreviewFamilySans");
         // Name the pack's numeric weight the way 字号 names its size, so the

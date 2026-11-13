@@ -38,7 +38,7 @@ const FONT_CHOICES: Array<{ id: SubtitleFontFamily | null; key: string }> = [
  * and the preview layer's stacks; the auto face (``null``) inherits the UI
  * sans, exactly what the renderer auto-detects.
  */
-const FONT_PREVIEW_STACKS: Record<string, string> = {
+export const FONT_PREVIEW_STACKS: Record<string, string> = {
   song: '"Songti SC", "SimSun", "Noto Serif CJK SC", serif',
   hei: '"PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif',
   kai: '"Kaiti SC", "KaiTi", "STKaiti", "Noto Serif CJK SC", serif',
