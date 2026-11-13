@@ -108,8 +108,10 @@ function browserTree(props: BrowserState, onInstalled: () => void) {
 
 function renderBrowser(installedNames: string[] = []) {
   const onInstalled = vi.fn();
-  render(browserTree({ open: true, installedNames }, onInstalled));
-  return { onInstalled };
+  const { unmount } = render(
+    browserTree({ open: true, installedNames }, onInstalled),
+  );
+  return { onInstalled, unmount };
 }
 
 /**
@@ -122,9 +124,10 @@ function renderControlled(installedNames: string[] = []) {
   // Accumulate, so a later update builds on what the previous one set instead
   // of falling back to the first render's props.
   let state: BrowserState = { open: true, installedNames };
-  const { rerender } = render(browserTree(state, onInstalled));
+  const { rerender, unmount } = render(browserTree(state, onInstalled));
   return {
     onInstalled,
+    unmount,
     update(next: Partial<BrowserState>) {
       state = { ...state, ...next };
       rerender(browserTree(state, onInstalled));
@@ -196,6 +199,9 @@ describe("SkillMarketBrowser paging", () => {
     searchMarketMock.mockReset();
     importUrlMock.mockReset();
     listProvidersMock.mockReset();
+    // The install identity outlives the component on purpose, so every test
+    // has to start from an empty store or the previous one would leak in.
+    window.localStorage.clear();
     listProvidersMock.mockResolvedValue({ providers: [provider("QwenPaw")] });
     // Every test starts with the browse request the modal fires on open.
     searchMarketMock.mockImplementation((query: string, page: number) =>
@@ -424,6 +430,49 @@ describe("SkillMarketBrowser paging", () => {
 
     expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(1);
     expect(buttonsByLabel(zh.skills.marketInstalled)).toHaveLength(0);
+  });
+
+  it("keeps the install identity across a pane remount", async () => {
+    // Settings renders the pane conditionally, so switching to another pane
+    // unmounts this whole tree and drops every piece of component state.
+    importUrlMock.mockResolvedValue(installResult("my-skill", "My Skill"));
+    const first = renderControlled();
+    await submitSearch("alpha");
+    await act(async () => {
+      fireEvent.click(installButton());
+    });
+    first.unmount();
+
+    // A fresh mount that already knows the folded name, exactly what the pane
+    // would pass after refetching its library.
+    renderBrowser(["my-skill"]);
+    await submitSearch("alpha");
+
+    expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(0);
+    expect(buttonByLabel(zh.skills.marketInstalled)).toBeDisabled();
+  });
+
+  it("frees the row after a delete and marks it again on reinstall", async () => {
+    importUrlMock.mockResolvedValue(installResult("my-skill", "My Skill"));
+    const first = renderControlled();
+    await submitSearch("alpha");
+    await act(async () => {
+      fireEvent.click(installButton());
+    });
+    first.unmount();
+
+    // The skill was deleted while the pane was gone: the stored identity must
+    // not keep the row blocked forever.
+    renderBrowser([]);
+    await submitSearch("alpha");
+    expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(1);
+
+    await act(async () => {
+      fireEvent.click(installButton());
+    });
+    expect(importUrlMock).toHaveBeenCalledTimes(2);
+    expect(buttonsByLabel(zh.skills.marketInstall)).toHaveLength(0);
+    expect(buttonByLabel(zh.skills.marketInstalled)).toBeDisabled();
   });
 
   it("names the unusable markets together with the host's reason", async () => {
