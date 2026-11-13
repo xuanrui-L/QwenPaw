@@ -846,3 +846,109 @@ def test_a_directory_removed_during_the_commit_scan_is_skipped_not_raised(
             authority_etag="sha256:whatever",
         )
     assert corrupt.is_dir()
+
+
+def test_gc_reclaims_through_an_atomic_rename_not_a_partial_rmtree(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The scan-safe fix lives in the GC, not only in the scan.
+
+    Review #243 follow-up (r4548690102): the scan-side ``lstat`` guard
+    only covered one timing (directory already gone). ``shutil.rmtree``
+    is not atomic -- it unlinks ``journal.json`` first and rmdirs the
+    parent last -- so a scan could still catch a legitimate "directory
+    present, journal missing" intermediate state and raise
+    ``PendingProjectRecoveryError`` on what was really an in-progress
+    reclaim. The GC now moves the transaction to a dot-prefixed
+    tombstone with ``os.rename``, which is a single atomic operation on
+    the same filesystem; the original path either fully exists or does
+    not, never half-deleted. ``list_transaction_ids`` skips leading-
+    dot entries by its existing rule, so the tombstone is invisible to
+    the scan throughout.
+    """
+
+    project_root = _managed(tmp_path)
+    doomed = _transaction(
+        project_root,
+        "txn-doomed",
+        "RUNTIME_FINALIZED",
+        age_days=2,
+    )
+    keep = _transaction(
+        project_root,
+        "txn-keep",
+        "RUNTIME_FINALIZED",
+        age_days=3,
+    )
+    transactions_root = project_root / "runtime" / "transactions"
+
+    # The commit scan parses journals against ``ProjectCommitJournal``,
+    # which the existing ``_transaction`` helper does not fully populate.
+    # Rewrite them with every required field so the scan probe below can
+    # actually get through ``_assert_no_pending_publication``.
+    def _rewrite_journal(directory: Path, name: str) -> None:
+        moment = (BASELINE + timedelta(days=1)).isoformat()
+        (directory / "journal.json").write_text(
+            json.dumps(
+                {
+                    "transaction_id": name,
+                    "project_id": "project-1",
+                    "state": "RUNTIME_FINALIZED",
+                    "base_etag": "sha256:base",
+                    "candidate_etag": "sha256:candidate",
+                    "temp_path": f"runtime/transactions/{name}/tmp.json",
+                    "touched_pointers": [],
+                    "created_at": moment,
+                    "updated_at": moment,
+                },
+            ),
+            encoding="utf-8",
+        )
+
+    _rewrite_journal(doomed, "txn-doomed")
+    _rewrite_journal(keep, "txn-keep")
+
+    # Spy ``os.rename`` and, at the moment GC would rename the doomed
+    # transaction to a tombstone, run a scan through the same
+    # directory state. The doomed name is atomically gone -- the scan
+    # sees ``FileNotFoundError`` on ``lstat`` -- and the tombstone
+    # prefix hides it from ``list_transaction_ids`` too.
+    from services.project_files import transaction_gc as gc_module
+    from services.project_files.commit import ProjectCommitBoundary
+
+    real_rename = gc_module.os.rename
+    probe = [None]
+
+    def spy_rename(src, dst):
+        result = real_rename(src, dst)
+        if src == doomed and probe[0] is None:
+            probe[0] = transactions_root
+            # Directory is fully gone from the original path at this
+            # instant; a scan running here must not raise.
+            ProjectCommitBoundary._assert_no_pending_publication(  # noqa
+                runtime_root=project_root / "runtime",
+                current_transaction_id="txn-live",
+                authority_etag="sha256:whatever",
+            )
+        return result
+
+    monkeypatch.setattr(gc_module.os, "rename", spy_rename)
+
+    removed, _bytes = collect_project_transactions(
+        project_root,
+        retention=1,
+    )
+
+    assert probe[0] == transactions_root, (
+        "the scan probe never fired -- GC did not take the atomic "
+        "rename path the fix promises"
+    )
+    assert removed == 1
+    assert not doomed.exists()
+    assert keep.is_dir()
+    # No lingering tombstone: the sweep's rmtree followed the rename.
+    lingering = [
+        p for p in transactions_root.iterdir() if p.name.startswith(".")
+    ]
+    assert not lingering

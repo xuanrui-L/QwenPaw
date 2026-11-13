@@ -39,6 +39,7 @@ from pathlib import Path
 import shutil
 import threading
 from typing import Any
+from uuid import uuid4
 
 from services.media_files.task_scratch import (
     SweepBudget,
@@ -243,6 +244,47 @@ def surplus_transaction_bytes(
     return sum(size for _mtime_value, _entry, size in surplus)
 
 
+def _atomic_reclaim(entry: Path) -> bool:
+    """Move one transaction directory to a hidden tombstone, then delete.
+
+    The rename is atomic within the same filesystem, so a concurrent
+    commit scan sees either the original directory intact or
+    ``FileNotFoundError`` on ``lstat`` and never the intermediate
+    ``shutil.rmtree`` state where ``journal.json`` has already been
+    unlinked while the parent directory still exists. The tombstone
+    name starts with a dot so ``list_transaction_ids`` and the surplus
+    enumerator both skip it by their existing rule. A cross-device
+    rename (OSError EXDEV) falls back to a direct rmtree, which keeps
+    the older behaviour as a last resort.
+    """
+
+    tombstone = entry.with_name(f".deleted-{entry.name}-{uuid4().hex}")
+    try:
+        os.rename(entry, tombstone)
+    except OSError as exc:
+        logger.warning(
+            "transaction directory could not be renamed to a tombstone "
+            "(%s); falling back to in-place removal: %s",
+            exc,
+            entry,
+        )
+        shutil.rmtree(entry, ignore_errors=True)
+        if entry.exists():
+            logger.warning("transaction directory survived removal: %s", entry)
+            return False
+        return True
+    shutil.rmtree(tombstone, ignore_errors=True)
+    if tombstone.exists():
+        # The rename already moved the tree out of the scan's view, so a
+        # surviving tombstone is a disk cost, not a correctness one; the
+        # next sweep picks it up again.
+        logger.warning(
+            "transaction tombstone cleanup deferred to next sweep: %s",
+            tombstone,
+        )
+    return True
+
+
 def collect_project_transactions(
     project_root: Path,
     *,
@@ -297,14 +339,23 @@ def collect_project_transactions(
     for _mtime_value, entry, size in surplus:
         if budget is not None and not budget.may_spend(size):
             break
-        shutil.rmtree(entry, ignore_errors=True)
-        if entry.exists():
-            logger.warning("transaction directory survived removal: %s", entry)
+        # ``shutil.rmtree`` is not atomic: the journal disappears first and
+        # the directory is rmdired last, so a commit scan that already
+        # captured this name in ``list_transaction_ids`` can see
+        # "directory still here, journal already gone" and raise a false
+        # ``PendingProjectRecoveryError`` on the intermediate state
+        # (review #243 r4548690102 follow-up). Renaming to a
+        # dot-prefixed tombstone is a single atomic operation, so the
+        # scan sees either the fully intact transaction or nothing at
+        # all -- ``list_transaction_ids`` skips leading-dot entries and
+        # ``entry.lstat`` on the original name raises FileNotFoundError.
+        # Then, and only then, do we rmtree the moved tree.
+        if not _atomic_reclaim(entry):
             continue
-        removed += 1
-        removed_bytes += size
         if budget is not None:
             budget.charge(size)
+        removed += 1
+        removed_bytes += size
     if removed:
         # The listing the commit path cached no longer matches the directory.
         drop_transaction_index(transactions_root)

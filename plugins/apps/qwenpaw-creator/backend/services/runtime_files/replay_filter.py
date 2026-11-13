@@ -46,12 +46,25 @@ REPLAY_SKIP_TYPES = frozenset(
 #: Byte markers of those types, matched on the raw line before any parsing.
 #: Canonical JSON writes no space after the colon; both spellings are matched
 #: so a future encoder change degrades to "parse it", never to "keep it".
+#:
+#: Anchored to the outer record's key ordering (``event_type`` is followed
+#: immediately by ``message_id`` because both are sort-keys on
+#: SessionEventRecord), not the bare ``"event_type":"<type>"`` substring.
+#: A tool-completed envelope whose ``result`` field happens to contain a
+#: legitimate JSON blob like ``{"event_type":"agent.message_delta"}``
+#: used to match the loose pattern, so the byte classifier threw away the
+#: whole lifecycle record and the persistent tool state a fresh view
+#: rebuilds its ToolCallCard from never reached the client (review #243
+#: r4548690038). Nesting a fake ``message_id`` after a fake event_type is
+#: theoretically possible but requires an attacker who already knows the
+#: envelope schema; the parse-time filter still runs on non-matching
+#: lines, so a false negative costs bytes, never correctness.
 REPLAY_SKIP_LINE_MARKERS: tuple[bytes, ...] = tuple(
     pattern
     for name in sorted(REPLAY_SKIP_TYPES)
     for pattern in (
-        f'"event_type":"{name}"'.encode("ascii"),
-        f'"event_type": "{name}"'.encode("ascii"),
+        f'"event_type":"{name}","message_id":'.encode("ascii"),
+        f'"event_type": "{name}", "message_id":'.encode("ascii"),
     )
 )
 

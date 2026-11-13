@@ -422,6 +422,28 @@ def kill_group(
             return
 
 
+def _close_pipes(process: subprocess.Popen) -> None:
+    """Force-close the child's stdout/stderr pipes.
+
+    A grandchild that inherited the pipe (Windows: kill_group cannot reach
+    it because there is no process group; POSIX: same when the grandchild
+    outlived the group) keeps ``communicate()`` blocked even after the
+    direct child is reaped. Closing the read ends locally unblocks the
+    wait: the reader sees EOF regardless of who is still holding the write
+    end open. Bounded follow-up ``communicate()`` plus this close is what
+    keeps the media_gate permit from being held forever (review #243
+    r4548690072).
+    """
+
+    for stream in (process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
 def run(
     command: Sequence[str | os.PathLike[str]],
     *,
@@ -450,7 +472,25 @@ def run(
                 stdout, stderr = process.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
                 kill_group(process)
-                stdout, stderr = process.communicate()
+                # ``kill_group`` has already sent the strongest portable
+                # signal (SIGKILL on POSIX, ``Popen.kill`` on Windows) and
+                # bounded its own wait; a follow-up ``communicate()``
+                # without a timeout still blocks forever on a grandchild
+                # that inherited the pipe and refuses to exit -- Windows
+                # has no process group to reach it, and POSIX hits the
+                # same thing whenever the child used ``start_new_session``
+                # or the grandchild outlived the group. Bounded, and if
+                # even the bounded wait expires we surface the timeout
+                # with whatever partial output we have and move on so the
+                # permit is released (review #243 r4548690072).
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=_KILL_GRACE_SECONDS,
+                    )
+                except subprocess.TimeoutExpired as follow_up:
+                    stdout = follow_up.output
+                    stderr = follow_up.stderr
+                    _close_pipes(process)
                 raise subprocess.TimeoutExpired(
                     process.args,
                     timeout,

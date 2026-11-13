@@ -139,6 +139,72 @@ def test_timeout_takes_the_whole_group_down(
     )
 
 
+def test_timeout_on_a_platform_without_process_groups_still_releases_the_slot(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-POSIX ``kill_group`` cannot reach grandchildren.
+
+    Review #243 r4548690072: on the non-POSIX branch (Windows, or any
+    environment where ``setpgid`` is unavailable) ``kill_group`` falls
+    back to ``terminate`` + ``kill`` on the direct child. A grandchild
+    that inherited the pipe stays alive, and ``run()`` used to follow
+    with an unbounded ``process.communicate()`` -- the permit never
+    released. The follow-up wait is now bounded and the pipes are
+    closed explicitly on the second timeout, so the sweep hands the
+    slot back within ``_KILL_GRACE_SECONDS`` regardless of the
+    descendant's lifetime.
+
+    The branch is exercised by forcing ``_GROUPS_SUPPORTED`` to False
+    under POSIX -- same code path Windows takes, no cross-platform
+    test skips needed.
+    """
+
+    monkeypatch.setenv(media_gate.ENV_SLOTS, "1")
+    media_gate.reset_gate()
+    monkeypatch.setattr(media_gate, "_GROUPS_SUPPORTED", False)
+    marker = tmp_path / "grandchild.pid"
+    # Child spawns a grandchild that inherits stdout/stderr and sleeps;
+    # killing the direct child leaves the grandchild holding the write
+    # end, exactly the state that would block an unbounded communicate().
+    body = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+        ")\n"
+        "open(sys.argv[1], 'w', encoding='utf-8').write(str(child.pid))\n"
+        "time.sleep(30)\n"
+    )
+    start = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        media_gate.run(
+            _child_script(body) + [str(marker)],
+            timeout=0.5,
+            check=False,
+            capture_output=True,
+        )
+    elapsed = time.monotonic() - start
+
+    # The permit must be free again immediately; a lingering slot here is
+    # what starved the whole gate under MIN_SLOTS=1.
+    assert media_gate.active_count() == 0
+    # kill_group's terminate + kill ladder plus the bounded follow-up
+    # communicate all fit inside one grace window each; a real hang
+    # would blow well past 30s.
+    assert elapsed < media_gate._KILL_GRACE_SECONDS * 4, (
+        f"non-POSIX timeout path took {elapsed:.2f}s -- the follow-up "
+        "wait was not bounded"
+    )
+    # Reap the grandchild the child spawned so it does not linger past
+    # the assertion window. It has no group to reach on this branch,
+    # so kill it directly.
+    grandchild = int(marker.read_text(encoding="utf-8"))
+    try:
+        os.kill(grandchild, 15)
+    except ProcessLookupError:
+        pass
+
+
 def test_slot_count_prefers_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,9 +323,11 @@ def test_cgroup_used_mb_excludes_page_cache(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         media_gate,
         "_read_cgroup_text",
-        lambda path: current.read_text(encoding="ascii")
-        if path.endswith("memory.current")
-        else stat.read_text(encoding="ascii"),
+        lambda path: (
+            current.read_text(encoding="ascii")
+            if path.endswith("memory.current")
+            else stat.read_text(encoding="ascii")
+        ),
     )
     # 6000 MiB used minus 4000 MiB reclaimable cache.
     assert media_gate.cgroup_used_mb() == pytest.approx(2000.0)

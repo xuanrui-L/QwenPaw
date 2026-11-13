@@ -12,6 +12,7 @@ from services.runtime_files.replay_filter import (
     REPLAY_SKIP_TYPES,
     filter_replay_events,
     replay_filter_enabled,
+    replay_noise_line,
     replay_result_max_bytes,
 )
 
@@ -55,7 +56,9 @@ def test_in_flight_run_keeps_its_deltas() -> None:
     """An unfinished message has no completed event: its text exists only as
     deltas, and the 「正在思考」 state reads them too."""
     events = [
-        _event(1, "agent.message_delta", {"runId": "run-live", "delta": "前半"}),
+        _event(
+            1, "agent.message_delta", {"runId": "run-live", "delta": "前半"}
+        ),
         _event(2, "agent.message_delta", {"runId": "run-done", "delta": "别"}),
     ]
     kept = filter_replay_events(events, active_run_ids={"run-live"})
@@ -149,3 +152,78 @@ def test_only_delta_types_are_in_the_skip_set() -> None:
         "agent.message_delta",
         "subagent.message_delta",
     }
+
+
+def test_byte_classifier_ignores_a_nested_event_type_in_a_result() -> None:
+    """A lifecycle record whose result embeds a delta JSON is not noise.
+
+    Review #243 r4548690038: the byte classifier used to substring-match
+    ``"event_type":"agent.message_delta"`` anywhere on the line, so a
+    ``subagent.tool_completed`` envelope whose ``result`` field carried a
+    legitimate JSON blob with that same key pair was dropped as noise
+    -- losing the persistent tool state that a fresh view rebuilds its
+    ToolCallCard from. The marker is now anchored to the outer record's
+    canonical key ordering (``event_type`` immediately followed by
+    ``message_id``), which a nested result cannot reproduce.
+    """
+
+    outer_lifecycle = json.dumps(
+        {
+            "record": {
+                "actor": "file_agent_runtime",
+                "created_at": "2026-11-13T00:00:00+00:00",
+                "creator_session_id": SESSION,
+                "event_id": "event-2",
+                "event_seq": 2,
+                "event_type": "subagent.tool_completed",
+                "message_id": None,
+                "payload": {
+                    "runId": "run-1",
+                    "toolCallId": "call-1",
+                    # A result that legitimately carries the very bytes
+                    # the loose marker used to match anywhere on the line.
+                    "result": json.dumps(
+                        {
+                            "event_type": "agent.message_delta",
+                            "delta": "nested",
+                        },
+                    ),
+                },
+                "project_id": PROJECT,
+                "round_id": None,
+            },
+            "seq": 2,
+            "written_at": "2026-11-13T00:00:00+00:00",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert replay_noise_line(outer_lifecycle) is False, (
+        "a tool_completed whose result embeds an event_type JSON must "
+        "not be classified as streaming noise -- the whole lifecycle "
+        "record would disappear from the replay"
+    )
+
+    # An actual outer delta is still classified as noise.
+    outer_delta = json.dumps(
+        {
+            "record": {
+                "actor": "file_agent_runtime",
+                "created_at": "2026-11-13T00:00:00+00:00",
+                "creator_session_id": SESSION,
+                "event_id": "event-3",
+                "event_seq": 3,
+                "event_type": "agent.message_delta",
+                "message_id": "msg-1",
+                "payload": {"runId": "run-1", "delta": "hi"},
+                "project_id": PROJECT,
+                "round_id": None,
+            },
+            "seq": 3,
+            "written_at": "2026-11-13T00:00:00+00:00",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert replay_noise_line(outer_delta) is True
