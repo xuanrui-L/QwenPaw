@@ -3384,6 +3384,13 @@ class FileCreatorAgentRuntime:
                     external_skills=render_external_skills_context(
                         external_skills,
                     ),
+                    # Same source as the caption renderer: the delegator
+                    # describes the style the final cut will actually draw.
+                    subtitle_settings=(
+                        snapshot_project.settings
+                        if snapshot_project is not None
+                        else None
+                    ),
                 ),
             },
             {

@@ -6,6 +6,8 @@ import type {
   CreatorContentPart,
   CreatorScenario,
   ModelConfigData,
+  SubtitleAnimationPolicy,
+  SubtitleStyle,
 } from "@/contracts/creator";
 import {
   createAssetImport,
@@ -446,6 +448,24 @@ export function useProjectLaunch(options?: {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(
     null,
   );
+  // Captions are opt-in: a new project starts without them so the first cut
+  // is never surprised by burned-in text the user did not ask for.
+  const [subtitlePolicy, setSubtitlePolicy] = useState<"auto" | "on" | "off">(
+    "off",
+  );
+  // JianYing-like subtitle style pack; null keeps the AI on smart recommend.
+  const [subtitleTemplate, setSubtitleTemplate] = useState<string | null>(
+    null,
+  );
+  // Standard subtitle-bar overrides (colour / font size / outline); null
+  // keeps every renderer default.
+  const [subtitleStyle, setSubtitleStyle] = useState<SubtitleStyle | null>(
+    null,
+  );
+  // Project-level caption motion default (entrance / exit / loop); null
+  // leaves every decision to the selected style pack.
+  const [subtitleAnimation, setSubtitleAnimation] =
+    useState<SubtitleAnimationPolicy | null>(null);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>(() =>
     (initialValues?.sourceUrls ?? []).map((url) => ({
       kind: "url" as const,
@@ -662,6 +682,10 @@ export function useProjectLaunch(options?: {
             ? contentType
             : interactiveContentTypeFromBrief(projectDescription),
         templateId: selectedTemplateId ?? undefined,
+        subtitlePolicy,
+        subtitleTemplate: subtitleTemplate ?? undefined,
+        subtitleStyle: subtitleStyle ?? undefined,
+        subtitleAnimation: subtitleAnimation ?? undefined,
         // With no assets, let Project creation persist the first Goal and
         // message atomically.  This avoids an observable IDLE Project between
         // navigation and the follow-up /messages request.
@@ -756,6 +780,14 @@ export function useProjectLaunch(options?: {
     setAspectRatio,
     selectedTemplateId,
     setSelectedTemplateId,
+    subtitlePolicy,
+    setSubtitlePolicy,
+    subtitleTemplate,
+    setSubtitleTemplate,
+    subtitleStyle,
+    setSubtitleStyle,
+    subtitleAnimation,
+    setSubtitleAnimation,
     attachments,
     addFiles,
     addUrl,
