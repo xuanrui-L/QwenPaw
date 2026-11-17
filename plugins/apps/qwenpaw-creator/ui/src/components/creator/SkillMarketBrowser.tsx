@@ -141,6 +141,16 @@ export default function SkillMarketBrowser({
   const [committedProviders, setCommittedProviders] = useState<
     string[] | undefined
   >(undefined);
+  /**
+   * The term of the most recent *submitted* search, recorded when the user
+   * commits it rather than when the response lands. ``committedQuery`` cannot
+   * fill this role: it only advances on success, so a source-filter change
+   * landing while a newer search is still in flight would re-run the
+   * superseded term, bump the sequence guard, and have that guard discard the
+   * newer response -- leaving the input box and the rows describing different
+   * terms with no way back.
+   */
+  const submittedQueryRef = useRef("");
   const searchSeqRef = useRef(0);
   const resultsRef = useRef<MarketSkillResult[]>([]);
   const inputRef = useRef<InputRef>(null);
@@ -277,6 +287,7 @@ export default function SkillMarketBrowser({
   );
 
   const handleSearch = useCallback(() => {
+    submittedQueryRef.current = query;
     void doSearch(query, 1, selectedProviders);
   }, [query, doSearch, selectedProviders]);
 
@@ -284,15 +295,18 @@ export default function SkillMarketBrowser({
     void doSearch(committedQuery, page + 1, committedProviders);
   }, [committedQuery, page, committedProviders, doSearch]);
 
-  // Narrowing the source picker re-runs the committed term against the new
-  // subset from page 1; clearing it means "every reachable market" again.
+  // Narrowing the source picker re-runs the last submitted term against the
+  // new subset from page 1; clearing it means "every reachable market" again.
+  // The submitted term rather than ``committedQuery``: the latter still names
+  // the previous search while a newer one is in flight, and re-running it
+  // would outrank that search in the sequence guard and drop its response.
   const handleProvidersChange = useCallback(
     (keys: string[]) => {
       const next = keys.length > 0 ? keys : undefined;
       setSelectedProviders(next);
-      void doSearch(committedQuery, 1, next);
+      void doSearch(submittedQueryRef.current, 1, next);
     },
-    [committedQuery, doSearch],
+    [doSearch],
   );
 
   const handleInstall = useCallback(
@@ -348,6 +362,7 @@ export default function SkillMarketBrowser({
     if (open) {
       setQuery("");
       setCommittedQuery("");
+      submittedQueryRef.current = "";
       setResults([]);
       resultsRef.current = [];
       setSearched(false);

@@ -523,9 +523,7 @@ describe("SkillMarketBrowser paging", () => {
     const clawhub = providerOption("ClawHub");
     expect(clawhub.className).toContain("ant-select-item-option-disabled");
     const qwenpaw = providerOption("QwenPaw");
-    expect(qwenpaw.className).not.toContain(
-      "ant-select-item-option-disabled",
-    );
+    expect(qwenpaw.className).not.toContain("ant-select-item-option-disabled");
 
     // The host's AK/SK reason rides on a hover tooltip over the disabled
     // option (console-market style), not inline text and not a banner.
@@ -552,13 +550,72 @@ describe("SkillMarketBrowser paging", () => {
       fireEvent.click(providerOption("ClawHub"));
     });
 
-    expect(searchMarketMock).toHaveBeenLastCalledWith(
+    expect(searchMarketMock).toHaveBeenLastCalledWith("", 1, PAGE_SIZE, LANG, [
+      "clawhub",
+    ]);
+  });
+
+  it("re-runs the newest submitted term when the source filter changes mid-flight", async () => {
+    listProvidersMock.mockResolvedValue({
+      providers: [provider("QwenPaw"), provider("ClawHub")],
+    });
+    // alpha lands at once while beta is held open, so the filter change can
+    // land during a submitted search. Both beta calls share the gate, hence
+    // releasing it settles the stale one first and the sequence guard has to
+    // be what drops it.
+    let releaseBeta: () => void = () => {};
+    const betaGate = new Promise<void>((resolve) => {
+      releaseBeta = resolve;
+    });
+    searchMarketMock.mockImplementation((query: string, page: number) => {
+      const items = [marketItem(`p${page}-${query || "browse"}`)];
+      return query === "beta"
+        ? betaGate.then(() => searchPage(items, true))
+        : searchPage(items, true);
+    });
+
+    renderBrowser();
+    await waitFor(() => expect(listProvidersMock).toHaveBeenCalled());
+
+    await openProviderPicker();
+    await act(async () => {
+      fireEvent.click(providerOption("ClawHub"));
+    });
+    await submitSearch("alpha");
+    expect(screen.getByText("p1-alpha")).toBeVisible();
+
+    // Submit beta, then change the source filter before beta resolves.
+    await typeDraft("beta");
+    await act(async () => {
+      fireEvent.click(buttonByLabel(zh.common.search));
+    });
+    await openProviderPicker();
+    await act(async () => {
+      // Clicking the already-selected market clears the filter.
+      fireEvent.click(providerOption("ClawHub"));
+    });
+
+    // The filter has to re-run the term the user submitted, not the older one
+    // whose response merely happened to land. Reading the call log rather than
+    // the rows is what separates the two: before the fix the last entry here
+    // is "alpha".
+    expect(searchMarketMock.mock.calls.map(([term]) => term)).toEqual([
       "",
-      1,
-      PAGE_SIZE,
-      LANG,
-      ["clawhub"],
-    );
+      "",
+      "alpha",
+      "beta",
+      "beta",
+    ]);
+
+    await act(async () => {
+      releaseBeta();
+    });
+
+    // The stale beta loses the sequence race, so the rows end up matching the
+    // term still sitting in the input box instead of the superseded one.
+    await waitFor(() => expect(screen.getByText("p1-beta")).toBeVisible());
+    expect(searchBox()).toHaveValue("beta");
+    expect(screen.queryByText("p1-alpha")).toBeNull();
   });
 
   it("shows no market warning when every provider is usable", async () => {
