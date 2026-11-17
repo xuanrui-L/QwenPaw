@@ -102,6 +102,7 @@ import AgentWaitHint from "./AgentWaitHint";
 import AgentActivityIndicator from "./AgentActivityIndicator";
 import DecisionTray from "./DecisionTray";
 import FeedbackModal from "@/components/creator/FeedbackModal";
+import ReviewDecisionReconcileToast from "./ReviewDecisionReconcileToast";
 import MentionInput, {
   type MentionInputContent,
   type MentionInputDraft,
@@ -2771,6 +2772,7 @@ export default function AgentDock({
             {/* Inline decision tray: pinned between the chat stream and the live
                 status bar so reviews and production confirmations are handled in place. */}
             <DecisionTray projectId={projectId} />
+            <ReviewDecisionReconcileToast projectId={projectId} />
 
             <div
               data-agent-composer
