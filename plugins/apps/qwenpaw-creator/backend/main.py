@@ -20,6 +20,7 @@ from functools import partial
 from pathlib import Path
 
 from qwenpaw.pawapp import PawApp
+from qwenpaw.utils.io_utils import run_sync_io
 
 logger = logging.getLogger("qwenpaw").getChild("plugin.qwenpaw_creator")
 
@@ -61,6 +62,7 @@ from services.project_files.facade import (  # noqa: E402
     clear_creator_file_service_registry,
     creator_file_services,
     mark_runtime_preparing,
+    preparing_file_services,
 )
 from services.project_files.transaction_gc import (  # noqa: E402
     collect_terminal_transactions,
@@ -332,18 +334,13 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
         # event loop has to keep answering while it runs, and requests that
         # arrive in that window get a 503 instead of queueing behind the same
         # registry lock the recovery holds.
-        mark_runtime_preparing(True)
-        try:
-            services = await asyncio.to_thread(
-                creator_file_services,
-                data_root,
-            )
-        finally:
-            mark_runtime_preparing(False)
-        await asyncio.to_thread(
-            recover_interrupted_source_analysis,
-            services,
-        )
+        with preparing_file_services(data_root):
+            mark_runtime_preparing(True)
+            try:
+                services = await run_sync_io(creator_file_services, data_root)
+            finally:
+                mark_runtime_preparing(False)
+            await run_sync_io(recover_interrupted_source_analysis, services)
         reset_remote_ingest_admission()
         mem_probe.stage("runtime.prepared")
     except (CreatorDataRootError, CreatorBinaryDependencyError) as exc:

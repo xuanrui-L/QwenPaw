@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -13,7 +14,7 @@ from pathlib import Path
 import shutil
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from services.runtime_files.atomic_store import atomic_replace_path
 from services.runtime_files.field_blocks import FieldBlockStore
@@ -855,6 +856,19 @@ def mark_runtime_preparing(preparing: bool) -> None:
 
 def runtime_is_preparing() -> bool:
     return _runtime_preparing
+
+
+@contextmanager
+def preparing_file_services(root: Path) -> Iterator[None]:
+    """Discard this root's registration if startup recovery is interrupted."""
+    try:
+        yield
+    except BaseException:
+        with _registry_lock:
+            services = _registry.pop(root.expanduser().resolve(), None)
+            if services is not None:
+                services.poller.stop()
+        raise
 
 
 def clear_creator_file_service_registry() -> None:
