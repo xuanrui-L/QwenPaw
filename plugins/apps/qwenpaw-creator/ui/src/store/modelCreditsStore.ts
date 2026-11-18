@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { getCreatorSession } from "@/api/creator/sessions";
+import { creatorReadSequence } from "@/api/creator/client";
 import type { CreatorSessionView } from "@/contracts/creator";
 
 /**
@@ -30,8 +31,6 @@ export interface CreditsSource {
   sessionId: string;
   seq?: number;
   at?: string;
-  /** The sequence was observed at the click, rather than at the refusal. */
-  isDismissalCursor?: true;
 }
 
 export interface CreditsNotice {
@@ -58,12 +57,16 @@ interface PendingLegacyDismissal {
 
 // Only an explicit click on an old, unbound notice can have a cursor in flight.
 let pendingLegacyDismissal: PendingLegacyDismissal | null = null;
+let awaitingErrorSnapshot: {
+  notice: CreditsNotice;
+  source: CreditsSource;
+} | null = null;
 
 interface ModelCreditsState {
   notice: CreditsNotice | null;
   recovery: CreditsRecovery | null;
   dismissed: CreditsNotice | null;
-  dismissalVersion: number;
+  lastReadAtDismissal: number;
   markExhausted: (
     projectId: string,
     source?: CreditsSource,
@@ -178,13 +181,14 @@ function atSessionCursor(
   notice: CreditsNotice,
   session: CreatorSessionView,
 ): CreditsNotice {
-  const refusedAt = session.error?.details?.refusedAt;
+  const known =
+    notice.source?.sessionId === session.id ? notice.source : undefined;
+  const refusedAt = known?.at ?? session.error?.details?.refusedAt;
   return {
     ...notice,
     source: {
       sessionId: session.id,
-      seq: session.lastEventSeq,
-      isDismissalCursor: true,
+      seq: Math.max(session.lastEventSeq, known?.seq ?? 0),
       ...(typeof refusedAt === "string" && { at: refusedAt }),
     },
   };
@@ -205,7 +209,7 @@ function afterDismissal(
 export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
   notice: storedNotice(readStored(STORAGE_KEY)),
   ...readHistory(),
-  dismissalVersion: 0,
+  lastReadAtDismissal: -1,
   markExhausted: (projectId, source, live = true) => {
     if (!projectId) return;
     const { notice: previous, recovery, dismissed } = get();
@@ -263,13 +267,15 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
     persist(STORAGE_KEY, notice);
   },
   clear: (readSession) => {
-    const { notice, recovery, dismissed, dismissalVersion } = get();
+    const { notice, recovery, dismissed } = get();
     if (!notice) return;
+    awaitingErrorSnapshot = null;
     const currentSession = readSession?.();
     // Ignore this refusal (or older history) after a manual dismissal. An
     // unrelated project's snapshot and recovery do not acknowledge a new refusal.
     const closing =
-      !hasServerSource(notice) && currentSession?.projectId === notice.projectId
+      currentSession?.projectId === notice.projectId &&
+      (!notice.source || notice.source.sessionId === currentSession.id)
         ? atSessionCursor(notice, currentSession)
         : notice;
     const latest =
@@ -284,7 +290,7 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
       notice: null,
       recovery: nextRecovery,
       dismissed: latest,
-      dismissalVersion: dismissalVersion + 1,
+      lastReadAtDismissal: creatorReadSequence(),
     });
     persist(RECOVERY_KEY, { ...nextRecovery, dismissed: latest });
     persist(STORAGE_KEY, null);
@@ -320,19 +326,21 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
         pendingLegacyDismissal = null;
         // With no cursor, leave old history hidden. A live refusal that still
         // matches the active session error is independent evidence.
-        const active = readSession?.();
         const refusal = pending.refusal;
+        if (!refusal?.live) return;
+        awaitingErrorSnapshot = { notice: latest, source: refusal.source };
+        const active = readSession?.();
         if (
-          !refusal?.live ||
-          active?.projectId !== latest.projectId ||
-          active.id !== refusal.source.sessionId ||
-          active.status !== "ERROR" ||
-          !isQuotaErrorCode(active.error?.code)
-        )
-          return;
-        const at = active.error?.details?.refusedAt;
-        if (typeof at !== "string" || at === refusal.source.at)
-          markCreditsExhausted(latest.projectId, refusal.source, true);
+          active?.projectId === latest.projectId &&
+          active.status === "ERROR" &&
+          isQuotaErrorCode(active.error?.code)
+        ) {
+          const at = active.error?.details?.refusedAt;
+          confirmLiveCreditsError(latest.projectId, {
+            sessionId: active.id,
+            at: typeof at === "string" ? at : undefined,
+          });
+        }
       });
   },
 }));
@@ -350,7 +358,7 @@ export function tracksCreditsHistory(projectId: string): boolean {
     notice?.projectId === projectId ||
     recovery?.clearedNotice === true ||
     (dismissed?.projectId === projectId &&
-      (dismissed.source?.isDismissalCursor === true ||
+      (hasServerSource(dismissed) ||
         pendingLegacyDismissal?.notice === dismissed))
   );
 }
@@ -359,14 +367,11 @@ function canReplayCreditsRefusal(
   projectId: string,
   source: CreditsSource,
 ): boolean {
-  const { notice, recovery, dismissed } = useModelCreditsStore.getState();
+  const { notice, dismissed } = useModelCreditsStore.getState();
   // A current quota-error snapshot may legitimately show the notice again.
   if (notice?.projectId === projectId) return true;
-  const hasClickCursor =
-    dismissed?.projectId === projectId &&
-    dismissed.source?.isDismissalCursor === true;
   return (
-    (hasClickCursor || recovery?.clearedNotice === true) &&
+    tracksCreditsHistory(projectId) &&
     (!dismissed || afterDismissal(dismissed, projectId, source, false))
   );
 }
@@ -417,16 +422,40 @@ export function markCreditsExhausted(
     state.markExhausted(projectId, source, live);
 }
 
+function confirmLiveCreditsError(
+  projectId: string,
+  source: CreditsSource,
+): boolean {
+  const pending = awaitingErrorSnapshot;
+  const state = useModelCreditsStore.getState();
+  if (
+    !pending ||
+    state.dismissed !== pending.notice ||
+    pending.notice.projectId !== projectId ||
+    pending.source.sessionId !== source.sessionId ||
+    (source.at && source.at !== pending.source.at)
+  )
+    return false;
+  awaitingErrorSnapshot = null;
+  state.markExhausted(projectId, pending.source, true);
+  return true;
+}
+
 export function markSnapshotCredits(
   projectId: string,
   source: CreditsSource,
-  reopening = false,
+  snapshot?: { reopening: boolean; status: CreatorSessionView["status"] },
 ): void {
+  if (
+    snapshot?.status === "ERROR" &&
+    confirmLiveCreditsError(projectId, source)
+  )
+    return;
   const { dismissed, markExhausted } = useModelCreditsStore.getState();
   // Reopening adopts the current server error. Background observations of the
   // same refusal must respect a dismissal made while the project is open.
   if (
-    !reopening &&
+    !snapshot?.reopening &&
     dismissed?.projectId === projectId &&
     !afterDismissal(dismissed, projectId, source, false)
   )
@@ -459,7 +488,7 @@ export function clearCreditsAfterCompletion(
     const dismissed =
       state.dismissed &&
       pendingLegacyDismissal?.notice !== state.dismissed &&
-      !state.dismissed.source?.isDismissalCursor &&
+      !hasServerSource(state.dismissed) &&
       afterDismissal(state.dismissed, projectId, source, live)
         ? null
         : state.dismissed;

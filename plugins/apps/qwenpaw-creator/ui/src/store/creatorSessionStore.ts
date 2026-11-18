@@ -24,6 +24,7 @@ import {
   isUserAuthorityMessage,
 } from "@/lib/creatorMessagePresentation";
 import i18n from "@/i18n";
+import { creatorReadSequence } from "@/api/creator/client";
 import {
   type CreditsSource,
   clearCreditsAfterCompletion,
@@ -567,7 +568,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             sessionId: response.session.id,
             at: typeof refusedAt === "string" ? refusedAt : undefined,
           },
-          reopening,
+          { reopening, status: response.session.status },
         );
       }
       const currentProgressSeq =
@@ -713,8 +714,6 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       bootstrap: async (projectId) => {
         const bootstrapGeneration = ++lifecycleGeneration;
         const sessionGeneration = ++sessionRefreshGeneration;
-        const dismissalAtOpen =
-          useModelCreditsStore.getState().dismissalVersion;
         const state = get();
         const sameProject = state.projectId === projectId;
         if (!sameProject) creditsReplay = null;
@@ -742,8 +741,9 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           });
         }
         try {
+          const sessionRead = getCreatorSession(projectId);
           const [sessionResponse, conversationPage] = await Promise.all([
-            getCreatorSession(projectId),
+            sessionRead,
             listConversations(projectId),
           ]);
           if (
@@ -809,8 +809,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 sessionResponse,
                 sessionGeneration,
                 current,
-                useModelCreditsStore.getState().dismissalVersion ===
-                  dismissalAtOpen,
+                creatorReadSequence(sessionRead) >
+                  useModelCreditsStore.getState().lastReadAtDismissal,
               ),
               conversations,
               activeConversationId,

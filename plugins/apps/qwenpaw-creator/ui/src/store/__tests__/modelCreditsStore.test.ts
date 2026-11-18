@@ -40,6 +40,7 @@ describe("cross-project Credits notice", () => {
       notice: null,
       recovery: null,
       dismissed: null,
+      lastReadAtDismissal: -1,
     });
     session().reset();
     useCreatorSessionStore.setState({
@@ -137,6 +138,42 @@ describe("cross-project Credits notice", () => {
       expect(notice()).toBeNull();
     },
   );
+
+  it("does not re-adopt an in-flight read from before a dismissal on a later open", async () => {
+    const error = {
+      ...quotaFailure,
+      details: { refusedAt: "2026-11-18T10:00:00Z" },
+    };
+    const old = sessionView({ lastEventSeq: 4, status: "ERROR", error });
+    const { fetchMock } = installMockFetch(bootstrapRoutes({ session: old }));
+    let release!: (value: Response) => void;
+    fetchMock.mockReturnValueOnce(
+      new Promise<Response>((done) => {
+        release = done;
+      }),
+    );
+    const earlier = getCreatorSession("p1");
+    useModelCreditsStore
+      .getState()
+      .markExhausted("p1", {
+        sessionId: old.id,
+        seq: 4,
+        at: error.details.refusedAt,
+      });
+    useModelCreditsStore
+      .getState()
+      .clear(() => sessionView({ lastEventSeq: 11, status: "CANCELLED" }));
+    const reopening = session().bootstrap("p1");
+    release(
+      Response.json({
+        session: old,
+        agentStatusBar: { progress: { sourceEventSeq: 4 } },
+      }),
+    );
+    await earlier;
+    await reopening;
+    expect(notice()).toBeNull();
+  });
 
   it("keeps a dismissed snapshot hidden when its matching SSE event arrives late", async () => {
     const at = "2026-11-18T10:00:00Z";
@@ -548,7 +585,7 @@ describe("cross-project Credits notice", () => {
     },
   );
 
-  it.each(["ERROR", "CANCELLED"] as const)(
+  it.each(["ERROR", "CANCELLED", "RUNNING"] as const)(
     "uses the active %s state if a legacy dismissal cursor is unavailable",
     async (status) => {
       const { fetchMock } = installMockFetch([]);
@@ -577,18 +614,37 @@ describe("cross-project Credits notice", () => {
       });
       expect(notice()?.source?.seq).toBe(status === "ERROR" ? 7 : undefined);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+      if (status === "RUNNING") {
+        installMockFetch(
+          bootstrapRoutes({ session: { ...active, status: "ERROR", error } }),
+        );
+        await session().refreshSession();
+        expect(notice()?.source?.seq).toBe(7);
+      }
     },
   );
 
-  it.each([false, true])(
-    "shows a refusal after the click cursor with no intervening project (success: %s)",
-    (hasSuccess) => {
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ] as const)(
+    "shows a distinct later refusal with no intervening project (success: %s, stored source: %s)",
+    (hasSuccess, storedSource) => {
+      const current = sessionView({ lastEventSeq: 4 });
+      const { calls } = installMockFetch([]);
       useModelCreditsStore.setState({
-        notice: { projectId: "p1", at: "2099-01-01" },
+        notice: {
+          projectId: "p1",
+          at: "2099-01-01",
+          ...(storedSource && { source: { sessionId: current.id, seq: 4 } }),
+        },
       });
       useModelCreditsStore
         .getState()
-        .clear(() => sessionView({ lastEventSeq: 4 }));
+        .clear(() => (storedSource ? null : current));
+      expect(calls).toHaveLength(0);
       session().reset();
       useCreatorSessionStore.setState({
         projectId: "p1",
