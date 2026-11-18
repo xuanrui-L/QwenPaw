@@ -139,14 +139,34 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
   markExhausted: (projectId, source, live = true) => {
     if (!projectId) return;
     const { notice: previous, recovery } = get();
+    // When the original project replays its own refusal, it supplies the
+    // server time that old localStorage records lack.
+    const observedLegacyRefusal =
+      previous?.projectId === projectId &&
+      !previous.source &&
+      source !== undefined &&
+      Number.isFinite(serverMicros(source.at));
     if (
       source &&
       recovery &&
       !newerThanNotice(recovery, projectId, source, live)
-    )
+    ) {
+      if (
+        observedLegacyRefusal &&
+        recovery.source &&
+        newerThanNotice(
+          { ...previous, source },
+          recovery.projectId,
+          recovery.source,
+          false,
+        )
+      )
+        get().clear();
       return;
+    }
     if (
       previous &&
+      !observedLegacyRefusal &&
       (source
         ? !newerThanNotice(previous, projectId, source, live)
         : previous.projectId === projectId)

@@ -471,7 +471,7 @@ def test_stopping_a_build_signals_its_parallel_clip_while_the_parent_drains(
 
         async def drive(_job):
             child = asyncio.create_task(clip())
-            service._subgraph_tasks[job.task_id] = [child]
+            service._builds[job.task_id].children.append(child)
             try:
                 await asyncio.Future()
             finally:
@@ -482,13 +482,94 @@ def test_stopping_a_build_signals_its_parallel_clip_while_the_parent_drains(
         monkeypatch.setattr(service, "_drive", drive)
         parent = service._spawn(job)
         await started.wait()
+        native_stop = service._builds[job.task_id].stop
         service.cancel_workers(job.project_id, job.task_id)
         try:
+            # Native permit waiters may resume before the next loop tick.
+            assert native_stop.is_set()
             await asyncio.wait_for(clip_cancelled.wait(), 2)
             assert not parent.done()
         finally:
             release_parent.set()
             await asyncio.gather(parent, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_durable_cancel_stops_a_clip_before_its_next_model_call(
+    tmp_path, monkeypatch
+):
+    from api.file_execution_routes import _cancel_task_sync
+    from services.project_files.facade import creator_file_services
+    from services.project_files.models import Project
+    from services.runtime_files.execution_models import TaskRecord
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    services = creator_file_services(tmp_path)
+    job = _build_job(tmp_path)
+    services.projects.create(
+        Project.new(project_id=job.project_id, name="Cancel")
+    )
+    service = source_memory.source_memory_service(services)
+    service.executions.create_task(
+        TaskRecord(
+            project_id=job.project_id,
+            task_id=job.task_id,
+            kind=source_memory.TaskKind.SOURCE_MEMORY_BUILD,
+            request_fingerprint="cancel",
+        )
+    )
+    entered, release_clip = threading.Event(), threading.Event()
+    published, return_to_api = threading.Event(), threading.Event()
+    model_calls = []
+    original_notify = ProjectExecutionStore._notify_task_terminal
+
+    def notify(store, task):
+        if task.status is TaskStatus.CANCELLED:
+            published.set()
+            assert return_to_api.wait(5)
+        original_notify(store, task)
+
+    def clip():
+        entered.set()
+        assert release_clip.wait(5)
+
+    async def drive(_job):
+        await source_memory._run_media_stage(
+            service._builds[job.task_id].stop, clip
+        )
+        model_calls.append(job.task_id)
+
+    monkeypatch.setattr(ProjectExecutionStore, "_notify_task_terminal", notify)
+    monkeypatch.setattr(service, "_drive", drive)
+
+    async def scenario():
+        worker = service._spawn(job)
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            cancel = asyncio.create_task(
+                asyncio.to_thread(
+                    _cancel_task_sync,
+                    services,
+                    job.project_id,
+                    job.task_id,
+                    "stop",
+                )
+            )
+            assert await asyncio.to_thread(published.wait, 3)
+            assert (
+                service.executions.get_task(job.project_id, job.task_id).status
+                is TaskStatus.CANCELLED
+            )
+            assert service._builds[job.task_id].stop.is_set()
+            release_clip.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(worker, 3)
+            assert not model_calls
+        finally:
+            release_clip.set()
+            return_to_api.set()
+        assert (await cancel).status is TaskStatus.CANCELLED
 
     asyncio.run(scenario())
 
@@ -510,7 +591,9 @@ def test_cancelled_frame_detection_joins_inflight_seeks_and_skips_queued_frames(
 
     async def scenario():
         detecting = asyncio.create_task(
-            source_memory._detect_segments(tmp_path / "video", 0, 300)
+            source_memory._detect_segments(
+                tmp_path / "video", 0, 300, threading.Event()
+            )
         )
         try:
             assert await asyncio.to_thread(entered.wait, 5)
@@ -604,7 +687,7 @@ def test_cancel_for_asset_stops_a_live_build_before_its_next_stage(
         executions.transitions[-1]["updates"]["error"]["code"]
         == "SOURCE_ASSET_DELETED"
     ), "the record a cancellation left behind must still terminalize"
-    assert not service._jobs and not service._job_specs
+    assert not service._jobs and not service._builds
 
 
 def test_merge_projection_folds_reviewed_drafts_and_summary(
@@ -773,6 +856,7 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
                 asyncio.Semaphore(1),
                 ckpt_dir,
                 "checksum-1",
+                threading.Event(),
             ),
         )
 
@@ -885,7 +969,10 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
         lambda: False,
     )
 
-    asyncio.run(service._execute(job))
+    async def run_build():
+        await service._spawn(job)
+
+    asyncio.run(run_build())
 
     assert detected == [(3600.0, 7200.0), (7200.0, 7300.0)]
     ref = load_memory_ref(project_root, "intel-1", "checksum-1")

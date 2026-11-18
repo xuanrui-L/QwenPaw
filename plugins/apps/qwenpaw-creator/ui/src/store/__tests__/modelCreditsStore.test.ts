@@ -182,6 +182,50 @@ describe("cross-project Credits notice", () => {
     expect(written.has(STORAGE_KEY)).toBe(false);
   });
 
+  it.each([
+    ["2026-11-18T09:00:00Z", false],
+    ["2026-11-18T11:00:00Z", true],
+  ] as const)(
+    "reconciles an old notice once its own refusal replays at %s",
+    async (refusedAt, remains) => {
+      const legacy = { projectId: "p1", at: "2099-01-01T00:00:00Z" };
+      useModelCreditsStore.setState({ notice: legacy });
+      written.set(STORAGE_KEY, JSON.stringify(legacy));
+      useCreatorSessionStore.setState({
+        projectId: "p2",
+        session: sessionView({ id: "s2", projectId: "p2", lastEventSeq: 2 }),
+        replayUntilSeq: 2,
+      });
+      session().ingestEvent({
+        ...ev(2, "agent.run.completed"),
+        projectId: "p2",
+        creatorSessionId: "s2",
+        at: "2026-11-18T10:00:00Z",
+      });
+      expect(notice()).toEqual(legacy);
+      session().reset();
+      const error = { ...quotaFailure, details: { runId: "current" } };
+      installMockFetch(
+        bootstrapRoutes({
+          session: { lastEventSeq: 3, status: "ERROR", error },
+        }),
+      );
+      await session().bootstrap("p1");
+      session().ingestEvent({
+        ...ev(1, "agent.run.failed", { runId: "older", error: quotaFailure }),
+        at: "2026-11-18T08:00:00Z",
+      });
+      expect(notice()).toEqual(legacy);
+      session().ingestEvent({
+        ...ev(2, "agent.run.failed", { runId: "current", error }),
+        at: refusedAt,
+      });
+      expect(Boolean(notice())).toBe(remains);
+      expect(written.has(STORAGE_KEY)).toBe(remains);
+      if (remains) expect(notice()?.source?.at).toBe(refusedAt);
+    },
+  );
+
   it("orders another project's replay by server time", () => {
     const time = (microsecond: number) =>
       `2026-10-01T12:00:00.${String(microsecond).padStart(6, "0")}+00:00`;

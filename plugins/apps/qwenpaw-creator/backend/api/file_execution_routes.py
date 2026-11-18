@@ -213,6 +213,14 @@ def _cancel_task_sync(
             task_id,
             _lifecycle_lock_held=True,
         )
+        if task.kind is TaskKind.SOURCE_MEMORY_BUILD and task.status in {
+            TaskStatus.QUEUED,
+            TaskStatus.RUNNING,
+            TaskStatus.CANCELLED,
+        }:
+            from services.media.source_memory import signal_source_memory_cancel
+
+            signal_source_memory_cancel(services.root, project_id, task_id)
         if task.status is TaskStatus.CANCELLED:
             return task
         return store.transition_task(
@@ -395,10 +403,6 @@ async def cancel_task(
         )
 
         file_image_execution_service(services).notify_terminal_task(task)
-    elif task.kind is TaskKind.SOURCE_MEMORY_BUILD:
-        from services.media.source_memory import source_memory_service
-
-        source_memory_service(services).cancel_workers(project_id, task_id)
     return _task_view(task)
 
 

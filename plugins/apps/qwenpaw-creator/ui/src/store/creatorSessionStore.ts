@@ -1632,9 +1632,15 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                     },
                   };
                 }
+                const currentRefusalRun = session.error?.details?.runId;
+                const failedRun =
+                  errorPayload?.details?.runId ?? event.data.runId;
                 if (
                   isQuotaErrorCode(errorPayload?.code) &&
-                  (liveFailure || isQuotaErrorCode(session.error?.code))
+                  (liveFailure ||
+                    (isQuotaErrorCode(session.error?.code) &&
+                      (typeof currentRefusalRun !== "string" ||
+                        currentRefusalRun === failedRun)))
                 ) {
                   const refusedAt = errorPayload?.details?.refusedAt;
                   markCreditsExhausted(
