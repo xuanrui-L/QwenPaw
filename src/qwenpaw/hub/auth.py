@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from .user_profile import HubUserProfile
 from .credentials import TenantCredentialVault
 from .database import (
     connect_hub_database,
@@ -80,7 +81,7 @@ class _PreparedUser:
     created_at: str
 
 
-class HubAuthService:
+class HubAuthService:  # pylint: disable=too-many-public-methods
     """Persist users and issue versioned HMAC bearer tokens."""
 
     def __init__(
@@ -92,6 +93,13 @@ class HubAuthService:
         self.credential_vault = credential_vault
         self._registration_lock = threading.Lock()
         initialize_hub_database(database_path)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE hub_users SET profile_json = json_set("
+                "profile_json, '$.workspace_dir', ?) "
+                "WHERE json_type(profile_json, '$.workspace_dir') IS NULL",
+                (HubUserProfile().workspace_dir,),
+            )
         self._token_secret = self.credential_vault.get_or_create_system_secret(
             "TOKEN_SIGNING_SECRET",
         ).encode("ascii")
@@ -102,11 +110,13 @@ class HubAuthService:
     def status(self) -> dict[str, object]:
         """Return public bootstrap and registration state."""
         has_users = self.user_count() > 0
+        mode = self.registration_mode()
         return {
             "enabled": True,
             "has_users": has_users,
             "bootstrap_required": not has_users,
-            "registration_enabled": self.registration_enabled(),
+            "registration_enabled": mode != "closed",
+            "registration_mode": mode,
             "mode": "hub",
         }
 
@@ -124,6 +134,16 @@ class HubAuthService:
             ).fetchone()
         return row is not None
 
+    def registration_mode(
+        self,
+        connection: sqlite3.Connection | None = None,
+    ) -> str:
+        """Return the single authoritative self-registration policy."""
+        if connection is not None:
+            return self._registration_mode(connection)
+        with self._connect() as current:
+            return self._registration_mode(current)
+
     def registration_enabled(self) -> bool:
         with self._connect() as connection:
             return self._registration_enabled(connection)
@@ -134,7 +154,7 @@ class HubAuthService:
             has_users = self._user_count(connection) > 0
             if has_users and not self._registration_enabled(connection):
                 raise PermissionError("Registration is disabled.")
-        prepared = self._prepare_user(username, password)
+        prepared = self.prepare_user(username, password)
         with self._registration_lock:
             try:
                 with self._connect() as connection:
@@ -160,7 +180,7 @@ class HubAuthService:
 
     def initialize_admin(self, username: str, password: str) -> HubUser:
         """Create the first administrator from a trusted local command."""
-        prepared = self._prepare_user(username, password)
+        prepared = self.prepare_user(username, password)
         with self._registration_lock:
             try:
                 with self._connect() as connection:
@@ -199,7 +219,7 @@ class HubAuthService:
         role: str = "user",
     ) -> HubUser:
         """Create an account with a stable ID and PBKDF2 password hash."""
-        prepared = self._prepare_user(username, password)
+        prepared = self.prepare_user(username, password)
         if role not in {"admin", "user"}:
             raise ValueError(f"Invalid role: {role}")
         try:
@@ -210,7 +230,15 @@ class HubAuthService:
                 f"Username already exists: {prepared.username}",
             ) from exc
 
-    def _prepare_user(self, username: str, password: str) -> _PreparedUser:
+    def insert_user(
+        self,
+        connection: sqlite3.Connection,
+        prepared: _PreparedUser,
+    ) -> str:
+        """Insert a prepared ordinary member in the caller's transaction."""
+        return self._insert_user(connection, prepared, "user").user_id
+
+    def prepare_user(self, username: str, password: str) -> _PreparedUser:
         """Validate and hash credentials before a database write lock."""
         normalized_username = username.strip()
         self._validate_credentials(normalized_username, password)
@@ -251,7 +279,7 @@ class HubAuthService:
                 prepared.password_hash,
                 prepared.password_salt,
                 role,
-                '{"schema_version":1}',
+                HubUserProfile().model_dump_json(),
                 '{"schema_version":1}',
                 '{"schema_version":1}',
                 prepared.created_at,
@@ -278,11 +306,15 @@ class HubAuthService:
 
     @staticmethod
     def _registration_enabled(connection: sqlite3.Connection) -> bool:
+        return HubAuthService._registration_mode(connection) == "open"
+
+    @staticmethod
+    def _registration_mode(connection: sqlite3.Connection) -> str:
         row = connection.execute(
             "SELECT value_json FROM hub_settings WHERE key = ?",
-            ("registration_enabled",),
+            ("registration_mode",),
         ).fetchone()
-        return row is not None and bool(json.loads(str(row["value_json"])))
+        return json.loads(row["value_json"]) if row else "closed"
 
     @staticmethod
     def _raise_database_busy(exc: sqlite3.OperationalError) -> NoReturn:
@@ -334,6 +366,10 @@ class HubAuthService:
             "iat": now,
             "exp": now + _TOKEN_TTL_SECONDS,
         }
+        return self.sign_token_payload(payload)
+
+    def sign_token_payload(self, payload: dict[str, object]) -> str:
+        """Sign a payload; callers must validate its purpose on receipt."""
         encoded = base64.urlsafe_b64encode(
             json.dumps(payload, separators=(",", ":")).encode("utf-8"),
         ).decode("ascii")
@@ -344,8 +380,8 @@ class HubAuthService:
         ).hexdigest()
         return f"{encoded}.{signature}"
 
-    def verify_token(self, token: str) -> HubUser | None:
-        """Verify signature, expiry, disabled state, and token version."""
+    def read_token_payload(self, token: str) -> dict[str, object] | None:
+        """Verify signature and expiry before interpreting token claims."""
         try:
             encoded, signature = token.split(".", 1)
             expected = hmac.new(
@@ -355,19 +391,33 @@ class HubAuthService:
             ).hexdigest()
             if not hmac.compare_digest(signature, expected):
                 return None
-            payload = json.loads(
-                base64.urlsafe_b64decode(encoded.encode("ascii")),
-            )
-            if int(payload["exp"]) < int(time.time()):
+            payload = json.loads(base64.urlsafe_b64decode(encoded))
+            if not isinstance(payload, dict):
                 return None
+            if int(payload["exp"]) <= int(time.time()):
+                return None
+            return payload
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def token_user(self, payload: dict[str, object]) -> HubUser | None:
+        """Apply account revocation to every signed token purpose."""
+        try:
             user = self.get_user(str(payload["sub"]))
             if user is None or user.disabled:
                 return None
-            if user.token_version != int(payload["ver"]):
+            if user.token_version != int(str(payload["ver"])):
                 return None
             return user
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, TypeError, ValueError):
             return None
+
+    def verify_token(self, token: str) -> HubUser | None:
+        """Accept account tokens only, never scoped resource sessions."""
+        payload = self.read_token_payload(token)
+        if payload is None or "purpose" in payload:
+            return None
+        return self.token_user(payload)
 
     def list_users(self) -> list[HubUser]:
         with self._connect() as connection:
@@ -427,20 +477,20 @@ class HubAuthService:
             ).fetchone()
         return self._user_from_row(row) if row is not None else None
 
-    def get_usernames(self, user_ids: set[str]) -> dict[str, str]:
-        """Return active usernames for a batch of user identifiers."""
+    def get_users(self, user_ids: set[str]) -> dict[str, HubUser]:
+        """Return active users for a batch of user identifiers."""
         if not user_ids:
             return {}
         ordered_ids = sorted(user_ids)
         placeholders = ", ".join("?" for _ in ordered_ids)
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT user_id, username FROM hub_users "
+                f"SELECT * FROM hub_users "
                 f"WHERE user_id IN ({placeholders}) "
                 f"AND deleted_at IS NULL",
                 ordered_ids,
             ).fetchall()
-        return {str(row["user_id"]): str(row["username"]) for row in rows}
+        return {str(row["user_id"]): self._user_from_row(row) for row in rows}
 
     def update_user(
         self,
@@ -449,6 +499,7 @@ class HubAuthService:
         role: str | None = None,
         disabled: bool | None = None,
         actor_user_id: str | None = None,
+        profile: dict[str, object] | None = None,
     ) -> HubUser:
         """Update authorization state and invalidate all existing tokens."""
         with self._connect() as connection:
@@ -461,6 +512,9 @@ class HubAuthService:
             if row is None:
                 raise KeyError(user_id)
             current = self._user_from_row(row)
+            next_profile = HubUserProfile.model_validate(
+                {**current.profile, **(profile or {})},
+            ).model_dump_json()
             next_role = role if role is not None else current.role
             next_disabled = (
                 disabled if disabled is not None else current.disabled
@@ -488,12 +542,18 @@ class HubAuthService:
                     )
             connection.execute(
                 """
-                UPDATE hub_users SET role = ?, disabled = ?,
+                UPDATE hub_users SET role = ?, disabled = ?, profile_json = ?,
                     token_version = token_version + 1,
                     revision = revision + 1, updated_at = ?
                 WHERE user_id = ?
                 """,
-                (next_role, int(next_disabled), utc_now(), user_id),
+                (
+                    next_role,
+                    int(next_disabled),
+                    next_profile,
+                    utc_now(),
+                    user_id,
+                ),
             )
             updated_row = connection.execute(
                 "SELECT * FROM hub_users WHERE user_id = ? "
@@ -559,7 +619,9 @@ class HubAuthService:
             role=str(row["role"]),
             disabled=bool(row["disabled"]),
             token_version=int(row["token_version"]),
-            profile=json.loads(str(row["profile_json"])),
+            profile=HubUserProfile.model_validate_json(
+                str(row["profile_json"]),
+            ).model_dump(),
             preferences=json.loads(str(row["preferences_json"])),
             metadata=json.loads(str(row["metadata_json"])),
             revision=int(row["revision"]),

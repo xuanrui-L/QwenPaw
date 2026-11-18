@@ -1,10 +1,4 @@
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-} from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import ComposedProvider from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/ChatAnywhere/ComposedProvider";
@@ -13,7 +7,7 @@ import {
   AgentScopeRuntimeRunStatus,
 } from "@agentscope-ai/chat";
 import { HostRequestCard, HostResponseCard } from "./HostBubbles";
-import { ChatRegenerateContext } from "./ChatRegenerateContext";
+import * as assistantMarkdown from "./AssistantMarkdown";
 import { ChatScalar, ChatList } from "../../plugins/registry/slotKeys";
 import {
   setAssistantMessageDisplayPreference,
@@ -40,7 +34,8 @@ vi.mock("../../features/files-workspace/ResponseArtifactList", () => ({
 vi.mock("../../components/Chat/MediaDownload", () => ({
   DownloadableAudios: () => null,
 }));
-vi.mock("react-i18next", () => ({
+vi.mock("react-i18next", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-i18next")>()),
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 // Keep the real vendor Request/Card and SDK contexts. Only visual leaves are
@@ -146,8 +141,109 @@ afterEach(() => {
 });
 
 describe("merged host bubbles behavior", () => {
-  it("reacts to thinking/display preferences while retaining response identity and regenerate", async () => {
-    const regenerate = vi.fn();
+  it.each(["expanded", "result-collapsed", "process-collapsed"] as const)(
+    "keeps a truncation warning visible with %s messages",
+    (preference) => {
+      setAssistantMessageDisplayPreference(preference);
+      const markdown = vi
+        .spyOn(assistantMarkdown, "AssistantMarkdown")
+        .mockImplementation(({ content }) => <p>{content}</p>);
+      try {
+        render(
+          provider(
+            <HostResponseCard
+              id="truncated"
+              data={{
+                id: "response",
+                status: AgentScopeRuntimeRunStatus.Completed,
+                output: [
+                  {
+                    id: "partial",
+                    role: "assistant",
+                    type: AgentScopeRuntimeMessageType.MESSAGE,
+                    status: AgentScopeRuntimeRunStatus.Completed,
+                    content: [{ type: "text", text: "partial answer" }],
+                    metadata: {
+                      metadata: {
+                        qwenpaw_model_completion: {
+                          finish_reason: "length",
+                          truncated: true,
+                        },
+                      },
+                    },
+                  },
+                ],
+              }}
+            />,
+          ),
+        );
+        expect(screen.getByText("partial answer")).toBeInTheDocument();
+        expect(screen.getByRole("status")).toHaveTextContent(
+          "chat.outputTruncated",
+        );
+      } finally {
+        markdown.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    [undefined, AgentScopeRuntimeRunStatus.InProgress, true],
+    [null, AgentScopeRuntimeRunStatus.InProgress, true],
+    [undefined, AgentScopeRuntimeRunStatus.Completed, false],
+    [
+      AgentScopeRuntimeRunStatus.Completed,
+      AgentScopeRuntimeRunStatus.InProgress,
+      false,
+    ],
+  ])(
+    "uses message status when text status is %s (message %s)",
+    async (status, messageStatus, isStreaming) => {
+      const markdown = vi
+        .spyOn(assistantMarkdown, "AssistantMarkdown")
+        .mockImplementation(() => <></>);
+      try {
+        setAssistantMessageDisplayPreference("expanded");
+        render(
+          provider(
+            <HostResponseCard
+              id="sdk-message"
+              data={{
+                id: "response",
+                status: messageStatus,
+                output: [
+                  {
+                    id: "text-message",
+                    type: AgentScopeRuntimeMessageType.MESSAGE,
+                    role: "assistant",
+                    status: messageStatus,
+                    content: [
+                      { type: "text", text: "```openui-lang\nroot =", status },
+                    ],
+                  },
+                ],
+              }}
+              isLast
+            />,
+          ),
+        );
+        await act(async () => {});
+        const props = markdown.mock.calls[markdown.mock.calls.length - 1][0];
+        expect({
+          isStreaming: props.isStreaming,
+          cursor: props.cursor,
+        }).toEqual({
+          isStreaming,
+          // Preserve the existing vendor cursor behavior for users without plugins.
+          cursor: false,
+        });
+      } finally {
+        markdown.mockRestore();
+      }
+    },
+  );
+
+  it("delegates response actions without injecting regenerate", async () => {
     setAssistantMessageDisplayPreference("expanded");
     const output = [
       {
@@ -167,20 +263,20 @@ describe("merged host bubbles behavior", () => {
     ];
     render(
       provider(
-        <ChatRegenerateContext.Provider value={regenerate}>
-          <HostResponseCard
-            id="sdk-message-id"
-            data={{
-              id: "runtime-response-id",
-              status: AgentScopeRuntimeRunStatus.Completed,
-              output,
-            }}
-            isLast
-          />
-        </ChatRegenerateContext.Provider>,
+        <HostResponseCard
+          id="sdk-message-id"
+          data={{
+            id: "runtime-response-id",
+            status: AgentScopeRuntimeRunStatus.Completed,
+            output,
+          }}
+          isLast
+        />,
       ),
     );
-    expect(screen.getByText("reasoning content")).toBeInTheDocument();
+    const reasoning = screen.getByText("reasoning content");
+    expect(reasoning).toBeInTheDocument();
+    expect(reasoning.parentElement?.className).toContain("reasoningStep");
     expect(screen.getByText("tool content")).toBeInTheDocument();
     expect(screen.queryByTestId("steps")).not.toBeInTheDocument();
     await act(async () => {
@@ -194,8 +290,9 @@ describe("merged host bubbles behavior", () => {
     expect(screen.getByTestId("response-actions")).toHaveTextContent(
       "sdk-message-id",
     );
-    fireEvent.click(screen.getByRole("button", { name: "chat.regenerate" }));
-    expect(regenerate).toHaveBeenCalledWith("sdk-message-id");
+    expect(
+      screen.queryByRole("button", { name: "chat.regenerate" }),
+    ).not.toBeInTheDocument();
   });
 
   it("retains the original request card's content and ordered prepend/append fallback", () => {
