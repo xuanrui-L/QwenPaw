@@ -57,6 +57,7 @@ from services.project_files.facade import (  # noqa: E402
     CreatorFileServices,
     clear_creator_file_service_registry,
     creator_file_services,
+    preparing_file_services,
 )
 from services.runtime_files.runtime_dependencies import (  # noqa: E402
     CreatorBinaryDependencyError,
@@ -199,11 +200,9 @@ async def _startup() -> None:
             ensure_creator_runtime_dependencies,
         )
         await asyncio.to_thread(ensure_vendor_libs)
-        services = await run_sync_io(creator_file_services, data_root)
-        await asyncio.to_thread(
-            recover_interrupted_source_analysis,
-            services,
-        )
+        with preparing_file_services(data_root):
+            services = await run_sync_io(creator_file_services, data_root)
+            await run_sync_io(recover_interrupted_source_analysis, services)
         reset_remote_ingest_admission()
     except (CreatorDataRootError, CreatorBinaryDependencyError) as exc:
         trace_event(

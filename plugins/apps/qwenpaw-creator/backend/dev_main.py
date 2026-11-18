@@ -29,6 +29,7 @@ from services.observability import trace_event  # noqa: E402
 from services.project_files.facade import (  # noqa: E402
     clear_creator_file_service_registry,
     creator_file_services,
+    preparing_file_services,
 )
 from services.runtime_files.runtime_dependencies import (  # noqa: E402
     ensure_creator_runtime_dependencies,
@@ -57,8 +58,9 @@ async def lifespan(_app: FastAPI):
     )
     try:
         await asyncio.to_thread(ensure_creator_runtime_dependencies)
-        services = await run_sync_io(creator_file_services, data_root)
-        await run_sync_io(recover_interrupted_source_analysis, services)
+        with preparing_file_services(data_root):
+            services = await run_sync_io(creator_file_services, data_root)
+            await run_sync_io(recover_interrupted_source_analysis, services)
     except BaseException as exc:
         trace_event(
             "creator.runtime.startup_failed",

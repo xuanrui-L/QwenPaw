@@ -1527,9 +1527,11 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                   streamingAssistantMessages = remaining;
                 }
               }
-              const historical =
-                current.isReplaying && event.seq <= current.replayUntilSeq;
-              if (event.type === "agent.run.failed" && session && !historical) {
+              if (
+                event.type === "agent.run.failed" &&
+                session &&
+                event.seq > session.lastEventSeq
+              ) {
                 const errorPayload = event.data.error as
                   | {
                       code?: string;
