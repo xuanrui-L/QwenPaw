@@ -288,11 +288,18 @@ def _parse_sse_id_type(chunk: str) -> tuple[int, str]:
 
 
 @pytest.mark.parametrize(
-    "status", [SpecialistRunStatus.RUNNING_MODEL, SpecialistRunStatus.FAILED]
+    ("status", "index_unavailable"),
+    [
+        (SpecialistRunStatus.RUNNING_MODEL, False),
+        (SpecialistRunStatus.FAILED, False),
+        (SpecialistRunStatus.RUNNING_MODEL, True),
+    ],
 )
 def test_replay_preserves_specialist_text_without_a_completed_message(
     tmp_path,
     status,
+    index_unavailable,
+    monkeypatch,
 ) -> None:
     """Both replay filters retain partial replies from live and failed workers."""
 
@@ -376,6 +383,17 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
                 status=final_status,
             )
 
+    if index_unavailable:
+
+        def fail_read(*_args):
+            raise OSError("specialist index unavailable")
+
+        monkeypatch.setattr(
+            ProjectExecutionStore,
+            "list_specialist_runs",
+            fail_read,
+        )
+
     class Connection:
         polls = 0
 
@@ -416,10 +434,8 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
         f"could exempt it: {events}"
     )
     assert "prefix" in active_delta
-    # The settled run's delta at seq 3 stays filtered -- the exemption
-    # is scoped to ``active_run_ids``, not a blanket "keep every
-    # delta" reversal.
-    assert 3 not in seqs
+    # An available index lets the replay discard the settled run's duplicate.
+    assert (3 in seqs) is index_unavailable
 
 
 def test_lifecycle_event_embedding_an_event_record_survives_the_filter(

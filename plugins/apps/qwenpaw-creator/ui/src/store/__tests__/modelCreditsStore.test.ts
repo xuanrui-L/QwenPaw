@@ -105,6 +105,23 @@ describe("cross-project Credits notice", () => {
     expect(notice()?.projectId).toBe("p1");
   });
 
+  it("keeps the current Credits notice through historical failures and successes", () => {
+    useCreatorSessionStore.setState({
+      isReplaying: true,
+      replayUntilSeq: 10,
+      session: sessionView({ lastEventSeq: 10 }),
+    });
+    useModelCreditsStore.getState().markExhausted("p2");
+    act(() =>
+      session().ingestEvent(ev(9, "agent.run.failed", { error: quotaFailure })),
+    );
+    expect(notice()?.projectId).toBe("p2");
+    act(() => session().ingestEvent(ev(10, "agent.run.completed")));
+    expect(notice()?.projectId).toBe("p2");
+    act(() => session().ingestEvent(ev(11, "agent.run.completed")));
+    expect(notice()).toBeNull();
+  });
+
   it("keeps the original timestamp while the same project keeps failing", () => {
     useModelCreditsStore.getState().markExhausted("p1");
     const raisedAt = notice()?.at;

@@ -80,9 +80,7 @@ from services.source_analysis import (  # noqa: E402
     recover_interrupted_source_analysis,
     shutdown_source_analysis_services,
 )
-from services.media.source_memory import (  # noqa: E402
-    recover_interrupted_source_memory,
-)
+from services.media.source_memory import source_memory_service  # noqa: E402
 from services.media.source_observation import (  # noqa: E402
     drain_source_observation_services,
     recover_interrupted_source_observations,
@@ -365,7 +363,7 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
-        await asyncio.to_thread(recover_interrupted_source_memory, services)
+        await source_memory_service(services).resume_interrupted()
         # Observation/read workers live only in process memory: fail their
         # orphaned QUEUED/RUNNING Tasks closed so waiters see a retryable
         # error instead of polling a record no worker will ever finish.

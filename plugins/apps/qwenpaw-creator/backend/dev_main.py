@@ -8,6 +8,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from qwenpaw.utils.io_utils import run_sync_io
 
 from utils.env import load_project_env
 
@@ -56,8 +57,8 @@ async def lifespan(_app: FastAPI):
     )
     try:
         await asyncio.to_thread(ensure_creator_runtime_dependencies)
-        services = creator_file_services(data_root)
-        recover_interrupted_source_analysis(services)
+        services = await run_sync_io(creator_file_services, data_root)
+        await run_sync_io(recover_interrupted_source_analysis, services)
     except BaseException as exc:
         trace_event(
             "creator.runtime.startup_failed",

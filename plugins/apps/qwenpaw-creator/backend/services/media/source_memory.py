@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess  # nosec B404 - fixed ffmpeg argv, no shell
 import tempfile
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
 from pydantic import Field
+from qwenpaw.utils.io_utils import run_sync_io
 
 from domain.enums import CreatorSessionStatus, TaskKind, TaskStatus
 from domain.errors import ValidationError
@@ -1719,7 +1721,17 @@ class SourceMemoryService:
     # -- recovery ------------------------------------------------------------
 
     def recover_interrupted(self) -> None:
-        """Converge or resume interrupted builds; never replay billed work.
+        for job in self._recoverable_jobs():
+            self._spawn(job)
+
+    async def resume_interrupted(self) -> None:
+        """Read durable state off-loop, then start workers on their owning loop."""
+        jobs = await run_sync_io(lambda: list(self._recoverable_jobs()))
+        for job in jobs:
+            self._spawn(job)
+
+    def _recoverable_jobs(self) -> Iterator[SourceMemoryBuildJob]:
+        """Converge interrupted builds and yield work eligible to resume.
 
         A build cut while RUNNING is closed as FAILED. It is re-queued
         when complete artifacts are already durable (the follow-up
@@ -1766,7 +1778,7 @@ class SourceMemoryService:
                 if task.status is TaskStatus.QUEUED:
                     job = self._job_from_task(task)
                     if job is not None:
-                        self._spawn(job)
+                        yield job
 
     def _list_project_ids(self) -> list[str]:
         try:

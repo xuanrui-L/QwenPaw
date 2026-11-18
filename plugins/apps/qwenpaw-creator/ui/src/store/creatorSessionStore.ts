@@ -1235,6 +1235,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           let session = current.session;
           let rateLimitRetry = current.rateLimitRetry;
           accepted.forEach((event) => {
+            const historical =
+              current.isReplaying && event.seq <= current.replayUntilSeq;
             if (event.type === "agent.run.started") rateLimitRetry = null;
             if (
               rateLimitRetry &&
@@ -1572,7 +1574,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               event.type === "agent.run.completed"
             ) {
               const terminalRunId = eventString(event.data, "runId");
-              if (event.type === "agent.run.completed") {
+              if (event.type === "agent.run.completed" && !historical) {
                 // A run that reaches its end spent Credits, so the balance
                 // recovered: leaving the notice up would accuse every other
                 // project of a condition that just stopped being true.
@@ -1593,7 +1595,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                   streamingAssistantMessages = remaining;
                 }
               }
-              if (event.type === "agent.run.failed" && session) {
+              if (event.type === "agent.run.failed" && session && !historical) {
                 const errorPayload = event.data.error as
                   | {
                       code?: string;
@@ -1818,16 +1820,14 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               // Bootstrap already loaded the conversation tail. Historical
               // lifecycle replay must not undo pagination by pulling from the
               // first old message again (large projects contain huge tool logs).
-              const historicalMessage =
-                current.isReplaying && event.seq <= current.replayUntilSeq;
               const message = event.data.message as CreatorMessage | undefined;
-              if (message && !historicalMessage) {
+              if (message && !historical) {
                 messages = mergeMessages(messages, [message]);
               }
               const durableMessageId =
                 message?.messageId ?? eventString(event.data, "messageId");
               if (
-                (historicalMessage || message) &&
+                (historical || message) &&
                 durableMessageId &&
                 streamingAssistantMessages[durableMessageId]
               ) {
@@ -1841,7 +1841,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 queuedUi = queuedUi.filter(
                   (item) => item.clientMessageId !== clientMessageId,
                 );
-              if (!historicalMessage) {
+              if (!historical) {
                 const rawMessageSeq = event.data.messageSeq ?? event.data.seq;
                 const cursor =
                   typeof rawMessageSeq === "number"
@@ -1865,9 +1865,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               // flicker users describe as "this part keeps refreshing". The
               // authoritative status is already in the snapshot this stream was
               // opened from, so only post-replay transitions are news.
-              const historicalStatusEvent =
-                current.isReplaying && event.seq <= current.replayUntilSeq;
-              if (!historicalStatusEvent) {
+              if (!historical) {
                 const status =
                   event.type === "creator.woken"
                     ? "RUNNING"

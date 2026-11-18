@@ -1507,6 +1507,7 @@ def test_http_manual_regeneration_uses_new_slot_without_changing_prompt(
             automatic = await client.post(url)
             assert automatic.status_code == 200, automatic.text
             assert not automatic.json()["dispatched"]
+            assert automatic.json()["reason"] == "already_done"
             manual = await client.post(url, json={"regenerate": True})
             assert manual.status_code == 200, manual.text
             assert manual.json()["dispatched"]

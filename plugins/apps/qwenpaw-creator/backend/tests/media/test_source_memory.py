@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -397,6 +398,56 @@ def test_recover_requeues_only_with_durable_artifacts(
     else:
         assert executions.transitions[-1]["status"].name == "QUEUED"
         assert len(spawned) == 1
+
+
+@pytest.mark.parametrize("outcome", ["complete", "cancel", "fail"])
+def test_startup_schedules_memory_workers_only_after_recovery(
+    tmp_path,
+    monkeypatch,
+    outcome,
+) -> None:
+    service = _service(tmp_path)
+    queued = _running_task(tmp_path)
+    queued.status = TaskStatus.QUEUED
+    service.executions = _RecordingExecutions(queued)
+    scanned = threading.Event()
+    finish = threading.Event()
+
+    def project_ids():
+        yield "project-1"
+        scanned.set()
+        assert finish.wait(5)
+        if outcome == "fail":
+            raise OSError("project scan interrupted")
+
+    monkeypatch.setattr(service, "_list_project_ids", project_ids)
+
+    async def scenario():
+        workers = []
+
+        async def record_worker(job):
+            workers.append((job.task_id, asyncio.get_running_loop()))
+
+        monkeypatch.setattr(service, "_drive", record_worker)
+        recovery = asyncio.create_task(service.resume_interrupted())
+        try:
+            assert await asyncio.to_thread(scanned.wait, 5)
+            assert not workers
+            if outcome == "cancel":
+                recovery.cancel()
+        finally:
+            finish.set()
+        if outcome == "complete":
+            await recovery
+        else:
+            error = asyncio.CancelledError if outcome == "cancel" else OSError
+            with pytest.raises(error):
+                await recovery
+        await asyncio.sleep(0)
+        expected = [("task-1", asyncio.get_running_loop())]
+        assert workers == (expected if outcome == "complete" else [])
+
+    asyncio.run(scenario())
 
 
 def test_cancel_for_asset_stops_a_live_build_before_its_next_stage(

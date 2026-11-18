@@ -1,4 +1,11 @@
-import { useEffect, useState, useCallback, memo, useRef } from "react";
+import {
+  useEffect,
+  useState,
+  useReducer,
+  useCallback,
+  memo,
+  useRef,
+} from "react";
 import { Modal, message, Tooltip, Button, Space } from "antd";
 import {
   Film,
@@ -29,6 +36,7 @@ import {
   newClientId,
 } from "@/api/creator";
 import type { ProjectStorageProfile } from "@/api/creator";
+import { invalidateCreatorListReads } from "@/api/creator/client";
 import { useModelConfigStore } from "@/store/modelConfigStore";
 import { useRecreateStore } from "@/store/recreateStore";
 import { useRouter, useSearchParams } from "@/routing/navigation";
@@ -292,10 +300,17 @@ export default function HomePage() {
     modelConfig === null ||
     Boolean(modelConfig.llm.enabled && modelConfig.llm.model_name);
 
-  const fetchProjects = useCallback(
-    async (sort: SortField = sortBy, order: "asc" | "desc" = sortOrder) => {
+  const [listRevision, reloadList] = useReducer((n: number) => n + 1, 0);
+  const refreshProjects = useCallback(() => {
+    invalidateCreatorListReads("/projects");
+    reloadList();
+  }, []);
+  useEffect(() => {
+    let current = true;
+    async function loadProjects() {
       try {
-        const data = await listProjects(100, 0, sort, order);
+        const data = await listProjects(100, 0, sortBy, sortOrder);
+        if (!current) return;
         const projectList = data.items || [];
         // One response carries both the cards and the "working" badge: the
         // listing answers hasActiveTask for every Project, so the page renders
@@ -310,21 +325,27 @@ export default function HomePage() {
           ),
         );
       } catch {
-        message.error(t("home.loadFailed"));
+        if (current) message.error(t("home.loadFailed"));
       } finally {
-        setLoading(false);
+        if (current) setLoading(false);
       }
-    },
-    [sortBy, sortOrder, t],
+    }
+    void loadProjects();
+    return () => {
+      current = false;
+    };
+  }, [listRevision, sortBy, sortOrder, t]);
+
+  const latestStorageRead = useRef<ReturnType<typeof getStorageProfile> | null>(
+    null,
   );
-
-  useEffect(() => {
-    void fetchProjects();
-  }, [fetchProjects]);
-
-  const fetchStorage = useCallback(async () => {
+  const fetchStorage = useCallback(async (afterReclaim = false) => {
     try {
-      const profile = await getStorageProfile();
+      if (afterReclaim) invalidateCreatorListReads("/storage/profile");
+      const request = getStorageProfile();
+      latestStorageRead.current = request;
+      const profile = await request;
+      if (latestStorageRead.current !== request) return;
       setReclaimCap(profile.autoReclaimMaxBytes);
       setStorageByProject(
         Object.fromEntries(profile.projects.map((row) => [row.projectId, row])),
@@ -333,6 +354,11 @@ export default function HomePage() {
       // The notice is advisory: a profile failure must not disturb the list.
     }
   }, []);
+
+  const refreshReclaimedStorage = useCallback(
+    () => fetchStorage(true),
+    [fetchStorage],
+  );
 
   useEffect(() => {
     void fetchStorage();
@@ -392,7 +418,7 @@ export default function HomePage() {
                 try {
                   await deleteProject(project.projectId, false);
                   message.success(t("home.deleteSuccess"));
-                  fetchProjects();
+                  refreshProjects();
                   modal.destroy();
                 } catch {
                   message.error(t("home.deleteFailed"));
@@ -418,7 +444,7 @@ export default function HomePage() {
                     try {
                       await deleteProject(project.projectId, true);
                       message.success(t("home.deleteAllDataSuccess"));
-                      fetchProjects();
+                      refreshProjects();
                     } catch {
                       message.error(t("home.deleteAllDataFailed"));
                     }
@@ -432,7 +458,7 @@ export default function HomePage() {
         ),
       });
     },
-    [fetchProjects],
+    [refreshProjects, t],
   );
 
   const handleCopy = useCallback(
@@ -457,13 +483,13 @@ export default function HomePage() {
         }
         if (error instanceof CreatorHttpError && error.status === 404) {
           message.error(t("home.projectGone"));
-          fetchProjects();
+          refreshProjects();
           return;
         }
         message.error(t("home.copyFailed"));
       }
     },
-    [router, fetchProjects],
+    [refreshProjects, router, t],
   );
 
   const handleRecreate = useCallback(
@@ -477,29 +503,26 @@ export default function HomePage() {
         // real cause and drop the stale row instead of a generic failure.
         if (error instanceof CreatorHttpError && error.status === 404) {
           message.error(t("home.projectGone"));
-          fetchProjects();
+          refreshProjects();
           return;
         }
         message.error(t("home.recreateFailed"));
       }
     },
-    [fetchProjects],
+    [refreshProjects, t],
   );
 
   const handleSortChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       const value = e.target.value as SortField;
       setSortBy(value);
-      fetchProjects(value, sortOrder);
     },
-    [fetchProjects, sortOrder],
+    [],
   );
 
   const handleSortOrderToggle = useCallback(() => {
-    const newOrder = sortOrder === "asc" ? "desc" : "asc";
-    setSortOrder(newOrder);
-    fetchProjects(sortBy, newOrder);
-  }, [fetchProjects, sortBy, sortOrder]);
+    setSortOrder((order) => (order === "asc" ? "desc" : "asc"));
+  }, []);
 
   const formatDate = useCallback((dateStr: string) => {
     const date = new Date(dateStr);
@@ -756,7 +779,7 @@ export default function HomePage() {
                     onCopy={handleCopy}
                     onRecreate={handleRecreate}
                     onPreview={setPreviewProject}
-                    onReclaimConfirmed={fetchStorage}
+                    onReclaimConfirmed={refreshReclaimedStorage}
                     formatDate={formatDate}
                   />
                 ))}
@@ -812,7 +835,7 @@ export default function HomePage() {
       <ProjectImporter
         open={importerOpen}
         onClose={() => setImporterOpen(false)}
-        onImported={() => fetchProjects()}
+        onImported={refreshProjects}
       />
       <HomeTour />
     </div>
