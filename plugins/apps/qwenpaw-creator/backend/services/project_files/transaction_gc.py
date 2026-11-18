@@ -1,20 +1,55 @@
 # -*- coding: utf-8 -*-
-"""Measure and explicitly reclaim settled transactions, retaining recent receipts."""
+"""Collect terminal Project transactions, at startup and as history grows.
+
+Every commit leaves a transaction directory holding four full copies of the
+Project (base, candidate, latest, final) plus its journal, changeset and round.
+Nothing ever removed them, so a 500-commit project carried 500 directories of
+history that no reader can use: recovery only needs transactions that never
+finished, and the change record itself lives durably in the change rounds and
+the Project generation.  Observed on one project: 238 directories, 3.1 GB.
+
+The sweep runs at startup, next to the orphaned-scratch sweep, and -- because a
+container that is never restarted never ran it -- again once one Project's
+commit history outgrows :data:`TERMINAL_TRANSACTION_SWEEP_THRESHOLD`.  It is
+deliberately conservative:
+
+* A transaction is removed only when its own ``journal.json`` says it reached
+  a terminal state.  A missing, unreadable or unknown-state journal is kept;
+  so is every non-terminal transaction, whatever the index cache believes.
+  The index is an optimization for the commit path, and deletion must not
+  inherit its uncertainty.
+* The newest :data:`TERMINAL_TRANSACTION_RETENTION` terminal transactions stay,
+  so a rollback or an incident review still has recent receipts.
+* Pre-baseline history goes too, by default: a customer cannot press anything
+  inside a pod, and space that only returns after a click never comes back.  A
+  Project that chose to keep its history -- its own marker, or
+  ``CREATOR_STORAGE_KEEP_HISTORY`` for a whole install -- is still untouched
+  below the baseline, matching the scratch release rule.
+
+One env var turns the whole sweep off without a code change.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 import logging
 import os
 from pathlib import Path
 import shutil
+import threading
+from typing import Any
 from uuid import uuid4
 
 from services.media_files.task_scratch import (
+    SweepBudget,
+    auto_reclaim_max_bytes,
     history_reclaim_kept,
+    read_reclaim_confirmation,
+    read_scratch_baseline,
 )
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
 from services.runtime_files import idempotency_ledger
-from services.runtime_files.models import IdempotencyRecord, IdempotencyStatus
 from services.runtime_files.path_safety import is_link_path
 
 from .transaction_index import drop_transaction_index
@@ -23,6 +58,11 @@ logger = logging.getLogger("qwenpaw.creator.project_files.transaction_gc")
 
 # Terminal transactions kept after a sweep, newest first by directory mtime.
 TERMINAL_TRANSACTION_RETENTION = 50
+
+# Transaction directories one Project may accumulate before its next commit
+# asks for a sweep of its own.  Above the retention on purpose: the startup
+# sweep alone only ever ran on a build that was restarted.
+TERMINAL_TRANSACTION_SWEEP_THRESHOLD = 100
 
 TRANSACTIONS_DIR_NAME = "transactions"
 JOURNAL_FILE_NAME = "journal.json"
@@ -47,6 +87,19 @@ def transaction_gc_enabled() -> bool:
 
     raw = os.environ.get("CREATOR_TRANSACTION_GC_ENABLED", "")
     return raw.strip().casefold() not in _DISABLED_VALUES
+
+
+@dataclass(frozen=True, slots=True)
+class TransactionGCSummary:
+    """What one startup sweep removed, for the startup log."""
+
+    projects: int = 0
+    swept_projects: int = 0
+    removed_transactions: int = 0
+    removed_bytes: int = 0
+    stopped_early: bool = False
+    skipped_projects: int = 0
+    skipped_bytes: int = 0
 
 
 def _journal_state(transaction_dir: Path) -> str | None:
@@ -85,67 +138,66 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
-def _eligible(entry: Path) -> bool:
-    """An unreadable or unfinished transaction is retained."""
-    if (
-        entry.name.startswith(".")
-        or not entry.is_dir()
-        or is_link_path(entry)
-        or is_link_path(entry / JOURNAL_FILE_NAME)
-    ):
+def _eligible(
+    entry: Path,
+    *,
+    baseline: datetime | None,
+    kept: bool,
+) -> bool:
+    """Whether one directory is settled history this sweep may collect.
+
+    A journal that cannot be read, or names a state the commit boundary has not
+    reached, is never touched; a Project that asked to keep its history still
+    gets the date gate.
+    """
+
+    if not entry.is_dir() or is_link_path(entry):
         return False
-    return _journal_state(entry) in TERMINAL_JOURNAL_STATES
+    if _journal_state(entry) not in TERMINAL_JOURNAL_STATES:
+        return False
+    if baseline is not None and kept and _mtime(entry) < baseline.timestamp():
+        # Arrived with the Project, and this Project asked for its history to
+        # be kept -- so the date gate still protects it.
+        return False
+    return True
 
 
 def _eligible_candidates(
     transactions_root: Path,
+    baseline: datetime | None,
+    kept: bool,
 ) -> list[tuple[float, Path, int]]:
     """Settled transaction directories with their mtime and byte size."""
 
     candidates: list[tuple[float, Path, int]] = []
     for entry in transactions_root.iterdir():
-        if not _eligible(entry):
+        if not _eligible(entry, baseline=baseline, kept=kept):
             continue
         candidates.append((_mtime(entry), entry, _directory_bytes(entry)))
     return candidates
 
 
-def _open_reservation_ids(
-    transactions_root: Path, *, verify: bool
-) -> frozenset[str] | None:
-    """A storage estimate can use the ledger. Removal verifies the records."""
-    root = transactions_root.parent / "commands" / "idempotency"
-    if is_link_path(root.parent) or is_link_path(root):
-        return None
-    if not root.exists():
-        return frozenset()
-    if not verify:
-        return idempotency_ledger.open_transaction_ids(root)
-    protected = set()
-    try:
-        for path in root.iterdir():
-            if (
-                path.suffix != ".json"
-                or path.name == idempotency_ledger.LEDGER_FILE_NAME
-            ):
-                continue
-            if not path.is_file() or is_link_path(path):
-                return None
-            record = IdempotencyRecord.model_validate_json(path.read_bytes())
-            if record.status is IdempotencyStatus.IN_PROGRESS:
-                protected.add(record.record_id)
-    except (OSError, ValueError):
-        logger.warning(
-            "Unresolved idempotency records; keeping transactions in %s", root
-        )
-        return None
-    return frozenset(protected)
+def _open_reservation_ids(transactions_root: Path) -> frozenset[str]:
+    """Transactions an IN_PROGRESS idempotency reservation still needs.
+
+    A PATCH that published its Project but failed to record the HTTP result
+    replays that result from the transaction directory. Deleting it first
+    turns the retry into a 409 and writes FAILED over work that really
+    completed, so the sweep holds those back (review #243). The ledger is
+    rebuilt from the records whenever it cannot be trusted.
+    """
+
+    return idempotency_ledger.open_transaction_ids(
+        transactions_root.parent / "commands" / "idempotency",
+    )
 
 
 def _surplus_candidates(
     transactions_root: Path,
+    baseline: datetime | None,
+    kept: bool,
     retention: int,
-    protected: frozenset[str] | None = frozenset(),
+    protected: frozenset[str] = frozenset(),
 ) -> list[tuple[float, Path, int]]:
     """Exactly what a sweep would remove: the newest ``retention`` stay.
 
@@ -159,9 +211,7 @@ def _surplus_candidates(
     deleted nor consume one of the retained slots.
     """
 
-    if protected is None:
-        return []
-    candidates = _eligible_candidates(transactions_root)
+    candidates = _eligible_candidates(transactions_root, baseline, kept)
     if protected:
         candidates = [
             item for item in candidates if item[1].name not in protected
@@ -184,24 +234,16 @@ def surplus_transaction_bytes(
     """
 
     transactions_root = Path(project_root) / "runtime" / TRANSACTIONS_DIR_NAME
-    if (
-        any(
-            is_link_path(path)
-            for path in (
-                project_root,
-                transactions_root.parent,
-                transactions_root,
-            )
-        )
-        or not transactions_root.is_dir()
-    ):
+    if not transactions_root.is_dir():
         return 0
-    if history_reclaim_kept(project_root) or not transaction_gc_enabled():
-        return 0
+    kept = history_reclaim_kept(project_root)
+    baseline = read_scratch_baseline(Path(project_root))
     surplus = _surplus_candidates(
         transactions_root,
+        baseline,
+        kept,
         retention,
-        _open_reservation_ids(transactions_root, verify=False),
+        _open_reservation_ids(transactions_root),
     )
     return sum(size for _mtime_value, _entry, size in surplus)
 
@@ -222,7 +264,10 @@ def _atomic_reclaim(entry: Path) -> tuple[bool, bool]:
     from an interrupted ``rmtree`` here is reclaimed by
     :func:`_purge_tombstones` on the next sweep, not by the
     journal-based path (the journal is the first thing that delete
-    removes, so it can never qualify again). On rename failure the original is retained.
+    removes, so it can never qualify again). A cross-device rename
+    (EXDEV) falls back to in-place ``rmtree``; if that also leaves
+    something behind, ``hidden_from_scan`` is False because the original
+    directory is still where the scan looks.
     """
 
     tombstone = entry.with_name(
@@ -231,8 +276,17 @@ def _atomic_reclaim(entry: Path) -> tuple[bool, bool]:
     try:
         os.rename(entry, tombstone)
     except OSError as exc:
-        logger.warning("Transaction is still in use: %s (%s)", entry, exc)
-        return False, False
+        logger.warning(
+            "transaction directory could not be renamed to a tombstone "
+            "(%s); falling back to in-place removal: %s",
+            exc,
+            entry,
+        )
+        shutil.rmtree(entry, ignore_errors=True)
+        survived = entry.exists()
+        if survived:
+            logger.warning("transaction directory survived removal: %s", entry)
+        return (not survived, not survived)
     shutil.rmtree(tombstone, ignore_errors=True)
     if tombstone.exists():
         # Out of the scan's view (correct), but the disk is not yet
@@ -282,44 +336,61 @@ def collect_project_transactions(
     project_root: Path,
     *,
     retention: int = TERMINAL_TRANSACTION_RETENTION,
-    confirmed: bool = False,
+    budget: SweepBudget | None = None,
+    enforce_cap: bool = True,
+    report: dict | None = None,
 ) -> tuple[int, int]:
-    """Reclaim a single explicitly confirmed project and return actual counts."""
+    """Remove settled transactions below one Project; return (count, bytes).
 
-    if (
-        not confirmed
-        or not transaction_gc_enabled()
-        or history_reclaim_kept(project_root)
-    ):
+    ``report`` receives ``skipped_bytes`` when the Project's settled surplus is
+    above the automatic cap and nobody confirmed reclaiming it yet.
+    """
+
+    if not transaction_gc_enabled():
         return (0, 0)
     transactions_root = Path(project_root) / "runtime" / TRANSACTIONS_DIR_NAME
-    if (
-        any(
-            is_link_path(path)
-            for path in (
-                project_root,
-                transactions_root.parent,
-                transactions_root,
-            )
-        )
-        or not transactions_root.is_dir()
-    ):
+    if not transactions_root.is_dir():
         return (0, 0)
     # Finish any tombstone an earlier sweep renamed but could not fully
     # delete, independent of the journal-based eligibility below -- the
     # bytes it holds are already out of the scan's view and this is the
     # only path that can ever reclaim them (review #243 r4548690102).
     purged, purged_bytes = _purge_tombstones(transactions_root)
+    kept = history_reclaim_kept(project_root)
+    baseline = read_scratch_baseline(Path(project_root))
+    if baseline is None and kept:
+        # A Project keeping its history needs proof that a transaction is newer
+        # than its start, and an unrecorded start proves nothing; the scratch
+        # sweep stamps it this boot, so the next one can collect.  A Project
+        # whose history is not kept needs no such proof at all.
+        return (purged, purged_bytes)
     surplus = _surplus_candidates(
         transactions_root,
+        baseline,
+        kept,
         retention,
-        _open_reservation_ids(transactions_root, verify=True),
+        _open_reservation_ids(transactions_root),
     )
     if not surplus:
         return (purged, purged_bytes)
+    # The cap protects the Project's history; whether a caller wants statistics
+    # is a separate question. Gating it on ``report`` made the startup scan
+    # wait for confirmation while the commit-triggered sweep -- which passes
+    # no report -- deleted the same surplus unconfirmed.
+    if enforce_cap:
+        projected = sum(size for _mtime_value, _entry, size in surplus)
+        if (
+            projected > auto_reclaim_max_bytes()
+            and read_reclaim_confirmation(project_root) is None
+        ):
+            if report is not None:
+                report["skipped_bytes"] = projected
+            return (purged, purged_bytes)
     removed = 0
     removed_bytes = 0
     for _mtime_value, entry, size in surplus:
+        if budget is not None and not budget.may_spend(size):
+            break
         # ``shutil.rmtree`` is not atomic: the journal disappears first and
         # the directory is rmdired last, so a commit scan that already
         # captured this name in ``list_transaction_ids`` can see
@@ -337,6 +408,8 @@ def collect_project_transactions(
             # pointless, and counting it would be a lie. Try again next
             # sweep.
             continue
+        if budget is not None:
+            budget.charge(size)
         # ``removed`` counts transactions moved out of the retained set
         # (correctness: the scan no longer sees them); ``removed_bytes``
         # only counts space actually released from disk. A renamed-but-
@@ -351,3 +424,159 @@ def collect_project_transactions(
         # The listing the commit path cached no longer matches the directory.
         drop_transaction_index(transactions_root)
     return (removed + purged, removed_bytes + purged_bytes)
+
+
+def collect_terminal_transactions(
+    services: Any,
+    *,
+    retention: int = TERMINAL_TRANSACTION_RETENTION,
+    project_ids: Any | None = None,
+    budget: SweepBudget | None = None,
+    enforce_cap: bool = True,
+) -> TransactionGCSummary:
+    """Sweep every discovered Project once; never raise, never gate startup.
+
+    ``project_ids`` scopes the sweep, which is what the on-demand reclaim uses
+    when a person asks for their space back before the next boot.  A shared
+    ``budget`` bounds a scheduled pass; without one the sweep runs to the end
+    of the tree.
+    """
+
+    if not transaction_gc_enabled():
+        return TransactionGCSummary()
+    wanted = None if project_ids is None else set(project_ids)
+    projects = 0
+    swept = 0
+    removed = 0
+    removed_bytes = 0
+    skipped_projects = 0
+    skipped_bytes = 0
+    for project_id in services.projects.discover_project_ids():
+        if wanted is not None and project_id not in wanted:
+            continue
+        if budget is not None and not budget.has_room():
+            break
+        projects += 1
+        try:
+            project_root = Path(services.projects.project_root(project_id))
+            report: dict = {}
+            count, size = collect_project_transactions(
+                project_root,
+                retention=retention,
+                budget=budget,
+                enforce_cap=enforce_cap,
+                report=report,
+            )
+            if report.get("skipped_bytes"):
+                skipped_projects += 1
+                skipped_bytes += report["skipped_bytes"]
+                logger.warning(
+                    "transaction reclaim withheld pending confirmation: "
+                    "project=%s bytes=%s cap=%s (confirm through "
+                    "POST /storage/projects/{id}/reclaim-history)",
+                    project_id,
+                    report["skipped_bytes"],
+                    auto_reclaim_max_bytes(),
+                )
+        except Exception:  # noqa: BLE001 - a sweep never breaks startup
+            logger.warning(
+                "transaction sweep skipped: project=%s",
+                project_id,
+                exc_info=True,
+            )
+            continue
+        if count:
+            swept += 1
+            removed += count
+            removed_bytes += size
+    return TransactionGCSummary(
+        projects=projects,
+        swept_projects=swept,
+        removed_transactions=removed,
+        removed_bytes=removed_bytes,
+        stopped_early=bool(budget is not None and budget.stopped_early),
+        skipped_projects=skipped_projects,
+        skipped_bytes=skipped_bytes,
+    )
+
+
+_sweep_guard = threading.Lock()
+_sweeps_in_flight: set[str] = set()
+_sweep_counts: dict[str, int] = {}
+
+
+def request_project_sweep(
+    project_root: Path,
+    *,
+    directory_count: int,
+    threshold: int = TERMINAL_TRANSACTION_SWEEP_THRESHOLD,
+    retention: int = TERMINAL_TRANSACTION_RETENTION,
+) -> bool:
+    """Sweep one Project in the background once its history outgrows itself.
+
+    ``directory_count`` comes from the listing the commit path already keeps,
+    so a normal commit pays nothing here. It counts every transaction directory
+    rather than only settled ones: a sweep may still find nothing to remove,
+    but it never misses one that is due.
+
+    Housekeeping must not block or fail a commit: the sweep runs on a daemon
+    thread, swallows everything it raises, and one Project never runs two at a
+    time. A sweep that removed nothing is not retried until the count has grown
+    by another threshold's worth, so pre-existing history this build will not
+    touch does not cost a scan per commit.
+    """
+
+    if not transaction_gc_enabled():
+        return False
+    key = str(project_root)
+    with _sweep_guard:
+        if directory_count <= threshold:
+            return False
+        if key in _sweeps_in_flight:
+            return False
+        if directory_count < _sweep_counts.get(key, 0) + threshold:
+            return False
+        _sweeps_in_flight.add(key)
+        _sweep_counts[key] = directory_count
+
+    def sweep() -> None:
+        try:
+            removed, removed_bytes = collect_project_transactions(
+                Path(project_root),
+                retention=retention,
+            )
+            if removed:
+                logger.info(
+                    "terminal transactions released during runtime: "
+                    "project_root=%s transactions=%s bytes=%s",
+                    project_root,
+                    removed,
+                    removed_bytes,
+                )
+        except Exception:  # noqa: BLE001 - a sweep never reaches the committer
+            logger.warning(
+                "transaction sweep failed: project_root=%s",
+                project_root,
+                exc_info=True,
+            )
+        finally:
+            with _sweep_guard:
+                _sweeps_in_flight.discard(key)
+
+    threading.Thread(
+        target=sweep,
+        name=f"creator-transaction-sweep:{Path(project_root).name}",
+        daemon=True,
+    ).start()
+    return True
+
+
+__all__ = [
+    "TERMINAL_TRANSACTION_RETENTION",
+    "TERMINAL_TRANSACTION_SWEEP_THRESHOLD",
+    "TransactionGCSummary",
+    "collect_project_transactions",
+    "collect_terminal_transactions",
+    "request_project_sweep",
+    "transaction_gc_enabled",
+]

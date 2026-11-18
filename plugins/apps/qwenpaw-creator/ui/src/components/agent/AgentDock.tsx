@@ -1393,7 +1393,8 @@ export default function AgentDock({
       if (
         notice.role !== "assistant" ||
         notice.source !== "creator_execution_notice" ||
-        !pause
+        !pause ||
+        pause.reason === "media_budget_exhausted"
       )
         continue;
       const text = conversationContent(notice, project)

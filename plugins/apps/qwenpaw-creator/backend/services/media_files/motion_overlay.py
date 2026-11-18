@@ -48,6 +48,7 @@ from services.media_files.motion_engine import (
 )
 from services.media_files.overlay import OverlayRenderResult
 from services.media_files import media_gate
+from services.observability import mem_probe
 from utils.logger import setup_logger
 
 logger = setup_logger("services.media_files.motion_overlay")
@@ -1060,6 +1061,12 @@ def _frames_visually_static(
 
     if len(frame_paths) <= 1:
         return False
+    total_mb = sum(path.stat().st_size for path in frame_paths) / 1048576.0
+    mem_probe.stage(
+        "motion_overlay.static_frame_check",
+        frames=len(frame_paths),
+        total_mb=round(total_mb, 1),
+    )
     if len({path.read_bytes() for path in frame_paths}) == 1:
         return True
     if not ffmpeg_path:
@@ -1440,7 +1447,12 @@ def render_motion_poster(
     )
     if target.is_file():
         try:
-            return target.read_bytes()
+            payload = target.read_bytes()
+            mem_probe.stage(
+                "motion_overlay.poster_cache_bytes",
+                bytes=len(payload),
+            )
+            return payload
         except OSError:
             pass
     with tempfile.TemporaryDirectory(prefix="motion-poster-") as poster_dir:

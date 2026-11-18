@@ -321,11 +321,8 @@ def _materialize_example(entry: dict[str, Any], data_root: Path) -> str:
         try:
             _extract_example_archive(archive_path, extract_dir)
         except Exception as exc:
-            # Preserve the underlying reason (Windows-illegal member name,
-            # corrupt zip entry, budget overrun…) so a 503 is self-
-            # diagnosing rather than a bare STORAGE_INTEGRITY_ERROR.
             raise StorageIntegrityError(
-                f"灵感示例归档无法解包: {entry['id']}（{str(exc)[:200]}）",
+                f"灵感示例归档无法解包: {entry['id']}",
             ) from exc
         archive_path.unlink(missing_ok=True)
         staged = extract_dir / project_id

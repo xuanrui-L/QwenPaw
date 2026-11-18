@@ -1,5 +1,19 @@
 # -*- coding: utf-8 -*-
-"""Reclaim eligible scratch and transaction history only for this request."""
+"""Run the settled-history sweeps for one Project, right now.
+
+The sweeps already run at boot: terminal transactions past the retention window
+and terminal Task scratch.  By default they no longer stop at a Project's
+reclaim baseline, because a customer inside a pod cannot press anything and
+space that waits for a click never comes back.
+
+This module is the on-demand door for the same code -- "give me my space back
+now, not at the next restart".  It deletes nothing itself, so every rule the
+sweeps already enforce still applies: only a transaction whose own
+``journal.json`` names a terminal state, the newest receipts inside the
+retention window, ``QUARANTINED`` work kept as evidence, a quiet period before
+a terminal Task's scratch is touched, and both environment switches.  A Project
+that explicitly chose to keep its history is reported as kept and left alone.
+"""
 
 from __future__ import annotations
 
@@ -15,9 +29,8 @@ from services.media_files.task_scratch import (
     release_orphaned_scratch,
 )
 
-from services.runtime_files.path_safety import is_link_path
-from .store import ProjectNotFound, UnsafeProjectPath
-from .transaction_gc import collect_project_transactions
+from .store import ProjectNotFound
+from .transaction_gc import collect_terminal_transactions
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,28 +62,6 @@ def reclaim_project_history(
 
     moment = now or datetime.now(timezone.utc)
     project_root = Path(services.projects.project_root(project_id))
-    with services.projects.lifecycle_lock(project_id):
-        return _reclaim_locked(services, project_id, project_root, moment)
-
-
-def _reclaim_locked(
-    services: Any,
-    project_id: str,
-    project_root: Path,
-    moment: datetime,
-) -> HistoryReclaimResult:
-    if any(
-        is_link_path(path)
-        for path in (
-            project_root,
-            services.projects.project_path(project_id),
-            project_root / "runtime",
-            project_root / "runtime" / "transactions",
-        )
-    ):
-        raise UnsafeProjectPath(
-            "Cannot reclaim through a redirected project path"
-        )
     if not services.projects.project_path(project_id).is_file():
         raise ProjectNotFound(f"Project does not exist: {project_id}")
     if history_reclaim_kept(project_root):
@@ -83,20 +74,26 @@ def _reclaim_locked(
             released_files=0,
             released_bytes=0,
         )
+    # The press is the confirmation: from now on the automatic passes may
+    # reclaim this Project even above the cap that makes them step back.
     confirmed_at = confirm_project_reclaim(project_root, now=moment)
-    count, size = collect_project_transactions(project_root, confirmed=True)
+    transactions = collect_terminal_transactions(
+        services,
+        project_ids=(project_id,),
+        enforce_cap=False,
+    )
     scratch = release_orphaned_scratch(
         services,
         now=moment,
         project_ids=(project_id,),
-        reclaim_legacy=True,
+        enforce_cap=False,
     )
     return HistoryReclaimResult(
         project_id=project_id,
         history_kept=False,
         confirmed_at=confirmed_at,
-        removed_transactions=count,
-        transaction_bytes=size,
+        removed_transactions=transactions.removed_transactions,
+        transaction_bytes=transactions.removed_bytes,
         released_files=scratch.removed_files,
         released_bytes=scratch.removed_bytes,
     )

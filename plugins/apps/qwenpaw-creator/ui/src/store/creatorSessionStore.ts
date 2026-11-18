@@ -1237,7 +1237,6 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           let session = current.session;
           let rateLimitRetry = current.rateLimitRetry;
           accepted.forEach((event) => {
-            const historical = current.isReplaying && event.seq <= current.replayUntilSeq;
             if (event.type === "agent.run.started") rateLimitRetry = null;
             if (
               rateLimitRetry &&
@@ -1575,7 +1574,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               event.type === "agent.run.completed"
             ) {
               const terminalRunId = eventString(event.data, "runId");
-              if (event.type === "agent.run.completed" && !historical) {
+              if (event.type === "agent.run.completed") {
                 // A run that reaches its end spent Credits, so the balance
                 // recovered: leaving the notice up would accuse every other
                 // project of a condition that just stopped being true.
@@ -1596,7 +1595,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                   streamingAssistantMessages = remaining;
                 }
               }
-              if (event.type === "agent.run.failed" && session && !historical) {
+              if (event.type === "agent.run.failed" && session) {
                 const errorPayload = event.data.error as
                   | {
                       code?: string;
@@ -1821,14 +1820,16 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               // Bootstrap already loaded the conversation tail. Historical
               // lifecycle replay must not undo pagination by pulling from the
               // first old message again (large projects contain huge tool logs).
+              const historicalMessage =
+                current.isReplaying && event.seq <= replayUntilSeq;
               const message = event.data.message as CreatorMessage | undefined;
-              if (message && !historical) {
+              if (message && !historicalMessage) {
                 messages = mergeMessages(messages, [message]);
               }
               const durableMessageId =
                 message?.messageId ?? eventString(event.data, "messageId");
               if (
-                (historical || message) &&
+                (historicalMessage || message) &&
                 durableMessageId &&
                 streamingAssistantMessages[durableMessageId]
               ) {
@@ -1842,7 +1843,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 queuedUi = queuedUi.filter(
                   (item) => item.clientMessageId !== clientMessageId,
                 );
-              if (!historical) {
+              if (!historicalMessage) {
                 const rawMessageSeq = event.data.messageSeq ?? event.data.seq;
                 const cursor =
                   typeof rawMessageSeq === "number"
@@ -1866,7 +1867,9 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               // flicker users describe as "this part keeps refreshing". The
               // authoritative status is already in the snapshot this stream was
               // opened from, so only post-replay transitions are news.
-              if (!historical) {
+              const historicalStatusEvent =
+                current.isReplaying && event.seq <= current.replayUntilSeq;
+              if (!historicalStatusEvent) {
                 const status =
                   event.type === "creator.woken"
                     ? "RUNNING"
@@ -1889,7 +1892,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             }
           });
           const lastEventSeq = accepted.at(-1)!.seq;
-          if (session && session.lastEventSeq < lastEventSeq)
+          if (session && session.lastEventSeq !== lastEventSeq)
             session = { ...session, lastEventSeq };
           const combinedEvents = [...current.events, ...accepted];
           const recentStart = Math.max(0, combinedEvents.length - EVENT_WINDOW);

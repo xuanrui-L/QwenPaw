@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from domain.enums import CreatorCommandType, TaskKind, TaskStatus
+from domain.enums import TaskKind, TaskStatus
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
     WorkNode,
@@ -348,6 +348,64 @@ def test_tick_dispatches_up_to_media_parallelism(tmp_path, monkeypatch):
     assert len(variant_ids) == 3  # three distinct nodes, no duplicates
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_stale_script_dispatch_requires_automatic_execution(
+    tmp_path,
+    monkeypatch,
+    enabled,
+):
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    node = WorkNode(
+        node_id="script:timeline:main",
+        kind="script",
+        label="Script",
+        status=WorkNodeStatus.STALE,
+        timeline_id="timeline:main",
+        command="GENERATE_TIMELINE_SCRIPT",
+        target_ref="timeline:timeline:main",
+        dispatch_fingerprint="script-inputs",
+        regeneration_of="script-old",
+    )
+    graph = WorkGraph(nodes=(node,), generation=1)
+    monkeypatch.setattr(
+        work_scheduler,
+        "derive_work_graph",
+        lambda *a, **k: graph,
+    )
+    scheduler = WorkGraphScheduler(services)
+    monkeypatch.setattr(scheduler, "enabled", lambda: enabled)
+    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
+    dispatch = _RecordingDispatch()
+
+    async def scenario():
+        dispatched = asyncio.Event()
+
+        async def script_dispatch(*args, **kwargs):
+            result = await dispatch(*args, **kwargs)
+            dispatched.set()
+            return result
+
+        monkeypatch.setattr(
+            work_scheduler,
+            "_default_script_dispatch",
+            script_dispatch,
+        )
+        try:
+            await scheduler.tick(PROJECT_ID)
+            if enabled:
+                await asyncio.wait_for(dispatched.wait(), timeout=2)
+        finally:
+            await scheduler.shutdown()
+
+    asyncio.run(scenario())
+    assert len(dispatch.calls) == int(enabled)
+    if enabled:
+        call = dispatch.calls[0]
+        assert call["target_ref"] == "timeline:timeline:main"
+        assert call["command"] == "GENERATE_TIMELINE_SCRIPT"
+        assert "-regen-" in call["idempotency_key"]
+
+
 def _failed_record(dispatch: _RecordingDispatch, *, error: str):
     """The durable FAILED record a real executor leaves after admission."""
     call = dispatch.calls[0]
@@ -372,7 +430,14 @@ def test_same_inputs_are_never_redispatched(tmp_path, monkeypatch):
     async def scenario():
         await scheduler.tick(PROJECT_ID)
         await _drain()
-        record = _failed_record(dispatch, error="provider down")
+        record = _failed_record(
+            dispatch,
+            # A settled failure, not an unknown one: an unrecognised wording is
+            # retried on purpose (see _is_transient_dispatch_error), which is
+            # what keeps a gateway timeout from walling a project forever.
+            error="Image generation failed: check creator_image_model "
+            "configuration.",
+        )
         monkeypatch.setattr(
             scheduler.executions,
             "list_tasks",
@@ -1209,6 +1274,7 @@ def test_dispatch_start_and_image_success_emit_quiet(tmp_path, monkeypatch):
 
 
 def test_r2v_submit_does_not_emit_success(tmp_path, monkeypatch):
+    from domain.enums import CreatorCommandType
     from services.file_agent_runtime.notifications import RuntimeEventKind
 
     services = _services(tmp_path, monkeypatch, ready_variants=0)
@@ -1355,11 +1421,6 @@ def test_credits_refusal_holds_the_project_and_reports_once(
     services = _services(tmp_path, monkeypatch, ready_variants=3)
     _enable_yolo(monkeypatch)
     monkeypatch.setattr(
-        work_scheduler.model_config,
-        "get_image_protocol",
-        lambda: "AgentScope Platform",
-    )
-    monkeypatch.setattr(
         "services.file_agent_runtime.work_scheduler.get_media_parallelism",
         lambda: 1,
     )
@@ -1465,13 +1526,9 @@ def test_rate_limit_breaker_holds_the_fan_out_and_expires(
     services = _services(tmp_path, monkeypatch, ready_variants=1)
     scheduler = WorkGraphScheduler(services)
 
-    assert not scheduler._trip_rate_limit_breaker(
-        PROJECT_ID, Exception(RATE_LIMIT_ERROR),
-    )
     assert scheduler._trip_rate_limit_breaker(
         PROJECT_ID,
         Exception(RATE_LIMIT_ERROR),
-        gateway=True,
     )
     assert scheduler._rate_limit_breaker_open(PROJECT_ID)
     # One window produces one line: the rest of the fan-out would hear the same
@@ -1479,7 +1536,6 @@ def test_rate_limit_breaker_holds_the_fan_out_and_expires(
     assert not scheduler._trip_rate_limit_breaker(
         PROJECT_ID,
         Exception(RATE_LIMIT_ERROR),
-        gateway=True,
     )
 
     # A bare status says the same thing in the provider's own words.
@@ -1490,7 +1546,6 @@ def test_rate_limit_breaker_holds_the_fan_out_and_expires(
         Exception(
             "Image generation failed with status 429: too many requests",
         ),
-        gateway=True,
     )
 
     # Credits is the better diagnosis when a refusal looks like both: its
@@ -1516,62 +1571,11 @@ def test_rate_limit_breaker_holds_the_fan_out_and_expires(
     assert scheduler._trip_rate_limit_breaker(
         PROJECT_ID,
         Exception(RATE_LIMIT_ERROR),
-        gateway=True,
     )
     scheduler._rate_limited_tripped[PROJECT_ID] -= (
         work_scheduler._RATE_LIMIT_BREAKER_SECONDS + 1
     )
     assert not scheduler._rate_limit_breaker_open(PROJECT_ID)
-
-
-def test_platform_throttle_leaves_direct_models_dispatchable(
-    tmp_path, monkeypatch
-):
-    services = _services(tmp_path, monkeypatch, ready_variants=1)
-    scheduler = WorkGraphScheduler(services)
-    monkeypatch.setattr(
-        work_scheduler.model_config,
-        "get_image_protocol",
-        lambda: "AgentScope Platform",
-    )
-    monkeypatch.setattr(
-        work_scheduler.model_config,
-        "get_video_protocol",
-        lambda: "Wan",
-    )
-    monkeypatch.setattr(
-        work_scheduler.model_config,
-        "get_video_base_url",
-        lambda: "https://dashscope.aliyuncs.com/api/v1",
-    )
-    graph = WorkGraph(
-        nodes=(
-            WorkNode(
-                node_id="visual:x",
-                kind="visual",
-                label="Image",
-                status=WorkNodeStatus.READY,
-                command=CreatorCommandType.GENERATE_ASSET.value,
-            ),
-            WorkNode(
-                node_id="video:x",
-                kind="video",
-                label="Video",
-                status=WorkNodeStatus.READY,
-                command=CreatorCommandType.GENERATE_R2V_VIDEO.value,
-            ),
-        ),
-        generation=1,
-    )
-    assert scheduler._trip_rate_limit_breaker(
-        PROJECT_ID,
-        Exception(RATE_LIMIT_ERROR),
-        gateway=True,
-    )
-    assert [
-        node.node_id
-        for node in scheduler._dispatch_candidates(PROJECT_ID, graph)
-    ] == ["video:x"]
 
 
 def test_credits_breaker_also_holds_prompt_preparation(
@@ -1591,11 +1595,6 @@ def test_credits_breaker_also_holds_prompt_preparation(
         Sentinel,
     )
     scheduler = WorkGraphScheduler(services)
-    monkeypatch.setattr(
-        work_scheduler.model_config,
-        "get_text_protocol",
-        lambda: "AgentScope Platform",
-    )
     scheduler._trip_quota_breaker(PROJECT_ID, Exception(CREDITS_ERROR))
     graph = WorkGraph(
         nodes=(
@@ -2050,3 +2049,97 @@ def test_manual_fingerprint_re_rolls_a_succeeded_slot() -> None:
     assert WorkGraphScheduler.manual_retry_fingerprint(node, [succeeded]) == (
         fresh
     )
+
+
+def test_media_history_does_not_block_dispatch_but_gates_still_apply(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    history = [
+        TaskRecord(
+            task_id=f"historical-media-{index}",
+            project_id=PROJECT_ID,
+            kind=TaskKind.R2V_GENERATION,
+            status=TaskStatus.SUCCEEDED,
+            request_fingerprint=f"historical-{index}",
+        )
+        for index in range(250)
+    ]
+    monkeypatch.setattr(
+        work_scheduler.ProjectExecutionStore,
+        "list_tasks",
+        lambda _store, _project_id: history,
+    )
+    monkeypatch.setattr(work_scheduler, "get_media_parallelism", lambda: 1)
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_execution_authorization_mode",
+        lambda: "required",
+    )
+    graph = WorkGraph(
+        nodes=tuple(
+            WorkNode(
+                node_id=kind + ":test",
+                kind=kind,
+                label=kind,
+                status=WorkNodeStatus.READY,
+                command=command,
+                target_ref="timeline:main"
+                if kind == "compose"
+                else "element:test",
+            )
+            for kind, command in [
+                ("video", "GENERATE_R2V_VIDEO"),
+                ("interaction", "GENERATE_INTERACTION_MOTION"),
+                ("compose", "COMPOSE_FINAL_VIDEO"),
+            ]
+        ),
+        generation=1,
+    )
+    completed = set()
+    monkeypatch.setattr(
+        work_scheduler,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: WorkGraph(
+            nodes=tuple(
+                node for node in graph.nodes if node.kind not in completed
+            ),
+            generation=graph.generation,
+        ),
+    )
+    scheduler = WorkGraphScheduler(services)
+    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
+    calls = []
+    release = asyncio.Event()
+
+    async def dispatch(_project, node, *_args, **_kwargs):
+        calls.append(node.kind)
+        await release.wait()
+        completed.add(node.kind)
+
+    scheduler.dispatch_node = dispatch
+
+    async def scenario():
+        try:
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+            assert not calls, "automatic dispatch still requires authorization"
+            _enable_yolo(monkeypatch)
+            for count in range(1, 4):
+                release.clear()
+                await scheduler.tick(PROJECT_ID)
+                await _drain()
+                assert len(calls) == count
+                await scheduler.tick(PROJECT_ID)
+                await _drain()
+                assert (
+                    len(calls) == count
+                ), "inflight work still occupies capacity"
+                release.set()
+                await asyncio.gather(*scheduler._dispatch_tasks[PROJECT_ID])
+        finally:
+            await scheduler.shutdown()
+
+    asyncio.run(scenario())
+    assert sorted(calls) == ["compose", "interaction", "video"]

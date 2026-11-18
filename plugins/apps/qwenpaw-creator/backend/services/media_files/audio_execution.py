@@ -32,6 +32,7 @@ from services.media_files import media_gate
 from services.project_files.assets import AssetAlreadyExists, AssetFileStore
 from services.project_files.commit import ProjectCommitError
 from services.project_files.facade import CreatorFileServices
+from services.observability import mem_probe
 from services.project_files.models import (
     CharacterVoice,
     IndexedFile,
@@ -343,8 +344,8 @@ def _requested_tts_identity(
         (voice or "").strip(),
         model_config.get_tts_voice(),
     )
-    # ``None`` is a name the runner rejects before any call, so no asset can
-    # have been stored under it; keep the request as typed.
+    # ``None`` is a name the runner refuses or forwards as typed, so no asset
+    # can have been stored under it; keep the request as handed over.
     return (capability.model, voice if active is None else active)
 
 
@@ -575,7 +576,13 @@ def _extracted_video_audio_bytes(payload: bytes, *, suffix: str) -> bytes:
                 "视频音轨提取失败（该视频可能没有音轨）："
                 + (result.stderr or result.stdout or "unknown")[-300:],
             )
-        return output.read_bytes()
+        payload = output.read_bytes()
+        mem_probe.stage(
+            "audio.extracted_track_bytes",
+            name=output.name,
+            bytes=len(payload),
+        )
+        return payload
 
 
 def _sample_bytes_for_version(

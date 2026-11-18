@@ -19,7 +19,6 @@ from pydantic import BaseModel, Field
 
 from domain.errors import NotFoundError, ValidationError
 from models.config import (
-    get_media_call_budget,
     get_image_model_name,
     get_video_model_name,
 )
@@ -56,11 +55,7 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
     graph = derive_work_graph(
         snapshot.project,
         tasks=tasks,
-        pending_reviews=(
-            services.reviews.all_pending(project_id)
-            if snapshot.project.narrative_edges
-            else ()
-        ),
+        pending_reviews=services.reviews.all_pending(project_id),
         media_models=(get_image_model_name(), get_video_model_name()),
     )
     hold = manual_regeneration_hold.ManualRegenerationHoldStore(
@@ -71,9 +66,7 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
         "manualHold": hold.payload(),
         "generation": graph.generation,
         "counts": graph.counts(),
-        # Honest spend metric: billable provider calls, never estimated money.
         "mediaCalls": media_call_count(services, project_id),
-        "mediaCallBudget": get_media_call_budget(),
         "nodes": [
             {
                 "id": node.node_id,
@@ -233,26 +226,29 @@ async def dispatch_work_graph_node(
     regenerate = bool(request and request.regenerate)
     if regenerate and node.kind != "interaction":
         raise ValidationError("Explicit regeneration is only for interaction")
-    if (
+    # A node whose task was admitted but never claimed reads as "running" and
+    # used to be answered with a silent dispatched=false, which left the user
+    # staring at a queue label while nothing was queued (field case
+    # 2026-11-06: 69 hours). That one is allowed through to the real dispatch
+    # path; a genuinely running render is still refused, now with a reason.
+    unclaimed = (
         node.status.value == "running"
-        and node.target_ref not in _abandoned_queued_targets(tasks)
-    ) or (
+        and bool(node.target_ref)
+        and (node.target_ref in _abandoned_queued_targets(tasks))
+    )
+    if (node.status.value == "running" and not unclaimed) or (
         node.kind == "interaction"
         and node.status.value == "done"
         and not regenerate
     ):
-        # An in-flight execution is provider spend already committed; the
-        # click races the run instead of authorizing a second one.
+        # Existing media controls request a reroll without a request body.
+        # Interaction controls explicitly opt in to bypass semantic reuse.
         return {
             "ok": True,
             "nodeId": node_id,
             "status": node.status.value,
             "dispatched": False,
-            "reason": (
-                "already_running"
-                if node.status.value == "running"
-                else "already_done"
-            ),
+            "reason": "already_running",
             **_task_admission_detail(tasks, node.target_ref),
         }
     if node.missing:

@@ -66,6 +66,14 @@
     "importUrlSourceDetected": "Detected: {{source}}",
     "importUrlSourceUnknown": "Unrecognized source URL; you can still try importing."
   },
+  "feedback": {
+    "action": "Feedback",
+    "title": "Feedback",
+    "placeholder": "Your input will guide what we improve next",
+    "submit": "Submit",
+    "sent": "Received — thank you for the feedback",
+    "failed": "Failed to submit feedback"
+  },
   "common": {
     "close": "Close",
     "cancel": "Cancel",
@@ -312,7 +320,10 @@
     "saveAsTemplateFailed": "Failed to save template",
     "deleteTemplateConfirm": "Delete template \"{{name}}\"?",
     "deleteTemplateSuccess": "Template deleted",
-    "deleteTemplateFailed": "Failed to delete template"
+    "deleteTemplateFailed": "Failed to delete template",
+    "videoTemplateNone": "No Template",
+    "videoTemplateHint": "Choose a preset to get started quickly",
+    "videoTemplateUserSection": "My Templates"
   },
   "nav": {
     "videoPlan": "Video Plan",
@@ -323,7 +334,6 @@
     "replayTour": "Replay tutorial",
     "breadcrumb": "Breadcrumb",
     "productionWorkbench": "Production Workbench",
-    "blueprint": "Video script",
     "creditsExhausted": "Out of Credits",
     "creditsExhaustedHint": "The model Credits balance is empty, so the provider refuses model calls in every project. Redeem Credits with contribution points on the platform's Model Calls page, then return to the project that failed and continue.",
     "creditsDismiss": "Hide the Credits notice for now",
@@ -331,7 +341,8 @@
     "creditsConsumed": "Consumed",
     "creditsRingTitle": "Credits usage",
     "creditsRingAria": "Remaining Credits",
-    "creditsRingUnavailable": "Unavailable: cannot reach the platform credits endpoint"
+    "creditsRingUnavailable": "Unavailable: cannot reach the platform credits endpoint",
+    "blueprint": "Video script"
   },
   "modelConfig": {
     "title": "Model Configuration",
@@ -441,6 +452,7 @@
       "dashscope": "DashScope",
       "aliyunTokenPlan": "Aliyun Token Plan",
       "aliyunCodingPlan": "Aliyun Coding Plan",
+      "agentscopePlatform": "AgentScope Platform",
       "deepseek": "DeepSeek",
       "googleGemini": "Google Gemini",
       "openai": "OpenAI Protocol",
@@ -466,8 +478,7 @@
       "custom": "Custom",
       "dashscopeFunAsr": "DashScope Fun-ASR",
       "dashscopeQwen3Asr": "DashScope Qwen3-ASR",
-      "openaiWhisper": "OpenAI Whisper",
-      "agentscopePlatform": "AgentScope Platform"
+      "openaiWhisper": "OpenAI Whisper"
     },
     "searchAdapterDashScope": "Qwen / DashScope",
     "ttsNarratorVoice": "Default Narrator Voice",
@@ -505,6 +516,16 @@
     "groupExtensions": "Extensions",
     "paneSkills": "Skills",
     "paneSkillsDesc": "Domain knowledge the agent consults automatically.",
+    "panePlatform": "One-Click Setup",
+    "panePlatformDesc": "Fetch this subdomain's model key and endpoint from AgentScope Platform, then write them into every service the platform proxies.",
+    "platform": {
+      "action": "Fetch and configure",
+      "credits": "Credits available: {{value}}",
+      "coverage": "Covers language and understanding, image, video, speech synthesis and transcription. Digital human, embedding and web grounding are not proxied by the platform and still need their own configuration.",
+      "endpoint": "Endpoint written: {{url}}",
+      "needsModel": "No model chosen",
+      "applyFailed": "One-click setup failed"
+    },
     "modeLevel": "Stop {{level}}",
     "gateCheckpoints": "Creation checkpoints",
     "gateExecution": "High-cost authorization",
@@ -632,17 +653,7 @@
     "translateModelLabel": "Translation model (optional)",
     "translateCardNote": "image_generation mode=translate uses this model to translate in-image text while keeping the layout; empty means the default qwen-mt-image, sharing the image model's DashScope API Key (DashScope protocol only).",
     "imageEndpointNote": "Set Base URL to the API root (https://dashscope.aliyuncs.com/api/v1): every Bailian qwen-image / wan-image model shares the multimodal-generation service path, appended automatically by the backend; in-image translation uses the image2image path, appended the same way.",
-    "videoEndpointNote": "Set Base URL to the API root: the backend appends the DashScope video-generation/video-synthesis submit path automatically, and the ark v3 task path for Volcano Engine.",
-    "panePlatform": "One-Click Setup",
-    "panePlatformDesc": "Fetch this subdomain's model key and endpoint from AgentScope Platform, then write them into every service the platform proxies.",
-    "platform": {
-      "action": "Fetch and configure",
-      "credits": "Credits available: {{value}}",
-      "coverage": "Covers language and understanding, image, video, speech synthesis and transcription. Digital human, embedding and web grounding are not proxied by the platform and still need their own configuration.",
-      "endpoint": "Endpoint written: {{url}}",
-      "needsModel": "No model chosen",
-      "applyFailed": "One-click setup failed"
-    }
+    "videoEndpointNote": "Set Base URL to the API root: the backend appends the DashScope video-generation/video-synthesis submit path automatically, and the ark v3 task path for Volcano Engine."
   },
   "modelBadges": {
     "textModel": "Text Model",
@@ -825,6 +836,7 @@
     "applySuccess": "Changes applied",
     "applySuccessRegenRequired": "Changes applied; related results marked for regeneration",
     "applySuccessPreviewUpdated": "Changes applied; live preview updated, final cut will recompose",
+    "applySuccessComposeWaiting": "Changes applied; live preview updated, and the final cut is out of date \u2014 press Final Cut to recompose it.",
     "applyFailed": "Apply failed: {{detail}}",
     "unsavedChanges": "Unsaved changes",
     "unsavedChangesDesc": "Page drafts will be discarded when you leave. You can go back and click \"Apply Changes\" first.",
@@ -839,6 +851,7 @@
     "noStoryboard": "No storyboard yet",
     "scriptPlan": "Back to video script",
     "expandSidebar": "Expand sidebar",
+    "railStoryboardTab": "Storyboard Preview",
     "subtitleRemove": "Remove All Subtitles",
     "subtitleAdd": "Add All Subtitles",
     "subtitleToggleFailed": "Subtitle toggle failed: {{detail}}",
@@ -852,8 +865,7 @@
     "subtitleStyleApplied": "Subtitle style updated. Click 'Compose Final Cut' to refresh the video.",
     "subtitleStyleFailed": "Subtitle style update failed: {{detail}}",
     "subtitleStyleSkippedDesign": "{{count}} caption(s) get their look from their own motion design, so the pack motion does not apply there",
-    "subtitleStyleMotionUnowned": "This caption's look comes from its own motion design, which the style pack never rewrites; tune entrance / exit / loop in the motion design",
-    "applySuccessComposeWaiting": "Changes applied; live preview updated, and the final cut is out of date — press Final Cut to recompose it."
+    "subtitleStyleMotionUnowned": "This caption's look comes from its own motion design, which the style pack never rewrites; tune entrance / exit / loop in the motion design"
   },
   "r2v": {
     "title": "Video Plan / {{element}} / Production Workbench",
@@ -1027,7 +1039,9 @@
     "editorReferencesChanged": "The reference images or editing target have changed. Reload before continuing so image references stay accurate. Your current draft is preserved.",
     "editorReload": "Reload latest",
     "editorKeep": "Keep my edits",
-    "narrativeTitle": "Clip narrative"
+    "narrativeTitle": "Clip narrative",
+    "subtitle": "AI-generated frame sub-interface, inheriting storyboards, reference assets and artifact versions.",
+    "tokenClickRemove": "Click to remove this reference"
   },
   "elementDetail": {
     "selectElement": "Select a timeline element",
@@ -1163,6 +1177,9 @@
     "rateLimitExhausted": "Model rate-limited, still unavailable after {{retries}} retries",
     "rateLimitContinue": "Continue",
     "rateLimitResumeMessage": "Continue the task that was interrupted by model rate limiting",
+    "quotaExhausted": "Not enough model Credits, so automatic retries stopped. Redeem Credits with contribution points on the platform's Model Calls page, then continue.",
+    "quotaContinue": "Redeemed — continue",
+    "quotaResumeMessage": "I have redeemed Credits; please continue the task that was interrupted",
     "contextUnfit": "This input exceeded the model's context window and everything that could be given up has been. Send fewer attachments or shorten the request, then resend it.",
     "mentionHint": "Type @ to reference storyboards, assets etc. as context; currently selected objects are also auto-included.",
     "clearAll": "Clear all references, selected text and @ mentions",
@@ -1237,10 +1254,7 @@
     "agentTimeout": "Agent execution timed out, please retry",
     "notRetryable": "Execution failed, cannot auto-retry",
     "executionFailed": "Execution failed, please retry",
-    "errorProjectBase": "Project state expired, please retry",
-    "quotaExhausted": "Not enough model Credits, so automatic retries stopped. Redeem Credits with contribution points on the platform's Model Calls page, then continue.",
-    "quotaContinue": "Redeemed — continue",
-    "quotaResumeMessage": "I have redeemed Credits; please continue the task that was interrupted"
+    "errorProjectBase": "Project state expired, please retry"
   },
   "agentEventFeed": {
     "executing": "Executing",
@@ -1269,6 +1283,8 @@
   "workGraph": {
     "manuallyHeld": "Manually paused",
     "manualHoldNotice": "Manual regeneration has paused downstream automatic production.",
+    "strandedAdmission": "{{count}} production request(s) were admitted but never started; resubmit them.",
+    "strandedResubmit": "Resubmit",
     "resume": "Resume automatic production",
     "resumeConfirm": "Resuming will restart downstream automatic generation and may incur media generation costs. Resume automatic production?",
     "resumeStale": "The pause has changed. Review the latest state and confirm resume again.",
@@ -1281,8 +1297,6 @@
     "generate": "Generate",
     "productionProgress": "Production progress {{done}}/{{total}}",
     "parallel": "Parallel {{count}}",
-    "mediaCallBudgetTitle": "Paid media generation calls issued / project budget (adjust via agent_runtime.media_call_budget)",
-    "mediaCalls": "Media calls {{used}}/{{budget}}",
     "progress": "Progress {{done}}/{{total}}",
     "failed": "Failed {{count}}",
     "listSeparator": ", ",
@@ -1311,9 +1325,7 @@
         "generate": "Compose final film",
         "retry": "Recompose final film"
       }
-    },
-    "strandedAdmission": "{{count}} production request(s) were admitted but never started; resubmit them.",
-    "strandedResubmit": "Resubmit"
+    }
   },
   "decisionTray": {
     "productionConfirm": "Production Confirm · ",
@@ -1342,6 +1354,9 @@
   },
   "executionAuth": {
     "title": "High-cost Media Execution",
+    "generatePresentation": "Generate work pages",
+    "generateInteraction": "Generate choice animation",
+    "presentationTarget": "Home, playback, story map and ending pages",
     "duration": "Duration {{duration}}s",
     "resolutionLabel": "Resolution {{resolution}}",
     "ratio": "Ratio {{ratio}}",
@@ -1377,12 +1392,11 @@
     "checkpointScript": "Script confirmation",
     "checkpointDirection": "Direction confirmation",
     "checkpointConfirmed": "Confirmed. Creation will continue.",
-    "checkpointCancelled": "Confirmation cancelled.",
-    "generatePresentation": "Generate work pages",
-    "generateInteraction": "Generate choice animation",
-    "presentationTarget": "Home, playback, story map and ending pages"
+    "checkpointCancelled": "Confirmation cancelled."
   },
   "fileReview": {
+    "applyingExecutionMode": "Applying the saved execution mode to the interaction design…",
+    "autoModeFailed": "The interaction design could not be accepted automatically. Retry or review it manually: {{detail}}",
     "pending": "Pending",
     "kept": "Kept",
     "undone": "Undone",
@@ -1400,6 +1414,7 @@
     "creativeBrief": "Creative Brief",
     "creativeDirection": "Creative Direction",
     "prompt": "Prompt",
+    "nativeAudio": "Native video audio",
     "camera": "Camera",
     "framing": "Framing",
     "duration": "Duration",
@@ -1461,6 +1476,9 @@
       "videoVersion": "Video version",
       "editPlan": "Edit plan",
       "contentUpdated": "Content updated",
+      "presentationEffect": "Experience pages · Interface",
+      "interactionEffect": "Choice animation",
+      "effectUpdated": "Interface updated. View the preview to review it.",
       "mediaSelection": "Selected media",
       "selectionUpdated": "Media selection updated",
       "text": "Copy",
@@ -1476,14 +1494,8 @@
       "versionHistoryUpdated": "Version history updated",
       "before": "Before",
       "after": "After",
-      "noReferenceImages": "No reference images selected",
-      "presentationEffect": "Experience pages · Interface",
-      "interactionEffect": "Choice animation",
-      "effectUpdated": "Interface updated. View the preview to review it."
-    },
-    "applyingExecutionMode": "Applying the saved execution mode to the interaction design…",
-    "autoModeFailed": "The interaction design could not be accepted automatically. Retry or review it manually: {{detail}}",
-    "nativeAudio": "Native video audio"
+      "noReferenceImages": "No reference images selected"
+    }
   },
   "rejectionFeedback": {
     "undoContent": "Undo content",
@@ -1570,6 +1582,7 @@
     "selectRow": "Select entire row",
     "timingAppliedRegenRequired": "Timing adjustments applied; related generation results marked for regeneration",
     "timingAppliedRecomposing": "Timing adjustments applied; recomposing final cut",
+    "timingAppliedComposeWaiting": "Timing applied; the final cut is out of date \u2014 press Final Cut to recompose it.",
     "timingApplied": "Timing adjustments applied",
     "applyTimingFailed": "Failed to apply timing adjustments: {{detail}}",
     "undoCancelled": "Timeline was updated by other changes, undo cancelled to avoid overwriting new content",
@@ -1637,8 +1650,7 @@
     "snapshotDeleted": "Snapshot deleted",
     "snapshotPreApplyBackup": "Backup before apply",
     "snapshotInUse": "Applied",
-    "snapshotCurrentMatches": "Content matches “{{name}}”",
-    "timingAppliedComposeWaiting": "Timing applied; the final cut is out of date — press Final Cut to recompose it."
+    "snapshotCurrentMatches": "Content matches “{{name}}”"
   },
   "editPlan": {
     "title": "Edit plan",
@@ -1657,6 +1669,7 @@
     "reviewRound": "Round {{round}}"
   },
   "workspaceEmpty": {
+    "interactive": "Story nodes awaiting a draft",
     "preparingHint": "Creation starts automatically once your materials are ready. Follow progress in the assistant; there is no need to submit again.",
     "blueprint": "Video script",
     "script": "Script",
@@ -1673,8 +1686,7 @@
     "stoppingHint": "Current work is stopping. Content already created will be kept.",
     "stoppedHint": "The task has stopped. You can adjust your request in the assistant and continue.",
     "errorHint": "This attempt could not finish. Check the assistant for details before continuing.",
-    "loadingHint": "Loading existing content and the latest progress.",
-    "interactive": "Story nodes awaiting a draft"
+    "loadingHint": "Loading existing content and the latest progress."
   },
   "elementList": {
     "disabled": "Disabled",
@@ -1785,7 +1797,7 @@
     "modelGuideVoiceDesc": "Synthesizes narration and lines; audio drives talking-head segments",
     "modelGuideGroundingProtocols": "Serper (Google) / Tavily search; the verifier can reuse LLM/VLM or a custom model",
     "modelGuideTtsTitle": "TTS Speech Synthesis",
-    "modelGuideTtsProtocols": "DashScope: Qwen-TTS family (qwen3-tts-flash, system voices plus cloning/design), CosyVoice family (cosyvoice-v3.5-plus needs a voice created first; qwen-audio-3.0-tts-flash / -plus and the qwen-audio-3.1 pair ship system voices)",
+    "modelGuideTtsProtocols": "DashScope: Qwen-TTS family (qwen3-tts-flash, system voices plus cloning/design), CosyVoice family (cosyvoice-v3.5-plus needs a voice created first; qwen-audio-3.0/3.1-tts-flash and -plus ship system voices)",
     "modelGuideS2vTitle": "Digital Human",
     "modelGuideS2vProtocols": "DashScope: wan2.2-s2v with the free face-detect gate (wan2.2-s2v-detect)",
     "modelGuideEmbeddingTitle": "Embedding",
@@ -2283,6 +2295,8 @@
     "dismiss": "Dismiss upload progress"
   },
   "blueprint": {
+    "scriptSyncExplanation": "The creative inputs have changed and this script has not yet been synchronized. Story branches or creative requirements added during generation can also trigger this state; it does not imply you requested an edit. The existing script remains readable.",
+    "scriptSyncReason": "Update reason: {{reason}}",
     "timelineEdit": "Timeline Editing",
     "episodeN": "Node {{n}}",
     "episodesCount": "Nodes · {{count}}",
@@ -2302,6 +2316,27 @@
       "idle": "To draft"
     },
     "episodeList": "Episode list · Linear {{count}} episodes",
+    "graph": {
+      "title": "Story map",
+      "expand": "Expand story map",
+      "collapse": "Collapse story map",
+      "locateNode": "Locate story node",
+      "zoomOut": "Zoom out story map",
+      "zoomIn": "Zoom in story map",
+      "actualSize": "Reset to 100%",
+      "fit": "Overview",
+      "arrange": "Auto arrange",
+      "localLayout": "Reset node positions. Layout is saved in this browser only.",
+      "navigationHint": "Drag nodes to arrange · Drag background to pan · Shift + wheel to scroll sideways · Select a node to trace choices",
+      "connections": "Node connections",
+      "clearFocus": "Clear node focus",
+      "continue": "Continue",
+      "noOutgoing": "This node has no outgoing branches.",
+      "incoming": "Show {{count}} incoming paths"
+    },
+    "interactiveStoryMap": "Interactive drama · Story map",
+    "branchesPending": "Branch connections not yet created",
+    "branchesPendingHint": "Story nodes appear here as they are drafted. Choices and connections will show the story paths once created. You can read existing scripts or open Interaction Design to review the page requirements.",
     "noSynopsis": "No synopsis yet",
     "timelineQuick": "Timeline",
     "endingNode": "Ending",
@@ -2328,6 +2363,7 @@
     "playRoughCut": "Play rough cut",
     "playFullFilm": "Play full film",
     "closeRoughCutPlayer": "Close player",
+    "previewUnavailable": "Storyboard images have not been generated yet. Preview is unavailable.",
     "roughCutFailed": "Rough-cut assembly failed: this timeline has no usable clips yet",
     "finalCutBadge": "Final cut",
     "downloadFinalCut": "Download final cut",
@@ -2468,28 +2504,6 @@
     "sourceResultLoading": "Loading understanding",
     "pausePreview": "Pause preview",
     "previewPosition": "Preview position",
-    "graph": {
-      "title": "Story map",
-      "expand": "Expand story map",
-      "collapse": "Collapse story map",
-      "locateNode": "Locate story node",
-      "zoomOut": "Zoom out story map",
-      "zoomIn": "Zoom in story map",
-      "actualSize": "Reset to 100%",
-      "fit": "Overview",
-      "arrange": "Auto arrange",
-      "localLayout": "Reset node positions. Layout is saved in this browser only.",
-      "navigationHint": "Drag nodes to arrange · Drag background to pan · Shift + wheel to scroll sideways · Select a node to trace choices",
-      "connections": "Node connections",
-      "clearFocus": "Clear node focus",
-      "continue": "Continue",
-      "noOutgoing": "This node has no outgoing branches.",
-      "incoming": "Show {{count}} incoming paths"
-    },
-    "interactiveStoryMap": "Interactive drama · Story map",
-    "branchesPending": "Branch connections not yet created",
-    "branchesPendingHint": "Story nodes appear here as they are drafted. Choices and connections will show the story paths once created. You can read existing scripts or open Interaction Design to review the page requirements.",
-    "previewUnavailable": "Storyboard images have not been generated yet. Preview is unavailable.",
     "playFullInteractive": "Play full interactive story",
     "exportBundle": "Export interactive bundle",
     "exportBundleFailed": "Interactive bundle export failed",
@@ -2499,14 +2513,12 @@
     "uploading": "Uploading…",
     "uploadBundleSubmitted": "Submitted — opening publish progress",
     "uploadBundleFailed": "Interactive bundle upload failed",
-    "previewChoice": "Choose a path",
-    "scriptSyncExplanation": "The creative inputs have changed and this script has not yet been synchronized. Story branches or creative requirements added during generation can also trigger this state; it does not imply you requested an edit. The existing script remains readable.",
-    "scriptSyncReason": "Update reason: {{reason}}"
+    "previewChoice": "Choose a path"
   },
   "sidebar": {
+    "nodes": "Story nodes",
     "assistant": "Assistant",
-    "episodes": "Episodes",
-    "nodes": "Story nodes"
+    "episodes": "Episodes"
   },
   "agentActivity": {
     "progress": "Creative progress",
@@ -2590,16 +2602,16 @@
     "activeWork": "In progress"
   },
   "agentProgress": {
+    "visualState": "State {{index}}",
+    "waitingForUpdate": "Waiting for {{target}} to be updated",
+    "waitingForTarget": "Waiting for {{target}} to finish",
+    "waitingForPrompt": "Waiting for the generation prompt",
     "composeNeedsUpdate": "Final cut needs updating",
     "lastAttemptFailed": "Last attempt failed",
     "lastAttemptCancelled": "Last attempt stopped",
     "otherWork": "Other creative work",
     "sources": "Project sources",
-    "timeline": "Video / episode {{index}}",
-    "visualState": "State {{index}}",
-    "waitingForUpdate": "Waiting for {{target}} to be updated",
-    "waitingForTarget": "Waiting for {{target}} to finish",
-    "waitingForPrompt": "Waiting for the generation prompt"
+    "timeline": "Video / episode {{index}}"
   },
   "agentRetry": {
     "context_recovery": "Organizing task information before continuing",
@@ -2611,19 +2623,11 @@
     "backoff": "Retrying in {{seconds}}s",
     "responding": "Waiting for the model response"
   },
-  "feedback": {
-    "action": "Feedback",
-    "title": "Feedback",
-    "placeholder": "Your input will guide what we improve next",
-    "submit": "Submit",
-    "sent": "Received — thank you for the feedback",
-    "failed": "Failed to submit feedback"
-  },
   "storage": {
     "pendingHint": "{{size}} of settled history is waiting for your confirmation",
     "confirmButton": "Confirm and free",
     "confirmTitle": "Free {{size}} of settled history in \"{{name}}\"?",
-    "confirmBody": "This removes eligible completed transaction records and temporary work files from this project. This action cannot be undone.",
+    "confirmBody": "The automatic sweep stepped back from this Project because its settled history grew past the threshold. Confirming records your decision and runs the same two sweeps right now, deleting the finished sessions and transactions that make up the bytes.",
     "confirmed": "Freed {{size}} of settled history",
     "failed": "Could not free the settled history: {{message}}"
   }

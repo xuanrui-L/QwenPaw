@@ -73,7 +73,14 @@ KEEP_FILE_NAMES = frozenset({"provider-tasks.jsonl"})
 BASELINE_FILE_NAME = ".storage-baseline.json"
 BASELINE_VERSION = 1
 
-# The optional keep marker blocks even a manual request to reclaim legacy work.
+# Pre-baseline history is reclaimed by default: a customer cannot shell into a
+# pod to press anything, and a sweep that waits for consent never collects.
+# What makes the sweeps safe is unchanged -- only a journal-declared terminal
+# transaction goes, the newest receipts stay inside the retention window,
+# QUARANTINED work is kept as evidence, and a terminal Task must be
+# quiet first.
+# Two ways to restore the old promise that an upgrade rewrites nothing: one env
+# var for a whole install, one marker per Project for a person's own choice.
 HISTORY_OPTOUT_FILE_NAME = ".storage-history-optout.json"
 KEEP_PROJECT_HISTORY_ENV = "CREATOR_STORAGE_KEEP_HISTORY"
 
@@ -138,6 +145,8 @@ class ScratchSweepSummary:
     removed_files: int = 0
     removed_bytes: int = 0
     stopped_early: bool = False
+    skipped_projects: int = 0
+    skipped_bytes: int = 0
 
 
 @dataclass(slots=True)
@@ -156,14 +165,9 @@ class SweepBudget:
     consumed_bytes: int = 0
     stopped_early: bool = False
 
-    stop_event: threading.Event | None = None
-
     def has_room(self) -> bool:
         """Whether anything at all may still be deleted this pass."""
 
-        if self.stop_event is not None and self.stop_event.is_set():
-            self.stopped_early = True
-            return False
         if (
             self.max_bytes is not None
             and self.consumed_bytes >= self.max_bytes
@@ -199,11 +203,7 @@ SWEEP_DEFAULT_MAX_BYTES = 16 * 1024 * 1024 * 1024
 SWEEP_DEFAULT_MAX_SECONDS = 300.0
 
 
-def budget_from_environment(
-    *,
-    monotonic: float | None = None,
-    stop_event: threading.Event | None = None,
-) -> SweepBudget:
+def budget_from_environment(*, monotonic: float | None = None) -> SweepBudget:
     """Build this pass's budget, so the caller can hand one to both sweeps."""
 
     raw_bytes = os.environ.get(SWEEP_MAX_BYTES_ENV, "").strip()
@@ -220,7 +220,6 @@ def budget_from_environment(
         max_seconds = SWEEP_DEFAULT_MAX_SECONDS
     started = time.monotonic() if monotonic is None else monotonic
     return SweepBudget(
-        stop_event=stop_event,
         max_bytes=max_bytes if max_bytes > 0 else None,
         deadline=(started + max_seconds) if max_seconds > 0 else None,
     )
@@ -750,11 +749,14 @@ def read_reclaim_confirmation(project_root: Path) -> datetime | None:
 
 
 def confirm_project_reclaim(project_root: Path, *, now: datetime) -> datetime:
-    """Record when the latest one-time reclamation was requested."""
+    """Record the confirmation once, keeping the first confirmed moment."""
 
     moment = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     moment = moment.astimezone(timezone.utc)
-    _reclaim_confirmation_store(Path(project_root)).write(
+    existing = read_reclaim_confirmation(project_root)
+    if existing is not None:
+        return existing
+    _reclaim_confirmation_store(Path(project_root)).try_create(
         {"version": BASELINE_VERSION, "confirmedAt": moment.isoformat()},
     )
     return read_reclaim_confirmation(project_root) or moment
@@ -818,8 +820,8 @@ def history_reclaim_kept(project_root: Path) -> bool:
     """Whether this Project's pre-baseline history must be left alone.
 
     The env switch is the fleet-wide emergency stop and the marker is a
-    person's choice for one Project; neither weakens any other rule, they
-    also apply to explicit requests to reclaim pre-baseline history.
+    person's choice for one Project; neither weakens any other rule, they only
+    restore the date gate that the default now ignores.
     """
 
     raw = os.environ.get(KEEP_PROJECT_HISTORY_ENV, "")
@@ -916,6 +918,38 @@ def _releasable_now(
     return moment - task.updated_at >= grace
 
 
+def _projected_release_bytes(
+    tasks: Iterable[TaskRecord],
+    directories: dict[str, Path],
+    *,
+    baseline: datetime,
+    kept: bool,
+    moment: datetime,
+    grace: timedelta,
+) -> int:
+    """What releasing this Project's settled scratch would free.
+
+    The cap has to be judged before any unlink, and judging it must not cost
+    more than the stats the profile already pays for.
+    """
+
+    projected = 0
+    for task in tasks:
+        directory = directories.get(task.task_id)
+        if directory is None:
+            continue
+        if not _releasable_now(
+            task,
+            baseline=baseline,
+            kept=kept,
+            moment=moment,
+            grace=grace,
+        ):
+            continue
+        projected += _releasable_bytes(directory)
+    return projected
+
+
 def _until_budget_exhausted(
     tasks: Iterable[TaskRecord],
     budget: SweepBudget | None,
@@ -928,6 +962,40 @@ def _until_budget_exhausted(
         yield task
 
 
+def _withheld_release_bytes(
+    project_root: Path,
+    tasks: Iterable[TaskRecord],
+    directories: dict[str, Path],
+    *,
+    baseline: datetime,
+    kept: bool,
+    moment: datetime,
+    grace: timedelta,
+    enforce_cap: bool,
+    cap: int,
+) -> int:
+    """The release this Project must wait on, or 0 when nothing withholds it.
+
+    Above the cap an automatic pass steps back and asks; a confirmation on the
+    Project, or a caller that passes ``enforce_cap=False`` because a person is
+    watching right now, lifts that.
+    """
+
+    if not enforce_cap:
+        return 0
+    if read_reclaim_confirmation(project_root) is not None:
+        return 0
+    projected = _projected_release_bytes(
+        tasks,
+        directories,
+        baseline=baseline,
+        kept=kept,
+        moment=moment,
+        grace=grace,
+    )
+    return projected if projected > cap else 0
+
+
 def release_orphaned_scratch(
     services: TaskStore,
     *,
@@ -935,7 +1003,7 @@ def release_orphaned_scratch(
     grace: timedelta = ORPHAN_RELEASE_GRACE,
     project_ids: Iterable[str] | None = None,
     budget: SweepBudget | None = None,
-    reclaim_legacy: bool = False,
+    enforce_cap: bool = True,
 ) -> ScratchSweepSummary:
     """Collect the scratch a crash left behind after a Task already finished.
 
@@ -961,19 +1029,20 @@ def release_orphaned_scratch(
     released_directories = 0
     removed_files = 0
     removed_bytes = 0
-    ids = (
-        services.projects.discover_project_ids()
-        if project_ids is None
-        else project_ids
-    )
-    for project_id in ids:
+    skipped_projects = 0
+    skipped_bytes = 0
+    cap = auto_reclaim_max_bytes()
+    for project_id in services.projects.discover_project_ids():
+        if project_ids is not None and project_id not in set(project_ids):
+            continue
         if budget is not None and not budget.has_room():
             break
         projects += 1
         project_root = Path(services.projects.project_root(project_id))
         baseline = remember_scratch_baseline(project_root, now=moment)
-        # Ordinary maintenance only releases scratch created after the baseline.
-        kept = not reclaim_legacy or history_reclaim_kept(project_root)
+        # Opted-out Projects keep every byte that arrived before they started
+        # being managed; by default the date gate no longer protects them.
+        kept = history_reclaim_kept(project_root)
         task_work = project_root / "runtime" / "task-work"
         directories = {
             item.name: item for item in _scratch_directories(task_work)
@@ -989,6 +1058,29 @@ def release_orphaned_scratch(
                 exc_info=True,
             )
             continue
+        withheld = _withheld_release_bytes(
+            project_root,
+            tasks,
+            directories,
+            baseline=baseline,
+            kept=kept,
+            moment=moment,
+            grace=grace,
+            enforce_cap=enforce_cap,
+            cap=cap,
+        )
+        if withheld:
+            skipped_projects += 1
+            skipped_bytes += withheld
+            logger.warning(
+                "scratch reclaim withheld pending confirmation: "
+                "project=%s bytes=%s cap=%s (confirm through "
+                "POST /storage/projects/{id}/reclaim-history)",
+                project_id,
+                withheld,
+                cap,
+            )
+            continue
         for task in _until_budget_exhausted(tasks, budget):
             directory = directories.get(task.task_id)
             if directory is None:
@@ -1001,10 +1093,6 @@ def release_orphaned_scratch(
                 grace=grace,
             ):
                 continue
-            if budget is not None and not budget.may_spend(
-                _releasable_bytes(directory)
-            ):
-                break
             result = release_scratch_media(directory, reason="orphan-sweep")
             if result.removed_files:
                 released_directories += 1
@@ -1018,6 +1106,8 @@ def release_orphaned_scratch(
         removed_files=removed_files,
         removed_bytes=removed_bytes,
         stopped_early=bool(budget is not None and budget.stopped_early),
+        skipped_projects=skipped_projects,
+        skipped_bytes=skipped_bytes,
     )
 
 
@@ -1112,7 +1202,6 @@ def project_storage_profile(
             )
             finished = {}
         measured: dict[str, int] = dict.fromkeys(totals, 0)
-        manual_scratch_bytes = 0
         # Reported, never rewritten: the event stream's seqs are the SSE
         # resume cursor, so collapsing it in place would desync clients.
         measured["eventStreamBytes"] = _event_stream_bytes(root)
@@ -1136,11 +1225,15 @@ def project_storage_profile(
                 moment=moment,
                 grace=ORPHAN_RELEASE_GRACE,
             ):
-                releasable = _releasable_bytes(directory)
-                if not kept:
-                    manual_scratch_bytes += releasable
-                if baseline is not None and stamp >= baseline:
-                    measured["taskWorkReclaimableBytes"] += releasable
+                # The same rule the sweep applies, so the number the console
+                # compares against the cap is the number the sweep would
+                # actually take.  Pre-baseline scratch is reclaimable history
+                # unless the Project asked to keep it; filing it as legacy
+                # here while the sweep released it left an oversized Project
+                # withheld with no confirm button anywhere.
+                measured["taskWorkReclaimableBytes"] += _releasable_bytes(
+                    directory,
+                )
         for directory in _child_directories(root / "runtime" / "transactions"):
             size, newest = _directory_bytes(directory)
             if baseline is None or _utc(newest) < baseline:
@@ -1149,13 +1242,17 @@ def project_storage_profile(
                 measured["transactionsBytes"] += size
         if include_orphans:
             measured["orphanBytes"] = _orphan_bytes(services, project_id, root)
-        # Eligible bytes for a single explicit reclaim, including legacy scratch.
+        # What the automatic passes would take here if they were allowed: the
+        # console shows it next to a confirm button once it exceeds the cap.
         # Imported late: transaction_gc imports this module at top level.
         from services.project_files.transaction_gc import (
             surplus_transaction_bytes,
         )
 
-        pending_bytes = surplus_transaction_bytes(root) + manual_scratch_bytes
+        pending_bytes = (
+            surplus_transaction_bytes(root)
+            + measured["taskWorkReclaimableBytes"]
+        )
         for key, value in measured.items():
             totals[key] += value
         projects.append(
@@ -1182,7 +1279,10 @@ def project_storage_profile(
         "elisionBackupBytes": _elision_backup_bytes(
             Path(services.root),
         ),
-        # Older clients read this informational threshold from the report.
+        # The console compares each Project's pending bytes against this to
+        # decide whether the automatic pass stepped back and is waiting for a
+        # person, so the threshold travels with the report instead of being
+        # a constant somebody has to keep in sync.
         "autoReclaimMaxBytes": auto_reclaim_max_bytes(),
         "eventStreamReportMaxBytes": event_stream_report_max_bytes(),
         "totals": totals,

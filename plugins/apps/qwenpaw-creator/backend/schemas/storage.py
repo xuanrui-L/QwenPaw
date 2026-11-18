@@ -40,7 +40,7 @@ class ProjectStorageProfileData(StrictModel):
 class HistoryReclaimRequest(StrictModel):
     """An explicit, deliberate press: the action refuses a missing confirm."""
 
-    confirm: bool = Field(default=False, strict=True)
+    confirm: bool = False
 
 
 class HistoryReclaimResultData(StrictModel):

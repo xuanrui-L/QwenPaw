@@ -1115,7 +1115,7 @@ def test_applying_a_snapshot_steers_the_agent_and_forces_a_fresh_baseline(
     frozen = after_agent.project.timelines.items[snapshot_id]
     restored_elements = {}
     for snap_id, frozen_element in frozen.elements_by_id.items():
-        original = snap_id[len(f"{snapshot_id}:") :]
+        original = snap_id[len(f"{snapshot_id}:") :]  # noqa: E203
         restored_elements[original] = frozen_element.model_copy(
             update={"element_id": original},
         ).model_dump(mode="json")

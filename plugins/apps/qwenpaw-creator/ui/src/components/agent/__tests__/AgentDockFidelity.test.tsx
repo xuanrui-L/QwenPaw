@@ -375,7 +375,7 @@ describe("AgentDock public output and interactions", () => {
     );
   });
 
-  it("pins an active media-budget pause so the user can resolve it", async () => {
+  it("keeps removed media-budget pauses only as historical bubbles", () => {
     const text = "自动创作已暂停，媒体调用预算已用完。";
     useCreatorSessionStore.setState({
       messages: [
@@ -387,7 +387,12 @@ describe("AgentDock public output and interactions", () => {
     });
     useAgentDockUiStore.getState().setOpen(false);
     renderDock();
-    expect(await screen.findByRole("alert")).toHaveTextContent(text);
+    expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(text).closest("[data-agent-message]"),
+    ).toBeInTheDocument();
   });
 
   it("pops the dock open with the inline tray when a production confirmation arrives live", async () => {

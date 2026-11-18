@@ -31,7 +31,6 @@
     "backend/skills/informal-launch-captions/SKILL.md",
     "backend/skills/professional-media-prompts/SKILL.md",
     "backend/skills/visual-asset-design/SKILL.md",
-    "backend/skills/interactive-interface-design/SKILL.md",
     "player/ivb/static/interaction-runtime.js",
     "player/ivb/static/authored-player.js"
   ],
@@ -51,7 +50,6 @@
     "ui/tsconfig.json",
     "ui/vite.config.ts",
     "ui/vitest.config.ts",
-    "ui/test-results",
     "player/docs"
   ],
   "meta": {

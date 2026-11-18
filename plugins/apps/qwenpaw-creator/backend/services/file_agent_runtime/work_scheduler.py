@@ -27,7 +27,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType, CreatorSessionStatus, TaskStatus
-from models import config as model_config
 from models.config import (
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
     get_execution_authorization_mode,
@@ -35,10 +34,6 @@ from models.config import (
     get_media_parallelism,
     get_video_model_name,
     get_vlm_timeout_seconds,
-)
-from services.media_files.call_budget import (
-    MediaCallBudgetExhausted,
-    ensure_media_call_budget,
 )
 from models.provider_errors import (
     CLASS_QUOTA,
@@ -101,16 +96,6 @@ _ZERO_ATTEMPT_REOPEN_CAP = 6
 # back as guidance so the model can self-correct.
 _PREPARATION_VALIDATION_RETRIES = 2
 
-# Scheduler-only transient markers; the shared media-side classifier
-# (is_transient_error_message) supplies the common ones (connection,
-# timeout, service unavailable, bad file descriptor, status 5xx, ...).
-_TRANSIENT_ERROR_MARKERS = (
-    "rate limit",
-    "429",
-    "status 5",
-    "temporarily",
-)
-
 # A gateway that stops spending stops for the whole account, not for one
 # node. Without a breaker a six-branch fan-out turns one exhausted balance
 # into a dozen failed nodes, each of which the Agent then reasons about.
@@ -143,49 +128,25 @@ _DETERMINISTIC_ERROR_CODES = frozenset(
 )
 
 
-def _uses_platform_model(kind: str, command: str | None = None) -> bool:
-    if kind in {"script", "interaction"}:
-        return model_config.is_agentscope_gateway(
-            model_config.get_text_protocol(),
-            model_config.get_text_base_url(),
-        )
-    if kind in {"visual", "lineup", "storyboard", "cover"}:
-        try:
-            url = model_config.get_image_generations_url()
-        except (ValueError, NotImplementedError):
-            # A missing or unsupported backend is itself the dispatch failure.
-            return False
-        return model_config.is_agentscope_gateway(
-            model_config.get_image_protocol(),
-            url,
-        )
-    if kind == "video" and command not in _S2V_COMMANDS:
-        return model_config.is_agentscope_gateway(
-            model_config.get_video_protocol(),
-            model_config.get_video_base_url(),
-        )
-    return False
-
-
-def _is_transient_dispatch_error(
-    exc: Exception,
-    *,
-    gateway: bool = False,
-) -> bool:
+def _is_transient_dispatch_error(exc: Exception) -> bool:
+    # One rule shared with the media lanes, plus a floor that belongs to this
+    # decision only. The scheduler used to keep its own marker table, and that
+    # copy was wrong in both directions: "status 5" matched the 502 this
+    # gateway uses for a deterministic client fault, while nothing matched
+    # nginx's hyphenated "504 Gateway Time-out" and a whole project sat walled
+    # behind it. An unrecognised wording is therefore retried here - a bounded
+    # budget absorbs a wrong guess, a wrong wall needs somebody to notice.
+    if getattr(exc, "code", None) in _DETERMINISTIC_ERROR_CODES:
+        # A structural refusal names an input the model cannot accept, so
+        # re-dispatching it is spend with no possible outcome.
+        return False
     message = str(exc)
-    if gateway or gateway_error_code(message):
-        if getattr(exc, "code", None) in _DETERMINISTIC_ERROR_CODES:
-            return False
-        return is_transient_error_message(
-            message, gateway=True
-        ) or is_unclassified_failure(message)
-    text = message.lower()
-    return is_transient_error_message(text) or any(
-        marker in text for marker in _TRANSIENT_ERROR_MARKERS
+    return is_transient_error_message(message) or is_unclassified_failure(
+        message,
     )
 
 
-def _provider_error_suffix(exc: Exception, *, gateway: bool = False) -> str:
+def _provider_error_suffix(exc: Exception) -> str:
     """The gateway's own identifiers, so a failure can be handed over.
 
     A provider request id is the only thing the platform team can look a
@@ -195,8 +156,6 @@ def _provider_error_suffix(exc: Exception, *, gateway: bool = False) -> str:
     text = str(exc)
     parts = []
     code = gateway_error_code(text)
-    if not (code or gateway):
-        return ""
     if code:
         parts.append(f"provider_code={code}")
     request_id = gateway_request_id(text)
@@ -513,8 +472,6 @@ class WorkGraphScheduler:
         self,
         project_id: str,
         exc: Exception,
-        *,
-        gateway: bool = False,
     ) -> bool:
         """Hold paid dispatch after the provider throttled us.
 
@@ -525,8 +482,6 @@ class WorkGraphScheduler:
         """
 
         text = str(exc)
-        if not (gateway or gateway_error_code(text)):
-            return False
         if classify_gateway_error(text) == CLASS_QUOTA:
             return False
         if not is_rate_limit_text(text):
@@ -900,9 +855,7 @@ class WorkGraphScheduler:
         graph = derive_work_graph(
             snapshot.project,
             tasks=tasks,
-            pending_reviews=(
-                pending_reviews if snapshot.project.narrative_edges else ()
-            ),
+            pending_reviews=pending_reviews,
             media_models=(get_image_model_name(), get_video_model_name()),
         )
         from services.run_review import admission
@@ -951,27 +904,6 @@ class WorkGraphScheduler:
             if delay is not None:
                 self._schedule_sync_gate_recheck(project_id, delay)
         inflight = self._inflight.setdefault(project_id, set())
-        try:
-            # Wallet fuse: a spent budget pauses automatic dispatch; the
-            # media entry points enforce it too, this just avoids creating
-            # failed tasks.
-            await asyncio.to_thread(
-                ensure_media_call_budget,
-                self.services,
-                project_id,
-            )
-        except MediaCallBudgetExhausted as exc:
-            logger.warning(
-                "work-graph dispatch paused for %s: %s",
-                project_id,
-                exc,
-            )
-            await self._emit_graph_transitions(
-                project_id,
-                graph,
-                snapshot.generation,
-            )
-            return graph
         active_media = {
             node.node_id
             for node in graph.nodes
@@ -1100,7 +1032,7 @@ class WorkGraphScheduler:
         """Prepare one edited R2V representation before automatic media work.
 
         Uses the same source-preserving, CAS-checked service as a workbench
-        regeneration click. Existing review/authorization/edit/budget gates
+        regeneration click. Existing review/authorization/edit gates
         are checked before the model call and again before publication.
         """
         from domain.errors import ConflictError
@@ -1131,10 +1063,9 @@ class WorkGraphScheduler:
         # be billed, a throttle because the next attempt would hear the same
         # refusal. Otherwise the loop keeps re-sending once per wake, for the
         # whole window.
-        if (
-            self._quota_breaker_open(project_id)
-            or self._rate_limit_breaker_open(project_id)
-        ) and _uses_platform_model("script"):
+        if self._quota_breaker_open(
+            project_id,
+        ) or self._rate_limit_breaker_open(project_id):
             return
         manually_held = (
             await asyncio.to_thread(self.manual_holds.read, project_id)
@@ -1309,11 +1240,8 @@ class WorkGraphScheduler:
                 # reads that edit; never publish the older generated plan.
                 pass
             except Exception as exc:
-                gateway = _uses_platform_model("script")
                 credits_trip = self._trip_quota_breaker(project_id, exc)
-                if self._trip_rate_limit_breaker(
-                    project_id, exc, gateway=gateway,
-                ):
+                if self._trip_rate_limit_breaker(project_id, exc):
                     logger.info(
                         "provider rate limit held project dispatch "
                         "project=%s error=%s",
@@ -1331,7 +1259,7 @@ class WorkGraphScheduler:
                         request_id=f"credits-{credits_trip}",
                         text=(
                             f"模型供应商 Credits 已用尽，自动生成已暂停：{exc}"
-                            f"{_provider_error_suffix(exc, gateway=gateway)}\n"
+                            f"{_provider_error_suffix(exc)}\n"
                             "充值后调度器会在十分钟内自动继续，无需重启。"
                         ),
                         node=node,
@@ -1380,14 +1308,13 @@ class WorkGraphScheduler:
                             text=(
                                 f"生成准备需要调整：{node.label}。"
                                 f"{str(exc)[:200]}"
-                                f"{_provider_error_suffix(exc, gateway=gateway)}"
+                                f"{_provider_error_suffix(exc)}"
                             ),
                             node=node,
                             error_code="PROMPT_PREPARATION_FAILED",
                         )
                 elif _is_transient_dispatch_error(
                     exc,
-                    gateway=gateway,
                 ) and self._transient_budget_available(ledger_key):
                     self._note_transient_retry(ledger_key)
                     self._schedule_sync_gate_recheck(
@@ -1410,8 +1337,7 @@ class WorkGraphScheduler:
                         request_id=f"failed-{fingerprint}-{node.node_id}",
                         text=(
                             f"生成准备需要调整：{node.label}。"
-                            f"{str(exc)[:200]}"
-                            f"{_provider_error_suffix(exc, gateway=gateway)}"
+                            f"{str(exc)[:200]}{_provider_error_suffix(exc)}"
                         ),
                         node=node,
                         error_code="PROMPT_PREPARATION_FAILED",
@@ -1570,16 +1496,28 @@ class WorkGraphScheduler:
         validation) never re-enter.
         """
 
-        platform_held = self._quota_breaker_open(
-            project_id,
-        ) or self._rate_limit_breaker_open(project_id)
+        if self._quota_breaker_open(project_id):
+            # Credits refusals are account-wide: every node in the fan-out
+            # would fail identically, and each attempt is a paid upstream
+            # round trip. Hold the whole project until the window expires.
+            logger.info(
+                "work-graph dispatch held: provider Credits exhausted "
+                "project=%s",
+                project_id,
+            )
+            return []
+
+        if self._rate_limit_breaker_open(project_id):
+            # The provider is throttling the account, not this node: every
+            # other branch in the fan-out would hear the same refusal, and
+            # each would spend its own transient budget getting there.
+            logger.info(
+                "work-graph dispatch held: provider rate limit project=%s",
+                project_id,
+            )
+            return []
+
         candidates = [*graph.ready_media_nodes(), *graph.regeneration_nodes()]
-        if platform_held:
-            candidates = [
-                node
-                for node in candidates
-                if not _uses_platform_model(node.kind, node.command)
-            ]
         rescuable = _quarantined_stale_targets(tasks)
         inflight = self._inflight.get(project_id, set())
         if rescuable:
@@ -1630,12 +1568,8 @@ class WorkGraphScheduler:
             # race, transient fs state) is worth a bounded, unpaid
             # re-render. Paid media nodes only re-enter on recognised
             # transient provider faults.
-            gateway = _uses_platform_model(node.kind, node.command)
-            if platform_held and gateway:
-                continue
             if node.kind != "compose" and not _is_transient_dispatch_error(
                 RuntimeError(node.error),
-                gateway=gateway,
             ):
                 continue
             fingerprint = self._ledger_fingerprint(node)
@@ -2001,11 +1935,8 @@ class WorkGraphScheduler:
         except Exception as exc:  # pylint: disable=broad-except
             ledger_key = (project_id, node.node_id, fingerprint)
             error_code = getattr(exc, "code", None)
-            gateway = _uses_platform_model(node.kind, node.command)
             credits_trip = self._trip_quota_breaker(project_id, exc)
-            if self._trip_rate_limit_breaker(
-                project_id, exc, gateway=gateway,
-            ):
+            if self._trip_rate_limit_breaker(project_id, exc):
                 logger.info(
                     "provider rate limit held project dispatch "
                     "project=%s error=%s",
@@ -2013,24 +1944,24 @@ class WorkGraphScheduler:
                     str(exc)[:200],
                 )
             if credits_trip:
-                # Each platform account refusal needs one notification, even
-                # when several platform-backed nodes complete together.
+                # One event for the whole account: the breaker now holds
+                # every other node in this fan-out, so a per-node event
+                # would repeat the same instruction once per branch.
                 await self._notify(
                     project_id,
                     kind=RuntimeEventKind.PROVIDER_CREDITS_EXHAUSTED,
                     request_id=f"credits-{credits_trip}",
                     text=(
                         f"模型供应商 Credits 已用尽，自动生成已暂停：{exc}"
-                        f"{_provider_error_suffix(exc, gateway=gateway)}\n"
+                        f"{_provider_error_suffix(exc)}\n"
                         "充值后调度器会在十分钟内自动继续，无需重启；"
-                        "期间不会重试使用该平台的付费节点。"
+                        "期间不会重试任何付费节点。"
                     ),
                     node=node,
                     error_code=gateway_error_code(str(exc)) or None,
                 )
             if _is_transient_dispatch_error(
                 exc,
-                gateway=gateway,
             ) and self._transient_budget_available(ledger_key):
                 # Field run 2026-08-06: the first live fan-out lost five
                 # storyboards to provider timeouts and the ledger locked
@@ -2074,7 +2005,7 @@ class WorkGraphScheduler:
                         text=(
                             f"媒体节点 {node.label}（{node.node_id}）生成失败，"
                             f"且在输入修改前不会自动重试：{exc}"
-                            f"{_provider_error_suffix(exc, gateway=gateway)}\n"
+                            f"{_provider_error_suffix(exc)}\n"
                             "请修复对应 Project 字段（如参考图数量、prompt "
                             "或引用）；修复后调度器会自动重新生成。"
                         ),
@@ -2082,7 +2013,7 @@ class WorkGraphScheduler:
                         error_code=str(error_code),
                     )
                 elif (
-                    _is_transient_dispatch_error(exc, gateway=gateway)
+                    _is_transient_dispatch_error(exc)
                     and self._transient_retries.get(ledger_key, 0)
                     >= _TRANSIENT_RETRY_HARD_CAP
                 ):
@@ -2095,7 +2026,7 @@ class WorkGraphScheduler:
                         text=(
                             f"媒体节点 {node.label}（{node.node_id}）连续多次"
                             f"瞬态失败，自动重试预算已用尽：{exc}"
-                            f"{_provider_error_suffix(exc, gateway=gateway)}\n"
+                            f"{_provider_error_suffix(exc)}\n"
                             "请检查供应商状态，或调整该节点的输入后再继续。"
                         ),
                         node=node,

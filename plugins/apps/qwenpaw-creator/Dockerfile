@@ -15,10 +15,9 @@
 
 # Image ARGs must be declared before the first FROM; RUN arguments are
 # redeclared in the stage that consumes them.
-# The base image uses ACR for users in China. Node uses the pinned official
-# image by default; override NODE_IMAGE to use an ACR Node mirror.
+# Use ACR registry for users in China; override with --build-arg for Docker Hub.
 ARG QWENPAW_BASE_IMAGE=agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/qwenpaw:latest
-ARG NODE_IMAGE=node:22.23.4-slim
+ARG NODE_IMAGE=agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/node:slim
 
 # PyPI mirror for faster package downloads in China.
 # Override with --build-arg PYPI_INDEX_URL=https://pypi.org/simple/ for global mirror.
@@ -29,11 +28,16 @@ ARG PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 # -----------------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS creator-ui-builder
 WORKDIR /app
+# The UI build ends with scripts/verify-package.mjs, which resolves the plugin
+# root as <ui>/scripts/../.. and asserts every plugin.json pack_requires entry
+# (backend/skills/**, player/ivb/static/**). Building a bare ui/ copy therefore
+# fails on a missing <root>/plugin.json; stage the whole plugin instead.
 COPY plugins/apps/qwenpaw-creator /app/plugin
+# The Creator UI imports the shared player runtime via ../../../../player/... ,
+# which resolves outside ui/. Stage 1 needs it at /app/player or rollup cannot
+# resolve the import.
+COPY plugins/apps/qwenpaw-creator/player /app/player
 RUN cd /app/plugin/ui && npm ci --include=dev && npm run build
-
-# Keep the pinned Node distribution available for the runtime stage.
-FROM ${NODE_IMAGE} AS node-runtime
 
 # -----------------------------------------------------------------------------
 # Final stage: runtime image with Creator plugin on top of official QwenPaw.
@@ -41,35 +45,6 @@ FROM ${NODE_IMAGE} AS node-runtime
 FROM ${QWENPAW_BASE_IMAGE}
 
 ARG PYPI_INDEX_URL
-
-# The QwenPaw base image may not be rebuilt with the repository Node pin yet.
-# Overlay Node-owned files so the final runtime always matches .nvmrc.
-COPY --from=node-runtime \
-  /usr/local/bin/node \
-  /usr/local/bin/npm \
-  /usr/local/bin/npx \
-  /usr/local/bin/corepack \
-  /usr/local/bin/
-COPY --from=node-runtime \
-  /usr/local/lib/node_modules/npm \
-  /usr/local/lib/node_modules/npm
-COPY --from=node-runtime \
-  /usr/local/lib/node_modules/corepack \
-  /usr/local/lib/node_modules/corepack
-RUN ln -sf node /usr/local/bin/nodejs
-
-# Keep image metadata consistent with the overlaid runtime.
-ENV NODE_VERSION=22.23.4
-
-# Fail if the final runtime's Node does not match the repository pin.
-COPY .nvmrc /tmp/qwenpaw-node-version
-RUN expected_version="v$(tr -d '[:space:]' < /tmp/qwenpaw-node-version)" \
-  && actual_version="$(node --version)" \
-  && if [ "${actual_version}" != "${expected_version}" ]; then \
-       echo "Node version mismatch: expected ${expected_version}, got ${actual_version}" >&2; \
-       exit 1; \
-     fi \
-  && rm /tmp/qwenpaw-node-version
 
 # Install Creator's editing, media-probing, and GIS system dependencies.
 # These are not included in the official QwenPaw image.
@@ -97,6 +72,23 @@ RUN PYPI_HOST=$(echo "${PYPI_INDEX_URL}" | sed -E 's|https?://([^/]+).*|\1|') &&
     --index-url "${PYPI_INDEX_URL}" \
     --trusted-host "${PYPI_HOST}" \
     -r /app/bundled-plugins/qwenpaw-creator/requirements.txt
+
+# Sampling profiler, shipped in the image so a live container can be profiled
+# without pip-installing into a running service. It reads another process's
+# memory, so the container must also start with --cap-add=SYS_PTRACE; without
+# that capability py-spy fails with EPERM, which is the only failure mode.
+RUN PYPI_HOST=$(echo "${PYPI_INDEX_URL}" | sed -E 's|https?://([^/]+).*|\1|') && \
+    uv pip install --no-cache-dir \
+    --index-url "${PYPI_INDEX_URL}" \
+    --trusted-host "${PYPI_HOST}" \
+    py-spy
+
+# Creator's document reader renders HTML sources through Playwright. The base
+# image already ships a system Chromium and exports
+# PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, which the web renderer honours via
+# executable_path, so the image needs no browser download of its own. Local
+# (non-Docker) installs must run `python -m playwright install chromium` once,
+# as requirements.txt notes.
 
 # Override entrypoint to auto-install Creator plugin on startup.
 COPY --chmod=755 plugins/apps/qwenpaw-creator/entrypoint.sh /entrypoint-creator.sh

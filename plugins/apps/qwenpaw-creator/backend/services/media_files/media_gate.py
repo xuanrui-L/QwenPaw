@@ -24,6 +24,7 @@ import time
 from collections.abc import Iterator, Sequence
 from typing import Any
 
+from services.observability import mem_probe
 
 ENV_SLOTS = "QWENPAW_FFMPEG_CONCURRENCY"
 ENV_ENCODE_THREADS = "QWENPAW_FFMPEG_THREADS"
@@ -56,6 +57,7 @@ _CGROUP_V1_PERIOD = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
 MAX_THREADS_PER_PROCESS = 4
 MIN_THREADS_PER_PROCESS = 1
 _KILL_GRACE_SECONDS = 5.0
+_BUDGET_NAME = "ffmpeg_processes"
 # cgroup v1 reports "no limit" as a page-aligned sentinel near the top of the
 # address space; anything that large is not a ceiling worth deriving from.
 _UNLIMITED_BYTES = 1 << 50
@@ -337,13 +339,23 @@ def slot(where: str) -> Iterator[None]:
         raise RuntimeError(
             f"ffmpeg slot for {where!r} nests inside {nested_into!r}",
         )
-    gate, _ = _active_gate()
+    gate, slots = _active_gate()
+    started = time.monotonic()
     gate.acquire()
     with _guard:
         _in_flight += 1
+        active = _in_flight
     _held.depth = 1
     _held.where = where
     try:
+        mem_probe.budget(
+            _BUDGET_NAME,
+            active,
+            limit=slots,
+            site=where,
+            threads=_gate_threads,
+            queued_seconds=round(time.monotonic() - started, 3),
+        )
         yield
     finally:
         _held.depth = 0

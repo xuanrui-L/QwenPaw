@@ -22,12 +22,8 @@ import httpx
 from models import config as model_config
 from models.concurrency import model_slot
 from models.output_budget import anthropic_output_limit
-from models.provider_errors import (
-    gateway_error_code,
-    is_gateway_quota_error,
-    retryable_for_status,
-)
-from models.sse import read_chat_response
+from models.provider_errors import is_gateway_quota_error, retryable_for_status
+from models.sse import decode_chat_response
 from utils.exceptions import ModelError, redact_url, upstream_status_hint
 
 
@@ -70,7 +66,7 @@ def _completion_tokens_of(payload: dict) -> str:
     return "unknown"
 
 
-def _empty_content_detail(payload: dict, model_name: str) -> str:
+def _empty_content_detail(payload: dict) -> str:
     """Why a 2xx reply held no text, always reported.
 
     A contentless reply is otherwise undecidable: a reasoning model that spent
@@ -82,7 +78,7 @@ def _empty_content_detail(payload: dict, model_name: str) -> str:
     reason = _finish_reason_of(payload) or "unknown"
     if payload.get("_finish_reason_missing"):
         reason += "(never_reported)"
-    detail = f"（模型：{model_name}，结束原因：{reason}，输出 token：{_completion_tokens_of(payload)}）"
+    detail = f"（结束原因：{reason}，输出 token：{_completion_tokens_of(payload)}）"
     if _reasoning_only(payload):
         detail += "；模型仅返回了推理内容，没有最终结果"
     if _finish_reason_of(payload) == "length":
@@ -136,17 +132,15 @@ def _http_error(
     )
     if hint:
         message = f"{message}。{hint}"
-    # Only the AgentScope proxy retries an HTTP 429 on this lane.
+    # Upstream 4xx client errors are permanent: retrying will not help. A
+    # gateway envelope overrides the status, because some gateways report a
+    # deterministic 5xx as retryable.
     return ModelError(
         message,
         model_name=model_name,
-        retryable=(
-            retryable_for_status(response.status_code, response.text)
-            if model_config.is_agentscope_gateway(
-                model_config.get_text_protocol(), url
-            )
-            or gateway_error_code(response.text)
-            else response.status_code >= 500
+        retryable=retryable_for_status(
+            response.status_code,
+            response.text,
         ),
     )
 
@@ -164,6 +158,12 @@ async def _call_openai(
         "model": model_name,
         "messages": messages,
         "temperature": temperature,
+        # Asked to stream although the caller wants one answer. A gateway in
+        # front of a slow model reads a silent connection as a dead one and
+        # kills it at 180s (measured: nginx 504 on a four-screen presentation,
+        # where our own budget was 600s). Bytes flowing resets that clock, and
+        # ``decode_chat_response`` folds the stream back into one completion.
+        "stream": True,
     }
     if model_config.chat_temperature(model_name, temperature) is None:
         body.pop("temperature", None)
@@ -171,13 +171,6 @@ async def _call_openai(
     # without an Authorization header; an empty Bearer value would be
     # rejected as an invalid key.
     url = _openai_chat_url()
-    # Keep the proxy connection alive while generating interactive pages.
-    via_gateway = model_config.is_agentscope_gateway(
-        model_config.get_text_protocol(),
-        url,
-    )
-    if via_gateway or thinking_budget is not None:
-        body["stream"] = True
     # Qwen's max_tokens excludes reasoning. Bound the separate budget for
     # callers that need predictable latency, without adding provider-specific
     # fields to other OpenAI-compatible gateways.
@@ -190,7 +183,7 @@ async def _call_openai(
             # honours ``thinking_budget``. Without this the field is silently
             # dropped there, so a thinking model rambles on until the platform
             # ends the stream at ~300s and we get reasoning-only, empty output.
-            or via_gateway
+            or model_config.is_agentscope_endpoint(url)
         )
         and model_name.lower().startswith(("qwen3.", "qwen3-"))
     ):
@@ -231,9 +224,10 @@ async def _call_openai(
         )
     # Some gateways answer with text/event-stream even though this request
     # never asked to stream; decode both shapes into one chat.completion.
-    payload = read_chat_response(
-        response,
-        gateway=via_gateway or thinking_budget is not None,
+    payload = decode_chat_response(
+        status_code=response.status_code,
+        text=response.text,
+        content_type=str(response.headers.get("content-type") or ""),
         model_name=model_name,
         url=url,
     )
@@ -245,8 +239,7 @@ async def _call_openai(
     )
     if not isinstance(content, str) or not content.strip():
         raise ModelError(
-            "Text model 返回空内容"
-            + _empty_content_detail(payload, model_name),
+            "Text model 返回空内容" + _empty_content_detail(payload),
             model_name=model_name,
         )
     if payload.get("_stream_truncated"):
@@ -325,7 +318,7 @@ async def _call_anthropic(
     content = "\n".join(text_parts)
     if not content.strip():
         raise ModelError(
-            "Text model 返回空内容",
+            "Text model 返回空内容" + _empty_content_detail(payload),
             model_name=model_name,
         )
     return content.strip()
@@ -382,7 +375,7 @@ async def _call_gemini(
     candidates = payload.get("candidates") or []
     if not candidates:
         raise ModelError(
-            "Text model 返回空内容",
+            "Text model 返回空内容" + _empty_content_detail(payload),
             model_name=model_name,
         )
     candidate = candidates[0] if isinstance(candidates[0], dict) else {}
@@ -396,7 +389,7 @@ async def _call_gemini(
     content = "\n".join(text_parts)
     if not content.strip():
         raise ModelError(
-            "Text model 返回空内容",
+            "Text model 返回空内容" + _empty_content_detail(payload),
             model_name=model_name,
         )
     return content.strip()

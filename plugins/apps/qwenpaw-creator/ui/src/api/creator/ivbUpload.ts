@@ -1,5 +1,3 @@
-import { creatorAuthenticatedUrl } from "./client";
-
 /**
  * Publish an exported interactive bundle to the platform.
  *
@@ -111,11 +109,4 @@ export function newUploadIdempotencyKey(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-/** Interactive-bundle zip export (fails 409 until every branch has a final cut). */
-export function getInteractiveBundleUrl(projectId: string): string {
-  return creatorAuthenticatedUrl(
-    `/projects/${encodeURIComponent(projectId)}/interactive-bundle`,
-  );
 }

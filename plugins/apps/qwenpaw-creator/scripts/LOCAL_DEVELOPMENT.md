@@ -26,8 +26,7 @@ project URLs, imported bundles and progress. Model settings are stored at
 with the same secret store. Configure credentials through the model settings
 screen or the documented provider environment variables.
 
-When routed through AgentScope Platform, Qwen3 Agent and review requests
-default to a 4,096-token reasoning allowance.
+Qwen3 Agent and review requests default to a 4,096-token reasoning allowance.
 This limits time spent before the model responds; it does not cap generated
 script/tool output. Set `CREATOR_AGENT_THINKING_BUDGET` (1–32,768) before starting
 the service when a larger planning allowance is needed. This uses the provider's

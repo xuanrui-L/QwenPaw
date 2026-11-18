@@ -561,16 +561,6 @@ def _enter_pre_narration_gate_runtime(monkeypatch):
     disabled and then strip the version field the old Runtime never wrote.
     """
 
-    # The old writer persisted its full model, including the then-default
-    # presentation fields. Recreate those bytes along with its narration rules.
-    from services.project_files import serialization
-
-    monkeypatch.setattr(
-        serialization, "without_empty_extensions", lambda value: value
-    )
-    monkeypatch.setattr(
-        commit_module, "without_empty_extensions", lambda value: value
-    )
     monkeypatch.setattr(
         migrations_module,
         "_deconflict_overlapping_narration",
@@ -1108,7 +1098,6 @@ def test_a_terminal_entry_is_decided_without_its_snapshots(
     after a copy is the one people wait minutes for.
     """
 
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "1")
     store = _finalized_store(tmp_path)
     calls: list = []
     _spy_load_inputs(monkeypatch, calls)

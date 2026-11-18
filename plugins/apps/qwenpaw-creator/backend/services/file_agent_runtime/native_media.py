@@ -376,7 +376,9 @@ async def source_intelligence_content_parts(
     file_store = AssetFileStore(services.projects.project_root(project_id))
     api_key = model_config.get_vlm_api_key().strip()
     model_name = (model_config.get_vlm_model_name() or "qwen3.7-plus").strip()
-    # Remote uploads present the configured credential. Inline data needs none.
+    # Both remote transports present this credential: the AgentScope
+    # proxy’s own media upload and the DashScope temporary OSS. Only the
+    # inline Base64 fallback is keyless, so the guard mirrors that routing.
     needs_upload_key = reference_transport_needs_upload_key(
         model_config.get_vlm_base_url(),
         model_config.get_vlm_protocol(),

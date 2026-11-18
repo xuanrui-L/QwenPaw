@@ -469,8 +469,7 @@ def _assemble_model_config(
         field = ".".join(str(part) for part in loc) if loc else "unknown field"
         message = first_error.get("msg", str(exc))
         raise ValidationError(
-            f"模型配置文件不可用: {field} {message}；"
-            "请先备份并修正 model_config.json，再重新加载配置",
+            f"模型配置文件不可用: {field} {message}；" "请修正 model_config.json 或重新保存模型配置",
         ) from exc
 
 
@@ -1172,6 +1171,8 @@ async def get_tts_capabilities() -> dict[str, Any]:
                 "transport": item.transport,
                 "systemVoices": list(item.system_voices),
                 "supportsDesign": item.supports_design,
+                # Which endpoint actually serves the model, so the UI can hide
+                # names this provider would reject outright.
                 "providers": list(item.providers),
             }
             for item in supported_models()

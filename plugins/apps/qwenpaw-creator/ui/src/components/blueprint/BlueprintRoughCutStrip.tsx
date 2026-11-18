@@ -46,9 +46,7 @@ function DraftTimelinePlayer({
   const [playing, setPlaying] = useState(true);
   const duration = timelineEndTick(timeline);
   const tps = timeline.ticks_per_second || 1000;
-  const available =
-    selectNarrativeShape(project) !== "branching" ||
-    hasTimelinePreviewContent(project, timeline);
+  const available = hasTimelinePreviewContent(project, timeline);
   useEffect(() => {
     if (available && duration > 0 && tick >= duration) onEnded();
   }, [tick, duration, onEnded, available]);
@@ -112,7 +110,6 @@ function DraftTimelinePlayer({
 const SOURCE_STYLE: Record<RoughCutSource, string> = {
   final: "bg-[var(--color-success)]/90",
   storyboard: "bg-[var(--color-primary,#3b82f6)]/90",
-  design: "bg-[var(--color-warning)]/90",
   none: "bg-black/50",
 };
 
@@ -199,6 +196,11 @@ function PreviewCinema({
   const [replayNonce, setReplayNonce] = useState(0);
   /** Intrinsic aspect ratio of the playing video; lets the frame hug it. */
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+
+  // Both story shapes use the same checked storyboard / shot preview. This
+  // component already follows narrative edges when the draft segment ends.
+  // A server rough cut may still substitute character reference sheets.
+  const srcFor = srcOf;
 
   useEffect(() => {
     setCurrentId(initialId);
@@ -336,7 +338,7 @@ function PreviewCinema({
             {t("blueprint.roughCutFailed")}
           </div>
         ) : !wholeFilm &&
-          !srcOf(currentId) &&
+          !srcFor(currentId) &&
           project.timelines.items[currentId] ? (
           <DraftTimelinePlayer
             key={`${currentId}:${replayNonce}`}
@@ -350,7 +352,7 @@ function PreviewCinema({
           // in either orientation.
           <video
             key={`${currentId}:${replayNonce}`}
-            src={(wholeFilm ? filmUrl : srcOf(currentId)) ?? undefined}
+            src={(wholeFilm ? filmUrl : srcFor(currentId)) ?? undefined}
             controls
             autoPlay
             playsInline
@@ -485,7 +487,7 @@ export default function BlueprintRoughCutStrip({
       : null;
     return slot?.kind === "final_video" && Boolean(version && !version.stale);
   });
-  if (!frames.length && !filmUrl && !(isBranching && hasSegment)) return null;
+  if (!frames.length && !filmUrl && !hasSegment) return null;
 
   const timelineLabelOf = (timelineId: string) => {
     const timeline = project.timelines.items[timelineId];
@@ -500,12 +502,11 @@ export default function BlueprintRoughCutStrip({
     if (slot?.kind !== "final_video" || !slot.selected_version_id) return null;
     const version =
       project.assets.artifact_versions_by_id[slot.selected_version_id];
-    if (version?.stale || (isBranching && !version)) return null;
+    if (!version || version.stale) return null;
     return getArtifactVersionMediaUrl(slot.selected_version_id);
   };
 
   const canPreview = (id: string) =>
-    !isBranching ||
     Boolean(
       finalCutUrlOf(id) ||
         (project.timelines.items[id] &&

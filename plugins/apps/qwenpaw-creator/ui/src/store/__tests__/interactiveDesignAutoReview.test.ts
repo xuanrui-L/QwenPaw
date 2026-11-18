@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FileProjectReviewRecord } from "@/contracts/creator";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
-import { projectDocument } from "@/test/creatorFixtures";
-import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { isInteractiveDesignReview } from "@/lib/interactiveDesignReview";
 
 function review(): FileProjectReviewRecord {
@@ -65,7 +63,6 @@ const resolved = (value: FileProjectReviewRecord) => ({
 });
 afterEach(() => {
   store().reset();
-  useProjectSnapshotStore.getState().reset();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -155,29 +152,8 @@ describe("YOLO compatibility for interactive design publications", () => {
     expect(store().reviews[0].status).toBe("PENDING");
   });
 
-  it("leaves ordinary motion edits pending without fetching the automatic review policy", async () => {
-    const ordinary = review();
-    ordinary.operations[0].json_pointer =
-      "/timelines/items/timeline:main/elements_by_id/r2v-window/creation/motion";
-    const project = structuredClone(projectDocument);
-    useProjectSnapshotStore.setState({ projectId: "p1", project });
-    const fetchMock = vi.fn().mockResolvedValueOnce(active(ordinary));
-    vi.stubGlobal("fetch", fetchMock);
-    await store().pollOnce("p1");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(store().reviews[0].status).toBe("PENDING");
-    expect(store().autoReviewIds).toEqual([]);
-  });
-
   it("supports regenerated HTML fields with their design prompt and metadata", () => {
     const draft = review();
-    const project = structuredClone(projectDocument);
-    const timeline = project.timelines.items["timeline:main"];
-    project.timelines.items["t/a"] = timeline;
-    timeline.elements_by_id.e1 = {
-      ...timeline.elements_by_id["r2v-window"],
-      creation: { type: "interaction", question: "", options: [] },
-    };
     for (const prefix of [
       "/interactive_presentation",
       "/timelines/items/t~1a/elements_by_id/e1/creation",
@@ -201,7 +177,7 @@ describe("YOLO compatibility for interactive design publications", () => {
           after: "new design",
         },
       ];
-      expect(isInteractiveDesignReview(draft, project)).toBe(true);
+      expect(isInteractiveDesignReview(draft)).toBe(true);
     }
   });
 

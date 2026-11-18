@@ -63,9 +63,7 @@ from .models import CURRENT_PROJECT_SCHEMA_VERSION, Project
 from .serialization import (
     load_project_document,
     project_document_etag,
-    project_edit_document,
 )
-from services.runtime_files.errors import RuntimeFileError
 from .store import ProjectSnapshot, ProjectStore
 
 logger = logging.getLogger("qwenpaw.creator.project_files.recovery")
@@ -103,7 +101,7 @@ _LIGHT_TERMINAL_ENV = "CREATOR_RECOVERY_LIGHT_TERMINAL"
 def light_terminal_audit_enabled() -> bool:
     """Whether a terminal entry may be decided without reading its snapshots."""
 
-    raw = os.environ.get(_LIGHT_TERMINAL_ENV, "0").strip()
+    raw = os.environ.get(_LIGHT_TERMINAL_ENV, "").strip()
     return raw.casefold() not in _DISABLED_VALUES
 
 
@@ -137,12 +135,7 @@ def _audit_fingerprint(
         except OSError:
             files[name] = None
             continue
-        files[name] = [
-            info.st_size,
-            info.st_mtime_ns,
-            info.st_ctime_ns,
-            info.st_ino,
-        ]
+        files[name] = [info.st_size, info.st_mtime_ns]
     if runtime_root is not None:
         for label, path in _audit_runtime_dependencies(
             transaction_root,
@@ -153,13 +146,8 @@ def _audit_fingerprint(
             except OSError:
                 files[label] = None
                 continue
-            files[label] = [
-                info.st_size,
-                info.st_mtime_ns,
-                info.st_ctime_ns,
-                info.st_ino,
-            ]
-    return {"files": files, "light_terminal": light_terminal_audit_enabled()}
+            files[label] = [info.st_size, info.st_mtime_ns]
+    return {"files": files}
 
 
 def _audit_runtime_dependencies(
@@ -174,10 +162,7 @@ def _audit_runtime_dependencies(
     aggregate entry and the transaction-side fingerprint is what decides.
     """
 
-    deps = {
-        "runtime-state": runtime_root / "state.json",
-        "project": runtime_root.parent / "project.json",
-    }
+    deps = {"runtime-state": runtime_root / "state.json"}
     try:
         raw = json.loads(
             (transaction_root / "round.json").read_text(encoding="utf-8"),
@@ -454,21 +439,25 @@ class ProjectCommitRecoveryCoordinator:
             runtime_root,
         ):
             return None
-        if entry.get("transaction_id") != transaction_root.name:
-            return None
-        try:
-            action = RecoveryAction(entry["action"])
-            before = CommitJournalState(entry["state_before"])
-            after = CommitJournalState(entry["state_after"])
-        except (ValueError, KeyError, TypeError):
-            return None
-        return TransactionRecoveryOutcome(
-            transaction_id=transaction_root.name,
-            action=action,
-            state_before=before,
-            state_after=after,
-            detail="terminal transaction (audit ledger hit)",
-        )
+        for action in RecoveryAction:
+            if action.value != entry.get("action"):
+                continue
+            return TransactionRecoveryOutcome(
+                transaction_id=str(entry.get("transaction_id", "")),
+                action=action,
+                state_before=(
+                    CommitJournalState(entry["state_before"])
+                    if entry.get("state_before")
+                    else None
+                ),
+                state_after=(
+                    CommitJournalState(entry["state_after"])
+                    if entry.get("state_after")
+                    else None
+                ),
+                detail="terminal transaction (audit ledger hit)",
+            )
+        return None
 
     def _ledger_record(
         self,
@@ -499,7 +488,7 @@ class ProjectCommitRecoveryCoordinator:
         if stored is None:
             try:
                 loaded = self._audit_ledger_store(runtime_root).read_or_none()
-            except (OSError, RuntimeFileError):
+            except OSError:
                 loaded = None
             stored = loaded if isinstance(loaded, dict) else {}
             self._ledger_tables[key] = stored
@@ -513,7 +502,7 @@ class ProjectCommitRecoveryCoordinator:
         store = self._audit_ledger_store(runtime_root)
         try:
             store.write(self._ledger_table(runtime_root))
-        except (OSError, RuntimeFileError):
+        except OSError:
             logger.warning(
                 "recovery audit ledger cannot be written: %s",
                 store.path,
@@ -1071,12 +1060,6 @@ class ProjectCommitRecoveryCoordinator:
                     "prepared final generation must equal or follow latest generation",
                 )
 
-        if journal.diff_semantics >= DIFF_SEMANTICS_MIGRATED:
-            # Hashes above identify the original snapshots. Business changes
-            # instead compare the normalized authoring view of both sides.
-            candidate_data = project_edit_document(candidate_data)
-            if final_data is not None:
-                final_data = project_edit_document(final_data)
         # touched_pointers were recorded against the representation the
         # committing boundary diffed, tagged by journal.diff_semantics.  A
         # current (MIGRATED) journal normalized base.json to the model_dump --

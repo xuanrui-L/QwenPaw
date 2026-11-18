@@ -8,15 +8,7 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { Button, Dropdown, Input, Modal, Switch, Tooltip, message } from "antd";
-import {
-  Eye,
-  Globe,
-  Pencil,
-  Plus,
-  ShoppingBag,
-  Trash2,
-  Upload,
-} from "lucide-react";
+import { Eye, Globe, Pencil, Plus, ShoppingBag, Trash2, Upload } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -96,8 +88,7 @@ const SKILL_MARKETS: Array<{
     name: "GitHub",
     homepage: "https://github.com",
     host: "github.com",
-    example:
-      "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+    example: "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
   },
   {
     key: "clawhub",
@@ -449,7 +440,10 @@ export default function SkillsConfigPane({
   const urlReady =
     SKILL_URL_RE.test(urlValue.trim()) && !urlTargetInvalid && !urlTargetTaken;
 
-  const installedNames = useMemo(() => items.map((item) => item.name), [items]);
+  const installedNames = useMemo(
+    () => items.map((item) => item.name),
+    [items],
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -792,38 +786,36 @@ export default function SkillsConfigPane({
               onChange={(event) => setUrlValue(event.target.value)}
             />
             {/* Source detection feedback */}
-            {urlValue.trim().length > 0 &&
-              SKILL_URL_RE.test(urlValue.trim()) && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    marginTop: 4,
-                    lineHeight: 1.5,
-                    color: detectMarketSource(urlValue)
-                      ? "var(--color-success)"
-                      : "var(--color-text-tertiary)",
-                  }}
-                >
-                  {detectMarketSource(urlValue)
-                    ? t("skills.importUrlSourceDetected", {
-                        source: detectMarketSource(urlValue),
-                      })
-                    : t("skills.importUrlSourceUnknown")}
-                </div>
-              )}
-            {urlValue.trim().length > 0 &&
-              !SKILL_URL_RE.test(urlValue.trim()) && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    marginTop: 4,
-                    lineHeight: 1.5,
-                    color: "var(--color-error)",
-                  }}
-                >
-                  {t("skills.urlInvalid")}
-                </div>
-              )}
+            {urlValue.trim().length > 0 && SKILL_URL_RE.test(urlValue.trim()) && (
+              <div
+                style={{
+                  fontSize: 11,
+                  marginTop: 4,
+                  lineHeight: 1.5,
+                  color: detectMarketSource(urlValue)
+                    ? "var(--color-success)"
+                    : "var(--color-text-tertiary)",
+                }}
+              >
+                {detectMarketSource(urlValue)
+                  ? t("skills.importUrlSourceDetected", {
+                      source: detectMarketSource(urlValue),
+                    })
+                  : t("skills.importUrlSourceUnknown")}
+              </div>
+            )}
+            {urlValue.trim().length > 0 && !SKILL_URL_RE.test(urlValue.trim()) && (
+              <div
+                style={{
+                  fontSize: 11,
+                  marginTop: 4,
+                  lineHeight: 1.5,
+                  color: "var(--color-error)",
+                }}
+              >
+                {t("skills.urlInvalid")}
+              </div>
+            )}
           </div>
           <div>
             <label className="field-label">

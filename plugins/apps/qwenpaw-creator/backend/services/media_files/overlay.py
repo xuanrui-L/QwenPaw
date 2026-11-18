@@ -132,7 +132,8 @@ _SUBTITLE_FONT_FAMILIES: dict[str, tuple[str, ...]] = {
         "/System/Library/Fonts/Kaiti.ttc",
         "/System/Library/Fonts/Supplemental/STKaiti.ttf",
         "/System/Library/Fonts/STKaiti.ttf",
-        "/System/Library/AssetsV2/com_apple_MobileAsset_Font8/*/AssetData/Kaiti.ttc",
+        # noqa 补自合并：上游行超长但漏标，非本分支回归
+        "/System/Library/AssetsV2/com_apple_MobileAsset_Font8/*/AssetData/Kaiti.ttc",  # noqa: E501
         "/usr/share/fonts/truetype/arphic/ukai.ttc",
         "{WINDIR}/Fonts/simkai.ttf",
     ),

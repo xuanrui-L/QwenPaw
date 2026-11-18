@@ -12,10 +12,8 @@ routed by :mod:`models.tts_capabilities`:
   through one ``voice-enrollment`` surface bound to the synthesis model itself.
 
 Character voices therefore come from either an audio sample (clone) or a plain
-text description (design). Each synthesis model publishes its own system
-voices, recorded in :mod:`models.tts_capabilities`; only
-``cosyvoice-v3.5-plus`` has none, so a created voice is the only way to speak
-with it.
+text description (design); the newest models of both families have no system
+voices, so designing one is the only way to speak with them.
 """
 
 from __future__ import annotations
@@ -112,6 +110,87 @@ def _tts_endpoint(base_url: str, *, via_gateway: bool) -> str:
     return (
         f"{parsed.scheme or 'https'}://{parsed.netloc}"
         f"/v1/{_TTS_GATEWAY_SUFFIX}"
+    )
+
+
+def _voice_preview(voices: tuple[str, ...], limit: int = 8) -> str:
+    """A short, honest sample of a voice list for error text.
+
+    One model publishes 88 system voices; dumping them into a message that
+    lands in the agent transcript teaches the model to guess at a long list of
+    near-identical names instead of reading the configured one.
+    """
+
+    if len(voices) <= limit:
+        return ", ".join(voices)
+    return f"{', '.join(voices[:limit])}, ... ({len(voices)} in total)"
+
+
+def _resolve_system_voice(
+    capability: TtsModelCapability,
+    model: str,
+    requested: str,
+    configured: str,
+    *,
+    via_gateway: bool,
+) -> str:
+    """The voice to synthesize with, checked against the local catalogue.
+
+    A model proxy publishes no voice catalogue at all (its customization
+    listing answers an empty ``voice_list``), so a name is passed through with
+    a warning for the models that have no local list to check - refusing them
+    would make speech synthesis unreachable there. Every other route keeps the
+    fail-fast check on a name the caller typed: a made-up name would otherwise
+    be rejected by the provider only after the call had burned an execution
+    authorization round-trip.
+
+    A name that came from the deployment default rather than from the caller
+    is not a made-up name, and the proxy would reject it exactly as Bailian
+    does - as a retryable 502 that reads like a broken route - so it falls
+    back to a voice this model can actually speak on either endpoint.
+    """
+    if not capability.has_system_voices:
+        # Nothing to check against: this model publishes no list at all, so on
+        # the proxy any name - typed or configured - is the proxy's business,
+        # while Bailian direct really does need a created voice.
+        configured_name = (requested or configured).strip()
+        if via_gateway and configured_name:
+            logger.warning(
+                "TTS voice %r is not in the local catalogue for %s; "
+                "the gateway catalogue is unpublished, passing it through",
+                configured_name,
+                model,
+            )
+            return configured_name
+        raise ValueError(
+            f"{model} has no system voices; create a character voice "
+            "first and synthesize with its voice id",
+        )
+    active = resolve_system_voice(capability, requested, configured)
+    if active is not None:
+        if not requested and active != configured.strip():
+            logger.warning(
+                "TTS default voice %r is not a system voice of %s; narrating "
+                "with %s instead",
+                configured,
+                model,
+                active,
+            )
+        return active
+    if via_gateway:
+        # Only a name the caller typed reaches this branch: the proxy
+        # publishes no catalogue, so it is forwarded rather than second
+        # guessed locally.
+        logger.warning(
+            "TTS voice %r is unknown locally for %s; the gateway "
+            "catalogue is unpublished, passing it through",
+            requested,
+            model,
+        )
+        return requested
+    raise ValueError(
+        f"unknown voice {requested!r} for {model}; its system voices "
+        f"are {_voice_preview(capability.system_voices)}",
     )
 
 
@@ -374,65 +453,6 @@ def _synthesize_over_websocket(
     return audio, "audio/mpeg"
 
 
-def _voice_preview(voices: tuple[str, ...], limit: int = 8) -> str:
-    """A short, honest sample of a voice list for error text.
-
-    One model publishes 88 system voices; dumping them into a message that
-    lands in the agent transcript teaches the model to guess at a long list of
-    near-identical names instead of reading the configured one.
-    """
-
-    if len(voices) <= limit:
-        return ", ".join(voices)
-    return f"{', '.join(voices[:limit])}, ... ({len(voices)} in total)"
-
-
-def _resolve_system_voice(
-    capability: TtsModelCapability,
-    requested: str,
-    configured: str,
-    *,
-    via_gateway: bool,
-) -> str:
-    """Resolve a system voice before submitting a synthesis request."""
-    model = capability.model
-    if not capability.has_system_voices:
-        supplied = (requested or configured).strip()
-        if via_gateway and supplied:
-            logger.warning(
-                "Forwarding voice %r for %s with no published gateway catalogue",
-                supplied,
-                model,
-            )
-            return supplied
-        raise ValueError(
-            f"{model} has no system voices; create a character voice "
-            "first and synthesize with its voice id",
-        )
-    active = resolve_system_voice(capability, requested, configured)
-    if active is None:
-        if via_gateway:
-            logger.warning(
-                "Forwarding voice %r for %s with no published gateway catalogue",
-                requested,
-                model,
-            )
-            return requested
-        raise ValueError(
-            f"unknown voice {requested!r} for {model}; its system "
-            f"voices are {_voice_preview(capability.system_voices)}",
-        )
-    if not requested and active != configured.strip():
-        logger.warning(
-            "TTS default voice %r is not a system voice of %s; narrating "
-            "with %s instead",
-            configured,
-            model,
-            active,
-        )
-    return active
-
-
 async def synthesize(
     text: str,
     *,
@@ -471,9 +491,11 @@ async def synthesize(
         active_voice = voice_id
     else:
         model = capability.model
+        requested = (voice or "").strip()
         active_voice = _resolve_system_voice(
             capability,
-            (voice or "").strip(),
+            capability.model,
+            requested,
             config.get_tts_voice(),
             via_gateway=via_gateway,
         )
@@ -583,7 +605,6 @@ async def _sample_url(sample_media_url: str, api_key: str, model: str) -> str:
             media_type=media_type,
             base_url=config.get_tts_base_url(),
             protocol=config.get_tts_protocol(),
-            allow_inline=False,
         )
     if parsed.scheme in {"http", "https", "oss"}:
         return sample_media_url

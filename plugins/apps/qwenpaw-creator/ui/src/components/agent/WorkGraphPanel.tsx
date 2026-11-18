@@ -240,13 +240,13 @@ export function WorkGraphStrandedNotice({ projectId }: { projectId: string }) {
     state.projectId === projectId ? state.tasks : NO_TASKS,
   );
   const dispatchNode = useWorkGraphStore((state) => state.dispatchNode);
-  const dispatching = useWorkGraphStore((state) => state.dispatching);
+  const [dispatching, setDispatching] = useState<string | null>(null);
   const now = Date.now();
   const stranded = (graph?.nodes ?? []).filter((node) => {
     if (node.status !== "running" || !node.taskId) return false;
     const task = tasks.find((item) => item.id === node.taskId);
     if (!task || task.status !== "QUEUED") return false;
-    if (task.lastAttemptSeq !== 0) return false;
+    if ((task.lastAttemptSeq ?? 0) !== 0) return false;
     const updated = Date.parse(task.updatedAt ?? "");
     return Number.isFinite(updated) && now - updated > STRANDED_ADMISSION_MS;
   });
@@ -266,12 +266,15 @@ export function WorkGraphStrandedNotice({ projectId }: { projectId: string }) {
             key={node.id}
             type="button"
             className="agent-work-action disabled:cursor-wait disabled:opacity-50"
-            disabled={Boolean(dispatching[node.id])}
-            onClick={() =>
-              void dispatchNode(projectId, node.id).catch(() =>
-                message.error(t("agentActivity.failureHint")),
-              )
-            }
+            disabled={dispatching === node.id}
+            onClick={async () => {
+              setDispatching(node.id);
+              try {
+                await dispatchNode(projectId, node.id);
+              } finally {
+                setDispatching(null);
+              }
+            }}
           >
             {t("workGraph.strandedResubmit")}
           </button>

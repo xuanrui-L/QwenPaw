@@ -28,9 +28,7 @@ recovery.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import logging
-import os
 from pathlib import Path
 from typing import Mapping
 
@@ -41,7 +39,7 @@ from services.runtime_files.atomic_store import AtomicJsonRecordStore
 logger = logging.getLogger("qwenpaw.creator.project_files.transaction_index")
 
 INDEX_FILE_NAME = ".journal-index.json"
-INDEX_VERSION = 2
+INDEX_VERSION = 1
 
 # Journal states that can never be revisited.  Kept as strings so this module
 # does not import the commit boundary that defines the enum.
@@ -62,7 +60,6 @@ class TransactionJournalIndex(BaseModel):
 
     version: int = INDEX_VERSION
     directory_count: int = Field(default=0, ge=0)
-    directory_digest: str = ""
     pending: tuple[str, ...] = ()
 
 
@@ -77,7 +74,6 @@ class TransactionScanPlan:
     """
 
     directory_count: int
-    directory_digest: str
     read_ids: tuple[str, ...]
     current_transaction_id: str
     cached: bool
@@ -126,12 +122,6 @@ def _read_stored_index(
     return stored
 
 
-def _directory_digest(names: tuple[str, ...]) -> str:
-    return hashlib.sha256(
-        b"\0".join(os.fsencode(name) for name in names)
-    ).hexdigest()
-
-
 def plan_transaction_scan(
     transactions_root: Path,
     *,
@@ -153,27 +143,18 @@ def plan_transaction_scan(
         if transactions_root.is_dir()
         else None
     )
-    directory_digest = _directory_digest(
-        tuple(sorted((*other_ids, current_transaction_id)))
-    )
-    if (
-        stored is not None
-        and stored.directory_count == len(other_ids)
-        and stored.directory_digest == _directory_digest(other_ids)
-    ):
+    if stored is not None and stored.directory_count == len(other_ids):
         known = set(other_ids)
         known.add(current_transaction_id)
         if all(name in known for name in stored.pending):
             return TransactionScanPlan(
                 directory_count=len(other_ids) + 1,
-                directory_digest=directory_digest,
                 read_ids=stored.pending,
                 current_transaction_id=current_transaction_id,
                 cached=True,
             )
     return TransactionScanPlan(
         directory_count=len(other_ids) + 1,
-        directory_digest=directory_digest,
         read_ids=other_ids,
         current_transaction_id=current_transaction_id,
         cached=False,
@@ -207,7 +188,6 @@ def record_transaction_scan(
             TransactionJournalIndex(
                 version=INDEX_VERSION,
                 directory_count=plan.directory_count,
-                directory_digest=plan.directory_digest,
                 pending=pending,
             ),
         )

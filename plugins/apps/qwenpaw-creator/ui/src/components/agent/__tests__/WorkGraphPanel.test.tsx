@@ -44,7 +44,6 @@ const graph: WorkGraphView = {
   generation: 7,
   counts: { total: 4, done: 1, running: 1, failed: 1, gated: 1 },
   mediaCalls: 12,
-  mediaCallBudget: 200,
   nodes: [
     node({
       id: "visual:char:a:var:x",

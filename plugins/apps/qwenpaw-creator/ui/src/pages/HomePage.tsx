@@ -23,7 +23,6 @@ import {
   copyProject,
   getRecreateParams,
   listProjects,
-  listTasks,
   getArtifactVersionMediaUrl,
   getStorageProfile,
   CreatorHttpError,
@@ -60,6 +59,7 @@ interface ProjectCardProps {
   project: ProjectSummary;
   hasActiveTasks: boolean;
   storage?: ProjectStorageProfile;
+  reclaimCap: number;
   onOpen: (id: string) => void;
   onDelete: (project: ProjectSummary) => void;
   onCopy: (project: ProjectSummary) => void;
@@ -95,6 +95,7 @@ const ProjectCard = memo(function ProjectCard({
   project,
   hasActiveTasks,
   storage,
+  reclaimCap,
   onOpen,
   onDelete,
   onCopy,
@@ -113,7 +114,9 @@ const ProjectCard = memo(function ProjectCard({
   }
   const canPreview = Boolean(project.finalVideoVersionId);
   const awaitingReclaim =
-    storage !== undefined && storage.pendingReclaimBytes > 0;
+    storage !== undefined &&
+    storage.reclaimConfirmedAt === null &&
+    storage.pendingReclaimBytes > reclaimCap;
   // When there are active background tasks, override the session status
   // to match the in-project live status display.
   const displayStatus =
@@ -276,10 +279,12 @@ export default function HomePage() {
   const modelConfig = useModelConfigStore((state) => state.config);
   const refreshModelConfig = useModelConfigStore((state) => state.refresh);
   const [configModalOpen, setConfigModalOpen] = useState(false);
-  // Reclaimable bytes are advisory; the project list loads independently.
+  // The storage profile is advisory: it feeds the one notice a Project earns
+  // when its settled history grows past what the automatic sweep may take.
   const [storageByProject, setStorageByProject] = useState<
     Record<string, ProjectStorageProfile>
   >({});
+  const [reclaimCap, setReclaimCap] = useState(0);
 
   useEffect(() => {
     void refreshModelConfig();
@@ -290,38 +295,27 @@ export default function HomePage() {
     modelConfig === null ||
     Boolean(modelConfig.llm.enabled && modelConfig.llm.model_name);
 
-  const latestList = useRef(0);
-  const latestStorage = useRef(0);
   const fetchProjects = useCallback(
     async (sort: SortField = sortBy, order: "asc" | "desc" = sortOrder) => {
-      const requestId = ++latestList.current;
       try {
         const data = await listProjects(100, 0, sort, order);
-        if (requestId !== latestList.current) return;
         const projectList = data.items || [];
         // One response carries both the cards and the "working" badge: the
         // listing answers hasActiveTask for every Project, so the page renders
         // as soon as it arrives instead of waiting on a per-Project /tasks
         // round trip for each card.
         setProjects(projectList);
-        const active = new Set(
-          projectList.filter((project) => project.hasActiveTask).map((project) => project.projectId),
+        setProjectsWithActiveTasks(
+          new Set(
+            projectList
+              .filter((project) => project.hasActiveTask)
+              .map((project) => project.projectId),
+          ),
         );
-        // A pre-summary server does not return this flag. Only those rows need a task lookup.
-        await Promise.all(projectList.filter((project) => project.hasActiveTask == null).map(async (project) => {
-          try {
-            const tasks = await listTasks(project.projectId);
-            if (tasks.items.some((task) => task.status === "QUEUED" || task.status === "RUNNING"))
-              active.add(project.projectId);
-          } catch {
-            // A failed task lookup must not hide the project card.
-          }
-        }));
-        if (requestId === latestList.current) setProjectsWithActiveTasks(active);
       } catch {
-        if (requestId === latestList.current) message.error(t("home.loadFailed"));
+        message.error(t("home.loadFailed"));
       } finally {
-        if (requestId === latestList.current) setLoading(false);
+        setLoading(false);
       }
     },
     [sortBy, sortOrder, t],
@@ -332,10 +326,9 @@ export default function HomePage() {
   }, [fetchProjects]);
 
   const fetchStorage = useCallback(async () => {
-    const requestId = ++latestStorage.current;
     try {
       const profile = await getStorageProfile();
-      if (requestId !== latestStorage.current) return;
+      setReclaimCap(profile.autoReclaimMaxBytes);
       setStorageByProject(
         Object.fromEntries(profile.projects.map((row) => [row.projectId, row])),
       );
@@ -349,7 +342,7 @@ export default function HomePage() {
   }, [fetchStorage]);
 
   // A reclaim can also finish outside this tab (the confirm route from a
-  // script or another tab), and nothing else re-reads the
+  // script, another tab, or the boot sweep), and nothing else re-reads the
   // profile, so coming back to the window refreshes the notice instead of
   // leaving a button for space that is already gone.
   useEffect(() => {
@@ -500,14 +493,16 @@ export default function HomePage() {
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       const value = e.target.value as SortField;
       setSortBy(value);
+      fetchProjects(value, sortOrder);
     },
-    [],
+    [fetchProjects, sortOrder],
   );
 
   const handleSortOrderToggle = useCallback(() => {
     const newOrder = sortOrder === "asc" ? "desc" : "asc";
     setSortOrder(newOrder);
-  }, [sortOrder]);
+    fetchProjects(sortBy, newOrder);
+  }, [fetchProjects, sortBy, sortOrder]);
 
   const formatDate = useCallback((dateStr: string) => {
     const date = new Date(dateStr);
@@ -758,6 +753,7 @@ export default function HomePage() {
                       project.projectId,
                     )}
                     storage={storageByProject[project.projectId]}
+                    reclaimCap={reclaimCap}
                     onOpen={handleOpen}
                     onDelete={handleDelete}
                     onCopy={handleCopy}

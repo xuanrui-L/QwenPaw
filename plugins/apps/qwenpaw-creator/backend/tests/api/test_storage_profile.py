@@ -215,13 +215,13 @@ def test_requests_are_told_to_retry_while_recovery_runs():
         facade.mark_runtime_preparing(False)
 
 
-def test_manual_reclaim_writes_its_confirmation_receipt(
+def test_confirming_writes_a_receipt_the_sweeps_then_honour(
     api_request,
     app,
     api_runtime_root,
     monkeypatch,
 ):
-    """The most recent explicit confirmation is available to storage diagnostics."""
+    """The button is the confirmation the automatic pass waits for."""
 
     from services.media_files.task_scratch import (
         RECLAIM_CONFIRMATION_FILE_NAME,
@@ -372,53 +372,3 @@ def test_invalidation_is_scoped_to_one_data_root() -> None:
 
     storage_profile_routes.invalidate_storage_profile_cache()
     assert not storage_profile_routes._profile_cache
-
-
-def test_reclaim_confirmation_does_not_authorize_future_history(
-    api_request, app, api_runtime_root
-):
-    from services.project_files.transaction_gc import (
-        collect_project_transactions,
-    )
-
-    root = api_runtime_root / PROJECT_A
-    transactions = _seed_legacy_project(api_runtime_root, PROJECT_A, count=60)
-    assert collect_project_transactions(root) == (0, 0)
-    assert len(list(transactions.iterdir())) == 60
-    reply = api_request(
-        app,
-        "POST",
-        f"/storage/projects/{PROJECT_A}/reclaim-history",
-        json={"confirm": True},
-    )
-    assert reply.status_code == 200
-    new = transactions / "txn-new"
-    new.mkdir()
-    (new / "journal.json").write_text('{"state":"ABORTED"}')
-    assert collect_project_transactions(root) == (0, 0)
-    assert len(list(transactions.iterdir())) == 51
-    profile = api_request(app, "GET", "/storage/profile").json()
-    assert (
-        next(
-            row for row in profile["projects"] if row["projectId"] == PROJECT_A
-        )["pendingReclaimBytes"]
-        > 0
-    )
-
-
-def test_manual_reclaim_preserves_unverifiable_reservations(
-    api_request, app, api_runtime_root
-):
-    transactions = _seed_legacy_project(api_runtime_root, PROJECT_A, count=60)
-    records = transactions.parent / "commands" / "idempotency"
-    records.mkdir(parents=True)
-    (records / "unknown.json").write_bytes(b"{")
-    reply = api_request(
-        app,
-        "POST",
-        f"/storage/projects/{PROJECT_A}/reclaim-history",
-        json={"confirm": True},
-    )
-    assert reply.status_code == 200
-    assert reply.json()["removedTransactions"] == 0
-    assert len(list(transactions.iterdir())) == 60

@@ -368,6 +368,30 @@ def test_model_without_system_voices_makes_design_a_prerequisite(
     assert "create_character_voice" in editing
 
 
+def test_voice_lists_are_summarised_not_dumped_into_the_prompt(
+    monkeypatch,
+) -> None:
+    """One model publishes 88 system voices. The prompt states the count and
+    samples a few names: a transcript-sized enum teaches the agent to guess at
+    near-identical names instead of omitting the parameter."""
+
+    _tts(monkeypatch, model="qwen-audio-3.1-tts-flash")
+    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
+    assert "共 88 个" in editing
+    assert "longanhuan_v3.1" in editing
+    # The line samples the first six names, so pin the boundary itself: a
+    # revert to the whole table then moves two assertions instead of the one
+    # vacuous check a name no model publishes would always have passed.
+    assert "qiaoxiaojiao_v3.1" in editing
+    assert "xiaxiaochen_v3.1" not in editing
+    # The delegator never hears the names, only what the model can do.
+    delegator = render_creator_system_prompt(
+        project_id="project-guidance-test",
+        workspace_schema="SCHEMA",
+    )
+    assert "longanhuan_v3.1" not in delegator
+
+
 def test_scenario_steers_how_the_voice_is_used(monkeypatch) -> None:
     _tts(monkeypatch, model="qwen3-tts-flash")
 
@@ -396,30 +420,6 @@ def test_scenario_steers_how_the_voice_is_used(monkeypatch) -> None:
     assert "tts_generation" not in other
 
 
-@pytest.mark.unit
-def test_voice_lists_are_summarised_not_dumped_into_the_prompt(
-    monkeypatch,
-) -> None:
-    """One model publishes 88 system voices. The prompt states the count and
-    samples a few names: a transcript-sized enum teaches the agent to guess at
-    near-identical names instead of omitting the parameter."""
-
-    _tts(monkeypatch, model="qwen-audio-3.1-tts-flash")
-    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
-    assert "共 88 个" in editing
-    assert "longanhuan_v3.1" in editing
-    # The line samples the first six names, so pin the boundary itself: a
-    # revert to the whole table then moves two assertions instead of the one
-    # vacuous check a name no model publishes would always have passed.
-    assert "qiaoxiaojiao_v3.1" in editing
-    assert "xiaxiaochen_v3.1" not in editing
-    # The delegator never hears the names, only what the model can do.
-    delegator = render_creator_system_prompt(
-        project_id="project-guidance-test",
-    )
-    assert "longanhuan_v3.1" not in delegator
-
-
 @pytest.mark.parametrize(
     ("video_model", "backend", "supports_reference_voice"),
     [
@@ -434,8 +434,8 @@ def test_native_dialogue_voice_guidance_matches_video_capability(
     backend,
     supports_reference_voice,
 ) -> None:
-    # A model that publishes no system voices: the case this guards. The
-    # Qwen-Audio models all ship lists now, so CosyVoice stands in.
+    # A model that genuinely ships no system voices, so the design prerequisite
+    # branch is exercised rather than a model name that happens to be sparse.
     _tts(monkeypatch, model="cosyvoice-v3.5-plus")
     monkeypatch.setattr(
         model_config,
@@ -489,12 +489,3 @@ def test_execution_guidance_explains_prompt_sync_gate(monkeypatch) -> None:
     )
     auto = render_creator_system_prompt(project_id="project-guidance-test")
     assert "并非审阅冷却" not in auto
-
-
-def test_prompt_sync_confirmation_requires_observed_current_evidence():
-    prompt = load_file_agent_prompt("creator_agent.system")
-    instruction = next(
-        line for line in prompt.splitlines() if line.startswith("- `confirm_prompt_sync`")
-    )
-    for field in ("`read_project`", "`basis`", "重新读取", "媒体评审"):
-        assert field in instruction

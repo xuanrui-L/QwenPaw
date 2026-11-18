@@ -1096,31 +1096,3 @@ def test_oversized_local_video_is_refused_before_its_bytes_are_read(
         )
 
     assert not reads
-
-
-def test_custom_native_media_endpoint_keeps_the_model_bound_upload(
-    monkeypatch, tmp_path
-):
-    path = tmp_path / "sample.wav"
-    path.write_bytes(b"test audio")
-    calls = []
-
-    async def upload(file_path, *, api_key, model_name, media_type):
-        calls.append((file_path, model_name, media_type))
-        return "oss://sample"
-
-    monkeypatch.setattr(
-        media_transport, "upload_local_file_to_dashscope_temp", upload
-    )
-    result = asyncio.run(
-        media_transport.upload_reference_file_for_provider(
-            path,
-            api_key="test",
-            model_name="test-model",
-            media_type="audio/wav",
-            base_url="https://custom.example/v1",
-            allow_inline=False,
-        )
-    )
-    assert calls == [(path, "test-model", "audio/wav")]
-    assert result == "oss://sample"

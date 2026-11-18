@@ -334,12 +334,28 @@ def test_v9_document_with_roles_is_not_altered_by_the_repair() -> None:
     assert raw["schema_version"] == 9
 
     # v9→v10 migration bumps the version even when no overlays exist,
-    # but nothing else changes for a role-complete audio document.
+    # but nothing else changes for a role-complete audio document. The
+    # migration path deep-copies (every migration runs against its own
+    # candidate), so identity is not part of this contract.
     migrated = migrate_project_document(raw)
     assert migrated["schema_version"] == 10
     del migrated["schema_version"]
     del raw["schema_version"]
     assert migrated == raw
+
+    # Not merely equal, though: the old code deep-copied the whole document
+    # on every load (measured 0.26 s of a 0.42 s read, and a read runs on
+    # every HTTP listing, every scheduler tick and the startup sweep). A
+    # document already at the current version takes the same-version
+    # repair path, which rebuilds only the containers it actually
+    # changes, so an untouched Timeline must still be the very object
+    # that came in.
+    raw["schema_version"] = 10
+    same_version = migrate_project_document(raw)
+    assert (
+        same_version["timelines"]["items"]["timeline:main"]
+        is raw["timelines"]["items"]["timeline:main"]
+    )
 
 
 def test_legacy_dialogue_rows_do_not_gate_narration() -> None:

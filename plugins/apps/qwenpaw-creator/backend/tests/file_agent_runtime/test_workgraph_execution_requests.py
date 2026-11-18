@@ -54,7 +54,7 @@ async def wait_for(predicate, seconds=12):
         await asyncio.sleep(0.01)
 
 
-def create(temporary):
+def create(temporary, *, historical_media_tasks=0):
     services = CreatorFileServices.create(temporary.resolve())
     project = Project.new(project_id="probe-project", name="Independent probe")
     project.visual.entities.items["hero"] = VisualEntity(
@@ -85,6 +85,20 @@ def create(temporary):
             initial_message_id="probe-message",
             initial_client_message_id="probe-client",
         )
+        for index in range(historical_media_tasks):
+            task = TaskRecord(
+                task_id=f"historical-media-{index}",
+                project_id="probe-project",
+                kind=TaskKind.IMAGE_GENERATION,
+                status=TaskStatus.SUCCEEDED,
+                request_fingerprint=f"historical-{index}",
+            )
+            task_root = staged / "runtime" / "tasks" / task.task_id
+            task_root.mkdir(parents=True)
+            (task_root / "task.json").write_text(
+                task.model_dump_json(),
+                encoding="utf-8",
+            )
 
     snapshot = services.projects.create(
         project,
@@ -230,15 +244,19 @@ def test_failed_receipt_reaches_agent_and_cannot_be_narrated_as_submitted(
 
 
 @pytest.mark.parametrize("cancel_first", [False, True])
-def test_required_approval_and_repeated_tool_only_one_real_admission(
+def test_high_media_history_keeps_approval_and_idempotent_admission(
     tmp_path,
     monkeypatch,
     cancel_first,
 ):
     pin(monkeypatch)
+    historical_media_tasks = 250
 
     async def scenario():
-        services = create(tmp_path)
+        services = create(
+            tmp_path,
+            historical_media_tasks=historical_media_tasks,
+        )
         turns = 0
 
         async def model(_messages, _tools):
@@ -303,8 +321,8 @@ def test_required_approval_and_repeated_tool_only_one_real_admission(
                 )
                 == 1
             )
-            assert len(runtime.executions.list_tasks("probe-project")) == len(
-                calls,
+            assert len(runtime.executions.list_tasks("probe-project")) == (
+                historical_media_tasks + len(calls)
             )
             if cancel_first:
                 results = [
@@ -557,10 +575,9 @@ def test_prompt_sync_gated_request_surfaces_diagnostic_fields(
         )
         graph = WorkGraph(nodes=(node,), generation=1)
 
-        async def fake_context(svcs, _execs, pid, **_kwargs):
+        async def fake_context(svcs, _execs, pid):
             # Only the request path reads this; hand back the GATED node and
-            # its pre-dispatch block reason (extra kwargs like
-            # ``check_media_budget`` are irrelevant to this canned graph).
+            # its pre-dispatch block reason.
             return (
                 svcs.projects.read(pid),
                 [],
@@ -838,7 +855,6 @@ def test_agent_workgraph_request_cannot_bypass_manual_hold(
             services,
             runtime.executions,
             "probe-project",
-            check_media_budget=False,
         )
         node = next(item for item in graph.nodes if item.kind == "visual")
         upstream = WorkNode(
@@ -1083,7 +1099,6 @@ def test_saved_prompt_authorization_rebinding(
                 services,
                 runtime.executions,
                 "probe-project",
-                check_media_budget=False,
             )
             node = next(
                 n
@@ -1121,7 +1136,6 @@ def test_saved_prompt_authorization_rebinding(
                 services,
                 runtime.executions,
                 "probe-project",
-                check_media_budget=False,
             )
             saved_node = saved_graph.by_id[node.node_id]
             held = scope != "visual" and not case.startswith("unchanged")
@@ -1175,14 +1189,12 @@ def test_saved_prompt_authorization_rebinding(
                     services,
                     runtime.executions,
                     "probe-project",
-                    check_media_budget=False,
                 )
                 assert still_blocked[node.node_id] == "EDIT_IN_PROGRESS"
                 _, _, _, confirmed_blocked = await dm.ready_request_context(
                     services,
                     runtime.executions,
                     "probe-project",
-                    check_media_budget=False,
                     confirmed_project_etag=saved.etag,
                     confirmed_node_id=node.node_id,
                 )
@@ -1219,7 +1231,6 @@ def test_saved_prompt_authorization_rebinding(
                     services,
                     runtime.executions,
                     "probe-project",
-                    check_media_budget=False,
                 )
                 latest_node = latest_graph.by_id[node.node_id]
                 assert (

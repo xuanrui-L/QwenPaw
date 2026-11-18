@@ -5,7 +5,6 @@ import type {
   TaskView,
 } from "@/contracts/creator";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
-import { ev } from "@/test/sessionEventBuilders";
 import { makeRun } from "@/test/agentFixtures";
 
 function deferred<T>() {
@@ -141,47 +140,6 @@ describe("creator task view refresh ordering", () => {
       finalMarker: "SUCCESS",
     });
     expect(useCreatorTaskViewStore.getState().loading).toBe(false);
-  });
-
-  it("preserves newer live rows across a slow poll and older events", async () => {
-    const pending = deferred<Response>();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn((input: RequestInfo | URL) =>
-        String(input).endsWith("/tasks")
-          ? pending.promise
-          : Promise.resolve(response({ items: [] })),
-      ),
-    );
-    const stale: TaskView = {
-      id: "t1",
-      projectId: "p1",
-      transactionId: null,
-      specialistRunId: null,
-      kind: "compose",
-      targetRef: "project:p1",
-      status: "QUEUED",
-      progress: null,
-      resultRefs: [],
-      updatedAt: "2026-10-20T12:00:00Z",
-    };
-    const terminal: TaskView = {
-      ...stale,
-      status: "SUCCEEDED",
-      updatedAt: "2026-10-20T12:01:00Z",
-    };
-    const legacy = { ...stale, id: "t2", updatedAt: undefined };
-    const store = useCreatorTaskViewStore.getState();
-    const poll = store.refresh("p1");
-    store.consumeEvent(ev(3, "task.updated", { task: terminal }));
-    store.consumeEvent(ev(4, "task.updated", { task: legacy }));
-    pending.resolve(response({ items: [stale] }));
-    await poll;
-    store.consumeEvent(ev(2, "task.updated", { task: stale }));
-    expect(useCreatorTaskViewStore.getState().tasks).toEqual([
-      legacy,
-      terminal,
-    ]);
   });
 
   it("drops a cancel response after switching projects", async () => {

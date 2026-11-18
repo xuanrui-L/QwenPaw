@@ -153,9 +153,7 @@ export interface MarketProvider {
   supports_browse: boolean;
 }
 
-export function listMarketProviders(): Promise<{
-  providers: MarketProvider[];
-}> {
+export function listMarketProviders(): Promise<{ providers: MarketProvider[] }> {
   return creatorRequest<{ providers: MarketProvider[] }>(
     "/skills/market/providers",
   );

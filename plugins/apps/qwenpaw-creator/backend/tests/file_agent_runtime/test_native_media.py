@@ -163,7 +163,9 @@ def test_asset_version_refs_are_uploaded_and_attached_as_native_media(
         "get_vlm_model_name",
         lambda: "qwen3.7-plus",
     )
-    # Attachments must use the endpoint and credentials from the VLM section.
+    # The decision point needs the VLM section's endpoint identity so a
+    # platform-configured Creator uploads attachments through the platform
+    # instead of the Bailian domain (which rejects sk-as keys with 401).
     monkeypatch.setattr(
         native_media.model_config,
         "get_vlm_base_url",
@@ -689,9 +691,11 @@ def test_downscaled_document_page_reports_the_media_it_carries(
     async def downscaled_transport(_path, **_kwargs):
         return "data:image/jpeg;base64," + base64.b64encode(b"j").decode()
 
+    # The dispatcher imports the inline transport from models.vlm_model at
+    # call time, so the double has to be installed there.
     monkeypatch.setattr(
-        native_media,
-        "upload_reference_file_for_provider",
+        vlm_model,
+        "transport_local_media_url",
         downscaled_transport,
     )
 

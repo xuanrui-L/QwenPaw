@@ -34,7 +34,6 @@ DEFAULT_PROFILE_TTL_SECONDS = 60.0
 # (data root, includeOrphans) -> (monotonic deadline, profile payload).
 # The root is part of the key: two data roots must never serve each other's
 # numbers, whether in a test process or after CREATOR_DATA_ROOT moves.
-_profile_revision = 0
 _profile_cache: dict[tuple[str, bool], tuple[float, dict[str, Any]]] = {}
 
 
@@ -57,8 +56,6 @@ def invalidate_storage_profile_cache(root: str | None = None) -> None:
     *root* to clear only that data root's entries.
     """
 
-    global _profile_revision
-    _profile_revision += 1
     if root is None:
         _profile_cache.clear()
         return
@@ -91,13 +88,12 @@ async def get_storage_profile(
     if ttl > 0 and cached is not None and now - cached[0] < ttl:
         return StorageProfileData.model_validate(cached[1])
 
-    revision = _profile_revision
     profile = await asyncio.to_thread(
         project_storage_profile,
         services,
         include_orphans=include_orphans,
     )
-    if ttl > 0 and revision == _profile_revision:
+    if ttl > 0:
         _profile_cache[cache_key] = (time.monotonic(), profile)
     return StorageProfileData.model_validate(profile)
 
@@ -111,7 +107,15 @@ async def reclaim_history(
     payload: HistoryReclaimRequest,
     services: CreatorFileServices = Depends(project_file_services),
 ) -> HistoryReclaimResultData:
-    """Reclaim one project's eligible scratch and settled transactions once."""
+    """Take one Project's settled history back now, not at the next restart.
+
+    The same two sweeps run by themselves at boot -- terminal transactions past
+    the retention window, and terminal Task scratch.  Reclaiming pre-baseline
+    history is the default; a Project that explicitly chose to keep it is
+    refused rather than silently doing nothing.  ``confirm`` is required
+    because
+    the caller is a person watching a button, not a cron job.
+    """
 
     if not payload.confirm:
         raise BadRequestError("回收历史需要显式确认（confirm=true）")

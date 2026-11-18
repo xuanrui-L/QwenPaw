@@ -12,7 +12,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from models.provider_errors import (
-    gateway_error_code,
     is_retryable_status,
     status_code_in_text,
 )
@@ -42,6 +41,12 @@ TRANSIENT_ERROR_MARKERS = (
     "status 502",
     "status 503",
     "status 504",
+    # The gateway severing a response mid-flight leaves an httpx transport
+    # error with no body, so there is no envelope and no status to read: the
+    # wording is the only signal. Nothing was billed - the request never
+    # completed - which is what makes a bounded retry safe here.
+    "peer closed connection",
+    "incomplete chunked read",
     # Legacy empty-detail records: before the provider labelled
     # httpx transport errors, WriteError/ReadError/ConnectError
     # stringified to nothing and persisted this exact degenerate
@@ -69,11 +74,19 @@ PERMANENT_ERROR_MARKERS = (
 MAX_TRANSIENT_RETRY_SLOTS = 3
 
 
-def is_transient_error_message(message: str, *, gateway: bool = False) -> bool:
-    """Apply the direct provider rules unless this failure came from AgentScope."""
-    folded = message.casefold()
-    if not gateway and not gateway_error_code(message):
-        return any(marker in folded for marker in TRANSIENT_ERROR_MARKERS)
+def is_transient_error_message(message: str) -> bool:
+    """Whether a failure is worth another attempt.
+
+    Two signals, most trusted first: an HTTP status the message names, then a
+    short list of causes no retry can fix. Anything left over counts as
+    transient.
+    """
+
+    # A gateway error code used to outrank everything below - the AgentScope
+    # proxy stamped ``retryable: true`` on deterministic failures, so trusting
+    # the status alone would burn paid retries on a request that could never
+    # succeed. The proxy is fixing that stamping on its side, so the status is
+    # now the authority and the envelope no longer vetoes a retry here.
     status = status_code_in_text(message)
     if status:
         # A message that names its own status needs no substring guess. The
@@ -82,16 +95,10 @@ def is_transient_error_message(message: str, *, gateway: bool = False) -> bool:
         # "HTTP 504" - so a gateway that merely took too long walled every
         # presentation node as deterministic.
         return is_retryable_status(status)
+    folded = message.casefold()
     if any(marker in folded for marker in PERMANENT_ERROR_MARKERS):
         return False
-    return any(
-        marker in folded
-        for marker in (
-            *TRANSIENT_ERROR_MARKERS,
-            "peer closed connection",
-            "incomplete chunked read",
-        )
-    )
+    return any(marker in folded for marker in TRANSIENT_ERROR_MARKERS)
 
 
 def is_unclassified_failure(message: str) -> bool:

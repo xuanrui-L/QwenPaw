@@ -47,7 +47,6 @@ from .dependencies import (
     semantic_etag,
 )
 
-
 router = APIRouter(
     prefix="/projects/{project_id}",
     tags=["runtime-files"],
@@ -842,7 +841,6 @@ async def _rebind_workgraph_authorization(
         services,
         store,
         current.project_id,
-        check_media_budget=False,
         confirmed_project_etag=project_etag,
         confirmed_node_id=workgraph["nodeId"],
     )
@@ -917,12 +915,16 @@ async def _decide_authorization(
                 ) != script_fingerprint(
                     snapshot.project,
                 ):
-                    raise ConflictError("剧本已更新，请重新请求并确认当前版本。")
+                    raise ConflictError(
+                        "剧本已更新，请重新请求并确认当前版本。"
+                    )
             if (
                 decision.get("provider") != current.requested_provider
                 or decision.get("model") != current.requested_model
             ):
-                raise ConflictError("批准的 provider/model 必须与原执行请求一致")
+                raise ConflictError(
+                    "批准的 provider/model 必须与原执行请求一致"
+                )
             requested_candidates = current.requested_candidates or 1
             if int(decision.get("maxCandidates") or 0) > requested_candidates:
                 raise ConflictError("批准的候选数量不能超过原执行请求")
@@ -931,13 +933,13 @@ async def _decide_authorization(
                     decision.get("promptPointer") is None
                     or (current.scope or {}).get("workGraph") is not None
                 ):
-                    decision[
-                        "workGraph"
-                    ] = await _rebind_workgraph_authorization(
-                        services,
-                        store,
-                        current,
-                        decision["projectEtag"],
+                    decision["workGraph"] = (
+                        await _rebind_workgraph_authorization(
+                            services,
+                            store,
+                            current,
+                            decision["projectEtag"],
+                        )
                     )
                 else:
                     from services.project_files.approved_prompt import (
@@ -950,13 +952,17 @@ async def _decide_authorization(
                     )
                     expected = semantic_etag(decision["projectEtag"])
                     if snapshot.etag != expected:
-                        raise ConflictError("已保存的项目快照已改变，请重新查看后批准。")
+                        raise ConflictError(
+                            "已保存的项目快照已改变，请重新查看后批准。"
+                        )
                     saved = saved_authorization_prompt(
                         snapshot.project,
                         current,
                     )
                     if saved["pointer"] != decision["promptPointer"]:
-                        raise ConflictError("授权卡的提示词目标与执行目标不一致。")
+                        raise ConflictError(
+                            "授权卡的提示词目标与执行目标不一致。"
+                        )
                     decision["savedPrompt"] = {
                         "etag": snapshot.etag,
                         **saved,

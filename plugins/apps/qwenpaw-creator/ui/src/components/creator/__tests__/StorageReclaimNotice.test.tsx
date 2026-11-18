@@ -49,7 +49,7 @@ describe("StorageReclaimNotice", () => {
   });
 
   it("records the confirmation and reports what the sweep freed", async () => {
-    const result = {
+    mockedReclaim.mockResolvedValue({
       projectId: "project-a",
       historyKept: false,
       removedTransactions: 12,
@@ -57,9 +57,7 @@ describe("StorageReclaimNotice", () => {
       releasedFiles: 3,
       releasedBytes: 2048,
       confirmedAt: "2026-11-03T00:00:00+00:00",
-    };
-    let finish!: (value: typeof result) => void;
-    mockedReclaim.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    });
     const onConfirmed = vi.fn();
     const { container } = render(
       <StorageReclaimNotice
@@ -75,6 +73,8 @@ describe("StorageReclaimNotice", () => {
     fireEvent.click(
       container.querySelector("[data-storage-reclaim-notice] button")!,
     );
+    // The confirm dialog repeats the label as its OK button; the last match
+    // in document order is the dialog's.
     // The newest modal root owns the OK button; a portal left closing by an
     // earlier case still repeats the label in role order.
     const okButton = await waitFor(() => {
@@ -88,19 +88,19 @@ describe("StorageReclaimNotice", () => {
     });
     fireEvent.click(okButton);
 
+    // The press is the decision: the notice steps aside before the sweep
+    // answers, instead of spinning for the whole deletion.
+    expect(document.querySelector("[data-storage-reclaim-notice]")).toBeNull();
     await waitFor(() =>
       expect(mockedReclaim).toHaveBeenCalledWith("project-a"),
     );
-    expect(onConfirmed).not.toHaveBeenCalled();
-    expect(container.querySelector("[data-storage-reclaim-notice] button")).toBeDisabled();
-    finish(result);
     await waitFor(() => expect(onConfirmed).toHaveBeenCalledTimes(1));
     expect(
       await screen.findByText("已释放 3.0 KB 沉淀历史"),
     ).toBeInTheDocument();
   });
 
-  it("leaves reclaim available when the request fails", async () => {
+  it("brings the notice back when the press fails", async () => {
     mockedReclaim.mockRejectedValue(new Error("boom"));
     // The static antd holder races Modal.destroyAll() plus the now-immediate
     // modal close, so pin the call rather than the rendered bubble.
@@ -120,6 +120,8 @@ describe("StorageReclaimNotice", () => {
     fireEvent.click(
       container.querySelector("[data-storage-reclaim-notice] button")!,
     );
+    // The confirm dialog repeats the label as its OK button; the last match
+    // in document order is the dialog's.
     // The newest modal root owns the OK button; a portal left closing by an
     // earlier case still repeats the label in role order.
     const okButton = await waitFor(() => {
@@ -133,6 +135,8 @@ describe("StorageReclaimNotice", () => {
     });
     fireEvent.click(okButton);
 
+    // The rejection lands in the same flush, so what this case pins is the
+    // recovery: the notice comes back and the refusal is reported.
     await waitFor(() => expect(mockedReclaim).toHaveBeenCalled());
     await waitFor(() => expect(errorSpy).toHaveBeenCalled());
     expect(String(errorSpy.mock.calls[0][0])).toMatch(/无法释放沉淀历史/);
@@ -141,6 +145,6 @@ describe("StorageReclaimNotice", () => {
         document.querySelector("[data-storage-reclaim-notice]"),
       ).not.toBeNull(),
     );
-    expect(onConfirmed).not.toHaveBeenCalled();
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
   });
 });

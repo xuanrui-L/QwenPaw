@@ -732,8 +732,7 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "enum": ["storyboard", "video"],
                     "description": (
-                        "只确认这一个阶段；省略时同时确认分镜与视频两个阶段。"
-                        "指定阶段时另一阶段的待同步状态保持不变。"
+                        "只确认这一个阶段；省略时同时确认分镜与视频两个阶段。" "指定阶段时另一阶段的待同步状态保持不变。"
                     ),
                 },
                 "basis": {
@@ -741,8 +740,7 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "minLength": 4,
                     "maxLength": 600,
                     "description": (
-                        "本次核对依据：读到的事实与结论，例如"
-                        "「叙述已加入雨声，分镜提示词已包含对应环境音描述，无需改写」。"
+                        "本次核对依据：读到的事实与结论，例如" "「叙述已加入雨声，分镜提示词已包含对应环境音描述，无需改写」。"
                     ),
                 },
             },
@@ -1975,8 +1973,7 @@ class AgentProjectTools:
             )
         except DomainValidationError as error:
             raise AgentProjectToolError(
-                f"当前提示词未通过技术校验，不能确认同步：{error}。"
-                "请先用 patch_project 修正提示词正文。",
+                f"当前提示词未通过技术校验，不能确认同步：{error}。" "请先用 patch_project 修正提示词正文。",
                 code="PROMPT_SYNC_VALIDATION_FAILED",
             ) from error
         confirmation: tuple[str, ...] = (
@@ -2024,8 +2021,7 @@ class AgentProjectTools:
                 if change.json_pointer is not None
             ],
             guidance=(
-                "已记录为一致，闸门已解除。不要再用 read_project 复核同一镜头；"
-                "继续处理其他待同步镜头或推进制作。"
+                "已记录为一致，闸门已解除。不要再用 read_project 复核同一镜头；" "继续处理其他待同步镜头或推进制作。"
                 if after["status"] == "current"
                 else (
                     f"提交后状态仍为 {after['status']}/{after['reason']}，"

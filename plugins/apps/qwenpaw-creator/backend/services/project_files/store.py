@@ -1226,9 +1226,9 @@ class ProjectStore:
                         source.current_intelligence_version_id
                         in dropped_intel_ids
                     ):
-                        pointer_update[
-                            "current_intelligence_version_id"
-                        ] = None
+                        pointer_update["current_intelligence_version_id"] = (
+                            None
+                        )
                     replaced_sources[source_id] = source.model_copy(
                         update=pointer_update,
                     )
@@ -1310,12 +1310,12 @@ class ProjectStore:
                         for r in (variant.reference_asset_version_ids or [])
                         if r != version_id
                     ]
-                    variant_updates.setdefault(entity_id, {})[
-                        variant_id
-                    ] = variant.model_copy(
-                        update={
-                            "reference_asset_version_ids": new_refs,
-                        },
+                    variant_updates.setdefault(entity_id, {})[variant_id] = (
+                        variant.model_copy(
+                            update={
+                                "reference_asset_version_ids": new_refs,
+                            },
+                        )
                     )
         if variant_updates:
             merged_items = dict(base_entities.items)

@@ -44,7 +44,6 @@ from .review import (
 )
 from .store import ProjectSnapshot, ProjectStore
 
-
 logger = logging.getLogger(__name__)
 
 # Export zips are per-request scratch; anything this old is an orphan from a
@@ -197,7 +196,7 @@ def _warn_on_second_backend(root: Path) -> bool:
     if pid and pid != os.getpid():
         try:
             os.kill(pid, 0)
-        except (OSError, SystemError):
+        except OSError:
             pass
         else:
             peer_alive = True

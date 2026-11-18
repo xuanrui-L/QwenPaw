@@ -66,6 +66,14 @@
     "importUrlSourceDetected": "已识别：{{source}}",
     "importUrlSourceUnknown": "未识别的 URL 来源，仍可尝试导入。"
   },
+  "feedback": {
+    "action": "意见反馈",
+    "title": "意见反馈",
+    "placeholder": "你的意见将成为我们改进的依据",
+    "submit": "提交",
+    "sent": "已收到，谢谢你的反馈",
+    "failed": "反馈提交失败"
+  },
   "common": {
     "close": "关闭",
     "cancel": "取消",
@@ -312,7 +320,10 @@
     "saveAsTemplateFailed": "保存模板失败",
     "deleteTemplateConfirm": "删除模板「{{name}}」？",
     "deleteTemplateSuccess": "模板已删除",
-    "deleteTemplateFailed": "删除模板失败"
+    "deleteTemplateFailed": "删除模板失败",
+    "videoTemplateNone": "不使用模板",
+    "videoTemplateHint": "选择预设模板快速开始",
+    "videoTemplateUserSection": "我的模板"
   },
   "nav": {
     "videoPlan": "视频方案",
@@ -323,7 +334,6 @@
     "replayTour": "重新查看新手引导",
     "breadcrumb": "面包屑",
     "productionWorkbench": "制作工作台",
-    "blueprint": "视频脚本",
     "creditsExhausted": "Credits 不足",
     "creditsExhaustedHint": "模型 Credits 已用尽，所有项目的模型调用都会被服务端拒绝。请在平台「模型调用」页用贡献值兑换，再回到出错的那个项目继续。",
     "creditsDismiss": "暂时隐藏 Credits 提醒",
@@ -331,7 +341,8 @@
     "creditsConsumed": "已消耗",
     "creditsRingTitle": "Credits 用量",
     "creditsRingAria": "Credits 剩余额度",
-    "creditsRingUnavailable": "暂不可用：未连上平台额度接口"
+    "creditsRingUnavailable": "暂不可用：未连上平台额度接口",
+    "blueprint": "视频脚本"
   },
   "modelConfig": {
     "title": "模型配置",
@@ -441,6 +452,7 @@
       "dashscope": "DashScope（百炼）",
       "aliyunTokenPlan": "Aliyun Token Plan",
       "aliyunCodingPlan": "Aliyun Coding Plan",
+      "agentscopePlatform": "AgentScope Platform",
       "deepseek": "DeepSeek",
       "googleGemini": "Google Gemini",
       "openai": "OpenAI 协议",
@@ -466,8 +478,7 @@
       "custom": "自定义",
       "dashscopeFunAsr": "DashScope Fun-ASR",
       "dashscopeQwen3Asr": "DashScope Qwen3-ASR",
-      "openaiWhisper": "OpenAI Whisper",
-      "agentscopePlatform": "AgentScope Platform"
+      "openaiWhisper": "OpenAI Whisper"
     },
     "searchAdapterDashScope": "Qwen / DashScope（百炼）",
     "ttsNarratorVoice": "默认旁白音色",
@@ -505,6 +516,16 @@
     "groupExtensions": "扩展",
     "paneSkills": "技能",
     "paneSkillsDesc": "给 Agent 补充领域知识，相关任务自动参考。",
+    "panePlatform": "一键配置",
+    "panePlatformDesc": "从 AgentScope Platform 拉取本子域的模型密钥与端点，一次写入平台可代理的全部服务。",
+    "platform": {
+      "action": "拉取并配置",
+      "credits": "可用 Credits {{value}}",
+      "coverage": "覆盖语言与理解、图片生成、视频生成、语音合成与语音识别。数字人、向量化与联网检索不由平台代理提供，仍需单独配置。",
+      "endpoint": "已写入端点 {{url}}",
+      "needsModel": "未选择模型",
+      "applyFailed": "一键配置失败"
+    },
     "modeLevel": "档位 {{level}}",
     "gateCheckpoints": "创作检查点",
     "gateExecution": "高花费授权",
@@ -632,17 +653,7 @@
     "translateModelLabel": "翻译模型（可选）",
     "translateCardNote": "image_generation 的 translate 模式用此模型翻译图内文字并保留排版；留空时使用默认的 qwen-mt-image，与图片生成模型共用同一个 DashScope API Key（仅 DashScope 协议可用）。",
     "imageEndpointNote": "Base URL 填 API 根（https://dashscope.aliyuncs.com/api/v1）即可：百炼 qwen-image / wan-image 全系共用 multimodal-generation 服务路径，由后端自动拼接；图内文字翻译走 image2image 路径，同样自动拼接。",
-    "videoEndpointNote": "Base URL 填 API 根即可：DashScope 由后端自动拼接 video-generation/video-synthesis 提交路径，火山引擎自动拼接 ark v3 任务路径。",
-    "panePlatform": "一键配置",
-    "panePlatformDesc": "从 AgentScope Platform 拉取本子域的模型密钥与端点，一次写入平台可代理的全部服务。",
-    "platform": {
-      "action": "拉取并配置",
-      "credits": "可用 Credits {{value}}",
-      "coverage": "覆盖语言与理解、图片生成、视频生成、语音合成与语音识别。数字人、向量化与联网检索不由平台代理提供，仍需单独配置。",
-      "endpoint": "已写入端点 {{url}}",
-      "needsModel": "未选择模型",
-      "applyFailed": "一键配置失败"
-    }
+    "videoEndpointNote": "Base URL 填 API 根即可：DashScope 由后端自动拼接 video-generation/video-synthesis 提交路径，火山引擎自动拼接 ark v3 任务路径。"
   },
   "modelBadges": {
     "textModel": "文本模型",
@@ -825,6 +836,7 @@
     "applySuccess": "修改已应用",
     "applySuccessRegenRequired": "修改已应用；相关生成结果已标记为需要重新生成",
     "applySuccessPreviewUpdated": "修改已应用；实时预览已更新，成片将重新合成",
+    "applySuccessComposeWaiting": "修改已应用；实时预览已更新，成片已过期，点「成片」重新合成",
     "applyFailed": "应用修改失败：{{detail}}",
     "unsavedChanges": "还有未应用的修改",
     "unsavedChangesDesc": "离开后这些页面草稿会被放弃。你也可以先返回并点击\"应用修改\"。",
@@ -839,6 +851,7 @@
     "noStoryboard": "暂无分镜图",
     "scriptPlan": "返回视频脚本",
     "expandSidebar": "展开侧边栏",
+    "railStoryboardTab": "分镜图预览",
     "subtitleRemove": "一键去字幕",
     "subtitleAdd": "一键加字幕",
     "subtitleToggleFailed": "字幕切换失败：{{detail}}",
@@ -852,8 +865,7 @@
     "subtitleStyleApplied": "字幕风格已更新，请点击「合成最终成片」刷新视频",
     "subtitleStyleFailed": "字幕风格更新失败：{{detail}}",
     "subtitleStyleSkippedDesign": "其中 {{count}} 条字幕的外观由其动效设计决定，风格包动效对它们不适用",
-    "subtitleStyleMotionUnowned": "这条字幕的外观由其动效设计决定，风格包不会重写它；入场/出场/循环请在动效设计里调整",
-    "applySuccessComposeWaiting": "修改已应用；实时预览已更新，成片已过期，点「成片」重新合成"
+    "subtitleStyleMotionUnowned": "这条字幕的外观由其动效设计决定，风格包不会重写它；入场/出场/循环请在动效设计里调整"
   },
   "r2v": {
     "title": "视频方案 / {{element}} / 制作工作台",
@@ -1027,7 +1039,9 @@
     "editorReferencesChanged": "引用图片或编辑对象已变化。为避免引用到错误图片，请重新载入后继续编辑。当前编辑暂时保留。",
     "editorReload": "重新载入最新内容",
     "editorKeep": "保留我的编辑",
-    "narrativeTitle": "片段内容"
+    "narrativeTitle": "片段内容",
+    "subtitle": "AI 生成画面子界面，继承分镜、引用资产和产物版本。",
+    "tokenClickRemove": "点击移除该引用"
   },
   "elementDetail": {
     "selectElement": "选择一项时间线内容",
@@ -1163,6 +1177,9 @@
     "rateLimitExhausted": "模型遭遇限流，已重试 {{retries}} 次仍无法访问",
     "rateLimitContinue": "继续",
     "rateLimitResumeMessage": "继续执行之前因模型限流中断的任务",
+    "quotaExhausted": "模型 Credits 不足，已停止自动重试；请在平台「模型调用」页用贡献值兑换后继续",
+    "quotaContinue": "已兑换，继续",
+    "quotaResumeMessage": "我已兑换 Credits，请继续之前中断的任务",
     "contextUnfit": "输入已超出模型上下文窗口，可让出的内容已全部让出；请减少本次附图数量或精简文字后重新发送。",
     "mentionHint": "输入 @ 可引用分镜、素材等对象作为上下文；当前选中的对象也会自动带入对话。",
     "clearAll": "清空全部引用、划选文本与输入框内的 @ 引用",
@@ -1237,10 +1254,7 @@
     "agentTimeout": "Agent 执行超时，请重试",
     "notRetryable": "执行失败，无法自动重试",
     "executionFailed": "执行失败，请重试",
-    "errorProjectBase": "项目状态已过期，请重试",
-    "quotaExhausted": "模型 Credits 不足，已停止自动重试；请在平台「模型调用」页用贡献值兑换后继续",
-    "quotaContinue": "已兑换，继续",
-    "quotaResumeMessage": "我已兑换 Credits，请继续之前中断的任务"
+    "errorProjectBase": "项目状态已过期，请重试"
   },
   "agentEventFeed": {
     "executing": "执行中",
@@ -1269,6 +1283,8 @@
   "workGraph": {
     "manuallyHeld": "手动暂停",
     "manualHoldNotice": "手动重生成已暂停后续自动制作。",
+    "strandedAdmission": "制作请求未被受理（{{count}} 项已准入但从未开始执行），可重新提交。",
+    "strandedResubmit": "重新提交",
     "resume": "恢复自动制作",
     "resumeConfirm": "恢复后将继续下游自动生成，可能产生媒体生成费用。确认恢复自动制作？",
     "resumeStale": "暂停状态已更新，请查看最新状态后重新确认恢复。",
@@ -1281,8 +1297,6 @@
     "generate": "生成",
     "productionProgress": "制作进度 {{done}}/{{total}}",
     "parallel": "并行 {{count}}",
-    "mediaCallBudgetTitle": "已发起的付费媒体生成调用次数 / 项目上限（可在配置 agent_runtime.media_call_budget 调整）",
-    "mediaCalls": "媒体调用 {{used}}/{{budget}}",
     "progress": "进度 {{done}}/{{total}}",
     "failed": "失败 {{count}}",
     "listSeparator": "、",
@@ -1311,9 +1325,7 @@
         "generate": "合成成片",
         "retry": "重新合成成片"
       }
-    },
-    "strandedAdmission": "制作请求未被受理（{{count}} 项已准入但从未开始执行），可重新提交。",
-    "strandedResubmit": "重新提交"
+    }
   },
   "decisionTray": {
     "productionConfirm": "生产确认 · ",
@@ -1342,6 +1354,9 @@
   },
   "executionAuth": {
     "title": "高成本媒体执行",
+    "generatePresentation": "生成作品页面",
+    "generateInteraction": "生成抉择动效",
+    "presentationTarget": "首页、播放页、剧情地图与结局页",
     "duration": "时长 {{duration}}秒",
     "resolutionLabel": "分辨率 {{resolution}}",
     "ratio": "比例 {{ratio}}",
@@ -1377,12 +1392,11 @@
     "checkpointScript": "剧本确认",
     "checkpointDirection": "方向确认",
     "checkpointConfirmed": "已确认，将继续创作",
-    "checkpointCancelled": "已取消本次确认",
-    "generatePresentation": "生成作品页面",
-    "generateInteraction": "生成抉择动效",
-    "presentationTarget": "首页、播放页、剧情地图与结局页"
+    "checkpointCancelled": "已取消本次确认"
   },
   "fileReview": {
+    "applyingExecutionMode": "正在按已保存的执行模式处理交互设计…",
+    "autoModeFailed": "交互设计自动处理未完成，请重试或手动处理：{{detail}}",
     "pending": "待审",
     "kept": "已保留",
     "undone": "已撤销",
@@ -1400,6 +1414,7 @@
     "creativeBrief": "创作总纲",
     "creativeDirection": "创作方向",
     "prompt": "提示词",
+    "nativeAudio": "视频原声",
     "camera": "运镜",
     "framing": "景别",
     "duration": "时长",
@@ -1461,6 +1476,9 @@
       "videoVersion": "视频版本",
       "editPlan": "剪辑方案",
       "contentUpdated": "内容已更新",
+      "presentationEffect": "作品页面 · 界面效果",
+      "interactionEffect": "抉择动效",
+      "effectUpdated": "界面效果已更新，点击查看预览",
       "mediaSelection": "使用的素材",
       "selectionUpdated": "素材选择已更新",
       "text": "文案",
@@ -1476,14 +1494,8 @@
       "versionHistoryUpdated": "版本记录已更新",
       "before": "修改前",
       "after": "修改后",
-      "noReferenceImages": "未指定参考图",
-      "presentationEffect": "作品页面 · 界面效果",
-      "interactionEffect": "抉择动效",
-      "effectUpdated": "界面效果已更新，点击查看预览"
-    },
-    "applyingExecutionMode": "正在按已保存的执行模式处理交互设计…",
-    "autoModeFailed": "交互设计自动处理未完成，请重试或手动处理：{{detail}}",
-    "nativeAudio": "视频原声"
+      "noReferenceImages": "未指定参考图"
+    }
   },
   "rejectionFeedback": {
     "undoContent": "撤销内容",
@@ -1570,6 +1582,7 @@
     "selectRow": "选取整行",
     "timingAppliedRegenRequired": "时间调整已应用；相关生成结果已标记为需要重新生成",
     "timingAppliedRecomposing": "时间调整已应用；正在重新合成成片",
+    "timingAppliedComposeWaiting": "时间调整已应用；成片已过期，点「成片」重新合成",
     "timingApplied": "时间调整已应用",
     "applyTimingFailed": "应用时间调整失败：{{detail}}",
     "undoCancelled": "时间线已被其他修改更新，已取消撤销以免覆盖新内容",
@@ -1637,8 +1650,7 @@
     "snapshotDeleted": "快照已删除",
     "snapshotPreApplyBackup": "应用前备份",
     "snapshotInUse": "已应用",
-    "snapshotCurrentMatches": "内容与「{{name}}」一致",
-    "timingAppliedComposeWaiting": "时间调整已应用；成片已过期，点「成片」重新合成"
+    "snapshotCurrentMatches": "内容与「{{name}}」一致"
   },
   "editPlan": {
     "title": "剪辑契约",
@@ -1657,6 +1669,7 @@
     "reviewRound": "第 {{round}} 轮"
   },
   "workspaceEmpty": {
+    "interactive": "剧情节点待起草",
     "preparingHint": "素材准备完成后会自动开始创作。你可以在创作助手中查看进展，无需重复提交。",
     "blueprint": "视频脚本",
     "script": "剧本内容",
@@ -1673,8 +1686,7 @@
     "stoppingHint": "正在结束当前工作，已经生成的内容会保留。",
     "stoppedHint": "当前任务已停止，可以在创作助手中调整要求后继续。",
     "errorHint": "这次创作未能完成，请在创作助手中查看提示后继续。",
-    "loadingHint": "正在读取已有内容和最新进展。",
-    "interactive": "剧情节点待起草"
+    "loadingHint": "正在读取已有内容和最新进展。"
   },
   "elementList": {
     "disabled": "已停用",
@@ -1785,7 +1797,7 @@
     "modelGuideVoiceDesc": "合成旁白与台词；音频驱动数字人口播视频段",
     "modelGuideGroundingProtocols": "Serper（Google）/ Tavily 搜索，验证模型可复用 LLM/VLM 或自定义",
     "modelGuideTtsTitle": "TTS 语音合成",
-    "modelGuideTtsProtocols": "DashScope（百炼）：Qwen-TTS 家族（qwen3-tts-flash，含系统音色与复刻/设计）、CosyVoice 家族（cosyvoice-v3.5-plus 需先建音色；qwen-audio-3.0-tts-flash / -plus 与 qwen-audio-3.1-tts-flash / -plus 自带系统音色）",
+    "modelGuideTtsProtocols": "DashScope（百炼）：Qwen-TTS 家族（qwen3-tts-flash，含系统音色与复刻/设计）、CosyVoice 家族（cosyvoice-v3.5-plus 需先建音色；qwen-audio-3.0/3.1-tts-flash 与 -plus 自带系统音色）",
     "modelGuideS2vTitle": "数字人",
     "modelGuideS2vProtocols": "DashScope（百炼）：wan2.2-s2v，提交前免费人像检测（wan2.2-s2v-detect）",
     "modelGuideEmbeddingTitle": "Embedding",
@@ -2283,6 +2295,8 @@
     "dismiss": "关闭上传进度"
   },
   "blueprint": {
+    "scriptSyncExplanation": "创作依据已更新，当前剧本尚未同步。生成过程中补全剧情分支或创作要求也会触发此状态，并不表示你提出过修改。已有正文仍可查看。",
+    "scriptSyncReason": "更新原因：{{reason}}",
     "timelineEdit": "时间线编辑",
     "episodeN": "节点 {{n}}",
     "episodesCount": "叙事节点 · {{count}}",
@@ -2302,6 +2316,27 @@
       "idle": "待起草"
     },
     "episodeList": "剧集列表 · 线性 {{count}} 集",
+    "graph": {
+      "title": "剧情地图",
+      "expand": "展开剧情地图",
+      "collapse": "收起剧情地图",
+      "locateNode": "定位剧情节点",
+      "zoomOut": "缩小剧情地图",
+      "zoomIn": "放大剧情地图",
+      "actualSize": "恢复 100%",
+      "fit": "总览",
+      "arrange": "自动整理",
+      "localLayout": "重新排布节点，布局仅保存在当前浏览器",
+      "navigationHint": "拖动节点整理 · 拖动空白平移 · Shift + 滚轮横移 · 点击节点查看去向",
+      "connections": "节点分支去向",
+      "clearFocus": "取消节点聚焦",
+      "continue": "继续",
+      "noOutgoing": "此节点没有后续分支。",
+      "incoming": "查看 {{count}} 条来路"
+    },
+    "interactiveStoryMap": "互动式短剧 · 剧情地图",
+    "branchesPending": "分支连接尚未建立",
+    "branchesPendingHint": "剧情节点将在这里逐步展开，抉择和分支连接建立后会显示完整的剧情走向。可先查看已有节点的剧本，或进入交互设计查看页面要求。",
     "noSynopsis": "暂无梗概",
     "timelineQuick": "时间线",
     "endingNode": "结局",
@@ -2328,6 +2363,7 @@
     "playRoughCut": "播放粗剪",
     "playFullFilm": "播放整个成片",
     "closeRoughCutPlayer": "关闭播放",
+    "previewUnavailable": "分镜图尚未生成，暂时无法预览",
     "roughCutFailed": "粗剪拼接失败：该时间线还没有可用的镜头素材",
     "finalCutBadge": "成片",
     "downloadFinalCut": "下载成片",
@@ -2468,28 +2504,6 @@
     "sourceResultLoading": "正在读取理解结果",
     "pausePreview": "暂停预览",
     "previewPosition": "预览进度",
-    "graph": {
-      "title": "剧情地图",
-      "expand": "展开剧情地图",
-      "collapse": "收起剧情地图",
-      "locateNode": "定位剧情节点",
-      "zoomOut": "缩小剧情地图",
-      "zoomIn": "放大剧情地图",
-      "actualSize": "恢复 100%",
-      "fit": "总览",
-      "arrange": "自动整理",
-      "localLayout": "重新排布节点，布局仅保存在当前浏览器",
-      "navigationHint": "拖动节点整理 · 拖动空白平移 · Shift + 滚轮横移 · 点击节点查看去向",
-      "connections": "节点分支去向",
-      "clearFocus": "取消节点聚焦",
-      "continue": "继续",
-      "noOutgoing": "此节点没有后续分支。",
-      "incoming": "查看 {{count}} 条来路"
-    },
-    "interactiveStoryMap": "互动式短剧 · 剧情地图",
-    "branchesPending": "分支连接尚未建立",
-    "branchesPendingHint": "剧情节点将在这里逐步展开，抉择和分支连接建立后会显示完整的剧情走向。可先查看已有节点的剧本，或进入交互设计查看页面要求。",
-    "previewUnavailable": "分镜图尚未生成，暂时无法预览",
     "playFullInteractive": "播放整个互动包",
     "exportBundle": "导出互动包",
     "exportBundleFailed": "互动包暂时无法导出",
@@ -2499,14 +2513,12 @@
     "uploading": "上传中…",
     "uploadBundleSubmitted": "已提交，正在打开发布进度",
     "uploadBundleFailed": "互动包上传失败",
-    "previewChoice": "选择故事走向",
-    "scriptSyncExplanation": "创作依据已更新，当前剧本尚未同步。生成过程中补全剧情分支或创作要求也会触发此状态，并不表示你提出过修改。已有正文仍可查看。",
-    "scriptSyncReason": "更新原因：{{reason}}"
+    "previewChoice": "选择故事走向"
   },
   "sidebar": {
+    "nodes": "剧情节点",
     "assistant": "创作助手",
-    "episodes": "剧集列表",
-    "nodes": "剧情节点"
+    "episodes": "剧集列表"
   },
   "agentActivity": {
     "progress": "创作进展",
@@ -2590,16 +2602,16 @@
     "activeWork": "当前进行中"
   },
   "agentProgress": {
+    "visualState": "状态 {{index}}",
+    "waitingForUpdate": "等待「{{target}}」更新",
+    "waitingForTarget": "等待「{{target}}」完成",
+    "waitingForPrompt": "等待补全生成提示词",
     "composeNeedsUpdate": "成片需更新",
     "lastAttemptFailed": "上次尝试失败",
     "lastAttemptCancelled": "上次尝试已停止",
     "otherWork": "其他创作工作",
     "sources": "项目素材",
-    "timeline": "视频 / 剧集 {{index}}",
-    "visualState": "状态 {{index}}",
-    "waitingForUpdate": "等待「{{target}}」更新",
-    "waitingForTarget": "等待「{{target}}」完成",
-    "waitingForPrompt": "等待补全生成提示词"
+    "timeline": "视频 / 剧集 {{index}}"
   },
   "agentRetry": {
     "context_recovery": "正在整理任务信息，随后继续",
@@ -2611,19 +2623,11 @@
     "backoff": "{{seconds}} 秒后重试",
     "responding": "等待模型响应"
   },
-  "feedback": {
-    "action": "意见反馈",
-    "title": "意见反馈",
-    "placeholder": "你的意见将成为我们改进的依据",
-    "submit": "提交",
-    "sent": "已收到，谢谢你的反馈",
-    "failed": "反馈提交失败"
-  },
   "storage": {
     "pendingHint": "已有 {{size}} 沉淀历史等待你确认",
     "confirmButton": "确认并释放",
     "confirmTitle": "释放「{{name}}」中 {{size}} 的沉淀历史？",
-    "confirmBody": "将清理本项目符合条件的已结束事务记录和临时工作文件。此操作无法撤销。",
+    "confirmBody": "该项目的沉淀历史超过了阈值，自动清理已主动停下。确认后会把你的决定记录在案，并立刻执行同样的两项清理，删除构成这些字节的已沉淀会话与事务。",
     "confirmed": "已释放 {{size}} 沉淀历史",
     "failed": "无法释放沉淀历史：{{message}}"
   }

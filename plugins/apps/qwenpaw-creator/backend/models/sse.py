@@ -1,12 +1,29 @@
 # -*- coding: utf-8 -*-
-"""Decode JSON and server-sent events from OpenAI-compatible chat endpoints."""
+"""Normalize OpenAI-compatible chat responses, JSON or SSE.
+
+Some gateways answer ``POST /chat/completions`` with ``text/event-stream``
+even when the request never asked for ``stream`` - measured on the AgentScope
+model proxy (platform-pre), which forces SSE regardless.  Reading that body
+with ``response.json()`` fails, and reading it as a plain string yields the
+``data:{...}`` framing rather than the assistant text.
+
+Deliberately **no ``stream`` flag is added to outgoing requests**: every other
+OpenAI-compatible endpoint on this code path answers with a single JSON body,
+and switching them to streaming to accommodate one gateway would change
+timing, usage reporting and error semantics for all of them.  Detection
+stays on the response side, so a JSON answer keeps taking the existing
+path untouched.
+
+The aggregated result is returned in the non-streaming ``chat.completion``
+shape, which lets the existing parsers (``text_model``'s choices extraction,
+``vlm_model._parse_openai_response``) consume a stream without knowing it was
+ever streamed.
+"""
 
 from __future__ import annotations
 
 import json
 from typing import Any
-
-import httpx
 
 from utils.exceptions import ModelError
 
@@ -289,24 +306,3 @@ def decode_chat_response(
             model_name=model_name,
         )
     return payload
-
-
-def read_chat_response(
-    response: httpx.Response, *, gateway: bool, model_name: str, url: str
-) -> dict:
-    """Read the native JSON response or a provider's streamed completion."""
-    if not gateway:
-        try:
-            payload = response.json()
-            if isinstance(payload, dict):
-                return payload
-        except ValueError:
-            # An endpoint may serve SSE even when the client requested JSON.
-            pass
-    return decode_chat_response(
-        status_code=response.status_code,
-        content_type=response.headers.get("content-type", ""),
-        text=response.text,
-        model_name=model_name,
-        url=url,
-    )

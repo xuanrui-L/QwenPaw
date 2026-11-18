@@ -268,7 +268,7 @@ def _event_payload(event: SessionEventRecord) -> dict[str, Any]:
 def _active_specialist_run_ids(
     services: CreatorFileServices,
     project_id: str,
-) -> set[str] | None:
+) -> set[str]:
     """Runs still in flight, so their deltas are the only text they have.
 
     Taken once per connection and deliberately generous: a stale extra id
@@ -278,8 +278,8 @@ def _active_specialist_run_ids(
         runs = ProjectExecutionStore(services.root).list_specialist_runs(
             project_id,
         )
-    except Exception:  # noqa: BLE001 - preserve the raw replay on uncertainty
-        return None
+    except Exception:  # noqa: BLE001 - a replay must not fail on this read
+        return set()
     return {
         run.run_id
         for run in runs
@@ -722,15 +722,11 @@ async def stream_events(
         filter_enabled = replay_filter_enabled()
         active_run_ids: set[str] = set()
         if filter_enabled:
-            specialist_ids = await asyncio.to_thread(
+            active_run_ids = await asyncio.to_thread(
                 _active_specialist_run_ids,
                 services,
                 project_id,
             )
-            if specialist_ids is None:
-                filter_enabled = False
-            else:
-                active_run_ids = specialist_ids
             # The mainline agent run carries ``agent.message_delta``
             # events with its own runId, and session.status stays
             # non-terminal for the whole turn. Terminal states

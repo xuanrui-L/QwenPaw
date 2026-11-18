@@ -1,31 +1,13 @@
 import type {
   FileProjectReviewRecord,
   ModelConfigData,
-  ProjectDocument,
 } from "@/contracts/creator";
-
-import { resolveCreatorLocator } from "@/routing/locatorTargets";
-
-export function isInteractiveDesignField(
-  field: string | null,
-  project?: ProjectDocument | null,
-): boolean {
-  if (!field) return false;
-  if (field.startsWith("/interactive_presentation/")) return true;
-  if (!project || !field.includes("/creation/")) return false;
-  const { timelineId, elementId } = resolveCreatorLocator({}, project, field);
-  return (
-    project.timelines.items[timelineId]?.elements_by_id[elementId]?.creation
-      .type === "interaction"
-  );
-}
 
 /** Compatibility for runtimes that publish interactive HTML with a required
  * review even under YOLO. Never extend this to scripts, deletions, execution
  * approvals, or mixed authoring changes. */
 export function isInteractiveDesignReview(
   review: FileProjectReviewRecord,
-  project?: ProjectDocument | null,
 ): boolean {
   if (review.status !== "PENDING") return false;
   const pending = review.operations.filter(
@@ -42,8 +24,7 @@ export function isInteractiveDesignReview(
     const match = (operation.json_pointer ?? "").match(
       /^(\/interactive_presentation|\/timelines\/items\/[^/]+\/elements_by_id\/[^/]+\/creation)\/(motion(?:\/(?:html|format|fps|loop|design_notes|emotion|entrance|exit))?|design_prompt)$/u,
     );
-    if (!match || !isInteractiveDesignField(operation.json_pointer, project))
-      return false;
+    if (!match) return false;
     if (match[2] === "motion") {
       const value = operation.after;
       if (!value || typeof value !== "object" || Array.isArray(value))

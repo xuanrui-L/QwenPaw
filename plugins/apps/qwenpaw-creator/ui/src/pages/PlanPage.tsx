@@ -9,7 +9,6 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
-import { useWorkGraphStore } from "@/store/workGraphStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { renderTimeline } from "@/api/creator";
 import { setSubtitleStyle, toggleSubtitles } from "@/api/creator";
@@ -442,11 +441,7 @@ export default function PlanPage() {
   // Publishing a render advances Project.generation; based_on_generation
   // records its input revision. The backend invalidates the artifact when
   // render inputs change, so comparing these counters re-composes fresh cuts.
-  const composeHeld = useWorkGraphStore((state) =>
-    state.projectId === id && timeline
-      ? state.graph?.manualHold?.nodeIds.includes(`compose:${timeline.timeline_id}`) ?? false
-      : false,
-  );
+  const renderIsCurrent = freshRender !== null;
   const freshRenderVersionId = freshRender?.version_id ?? null;
   useEffect(() => {
     // A timed-out dispatch can finish later without its Task ever appearing
@@ -657,9 +652,10 @@ export default function PlanPage() {
     message.error(t("plan.composeFailed", { detail }));
   }, [id, pollOnce, requestedComposeTask]);
 
-  // The editor can compose the first ready cut. Once a cut exists, the
-  // work graph decides whether an edit requires explicit re-composition
-  // or delegated execution. Opening the editor must preserve that decision.
+  // Auto-compose once all main-track elements are ready and there is no
+  // up-to-date final cut; only one attempt per generation (no auto-retry on
+  // failure — a manual retry entry remains); a short debounce absorbs
+  // successive edits.
   //
   // Review decisions do not bump the project generation, so once the pending
   // reviews drain, re-arm the one-attempt guard: the attempt blocked by the
@@ -677,7 +673,7 @@ export default function PlanPage() {
   }, [pendingReviewCount]);
 
   useEffect(() => {
-    if (!allReady || renderOutput?.selected || composeHeld || isComposing || pendingReviewCount > 0)
+    if (!allReady || renderIsCurrent || isComposing || pendingReviewCount > 0)
       return;
     if (
       generation !== null &&
@@ -691,8 +687,7 @@ export default function PlanPage() {
     return () => window.clearTimeout(timer);
   }, [
     allReady,
-    renderOutput?.selected,
-    composeHeld,
+    renderIsCurrent,
     isComposing,
     generation,
     composeNow,

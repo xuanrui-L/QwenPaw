@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Subtitle style packs (JianYing-like) bias the caption fallback chain."""
 
 from services.media_files.motion_blueprints import (
@@ -81,7 +80,9 @@ class TestPreviewSpecs:
         )
 
     def test_spec_fields_mirror_pack_table(self) -> None:
-        specs = {s["id"]: s for s in subtitle_pack_preview_specs() if s["id"]}
+        specs = {
+            s["id"]: s for s in subtitle_pack_preview_specs() if s["id"]
+        }
         for pack_id, pack in SUBTITLE_TEMPLATE_PACKS.items():
             spec = specs[pack_id]
             typo = pack["typography"]

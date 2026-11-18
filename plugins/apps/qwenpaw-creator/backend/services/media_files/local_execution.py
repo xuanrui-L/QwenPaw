@@ -101,7 +101,7 @@ from services.media_files.transitions import (
     build_transition_filter_chain,
     normalize_transition_kind,
 )
-from services.observability import report_error
+from services.observability import mem_probe, report_error
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileError,
@@ -330,8 +330,9 @@ def _render_element_total(inputs: Sequence[LocalMediaInput]) -> int:
 class LocalMediaRunner(Protocol):
     """Runner boundary.  Implementations write exactly ``spec.output_path``."""
 
-    async def render(self, spec: LocalMediaExecutionSpec) -> Mapping[str, Any]:
-        ...
+    async def render(
+        self, spec: LocalMediaExecutionSpec
+    ) -> Mapping[str, Any]: ...
 
 
 # Unified colour-grade presets applied to the whole composited cut.
@@ -403,7 +404,14 @@ class FfmpegLocalMediaRunner:
 
     async def render(self, spec: LocalMediaExecutionSpec) -> Mapping[str, Any]:
         self._validate_supported_directives(spec)
-        overlay_warnings = await asyncio.to_thread(self._render_sync, spec)
+        token = mem_probe.watch("local_render.thread")
+        try:
+            overlay_warnings = await asyncio.to_thread(self._render_sync, spec)
+        except asyncio.CancelledError:
+            # The coroutine unwinds here; the thread and its ffmpeg do not.
+            mem_probe.orphans(token, "local_render.cancelled")
+            raise
+        mem_probe.orphans(token, "local_render.finished")
         metadata: dict[str, Any] = {"runner": "ffmpeg"}
         if overlay_warnings:
             metadata["overlayWarnings"] = overlay_warnings
@@ -445,6 +453,12 @@ class FfmpegLocalMediaRunner:
                 "segments",
             )
             concurrency = self._segment_concurrency(len(spec.inputs))
+            mem_probe.budget(
+                "compose.segment_pool",
+                active=concurrency,
+                limit=concurrency,
+                segments=len(spec.inputs),
+            )
             outcomes: dict[int, _SegmentRender] = {}
             done_signals = 0
 
@@ -699,8 +713,11 @@ class FfmpegLocalMediaRunner:
             return None
         video_filter = _COLOR_GRADE_FILTERS.get(grade)
         if video_filter is None:
-            return f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: " + ", ".join(
-                sorted(_COLOR_GRADE_FILTERS),
+            return (
+                f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: "
+                + ", ".join(
+                    sorted(_COLOR_GRADE_FILTERS),
+                )
             )
         graded = spec.work_dir / "graded.mp4"
         self._run(
@@ -712,8 +729,13 @@ class FfmpegLocalMediaRunner:
                 video_filter,
                 "-c:v",
                 "libx264",
+                # ``fast`` instead of ``medium``, measured on a 12 s window of a
+                # real 1080p cut through the warm_bright chain: 9.21 s / 496 MB
+                # against 10.89 s / 567 MB, and the two outputs differ by PSNR
+                # 48.8 dB / SSIM 0.994 -- this pass re-encodes footage that is
+                # already lossy, so the preset only redistributes bits.
                 "-preset",
-                "medium",
+                "fast",
                 "-crf",
                 "18",
                 "-pix_fmt",
@@ -1529,10 +1551,13 @@ class FfmpegLocalMediaRunner:
                     str(overlay.get("text") or ""),
                 )
             ):
-                reject_informal_launch_fallback(overlay, "动效文档与当前文案不一致")
+                reject_informal_launch_fallback(
+                    overlay, "动效文档与当前文案不一致"
+                )
                 motion = None
                 styled_error = (
-                    f"{overlay['kind']} 动效文档与当前文案不一致，" "已用回退样式渲染最新文案"
+                    f"{overlay['kind']} 动效文档与当前文案不一致，"
+                    "已用回退样式渲染最新文案"
                 )
             if (
                 isinstance(motion, Mapping)
@@ -3191,12 +3216,16 @@ def _resolved_fade_seconds(
         else 0.0
     )
     return (
-        creation.fade_in_seconds
-        if creation.fade_in_seconds is not None
-        else default_fade,
-        creation.fade_out_seconds
-        if creation.fade_out_seconds is not None
-        else default_fade,
+        (
+            creation.fade_in_seconds
+            if creation.fade_in_seconds is not None
+            else default_fade
+        ),
+        (
+            creation.fade_out_seconds
+            if creation.fade_out_seconds is not None
+            else default_fade
+        ),
     )
 
 
@@ -3839,7 +3868,9 @@ class FileLocalMediaExecutionService:
             raise ConflictError("本地媒体执行服务正在关闭")
         command_value = CreatorCommandType(command)
         if command_value not in _LOCAL_MEDIA_COMMANDS:
-            raise ValidationError(f"不支持的文件本地媒体命令: {command_value.value}")
+            raise ValidationError(
+                f"不支持的文件本地媒体命令: {command_value.value}"
+            )
         ids = self._ids(project_id, idempotency_key)
         command_request_hash = _fingerprint(
             {
@@ -4650,7 +4681,9 @@ class FileLocalMediaExecutionService:
         except AssetAlreadyExists:
             file_store.abandon(staged)
             if not file_store.inspect(indexed).available:
-                raise StorageIntegrityError("稳定本地媒体输出路径已存在但内容不同")
+                raise StorageIntegrityError(
+                    "稳定本地媒体输出路径已存在但内容不同"
+                )
         metadata = {
             "taskId": task.task_id,
             "runId": task.run_id,
@@ -4705,7 +4738,9 @@ class FileLocalMediaExecutionService:
         replayed: bool,
     ) -> FileLocalMediaExecutionResult:
         if not isinstance(task.result, dict):
-            raise StorageIntegrityError("RUNNING 本地媒体 Task 缺少可重放 result")
+            raise StorageIntegrityError(
+                "RUNNING 本地媒体 Task 缺少可重放 result"
+            )
         result = dict(task.result)
 
         def commit_if_live() -> tuple[str, TaskRecord, ProjectSnapshot | None]:
@@ -5097,7 +5132,9 @@ class FileLocalMediaExecutionService:
                 continue
             ids = self._ids(project_id, key)
             if ids["task_id"] != task.task_id:
-                raise StorageIntegrityError("本地媒体 Task 稳定 ID 与 key 不一致")
+                raise StorageIntegrityError(
+                    "本地媒体 Task 稳定 ID 与 key 不一致"
+                )
             if task.status is TaskStatus.RUNNING and task.result is not None:
                 try:
                     await self._converge(task=task, ids=ids, replayed=True)

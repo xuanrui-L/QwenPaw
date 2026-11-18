@@ -79,7 +79,6 @@ describe("selectFinalFilmVersionId", () => {
 describe("selectRoughCutFrames", () => {
   it("never substitutes a character reference for a missing, stale or invalid storyboard", () => {
     const project = cloneProject();
-    project.settings.content_type = "interactive_branching_drama";
     const timeline = project.timelines.items["timeline:main"];
     const shot = timeline.elements_by_id["r2v-window"];
     timeline.elements_by_id = { "r2v-window": shot };

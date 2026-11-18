@@ -20,7 +20,6 @@ import { getArtifactVersionMediaUrl } from "@/api/creator";
 import { navigateToLocator } from "@/routing/locators";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import OnboardingHint from "@/components/onboarding/OnboardingHint";
-import { isInteractiveDesignField } from "@/lib/interactiveDesignReview";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import DiffView from "./DiffView";
 import { creatorTargetLabel } from "@/lib/creatorPresentation";
@@ -84,17 +83,15 @@ export function reviewMediaLocator(
 
 /** A generated interface and its provenance are one reviewable result. */
 function reviewOperationGroups(operations: FileProjectReviewOperation[]) {
-  const project = useProjectSnapshotStore.getState().project;
   const groups = new Map<string, FileProjectReviewOperation[]>();
   for (const operation of operations) {
     const motion = operation.json_pointer?.match(
       /^(\/interactive_presentation\/motion|\/timelines\/items\/[^/]+\/elements_by_id\/[^/]+\/creation\/motion)(?:\/|$)/u,
     )?.[1];
     // Preserve already-decided rows and keep unrelated edits independent.
-    const key =
-      motion && isInteractiveDesignField(operation.json_pointer, project)
-        ? `${motion}:${operation.decision}`
-        : operation.operation_id;
+    const key = motion
+      ? `${motion}:${operation.decision}`
+      : operation.operation_id;
     const group = groups.get(key) ?? [];
     group.push(operation);
     groups.set(key, group);

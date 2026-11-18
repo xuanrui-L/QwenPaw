@@ -88,7 +88,6 @@ describe("overview operation clicks reach the actual generation field", () => {
         nodes: [operation("storyboard"), operation("video")],
         counts: { done: 2 },
         mediaCalls: 0,
-        mediaCallBudget: 10,
       },
     });
     installMockFetch([

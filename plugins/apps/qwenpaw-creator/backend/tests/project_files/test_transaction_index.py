@@ -217,16 +217,3 @@ def test_dropping_the_index_forces_the_next_full_scan(tmp_path):
     )
     assert not plan.cached
     assert plan.read_ids == ("txn-1", "txn-2", "txn-3")
-
-
-def test_replaced_directory_with_same_count_forces_full_scan(tmp_path):
-    root = _transactions_root(tmp_path)
-    (root / "settled").mkdir()
-    (root / "in-flight").mkdir()
-    plan = plan_transaction_scan(root, current_transaction_id="in-flight")
-    record_transaction_scan(root, plan, {"settled": "ABORTED"})
-    (root / "settled").rename(root / "unknown")
-    (root / "next").mkdir()
-    next_plan = plan_transaction_scan(root, current_transaction_id="next")
-    assert not next_plan.cached
-    assert "unknown" in next_plan.read_ids

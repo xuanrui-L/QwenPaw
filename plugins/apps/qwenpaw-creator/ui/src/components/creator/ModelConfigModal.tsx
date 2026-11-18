@@ -47,6 +47,8 @@ import {
 import type {
   HostProviderInfo,
   TtsCapabilities,
+  TtsModelCapability,
+  TtsProvider,
   VideoModelCapabilities,
 } from "@/api/creator";
 import type {
@@ -251,7 +253,15 @@ interface ProtocolPreset {
   base_url_options?: { label: string; value: string }[];
 }
 
-/** Prefer the host catalog; a provider without a registry entry can still publish a preset. */
+/**
+ * Endpoint and model list the LLM/VLM section should use for *protocol*.
+ *
+ * Every protocol has to resolve to an endpoint here, including the ones the
+ * QwenPaw host does not publish as a provider. Returning null for a missing
+ * provider id instead would leave the previously selected provider's URL in
+ * the field, so switching to the model proxy kept sending an sk-as key to
+ * Bailian - a different provider than the one that issued the credential.
+ */
 export function llmPresetFor(
   protocol: string,
   providerId: string | undefined,
@@ -274,11 +284,12 @@ export function llmPresetFor(
       };
     }
     const fallback = LLM_PROTOCOL_FALLBACK_BASE_URLS[protocol];
-    if (!fallback) return null;
-    return {
-      base_url: fallback,
-      models: LLM_PROTOCOL_FALLBACK_MODELS[protocol] ?? [],
-    };
+    return fallback
+      ? {
+          base_url: fallback,
+          models: LLM_PROTOCOL_FALLBACK_MODELS[protocol] ?? [],
+        }
+      : null;
   }
   const hostIds = [
     ...provider.models.map((model) => model.id),
@@ -380,6 +391,38 @@ const ASR_PRESETS: Record<string, ProtocolPreset> = {
   },
 };
 
+/**
+ * Which endpoint a TTS protocol talks to, matching `providers` in the
+ * capability table. Only the proxy narrows the choice: it publishes its own
+ * model list and rejects anything outside it with MODEL_NOT_ALLOWED, while a
+ * Bailian or custom base is assumed to serve every listed speech model.
+ */
+const ttsProviderFor = (protocol: string): TtsProvider =>
+  protocol === "AgentScope Platform" ? "gateway" : "bailian";
+
+/**
+ * Speech models the given protocol can actually drive, in table order.
+ *
+ * Exported so the narrowing itself is testable: offering a Bailian-only name
+ * under the proxy is not a cosmetic slip but a guaranteed
+ * ``MODEL_NOT_ALLOWED`` on every synthesis attempt.
+ */
+export function ttsModelChoices(
+  protocol: string,
+  models: TtsModelCapability[],
+): TtsModelCapability[] {
+  // A preset roster names exactly what the gateway serves: Token Plan
+  // documents a single synthesis model, so offering the whole capability
+  // table there lets the user pick a model the plan answers "Model not
+  // exist" for.
+  const roster = TTS_PRESETS[protocol]?.models ?? [];
+  if (roster.length) {
+    return models.filter((item) => roster.includes(item.model));
+  }
+  const provider = ttsProviderFor(protocol);
+  return models.filter((item) => item.providers.includes(provider));
+}
+
 const TTS_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
@@ -397,33 +440,12 @@ const TTS_PRESETS: Record<string, ProtocolPreset> = {
   },
   "Aliyun Token Plan": {
     base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
-    // Token Plan serves qwen-audio-3.0-tts-plus over the CosyVoice WebSocket
-    // endpoint; seed it so the section starts on the only plan TTS model.
+    // Token Plan serves qwen-audio-3.0-tts-plus over the CosyVoice
+    // WebSocket endpoint; seed it so the section starts on the only
+    // plan TTS model.
     models: ["qwen-audio-3.0-tts-plus"],
   },
 };
-
-/** Speech models one protocol actually serves, keeping capability labels.
- *
- * The backend capability table lists every model this build can drive; a
- * protocol preset with an explicit roster narrows that to what the gateway
- * serves. Token Plan documents a single synthesis model, so offering the
- * whole table there lets the user pick a model the plan answers "Model not
- * exist" for.
- */
-export function ttsModelsForProtocol(
-  models: { model: string; label: string; providers?: string[] }[],
-  protocol: string,
-): { value: string; label: string }[] {
-  const roster = TTS_PRESETS[protocol]?.models ?? [];
-  return models
-    .filter((item) => !roster.length || roster.includes(item.model))
-    .filter(
-      (item) =>
-        protocol !== "AgentScope Platform" || item.providers?.includes("gateway"),
-    )
-    .map((item) => ({ value: item.model, label: item.label }));
-}
 
 const S2V_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
@@ -829,7 +851,8 @@ type SettingsPane =
   | "mode"
   | "review"
   | "skills"
-  | "guide";
+  | "guide"
+  | "platform";
 
 const PANE_MODELS: Record<"lang" | "perception" | "media", TabType[]> = {
   lang: ["llm", "vlm", "embedding"],
@@ -2156,9 +2179,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     if (type === "tts") {
       const preset = TTS_PRESETS[protocol];
       if (!preset) return null;
+      // Supported speech models come from the backend capability table, kept
+      // to the ones this endpoint actually serves.
       return {
         ...preset,
-        models: preset.models.length ? preset.models : ttsModelsForProtocol(ttsModels, protocol).map((item) => item.value),
+        models: ttsModelChoices(protocol, ttsModels).map((item) => item.model),
       };
     }
     if (type === "embedding") return EMBEDDING_PRESETS[protocol] || null;
@@ -2174,6 +2199,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     if (type === "llm" || type === "vlm") {
       const providerId = mergedProviderMap[protocol];
       if (!providerId) {
+        // A protocol the host registry does not publish (e.g. AgentScope
+        // Platform) still offers its static preset model list, so the field
+        // becomes a dropdown like every provider-backed section instead of a
+        // bare text box.
         const preset = llmPresetFor(protocol, undefined, hostProviders);
         return (preset?.models ?? []).map((model) => ({
           value: model,
@@ -2216,7 +2245,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     if (type === "tts") {
       // Label each speech model with what it can do, so the choice between
       // "has system voices" and "must design a voice first" is visible.
-      return ttsModelsForProtocol(ttsModels, protocol);
+      return ttsModelChoices(protocol, ttsModels).map((item) => ({
+        value: item.model,
+        label: item.label,
+      }));
     }
     const preset = getPresetForType(type, protocol);
     if (!preset?.models.length) return [];

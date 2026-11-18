@@ -14,6 +14,7 @@ import re
 import subprocess
 import tempfile
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -65,7 +66,7 @@ def asr_route(model_name: str, provider: str) -> str:
     """
     if (provider or "").casefold() == "whisper":
         return "whisper"
-    if (model_name or "").casefold().startswith("qwen3-asr") or is_qwen_audio_asr_model(model_name):
+    if _is_qwen_multimodal_asr(model_name or ""):
         return "qwen3-asr"
     return "fun-asr"
 
@@ -77,8 +78,7 @@ def is_qwen_audio_asr_model(model_name: str) -> bool:
     rejects ``result_format=message`` (400), answers ``output.text`` and
     takes ``format``/``sample_rate`` instead.
     """
-    folded = (model_name or "").casefold()
-    return folded.startswith("qwen-audio") and "asr" in folded
+    return (model_name or "").casefold().startswith("qwen-audio")
 
 
 # Provider verdicts meaning "the audio simply contains no speech"; they
@@ -244,7 +244,6 @@ async def _upload_asr_reference(
         media_type=media_type,
         base_url=config.get_asr_base_url(),
         protocol=config.get_asr_protocol(),
-        allow_inline=False,
     )
 
 
@@ -879,47 +878,52 @@ def _prepare_qwen3_chunks(
     return prepared
 
 
+def _is_qwen_multimodal_asr(model: str) -> bool:
+    """True when *model* is served by the aigc multimodal-generation route.
+
+    Two naming generations share that route: ``qwen3-asr-*`` on Bailian and
+    ``qwen-audio-*-asr-*`` on the AgentScope proxy, where the ``fun-asr``
+    transcription route is not deployed at all (measured: 404).
+    """
+    folded = model.casefold()
+    return folded.startswith("qwen3-asr") or (
+        folded.startswith("qwen-audio") and "asr" in folded
+    )
+
+
 def _qwen3_sentences(body: Mapping[str, Any]) -> list[str]:
     choices = body.get("output", {}).get("choices") or ()
-    if not choices:
-        return _qwen_audio_sentences(body)
-    content = choices[0].get("message", {}).get("content") or ()
     sentences: list[str] = []
-    for item in content:
-        if isinstance(item, Mapping):
-            text = str(item.get("text") or "").strip()
-        elif isinstance(item, str):
-            text = item.strip()
-        else:
-            text = ""
+    if choices:
+        content = choices[0].get("message", {}).get("content") or ()
+        for item in content:
+            if isinstance(item, Mapping):
+                text = str(item.get("text") or "").strip()
+            elif isinstance(item, str):
+                text = item.strip()
+            else:
+                text = ""
+            if text:
+                sentences.append(text)
+    if sentences:
+        return sentences
+    # ``qwen-audio-*-asr-*`` answers without ``choices``: the transcript sits
+    # in ``output.sentence`` (one object, or one per segment) and is repeated
+    # at the top level. Reading only ``choices`` yields an empty transcript
+    # for a call that actually succeeded.
+    output = body.get("output")
+    sentence = output.get("sentence") if isinstance(output, Mapping) else None
+    candidates: list[Mapping[str, Any]] = []
+    if isinstance(sentence, Mapping):
+        candidates = [sentence]
+    elif isinstance(sentence, Sequence):
+        candidates = [item for item in sentence if isinstance(item, Mapping)]
+    for item in candidates:
+        text = str(item.get("text") or "").strip()
         if text:
             sentences.append(text)
-    return sentences
-
-
-def _qwen_audio_sentences(body: Mapping[str, Any]) -> list[str]:
-    """Transcript text from a qwen-audio-3.0-asr-flash response.
-
-    This family answers with a cumulative ``output.text`` (plus an
-    ``output.sentence`` block carrying real begin/end timings) rather than
-    the qwen3-asr ``output.choices`` chat shape, so it needs its own reader.
-    """
-    output = body.get("output") or {}
-    text = str(output.get("text") or "").strip()
-    if text:
-        return [text]
-    sentence = output.get("sentence")
-    if isinstance(sentence, list):
-        return [
-            str(item["text"]).strip()
-            for item in sentence
-            if isinstance(item, Mapping)
-            and str(item.get("text") or "").strip()
-        ]
-    if isinstance(sentence, Mapping):
-        sentence_text = str(sentence.get("text") or "").strip()
-        if sentence_text:
-            return [sentence_text]
+    if sentences:
+        return sentences
     top_level = str(body.get("text") or "").strip()
     return [top_level] if top_level else []
 
@@ -1221,8 +1225,8 @@ async def transcribe(media_url: str) -> ASRResult:
     )
     if provider == "whisper":
         return await _whisper(media_url)
-    route = asr_route(config.get_asr_model_name() or "", provider)
-    if route == "qwen3-asr":
+    model = config.get_asr_model_name() or ""
+    if _is_qwen_multimodal_asr(model):
         return await _qwen3_asr(media_url)
     return await _fun_asr(media_url)
 

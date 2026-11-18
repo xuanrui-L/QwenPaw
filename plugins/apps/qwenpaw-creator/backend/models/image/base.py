@@ -29,10 +29,11 @@ import httpx
 
 from models import config as model_config
 from models.concurrency import model_slot
-from models.provider_errors import gateway_error_code, retryable_for_status
+from models.provider_errors import retryable_for_status
 from models.retry_timing import backoff_seconds
 from models.reference_markers import ReferenceMarkerSpec
 from services.runtime_files.atomic_store import atomic_replace_bytes
+from services.observability import mem_probe
 from utils.logger import setup_logger
 from utils.exceptions import ModelError
 from utils.paths import media_url_for, unique_task_work_path
@@ -45,7 +46,7 @@ RETRY_BACKOFF_BASE = 10  # seconds
 MIN_IMAGE_BYTES = int(os.environ.get("IMAGE_MIN_BYTES", "10000"))
 
 
-def _is_retryable_response(resp: httpx.Response, *, gateway: bool) -> bool:
+def _is_retryable_response(resp: httpx.Response) -> bool:
     """Whether an HTTP failure deserves another attempt.
 
     The shared rule applies: a gateway error code decides when the body carries
@@ -59,9 +60,7 @@ def _is_retryable_response(resp: httpx.Response, *, gateway: bool) -> bool:
 
     if resp.status_code < 400:
         return False
-    if gateway:
-        return retryable_for_status(resp.status_code, resp.text)
-    return resp.status_code == 429
+    return retryable_for_status(resp.status_code, resp.text)
 
 
 # Tool-level image operation modes. ``generate`` keeps the historical
@@ -512,6 +511,12 @@ def persist_image_bytes(img_bytes: bytes, model_name: str, source: str) -> str:
             model_name=model_name,
         )
     image_path = unique_task_work_path("images", ".png", prefix="img_")
+    mem_probe.stage(
+        "image.provider_bytes",
+        source=source,
+        bytes=len(img_bytes),
+        model_name=model_name,
+    )
     atomic_replace_bytes(image_path, img_bytes)
     result_url = media_url_for(image_path)
     logger.info(
@@ -806,11 +811,6 @@ class BaseImageModel(ABC):
             f"references={len(clean_reference_urls)}",
         )
 
-        configured_gateway = model_config.is_agentscope_gateway(
-            model_config.get_image_protocol(),
-            self.generation_url,
-        )
-        gateway = configured_gateway
         try:
             if active_mode == "translate":
                 async with model_slot("image"):
@@ -834,26 +834,17 @@ class BaseImageModel(ABC):
                             clean_reference_urls,
                             active_mode,
                         )
-                    gateway = configured_gateway or (
-                        resp.status_code >= 400
-                        and bool(gateway_error_code(resp.text))
-                    )
-                    if _is_retryable_response(resp, gateway=gateway):
-                        if gateway and attempt == MAX_RETRIES - 1:
+                    if _is_retryable_response(resp):
+                        if attempt == MAX_RETRIES - 1:
                             if resp.status_code == 429:
                                 rate_limited = True
                                 break
                             # Let the provider's own status surface below.
                             resp.raise_for_status()
-                        rate_limited = resp.status_code == 429
-                        wait = (
-                            backoff_seconds(
-                                attempt,
-                                base=RETRY_BACKOFF_BASE,
-                                headers=resp.headers,
-                            )
-                            if gateway
-                            else RETRY_BACKOFF_BASE * (attempt + 1)
+                        wait = backoff_seconds(
+                            attempt,
+                            base=RETRY_BACKOFF_BASE,
+                            headers=resp.headers,
                         )
                         logger.warning(
                             f"Image generation retryable HTTP {resp.status_code}, "
@@ -869,10 +860,9 @@ class BaseImageModel(ABC):
                     except ModelError as exc:
                         if attempt == MAX_RETRIES - 1:
                             raise
-                        wait = (
-                            backoff_seconds(attempt, base=RETRY_BACKOFF_BASE)
-                            if gateway
-                            else RETRY_BACKOFF_BASE * (attempt + 1)
+                        wait = backoff_seconds(
+                            attempt,
+                            base=RETRY_BACKOFF_BASE,
                         )
                         logger.warning(
                             f"Image response validation failed, retrying in {wait}s: {exc}",
@@ -928,12 +918,9 @@ class BaseImageModel(ABC):
                 # Same envelope-first rule as the retry loop above, so a task
                 # is not persisted as retryable when its body names a
                 # deterministic fault.
-                retryable=(
-                    retryable_for_status(
-                        e.response.status_code, e.response.text
-                    )
-                    if gateway
-                    else True
+                retryable=retryable_for_status(
+                    e.response.status_code,
+                    e.response.text,
                 ),
             )
         except Exception as e:

@@ -1086,19 +1086,19 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
         # pylint: disable=too-many-branches,too-many-statements
         base = services.projects.read("project-1")
         project = base.project.model_copy(deep=True)
-        project.timelines.items["timeline:main"].elements_by_id[
-            "e1"
-        ] = TimelineElement.model_validate(
-            {
-                "element_id": "e1",
-                "label": "Sunset",
-                "span": {"start_tick": 0, "duration_tick": 4000},
-                "location": {},
-                "creation": {
-                    "type": "t2v",
-                    "video_prompt": "A quiet sunset.",
+        project.timelines.items["timeline:main"].elements_by_id["e1"] = (
+            TimelineElement.model_validate(
+                {
+                    "element_id": "e1",
+                    "label": "Sunset",
+                    "span": {"start_tick": 0, "duration_tick": 4000},
+                    "location": {},
+                    "creation": {
+                        "type": "t2v",
+                        "video_prompt": "A quiet sunset.",
+                    },
                 },
-            },
+            )
         )
         elements = project.timelines.items["timeline:main"].elements_by_id
         elements["e2"] = elements["e1"].model_copy(
@@ -1116,7 +1116,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
             services,
             executions,
             "project-1",
-            check_media_budget=False,
         )
         node = next(
             n
@@ -1264,7 +1263,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
             services,
             executions,
             "project-1",
-            check_media_budget=False,
         )
         if change not in {"unchanged", "review"}:
             assert blocked[node.node_id] == "EDIT_IN_PROGRESS"
@@ -1292,7 +1290,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
                     services,
                     executions,
                     "project-1",
-                    check_media_budget=False,
                     **confirmation,
                 )
                 matches = confirmation == {

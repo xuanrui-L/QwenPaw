@@ -17,6 +17,7 @@ from pathlib import Path
 
 from services.project_files.models import Project, Timeline
 from services.media_files import media_gate
+from services.observability import mem_probe
 
 _DRAFT_HEIGHT = 480
 _DRAFT_FPS = 24
@@ -311,7 +312,13 @@ def render_rough_cut(
                 str(output),
             ],
         )
-        return output.read_bytes()
+        payload = output.read_bytes()
+        mem_probe.stage(
+            "rough_cut.output_bytes",
+            name=output.name,
+            bytes=len(payload),
+        )
+        return payload
 
 
 def _run_ffmpeg(command: list[str]) -> None:

@@ -99,7 +99,6 @@ function commonRoutes(review?: FileProjectReviewRecord) {
           nodes: [],
           generation: 0,
           mediaCalls: 0,
-          mediaCallBudget: 20,
         },
       },
     },

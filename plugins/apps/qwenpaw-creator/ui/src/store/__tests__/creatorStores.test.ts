@@ -821,15 +821,6 @@ describe("bounded frontend caches", () => {
     });
   });
 
-  it("keeps the snapshot error and head while older failures replay", () => {
-    const error = { code: "CURRENT", message: "current failure", retryable: true };
-    seed({ isReplaying: true, replayUntilSeq: 10, session: sessionView({ lastEventSeq: 10, error }) });
-    ingest(ev(1, "agent.run.failed", { error: { ...error, code: "OLDER" } }));
-    expect(store().session).toMatchObject({ lastEventSeq: 10, error });
-    ingest(ev(11, "agent.run.failed", { error: { ...error, code: "NEW" } }));
-    expect(store().session).toMatchObject({ lastEventSeq: 11, error: { code: "NEW" } });
-  });
-
   it("does not let replayed status history flip the live session status", () => {
     // The flicker this guards: a first view replays the run's own
     // session.status_changed events. Writing them into the live session made

@@ -1439,8 +1439,8 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             command, dispatch_arguments = _video_dispatch_command(
                 creation_type,
             )
-            if creation_type != "s2v" and not creation.generate_audio:
-                dispatch_arguments["generateAudio"] = False
+            if creation_type != "s2v":
+                dispatch_arguments["generateAudio"] = creation.generate_audio
 
             add(
                 WorkNode(
@@ -1811,8 +1811,19 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         elif final_slot:
             status = WorkNodeStatus.DONE
         elif superseded_final:
-            # In co-creation, wait for the author's explicit re-compose.
-            # Delegated runs must still deliver an updated cut automatically.
+            # An edit superseded a cut that already exists. Composing again
+            # is only worth its cost when somebody asked: in co-creation the
+            # "成片" button is that ask. The field showed what auto-compose
+            # does instead — five renders inside five minutes on 2026-11-05,
+            # four of them discarded as PROJECT_INPUT_SNAPSHOT_STALE because
+            # the timeline moved again before the render landed. STALE also
+            # stays out of the scheduler's hands: `ready_media_nodes` only
+            # takes READY, and `regeneration_nodes` additionally requires a
+            # regeneration_of marker this node never carries.
+            # Delegated (YOLO) runs keep auto-composing — unattended delivery
+            # to the final cut is the whole point of that mode.
+            # Local import: models.config pulls in nothing that would
+            # close a cycle back onto the work graph.
             from models.config import (
                 EXECUTION_MODE_DELEGATED,
                 get_execution_mode,

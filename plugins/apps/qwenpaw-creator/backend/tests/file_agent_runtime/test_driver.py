@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -16,6 +17,7 @@ import pytest
 from PIL import Image
 
 from api.file_asset_routes import _AssetInput, _ingest_many_sync
+from domain.enums import TaskKind, TaskStatus
 from services.file_agent_runtime import (
     AgentModelConfigurationError,
     AgentModelError,
@@ -66,6 +68,7 @@ from services.runtime_files.models import (
 )
 from services.runtime_files.execution_models import (
     ExecutionAuthorizationStatus,
+    TaskRecord,
 )
 from services.specialist_tools import SpecialistToolResult
 from services.workspace.content_store import ContentStore
@@ -178,8 +181,9 @@ def test_stale_project_snapshots_are_elided_from_the_continuation() -> None:
     A 50-element production run accumulated 18 full project.json echoes
     (2.09MB) in one Conversation and every model call failed with an
     input-length 400. Older echoes carry no information the model cannot
-    get from the latest snapshot, so they collapse to change receipts;
-    durable history keeps every byte.
+    get from the latest snapshot, so they collapse to change receipts; what
+    durable history keeps is the bounded view (see
+    ``test_durable_project_echo_is_the_bounded_view``).
     """
 
     from services.file_agent_runtime.driver import _continuation_message_text
@@ -228,6 +232,101 @@ def test_stale_project_snapshots_are_elided_from_the_continuation() -> None:
     assert "写好了" in rendered
 
 
+def _echo_payload() -> dict:
+    """A Project snapshot echo big the way a long-running project makes them."""
+
+    return {
+        "project": {
+            "project_id": PROJECT_ID,
+            "generation": 11,
+            "description": "x" * 200_000,
+            "timelines": {
+                "items": {
+                    "timeline:main": {
+                        "timeline_id": "timeline:main",
+                        "elements_by_id": {},
+                    },
+                    "snapshot:timeline:main:1": {
+                        "timeline_id": "snapshot:timeline:main:1",
+                        "name": "自动快照",
+                        "elements_by_id": {"a": "b" * 4000},
+                    },
+                },
+                "order": ["timeline:main", "snapshot:timeline:main:1"],
+            },
+        },
+        "generation": 11,
+        "etag": "etag-11",
+        "changedPointers": ["/description"],
+    }
+
+
+def test_durable_project_echo_is_the_bounded_view(monkeypatch) -> None:
+    # The echo used to be appended byte for byte, so the conversation kept
+    # every intermediate state of the Project forever: 96% of a 284 MB
+    # messages.jsonl, paid again on every page read. The durable record is now
+    # the same projection the model context already builds, so the identifiers
+    # survive and the frozen bodies are indexed instead of copied.
+    from services.file_agent_runtime.driver import (
+        _durable_project_echo,
+        tool_echo_receipt_enabled,
+    )
+
+    monkeypatch.delenv("CREATOR_TOOL_ECHO_RECEIPT", raising=False)
+    assert tool_echo_receipt_enabled()
+
+    payload = _echo_payload()
+    stored = _durable_project_echo(payload)
+
+    assert len(json.dumps(stored)) * 10 < len(json.dumps(payload))
+    # Bound, and said out loud: a reader can ask for the rest by pointer.
+    assert len(stored["project"]["description"]) < len(
+        payload["project"]["description"],
+    )
+    assert stored["projectView"]["partial"] is True
+    assert "/description" in stored["projectView"]["omittedPointers"]
+
+
+def test_durable_project_echo_keeps_the_identifiers_a_receipt_carries(
+    monkeypatch,
+) -> None:
+    from services.file_agent_runtime.driver import (
+        _durable_project_echo,
+        _project_snapshot_from_text,
+    )
+
+    monkeypatch.delenv("CREATOR_TOOL_ECHO_RECEIPT", raising=False)
+    stored = _durable_project_echo(_echo_payload())
+
+    assert stored["generation"] == 11
+    assert stored["etag"] == "etag-11"
+    assert stored["project"]["generation"] == 11
+    # Still recognizable as a Project snapshot, so a later echo can still
+    # collapse this record to a change receipt when the context is rebuilt.
+    assert _project_snapshot_from_text(json.dumps(stored)) is not None
+    # Frozen history is indexed, not materialized.
+    view = stored["projectView"]
+    assert [item["timelineId"] for item in view["historyTimelines"]] == [
+        "snapshot:timeline:main:1",
+    ]
+    assert (
+        "snapshot:timeline:main:1"
+        not in stored["project"]["timelines"]["items"]
+    )
+    assert "b" * 1000 not in json.dumps(stored, ensure_ascii=False)
+
+
+def test_durable_project_echo_can_be_kept_byte_for_byte(monkeypatch) -> None:
+    # What is persisted changed, so one env var has to restore the old record
+    # exactly -- no projection, no rewrite, no new code path.
+    from services.file_agent_runtime.driver import _durable_project_echo
+
+    monkeypatch.setenv("CREATOR_TOOL_ECHO_RECEIPT", "0")
+    payload = _echo_payload()
+
+    assert _durable_project_echo(payload) is payload
+
+
 def test_ai_edit_idempotency_can_be_scoped_to_one_model_tool_call() -> None:
     from services.file_agent_runtime.driver import (
         _specialist_tool_invocation_id,
@@ -264,7 +363,12 @@ def test_ai_edit_idempotency_can_be_scoped_to_one_model_tool_call() -> None:
     assert "file_id=null" in _specialist_tool_recovery("ai_edit")
 
 
-def _create_project(tmp_path, *, initial_goal: str | None):
+def _create_project(
+    tmp_path,
+    *,
+    initial_goal: str | None,
+    historical_media_tasks: int = 0,
+):
     services = CreatorFileServices.create(tmp_path.resolve())
 
     def initialize(staged_root) -> None:
@@ -282,6 +386,20 @@ def _create_project(tmp_path, *, initial_goal: str | None):
                 "client-initial" if initial_goal is not None else None
             ),
         )
+        for index in range(historical_media_tasks):
+            task = TaskRecord(
+                task_id=f"historical-media-{index}",
+                project_id=PROJECT_ID,
+                kind=TaskKind.IMAGE_GENERATION,
+                status=TaskStatus.SUCCEEDED,
+                request_fingerprint=f"historical-{index}",
+            )
+            task_root = staged_root / "runtime" / "tasks" / task.task_id
+            task_root.mkdir(parents=True)
+            (task_root / "task.json").write_text(
+                task.model_dump_json(),
+                encoding="utf-8",
+            )
 
     project = Project.new(project_id=PROJECT_ID, name="Initial")
     project.visual.entities.items["hero"] = VisualEntity(
@@ -610,7 +728,6 @@ def _edit_client(*, description: str):
         assert {item["function"]["name"] for item in tools} == {
             "read_project",
             "read_project_file",
-            "confirm_prompt_sync",
             "jq_project",
             "patch_project",
             "ground_prompt_context",
@@ -619,6 +736,7 @@ def _edit_client(*, description: str):
             "recall_history",
             "browser_use",
             "elements_at",
+            "confirm_prompt_sync",
             "import_script_asset",
             "delegate_to_agent",
             "request_workgraph_execution",
@@ -1398,11 +1516,6 @@ def test_repeated_malformed_jq_project_arguments_stop_after_two_retries(
         (
             "Creator AgentScope model request failed: Error code: 503 - "
             "upstream connect error",
-            "MODEL_REQUEST_FAILED",
-            True,
-        ),
-        (
-            "HTTP 403: account has insufficient credits",
             "MODEL_REQUEST_FAILED",
             True,
         ),
@@ -2236,7 +2349,10 @@ def test_feedback_keeps_admitted_media_alive_but_hard_stop_cancels_it(
     """A new user message must not abandon an unrelated paid image call."""
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="制作短剧")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="制作短剧",
+        )
         model_started = asyncio.Event()
         media_started = asyncio.Event()
         release_media = asyncio.Event()
@@ -3564,7 +3680,9 @@ def test_manual_prompt_repair_respects_review_and_never_dispatches_media(
         feedback = messages[0]
         assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
         assert reason in feedback.content_parts[0].text
-        assert "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
+        assert (
+            "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
+        )
         assert feedback.metadata["modelRequiredNodes"] == ["video:ep1"]
         if after_failure:
             assert "瞬态故障" in feedback.content_parts[0].text
@@ -3632,6 +3750,788 @@ def test_completion_resume_preserves_manual_regeneration_pause(
     assert (
         len(services.sessions.list_messages(PROJECT_ID, SESSION_ID))
         == before + 1
+    )
+
+
+@pytest.fixture(name="completion_resume_runtime")
+def _completion_resume_runtime(tmp_path, monkeypatch, request):
+    services, snapshot = _create_project(
+        tmp_path,
+        initial_goal="完成短剧",
+        historical_media_tasks=getattr(request, "param", 0),
+    )
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    state = {
+        "generation": snapshot.generation,
+        "nodes": [
+            WorkNode(
+                node_id="video:ep1",
+                kind="video",
+                label="第一场 · 视频",
+                status=WorkNodeStatus.GATED,
+                missing=("video_prompt 缺失", "dialogue 缺失"),
+                authored_text_gap=True,
+                dispatch_fingerprint="input-0",
+            ),
+        ],
+        "failures": {},
+        "wakes": [],
+    }
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "auto_approve",
+    )
+    monkeypatch.setattr(
+        services.projects,
+        "read",
+        lambda _project_id: replace(snapshot, generation=state["generation"]),
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: WorkGraph(
+            nodes=tuple(state["nodes"]),
+            generation=state["generation"],
+        ),
+    )
+    monkeypatch.setattr(driver.work_scheduler, "enabled", lambda: True)
+    monkeypatch.setattr(driver.work_scheduler, "wake", state["wakes"].append)
+    monkeypatch.setattr(
+        driver.work_scheduler,
+        "deterministic_failure_nodes_for_project",
+        lambda _project_id: state["failures"],
+    )
+    return services, driver, state
+
+
+def _queue_completion_resume(
+    driver,
+    *,
+    run_id="run-completion",
+    after_failure=False,
+):
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id=run_id,
+            after_failure=after_failure,
+        ),
+    )
+    return driver.sessions.list_messages(PROJECT_ID, SESSION_ID, limit=None)
+
+
+@pytest.mark.parametrize("resume_count", [2, 6, 10])
+def test_yolo_new_done_allows_same_generation_and_sixth_resume(
+    completion_resume_runtime,
+    resume_count,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    for index in range(resume_count):
+        state["nodes"].append(
+            WorkNode(
+                f"visual:{index}",
+                "visual",
+                f"角色 {index}",
+                WorkNodeStatus.DONE,
+            ),
+        )
+        messages = _queue_completion_resume(driver, run_id=f"run-{index}")
+        checkpoint = messages[-1].metadata["completionCheckpoint"]
+        assert checkpoint["version"] == 1
+        assert checkpoint["completedNodeIds"] == [
+            f"visual:{i}" for i in range(index + 1)
+        ]
+        assert checkpoint["unproductiveResumes"] == 0
+        assert (
+            messages[-1].metadata["projectGeneration"] == state["generation"]
+        )
+    assert (
+        sum(item.source == driver.YOLO_RESUME_SOURCE for item in messages)
+        == resume_count
+    )
+    assert not any(
+        item.source == "creator_execution_notice" for item in messages
+    )
+
+
+@pytest.mark.parametrize("generation_churn", [False, True])
+def test_yolo_repeated_state_pauses_visibly_once_across_restart(
+    completion_resume_runtime,
+    monkeypatch,
+    generation_churn,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    before = _queue_completion_resume(driver)
+    state["generation"] += int(generation_churn)
+    node = state["nodes"][0]
+    state["nodes"][0] = replace(
+        node,
+        label="模型声称已经完成",
+        missing=tuple(reversed(node.missing)),
+        task_id="new-task-id",
+        progress=0.9,
+        locator={"updatedAt": "later", "modelClaim": "completed"},
+    )
+    driver._wake.clear()
+    messages = _queue_completion_resume(driver, run_id="different-run")
+    pause = messages[-1]
+    assert pause.role == "assistant"
+    assert pause.source == "creator_execution_notice"
+    assert (
+        pause.metadata["executionPause"]["reason"] == "no_committed_progress"
+    )
+    assert "未检测到新的节点完成进展" in pause.content_parts[0].text
+    assert "video_prompt 缺失" in pause.content_parts[0].text
+    assert (
+        "检查" in pause.content_parts[0].text
+        and "继续" in pause.content_parts[0].text
+    )
+    assert [item for item in messages if item.role == "user"] == [
+        item for item in before if item.role == "user"
+    ]
+    assert not driver._wake.is_set()
+    restarted = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    monkeypatch.setattr(restarted.work_scheduler, "enabled", lambda: True)
+    monkeypatch.setattr(
+        restarted.work_scheduler,
+        "wake",
+        state["wakes"].append,
+    )
+    state["generation"] += 1
+    assert (
+        _queue_completion_resume(restarted, run_id="restart-run") == messages
+    )
+    events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+    completed = [
+        event for event in events if event.event_type == "message.completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0].payload["messageId"] == pause.message_id
+    assert (
+        services.sessions.get_project_session(
+            PROJECT_ID,
+        ).last_consumed_message_seq
+        == 0
+    )
+    assert driver.runs.list(PROJECT_ID) == []
+    assert driver.executions.list_tasks(PROJECT_ID) == []
+
+
+def _resume_once(driver, *, run_id, **kwargs):
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id=run_id,
+            **kwargs,
+        ),
+    )
+
+
+def _spy_message_reads(monkeypatch, driver):
+    calls = []
+    original = driver.sessions.list_messages
+
+    def spy(*args, **kwargs):
+        calls.append(args[1:])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(driver.sessions, "list_messages", spy)
+    return calls
+
+
+def test_fused_pause_memo_skips_the_history_reread_next_tick(
+    completion_resume_runtime,
+    monkeypatch,
+) -> None:
+    services, driver, _state = completion_resume_runtime
+    _queue_completion_resume(driver, run_id="run-first")
+    fused = _queue_completion_resume(driver, run_id="run-fuse")
+    notices = [
+        item for item in fused if item.source == "creator_execution_notice"
+    ]
+    assert len(notices) == 1
+    calls = _spy_message_reads(monkeypatch, driver)
+
+    _resume_once(driver, run_id="run-second-tick")
+
+    # Nothing moved, so the fused verdict is replayed from the memo: the tick
+    # must not rebuild a history whose answer it already has.
+    assert calls == []
+    assert [
+        item
+        for item in services.sessions.list_messages(
+            PROJECT_ID,
+            SESSION_ID,
+            limit=None,
+        )
+        if item.source == "creator_execution_notice"
+    ] == notices
+
+
+def test_fused_pause_memo_releases_when_a_human_message_lands(
+    completion_resume_runtime,
+    monkeypatch,
+) -> None:
+    services, driver, _state = completion_resume_runtime
+    _queue_completion_resume(driver, run_id="run-first")
+    _queue_completion_resume(driver, run_id="run-fuse")
+    _append_human_message(services, "把第一场的台词补齐")
+    calls = _spy_message_reads(monkeypatch, driver)
+
+    _resume_once(driver, run_id="run-after-human")
+
+    # A new message moved the head, so the fuse has to be re-decided against
+    # the real history -- the memo may not swallow a human re-arm.
+    assert calls
+
+
+def test_fused_pause_memo_releases_when_a_task_finishes_without_a_write(
+    completion_resume_runtime,
+    monkeypatch,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    _queue_completion_resume(driver, run_id="run-first")
+    _queue_completion_resume(driver, run_id="run-fuse")
+    # A media task completing is durable progress the Project generation never
+    # sees. The fuse reads it as a new DONE node, so the memo key must cover
+    # node statuses or a finished shot would stay paused forever.
+    state["nodes"].append(
+        WorkNode("visual:new", "visual", "新角色", WorkNodeStatus.DONE),
+    )
+    calls = _spy_message_reads(monkeypatch, driver)
+
+    _resume_once(driver, run_id="run-after-task")
+
+    assert calls
+
+
+def test_completion_resume_reuses_the_projection_it_was_given(
+    completion_resume_runtime,
+    monkeypatch,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    snapshot = services.projects.read(PROJECT_ID)
+    graph = WorkGraph(
+        nodes=tuple(state["nodes"]),
+        generation=state["generation"],
+    )
+    reads = []
+    derives = []
+    monkeypatch.setattr(
+        services.projects,
+        "read",
+        lambda _project_id: reads.append(_project_id) or snapshot,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: derives.append(1) or graph,
+    )
+
+    _resume_once(
+        driver,
+        run_id="run-tick",
+        snapshot=snapshot,
+        task_records=[],
+        graph=graph,
+    )
+
+    assert reads == []
+    assert derives == []
+    messages = services.sessions.list_messages(
+        PROJECT_ID,
+        SESSION_ID,
+        limit=None,
+    )
+    assert any(item.source == driver.YOLO_RESUME_SOURCE for item in messages)
+
+
+@pytest.fixture(name="prompt_contract_runtime")
+def _prompt_contract_runtime(tmp_path, monkeypatch):
+    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    state = {
+        "generation": snapshot.generation,
+        "nodes": [
+            WorkNode(
+                node_id="storyboard:ep1",
+                kind="storyboard",
+                label="第一场 · 分镜",
+                status=WorkNodeStatus.GATED,
+                missing=("分镜内容与提示词待同步",),
+                authored_text_gap=True,
+                prompt_sync_required=True,
+                dispatch_fingerprint="input-0",
+            ),
+        ],
+    }
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "manual",
+    )
+    monkeypatch.setattr(
+        services.projects,
+        "read",
+        lambda _project_id: replace(
+            snapshot,
+            generation=state["generation"],
+        ),
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: WorkGraph(
+            nodes=tuple(state["nodes"]),
+            generation=state["generation"],
+        ),
+    )
+    return services, driver, state
+
+
+def _append_human_message(services, text: str) -> int:
+    return services.sessions.append_message(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        role="user",
+        content_parts=[{"type": "text", "text": text}],
+        source="initial_creation",
+        channel=MessageChannel.COMPOSER,
+    ).message.message_seq
+
+
+def test_prompt_contract_resume_is_not_rearmed_by_an_unrelated_human_turn(
+    prompt_contract_runtime,
+) -> None:
+    services, driver, _state = prompt_contract_runtime
+    messages = _queue_completion_resume(driver, run_id="run-1")
+    resume = messages[-1]
+    assert resume.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    assert "分镜内容与提示词待同步" in resume.content_parts[0].text
+    assert "confirm_prompt_sync" in resume.content_parts[0].text
+    assert resume.metadata["actionableFingerprint"]
+    # The same gap inside one uninterrupted streak still trips the fuse.
+    paused = _queue_completion_resume(driver, run_id="run-2")
+    assert paused[-1].source == "creator_execution_notice"
+    assert (
+        paused[-1].metadata["executionPause"]["reason"]
+        == "no_committed_progress"
+    )
+    # A chat turn that wrote nothing must not re-arm the fuse: the identical
+    # instruction was already delivered and is still unanswered.
+    human_seq = _append_human_message(services, "你好")
+    settled = _queue_completion_resume(driver, run_id="run-3")
+    assert settled[-1].message_seq == human_seq
+    assert not any(
+        item.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+        and item.message_seq > human_seq
+        for item in settled
+    )
+
+
+def test_prompt_contract_resume_returns_after_any_committed_write(
+    prompt_contract_runtime,
+) -> None:
+    services, driver, state = prompt_contract_runtime
+    resume = _queue_completion_resume(driver, run_id="run-1")[-1]
+    _queue_completion_resume(driver, run_id="run-2")
+    human_seq = _append_human_message(services, "改一下结尾")
+    state["generation"] += 1
+    resumed = _queue_completion_resume(driver, run_id="run-3")
+    assert resumed[-1].message_seq > human_seq
+    assert resumed[-1].source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    assert (
+        resumed[-1].metadata["actionableFingerprint"]
+        == resume.metadata["actionableFingerprint"]
+    )
+
+
+def test_prompt_contract_resume_still_retries_a_transient_failure(
+    prompt_contract_runtime,
+) -> None:
+    services, driver, _state = prompt_contract_runtime
+    _queue_completion_resume(driver, run_id="run-1")
+    _queue_completion_resume(driver, run_id="run-2")
+    human_seq = _append_human_message(services, "你好")
+    retried = _queue_completion_resume(
+        driver,
+        run_id="run-3",
+        after_failure=True,
+    )
+    assert retried[-1].message_seq > human_seq
+    assert retried[-1].source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    assert "瞬态故障" in retried[-1].content_parts[0].text
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"missing": ("新的结构缺口",)},
+        {"status": WorkNodeStatus.STALE},
+        {"error": "prompt preparation failed"},
+        {"dispatch_fingerprint": "changed-input"},
+        {"regeneration_of": "artifact-version-old"},
+    ],
+)
+def test_yolo_actionable_changes_consume_budget_without_progress_credit(
+    completion_resume_runtime,
+    change,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    before = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    state["generation"] += 1
+    state["nodes"][0] = replace(state["nodes"][0], **change)
+    after = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    assert after["actionableFingerprint"] != before["actionableFingerprint"]
+    assert after["unproductiveResumes"] == 1
+
+
+@pytest.mark.parametrize("generation_churn", [False, True])
+def test_yolo_five_changed_unproductive_attempts_exhaust_budget(
+    completion_resume_runtime,
+    generation_churn,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    for index in range(6):
+        state["generation"] += int(generation_churn)
+        state["nodes"][0] = replace(
+            state["nodes"][0],
+            dispatch_fingerprint=f"input-{index}",
+        )
+        messages = _queue_completion_resume(driver, run_id=f"run-{index}")
+        if index < 5:
+            assert (
+                messages[-1].metadata["completionCheckpoint"][
+                    "unproductiveResumes"
+                ]
+                == index
+            )
+    assert (
+        sum(item.source == driver.YOLO_RESUME_SOURCE for item in messages) == 5
+    )
+    assert (
+        messages[-1].metadata["executionPause"]["reason"]
+        == "consecutive_resume_limit"
+    )
+    assert "预算已耗尽" in messages[-1].content_parts[0].text
+    state["generation"] += 1
+    state["nodes"][0] = replace(
+        state["nodes"][0],
+        dispatch_fingerprint="another-input",
+    )
+    assert (
+        _queue_completion_resume(driver, run_id="repeat-budget-check")
+        == messages
+    )
+    state["nodes"].append(
+        WorkNode("visual:new", "visual", "新角色", WorkNodeStatus.DONE),
+    )
+    messages = _queue_completion_resume(driver, run_id="productive-sixth")
+    assert (
+        messages[-1].metadata["completionCheckpoint"]["unproductiveResumes"]
+        == 0
+    )
+    assert (
+        sum(item.source == driver.YOLO_RESUME_SOURCE for item in messages) == 6
+    )
+
+
+def test_yolo_done_union_prevents_toggling_from_earning_progress(
+    completion_resume_runtime,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    done = WorkNode("visual:hero", "visual", "角色", WorkNodeStatus.DONE)
+    state["nodes"].append(done)
+    _queue_completion_resume(driver)
+    state["nodes"][1] = replace(done, status=WorkNodeStatus.READY)
+    state["nodes"][0] = replace(
+        state["nodes"][0],
+        dispatch_fingerprint="input-1",
+    )
+    checkpoint = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    assert checkpoint["completedNodeIds"] == [done.node_id]
+    assert checkpoint["unproductiveResumes"] == 1
+    state["nodes"][1] = done
+    state["nodes"][0] = replace(
+        state["nodes"][0],
+        dispatch_fingerprint="input-2",
+    )
+    checkpoint = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    assert checkpoint["unproductiveResumes"] == 2
+    state["nodes"].append(
+        WorkNode("visual:new", "visual", "新角色", WorkNodeStatus.DONE),
+    )
+    checkpoint = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    assert checkpoint["completedNodeIds"] == ["visual:hero", "visual:new"]
+    assert checkpoint["unproductiveResumes"] == 0
+
+
+def test_yolo_absolute_ceiling_survives_notifications_until_human_input(
+    completion_resume_runtime,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    for index in range(11):
+        state["nodes"].append(
+            WorkNode(f"visual:{index}", "visual", "角色", WorkNodeStatus.DONE),
+        )
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": "进度"}],
+            source=driver_module.NOTIFICATION_SOURCE,
+        )
+        messages = _queue_completion_resume(driver, run_id=f"run-{index}")
+    assert (
+        sum(item.source == driver.YOLO_RESUME_SOURCE for item in messages)
+        == 10
+    )
+    assert (
+        messages[-1].metadata["executionPause"]["reason"]
+        == "unattended_budget"
+    )
+    assert "10 次自动续跑上限" in messages[-1].content_parts[0].text
+    services.sessions.append_message(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        role="user",
+        content_parts=[{"type": "text", "text": "检查后继续"}],
+        source="user",
+    )
+    assert (
+        _queue_completion_resume(driver)[-1].source
+        == driver.YOLO_RESUME_SOURCE
+    )
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto_approve"])
+@pytest.mark.parametrize("count", [5, 10])
+def test_completion_resume_mode_separation_keeps_absolute_ceiling(
+    completion_resume_runtime,
+    monkeypatch,
+    mode,
+    count,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    monkeypatch.setattr(driver_module, "get_media_review_mode", lambda: mode)
+    other_source = (
+        driver.YOLO_RESUME_SOURCE
+        if mode == "manual"
+        else driver.PROMPT_CONTRACT_RESUME_SOURCE
+    )
+    for index in range(count):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"续跑 {index}"}],
+            source=other_source,
+            metadata={"projectGeneration": state["generation"]},
+        )
+    feedback = _queue_completion_resume(driver)[-1]
+    if count == 10:
+        assert (
+            feedback.metadata["executionPause"]["reason"]
+            == "unattended_budget"
+        )
+    else:
+        expected_source = (
+            driver.PROMPT_CONTRACT_RESUME_SOURCE
+            if mode == "manual"
+            else driver.YOLO_RESUME_SOURCE
+        )
+        assert feedback.source == expected_source
+    if mode == "manual":
+        assert state["wakes"] == []
+
+
+@pytest.mark.parametrize(
+    "streak,same_generation",
+    [(1, True), (5, False), (4, False)],
+)
+def test_yolo_legacy_metadata_preserves_generation_and_streak_guards(
+    completion_resume_runtime,
+    streak,
+    same_generation,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    for index in range(streak):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"旧续跑 {index}"}],
+            source=driver.YOLO_RESUME_SOURCE,
+            metadata={
+                "projectGeneration": state["generation"]
+                - int(not same_generation),
+            },
+        )
+    state["nodes"].append(
+        WorkNode("visual:done", "visual", "角色", WorkNodeStatus.DONE),
+    )
+    messages = _queue_completion_resume(driver)
+    if streak == 4:
+        assert (
+            messages[-1].metadata["completionCheckpoint"][
+                "unproductiveResumes"
+            ]
+            == 4
+        )
+        state["nodes"][0] = replace(
+            state["nodes"][0],
+            dispatch_fingerprint="new-input",
+        )
+        messages = _queue_completion_resume(driver)
+    assert messages[-1].source == "creator_execution_notice"
+    assert messages[-1].metadata["executionPause"]["reason"] == (
+        "no_committed_progress"
+        if same_generation
+        else "consecutive_resume_limit"
+    )
+
+
+@pytest.mark.parametrize("after_failure", [False, True])
+def test_yolo_deterministic_errors_precede_generic_feedback(
+    completion_resume_runtime,
+    after_failure,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    state["nodes"] = [
+        WorkNode(f"script:{i}", "script", f"剧本 {i}", WorkNodeStatus.STALE)
+        for i in range(9)
+    ] + [
+        WorkNode(
+            "video:prep",
+            "video",
+            "生成准备",
+            WorkNodeStatus.GATED,
+            prompt_sync_required=True,
+        ),
+        WorkNode("video:ready", "video", "视频派发", WorkNodeStatus.READY),
+        WorkNode(
+            "visual:failed",
+            "visual",
+            "角色",
+            WorkNodeStatus.FAILED,
+            error="invalid reference",
+        ),
+    ]
+    state["failures"] = {
+        "video:prep": "PROMPT_PREPARATION_FAILED",
+        "video:ready": "reference budget exceeded",
+    }
+    feedback = _queue_completion_resume(driver, after_failure=after_failure)[
+        -1
+    ]
+    text = feedback.content_parts[0].text
+    assert "PROMPT_PREPARATION_FAILED" in text
+    assert "reference budget exceeded" in text
+    assert "invalid reference" in text
+    assert text.index("PROMPT_PREPARATION_FAILED") < text.index("剧本 0")
+    assert text.index("invalid reference") < text.index("剧本 0")
+    assert "剧本 5" not in text
+    assert feedback.metadata["modelRequiredNodes"][:3] == [
+        "video:prep",
+        "video:ready",
+        "visual:failed",
+    ]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [WorkNodeStatus.READY, WorkNodeStatus.GATED],
+)
+def test_yolo_scheduler_failure_alone_is_actionable(
+    completion_resume_runtime,
+    status,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    state["nodes"][0] = replace(
+        state["nodes"][0],
+        status=status,
+        missing=(),
+        authored_text_gap=False,
+        prompt_sync_required=True,
+    )
+    state["failures"] = {"video:ep1": "PROMPT_PREPARATION_FAILED"}
+    feedback = _queue_completion_resume(driver)[-1]
+    assert feedback.source == driver.YOLO_RESUME_SOURCE
+    assert "PROMPT_PREPARATION_FAILED" in feedback.content_parts[0].text
+    state["failures"]["video:ep1"] = "another deterministic error"
+    feedback = _queue_completion_resume(driver)[-1]
+    assert (
+        feedback.metadata["completionCheckpoint"]["unproductiveResumes"] == 1
+    )
+    assert "another deterministic error" in feedback.content_parts[0].text
+    assert (
+        _queue_completion_resume(driver)[-1].metadata["executionPause"][
+            "reason"
+        ]
+        == "no_committed_progress"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [WorkNodeStatus.READY, WorkNodeStatus.RUNNING],
+)
+def test_yolo_machine_only_work_stays_scheduler_owned(
+    completion_resume_runtime,
+    status,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    state["nodes"] = [
+        WorkNode(
+            "video:ep1",
+            "video",
+            "视频",
+            status,
+            command="r2v_generation",
+        ),
+    ]
+    before = services.sessions.list_messages(
+        PROJECT_ID,
+        SESSION_ID,
+        limit=None,
+    )
+    assert _queue_completion_resume(driver) == before
+    assert state["wakes"] == [PROJECT_ID]
+    assert not driver._wake.is_set()
+
+
+def test_yolo_transient_failure_without_nodes_still_gets_bounded_resume(
+    completion_resume_runtime,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    state["nodes"] = []
+    messages = _queue_completion_resume(driver, after_failure=True)
+    assert messages[-1].source == driver.YOLO_RESUME_SOURCE
+    assert "瞬态故障" in messages[-1].content_parts[0].text
+    messages = _queue_completion_resume(driver, after_failure=True)
+    assert (
+        messages[-1].metadata["executionPause"]["reason"]
+        == "no_committed_progress"
     )
 
 
@@ -3959,14 +4859,29 @@ def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
     )
 
 
-@pytest.mark.parametrize(
-    "reason",
-    ["no_committed_progress", "media_budget_exhausted"],
-)
-def test_yolo_pause_reasons_are_durable_not_new_model_requests(
+@pytest.mark.parametrize("completion_resume_runtime", [250], indirect=True)
+def test_yolo_resumes_after_many_historical_media_tasks(
+    completion_resume_runtime,
+):
+    _services, driver, state = completion_resume_runtime
+    history = driver.executions.list_tasks(PROJECT_ID)
+    assert len(history) == 250
+    assert all(task.kind is TaskKind.IMAGE_GENERATION for task in history)
+
+    messages = _queue_completion_resume(driver)
+
+    assert state["wakes"] == [PROJECT_ID]
+    assert messages[-1].source == driver.YOLO_RESUME_SOURCE
+    assert messages[-1].metadata["modelRequiredNodes"] == ["video:ep1"]
+    assert not any(
+        item.source == "creator_execution_notice" for item in messages
+    )
+    assert driver._wake.is_set()
+
+
+def test_yolo_no_progress_pause_is_durable_not_a_new_model_request(
     tmp_path,
     monkeypatch,
-    reason,
 ):
     services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
     driver = _driver(services, lambda *_args: AgentModelTurn())
@@ -3995,26 +4910,15 @@ def test_yolo_pause_reasons_are_durable_not_new_model_requests(
         "wake",
         lambda _project_id: None,
     )
-    if reason == "no_committed_progress":
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            source=driver.YOLO_RESUME_SOURCE,
-            content_parts=[{"type": "text", "text": "修正输入文本"}],
-            metadata={"projectGeneration": snapshot.generation},
-        )
-    else:
-
-        def exhausted(*_args):
-            raise driver_module.MediaCallBudgetExhausted("used budget")
-
-        monkeypatch.setattr(
-            driver_module,
-            "ensure_media_call_budget",
-            exhausted,
-        )
+    services.sessions.append_message(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        role="user",
+        source=driver.YOLO_RESUME_SOURCE,
+        content_parts=[{"type": "text", "text": "修正输入文本"}],
+        metadata={"projectGeneration": snapshot.generation},
+    )
     before = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
     asyncio.run(
         driver._queue_yolo_completion_resume(
@@ -4029,7 +4933,10 @@ def test_yolo_pause_reasons_are_durable_not_new_model_requests(
         m.message_id for m in after if m.role == "user"
     ]
     assert after[-1].source == "creator_execution_notice"
-    assert after[-1].metadata["executionPause"]["reason"] == reason
+    assert (
+        after[-1].metadata["executionPause"]["reason"]
+        == "no_committed_progress"
+    )
     assert not driver._wake.is_set()
 
 
@@ -4051,9 +4958,9 @@ def test_yolo_does_not_resume_while_scheduler_owns_remaining_work(
         status=status,
         command="GENERATE_TIMELINE_SCRIPT",
         target_ref="timeline:main",
-        regeneration_of="old-script"
-        if status is WorkNodeStatus.STALE
-        else None,
+        regeneration_of=(
+            "old-script" if status is WorkNodeStatus.STALE else None
+        ),
     )
     monkeypatch.setattr(
         driver_module,
@@ -4410,7 +5317,9 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
                     SESSION_ID,
                     CONVERSATION_ID,
                     role="user",
-                    content_parts=[{"type": "text", "text": "旧分镜自动审阅结果"}],
+                    content_parts=[
+                        {"type": "text", "text": "旧分镜自动审阅结果"},
+                    ],
                     source="run_review_feedback",
                     channel=MessageChannel.RUNTIME,
                 )
@@ -4438,7 +5347,10 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
         requests[-1].message_seq,
     ]
     assert len(received) == 1
-    assert "还要让酒瓶与张东身份图" in received[0].split("CURRENT_USER_REQUEST=")[-1]
+    assert (
+        "还要让酒瓶与张东身份图"
+        in received[0].split("CURRENT_USER_REQUEST=")[-1]
+    )
     # Automated findings remain available as context, without an obsolete
     # paid repair being dispatched ahead of either human request.
     assert "run_review_feedback" in received[0]
@@ -5568,7 +6480,10 @@ def test_upload_joining_a_live_run_starts_understanding(
                         CONVERSATION_ID,
                         role="user",
                         content_parts=[
-                            {"type": "text", "text": "我刚上传了噜噜的参考素材"},
+                            {
+                                "type": "text",
+                                "text": "我刚上传了噜噜的参考素材",
+                            },
                         ],
                         source="user",
                         channel=MessageChannel.AGENTDOCK,
@@ -5813,6 +6728,29 @@ def test_startup_sweep_discovers_ids_without_reading_documents(
     assert calls == []
 
 
+def test_transient_run_failures_are_classified_by_type_not_wording() -> None:
+    """Lock contention must count as retryable, and wording must not decide.
+
+    Field case: an export died on LockTimeoutError inside the catch-all
+    branch, which hardcoded retryable=False, so YOLO never retried a failure
+    that had changed nothing at all -- the Project sat at 本次执行未完成 with
+    nothing willing to try again.
+
+    The other half matters equally: a provider refusal or a validation fault
+    must not be swept into this bucket, because those wait for a human by
+    design.
+    """
+
+    from domain.errors import ValidationError
+    from services.runtime_files.errors import LockTimeoutError
+
+    transient = FileCreatorAgentRuntime.TRANSIENT_RUN_FAILURES
+    assert LockTimeoutError in transient
+    assert TimeoutError in transient
+    assert ConnectionError in transient
+    # One entry covers the lock family, so no message matching is needed.
+    assert issubclass(LockTimeoutError, TimeoutError)
+    assert not issubclass(ValidationError, transient)
 
 
 def test_recalled_media_arrives_after_its_own_tool_group(

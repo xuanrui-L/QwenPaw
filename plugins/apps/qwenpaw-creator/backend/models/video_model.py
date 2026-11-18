@@ -24,7 +24,7 @@ from models.media_transport import (
     reference_media_data_url,
     upload_reference_file_for_provider,
 )
-from models.provider_errors import gateway_error_code, retryable_for_status
+from models.provider_errors import retryable_for_status
 from models.retry_timing import backoff_seconds
 from models.video_capabilities import (
     HAPPYHORSE_MAX_DURATION_SECONDS,
@@ -253,7 +253,6 @@ async def _resolve_reference_media_url(
                 media_type=media_type,
                 base_url=model_config.get_video_base_url(),
                 protocol=model_config.get_video_protocol(),
-                allow_inline=False,
             )
             logger.info(
                 f"Uploaded reference media to provider storage | backend={backend}, "
@@ -1338,11 +1337,6 @@ async def submit_video_task(
         f"media={len(media)}, protocol={backend_key}",
     )
 
-    configured_gateway = model_config.is_agentscope_gateway(
-        model_config.get_video_protocol(),
-        url,
-    )
-    gateway = configured_gateway
     try:
         async with httpx.AsyncClient(timeout=submit_timeout) as client:
             resp = None
@@ -1353,27 +1347,22 @@ async def submit_video_task(
                         headers=submit_headers,
                         json=body,
                     )
-                    gateway = configured_gateway or (
-                        resp.status_code >= 400
-                        and bool(gateway_error_code(resp.text))
-                    )
-                    if gateway:
-                        if (
-                            not retryable_for_status(
-                                resp.status_code, resp.text
-                            )
-                            or attempt == MAX_RETRIES - 1
-                        ):
-                            break
-                        wait = backoff_seconds(
-                            attempt,
-                            base=RETRY_BACKOFF_BASE,
-                            headers=resp.headers,
+                    # A gateway error code decides when the body carries one and
+                    # the status decides otherwise, so an nginx 503 is retried
+                    # rather than ending the task on its first attempt.
+                    if (
+                        not retryable_for_status(
+                            resp.status_code,
+                            resp.text,
                         )
-                    elif resp.status_code == 429:
-                        wait = RETRY_BACKOFF_BASE * (attempt + 1)
-                    else:
+                        or attempt == MAX_RETRIES - 1
+                    ):
                         break
+                    wait = backoff_seconds(
+                        attempt,
+                        base=RETRY_BACKOFF_BASE,
+                        headers=resp.headers,
+                    )
                     logger.warning(
                         f"Video submit retryable HTTP {resp.status_code}, "
                         f"retrying in {wait}s (attempt {attempt+1}/{MAX_RETRIES})",
@@ -1449,7 +1438,7 @@ async def submit_video_task(
                 model_name=effective_model,
                 # A name the endpoint does not publish will not appear on a
                 # retry, and each submit attempt costs a provider round trip.
-                retryable=not gateway,
+                retryable=False,
             )
         # Keep a long enough response body: error codes such as content
         # moderation appear after ~200 characters, and truncating too short
@@ -1461,10 +1450,9 @@ async def submit_video_task(
             # 4xx are permanent; a gateway error code is a better signal than
             # the status alone, because this proxy reports deterministic
             # failures as 502 with retryable:true.
-            retryable=(
-                retryable_for_status(e.response.status_code, e.response.text)
-                if gateway
-                else True
+            retryable=retryable_for_status(
+                e.response.status_code,
+                e.response.text,
             ),
         )
     except ModelError:
@@ -1665,7 +1653,7 @@ async def check_task_status(task_id: str) -> dict:
         raise ModelError(
             f"Task status check failed with status {status_code}",
             model_name=model_name,
-            retryable=status_code >= 500 or status_code == 429,
+            retryable=retryable_for_status(status_code, e.response.text),
         )
     except Exception as e:
         logger.error(f"Task status check failed | task_id={task_id}: {e}")

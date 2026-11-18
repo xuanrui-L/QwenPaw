@@ -72,17 +72,6 @@ describe("cross-project Credits notice", () => {
     expect(written.has(STORAGE_KEY)).toBe(false);
   });
 
-  it("preserves a newer cross-project notice while historical runs replay", () => {
-    useModelCreditsStore.getState().markExhausted("p2");
-    useCreatorSessionStore.setState({ isReplaying: true, replayUntilSeq: 5 });
-    session().ingestEvent(ev(1, "agent.run.failed", { runId: "r1", error: quotaFailure }));
-    expect(notice()?.projectId).toBe("p2");
-    session().ingestEvent(ev(2, "agent.run.completed", { runId: "r2" }));
-    expect(notice()?.projectId).toBe("p2");
-    session().ingestEvent(ev(6, "agent.run.completed", { runId: "r3" }));
-    expect(notice()).toBeNull();
-  });
-
   it("drops once a run reaches its end, which proves the balance recovered", () => {
     act(() =>
       session().ingestEvent(

@@ -70,8 +70,7 @@ from .json_pointer import (
 )
 from .locator_map import derive_ui_locator
 from .models import CURRENT_PROJECT_SCHEMA_VERSION, Project
-from .linear_document import without_empty_extensions
-from .serialization import project_edit_document, project_etag
+from .serialization import project_etag
 from .review_bookkeeping import is_human_review_change
 from .store import ProjectSnapshot, ProjectStore
 from .transaction_index import (
@@ -284,7 +283,7 @@ def _snapshot_document(snapshot: ProjectSnapshot) -> dict[str, Any]:
         and source.get("schema_version") == CURRENT_PROJECT_SCHEMA_VERSION
     ):
         return copy.deepcopy(dict(source))
-    return without_empty_extensions(_json(snapshot.project))
+    return _json(snapshot.project)
 
 
 def _snapshot_store(path: Path) -> AtomicJsonRecordStore[dict[str, Any]]:
@@ -430,8 +429,9 @@ class ProjectCommitBoundary:
         ) = None,
         production_stage_confirmation: str | None = None,
         prompt_sync_expected_etag: str | None = None,
-        prompt_sync_context_validator: Callable[[dict[str, Any]], None]
-        | None = None,
+        prompt_sync_context_validator: (
+            Callable[[dict[str, Any]], None] | None
+        ) = None,
         _order_lock_held: bool = False,
         _lifecycle_lock_held: bool = False,
     ) -> ProjectCommitResult:
@@ -453,8 +453,7 @@ class ProjectCommitBoundary:
         # as base.json below.
         base_data = _json(base.project)
         candidate_data = copy.deepcopy(dict(candidate))
-        stored_candidate = without_empty_extensions(candidate_data)
-        candidate_etag = _candidate_hash(stored_candidate)
+        candidate_etag = _candidate_hash(candidate_data)
         requested = diff_json(base_data, candidate_data)
         protected = sorted(
             {
@@ -527,7 +526,6 @@ class ProjectCommitBoundary:
                     round_record=round_record,
                     base_etag=base.etag,
                     candidate_etag=candidate_etag,
-                    candidate=stored_candidate,
                     advance_accepted_baseline=advance_accepted_baseline,
                 )
             aggregate_round_store = AtomicJsonRecordStore(
@@ -563,11 +561,7 @@ class ProjectCommitBoundary:
             transactions_root = transaction_root.parent
             transactions_root.mkdir(parents=True, exist_ok=True)
             staging_root = runtime_root / "temp" / "transactions"
-            if is_link_path(staging_root.parent):
-                raise ProjectCommitError(
-                    "Runtime temp path must be a real directory"
-                )
-            staging_root.mkdir(mode=0o700, exist_ok=True, parents=True)
+            staging_root.mkdir(mode=0o700, exist_ok=True)
             if is_link_path(staging_root) or not staging_root.is_dir():
                 raise ProjectCommitError(
                     "Project transaction staging path must be a real directory",
@@ -586,7 +580,7 @@ class ProjectCommitBoundary:
                 )
                 _snapshot_store(
                     staged_transaction / "candidate.json",
-                ).write(stored_candidate)
+                ).write(candidate_data)
                 AtomicJsonRecordStore(
                     staged_transaction / "journal.json",
                     ProjectCommitJournal,
@@ -680,14 +674,18 @@ class ProjectCommitBoundary:
                 ):
                     from domain.errors import ConflictError
 
-                    raise ConflictError("剧本已更新，请查看最新内容后重新确认。")
+                    raise ConflictError(
+                        "剧本已更新，请查看最新内容后重新确认。",
+                    )
                 if (
                     prompt_sync_expected_etag is not None
                     and latest.etag != prompt_sync_expected_etag
                 ):
                     from domain.errors import ConflictError
 
-                    raise ConflictError("项目在保存同步结果时已更新，请按最新内容重新生成")
+                    raise ConflictError(
+                        "项目在保存同步结果时已更新，请按最新内容重新生成",
+                    )
                 latest_doc = _snapshot_document(latest)
                 latest_data = _json(latest.project)
                 if prompt_sync_context_validator is not None:
@@ -756,7 +754,7 @@ class ProjectCommitBoundary:
                         merged,
                         context={"reject_retired_authoring_fields": True},
                     )
-                    final_data = without_empty_extensions(_json(final_project))
+                    final_data = _json(final_project)
                     pre_publish_etag = latest.etag
                     expected_final_etag = project_etag(final_project)
                     _snapshot_store(
@@ -1048,7 +1046,6 @@ class ProjectCommitBoundary:
         round_record: ChangeRoundRecord,
         base_etag: str,
         candidate_etag: str,
-        candidate: dict[str, Any],
         advance_accepted_baseline: bool,
     ) -> None:
         entry_stat = transaction_root.lstat()
@@ -1083,26 +1080,12 @@ class ProjectCommitBoundary:
             or journal.project_id != project_id
             or journal.round_id != round_record.round_id
             or journal.base_etag != base_etag
+            or journal.candidate_etag != candidate_etag
             or journal.advance_accepted_baseline != advance_accepted_baseline
         ):
             raise ProjectCommitError(
                 f"Project transaction already exists: {transaction_id}",
             )
-        if journal.candidate_etag != candidate_etag:
-            # An old writer hashed its full editing view. Verify its original
-            # hash before comparing the two candidates using today's defaults.
-            previous = _snapshot_store(
-                transaction_root / "candidate.json"
-            ).read()
-            if (
-                not isinstance(previous, dict)
-                or _candidate_hash(previous) != journal.candidate_etag
-                or _candidate_hash(project_edit_document(previous))
-                != _candidate_hash(project_edit_document(candidate))
-            ):
-                raise ProjectCommitError(
-                    f"Project transaction already exists: {transaction_id}"
-                )
         archive_root = runtime_root / "transaction-history" / "aborted"
         archive_root.mkdir(parents=True, exist_ok=True)
         archive = archive_root / f"{transaction_id}.{uuid4().hex}"
@@ -1261,6 +1244,21 @@ class ProjectCommitBoundary:
                     f"{journal.transaction_id}",
                 )
         record_transaction_scan(transactions_root, plan, observed_states)
+        # A container that is never restarted never ran the startup sweep,
+        # so commit history asks for its own collection once it outgrows the
+        # threshold. This runs before the current transaction exists, which is
+        # what keeps the sweep off the committing thread's critical path.
+        #
+        # Imported here rather than at module level on purpose:
+        # transaction_gc reaches services.media_files, whose package init
+        # reaches this module back through project_files.facade -- a module
+        # level edge here closes that cycle and breaks plugin installation.
+        from .transaction_gc import request_project_sweep
+
+        request_project_sweep(
+            runtime_root.parent,
+            directory_count=plan.directory_count,
+        )
 
     def _finalize_no_change(
         self,
@@ -1579,9 +1577,11 @@ class ProjectCommitBoundary:
                     if live_hash != operation.after_hash:
                         operation = operation.model_copy(
                             update={
-                                "after": None
-                                if live_value is MISSING
-                                else live_value,
+                                "after": (
+                                    None
+                                    if live_value is MISSING
+                                    else live_value
+                                ),
                                 "after_hash": live_hash,
                             },
                         )

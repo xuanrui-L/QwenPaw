@@ -131,7 +131,7 @@ router = APIRouter(
     tags=["projects"],
     route_class=_RemovedProjectPutRoute,
 )
-storage_router = APIRouter(
+archive_router = APIRouter(
     prefix="/projects",
     tags=["projects"],
     route_class=CreatorErrorRoute,
@@ -339,7 +339,7 @@ def _existing_copy_receipt(
     return {"projectId": target_project_id}
 
 
-@storage_router.get("")
+@router.get("")
 async def list_projects(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -799,7 +799,8 @@ async def set_subtitle_style(
             or "subtitle_style" in request.model_fields_set
         ):
             raise ValidationError(
-                "elementIds 只能配合入场/出场/循环选择；" "风格包与覆盖样式始终作用于全项目字幕。",
+                "elementIds 只能配合入场/出场/循环选择；"
+                "风格包与覆盖样式始终作用于全项目字幕。",
             )
         # A present key is authoritative, so the UI can also go back:
         # ``null``/``""`` mean smart recommend and an explicit ``null`` style
@@ -844,7 +845,6 @@ async def set_subtitle_style(
             stored, indexed = externalize_motion_document(document, file_store)
             indexed_files[indexed.file_id] = indexed
             return stored.model_dump(mode="json")
-
         timelines = candidate["timelines"]["items"]
         # The caption boxes are validated against the same canvas the design
         # pass and the renderer use, so a switch here cannot bake a document
@@ -1038,13 +1038,6 @@ async def delete_project(
     from api.file_session_routes import _cancel_detached_project_tasks
 
     _cancel_detached_project_tasks(services, project_id)
-    # Release the poller and the per-project log before the directory
-    # rename. On Windows an open creator.log inside the tree makes
-    # os.replace fail with WinError 5.
-    services.poller.close(project_id)
-    from utils.logger import close_creator_project_logging
-
-    close_creator_project_logging(project_id)
     try:
         await asyncio.to_thread(
             services.projects.delete,
@@ -1055,9 +1048,9 @@ async def delete_project(
         pass
     except (ProjectIntegrityError, ProjectStoreError) as exc:
         raise StorageIntegrityError(str(exc)) from exc
-    # Cancellation only signals workers; a late project-scoped emit can
-    # reopen the log between the pre-delete close and rename. Drop that
-    # handler again so deleted projects do not keep an open target.
+    services.poller.close(project_id)
+    from utils.logger import close_creator_project_logging
+
     close_creator_project_logging(project_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -1264,7 +1257,7 @@ async def copy_project(
 # pylint: enable=too-many-statements
 
 
-@storage_router.get("/{project_id}/export")
+@archive_router.get("/{project_id}/export")
 async def export_project(
     project_id: str,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
@@ -1451,7 +1444,7 @@ async def _run_import(upload) -> str:
         )
 
 
-@storage_router.post("/import")
+@archive_router.post("/import")
 async def import_project(
     request: Request,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),

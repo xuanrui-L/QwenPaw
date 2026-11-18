@@ -93,6 +93,8 @@ export function getVideoCapabilities(
   return creatorRequest(`/models/video-capabilities?${query.toString()}`);
 }
 
+export type TtsProvider = "bailian" | "gateway";
+
 export interface TtsModelCapability {
   model: string;
   label: string;
@@ -101,7 +103,7 @@ export interface TtsModelCapability {
   systemVoices: string[];
   supportsDesign: boolean;
   /** Endpoints that actually serve this model. */
-  providers?: string[];
+  providers: TtsProvider[];
 }
 
 export interface TtsCapabilities {

@@ -3,7 +3,7 @@
 # pylint: disable=line-too-long
 """SSE normalization for OpenAI-compatible chat calls.
 
-An OpenAI-compatible gateway can answer ``POST /v1/chat/completions`` with
+The AgentScope proxy answers ``POST /v1/chat/completions`` with
 ``text/event-stream`` even when ``stream`` was never requested, so the fold has
 to reproduce the non-streaming shape exactly - and must not turn a reasoning
 model's thinking trace into the assistant answer.
@@ -206,7 +206,7 @@ def test_error_frame_inside_a_200_stream_is_raised() -> None:
     body = _frames(_chunk("半句")) + _frames(
         {
             "error": {
-                "code": "PROVIDER.UPSTREAM.ERROR",
+                "code": "ASP.UPSTREAM.ERROR",
                 "message": "上游返回错误",
                 "retryable": True,
             },
@@ -218,7 +218,7 @@ def test_error_frame_inside_a_200_stream_is_raised() -> None:
         _decode(body)
 
     message = str(excinfo.value)
-    assert "PROVIDER.UPSTREAM.ERROR" in message
+    assert "ASP.UPSTREAM.ERROR" in message
     assert "req-42" in message
     # The proxy marks even deterministic stream errors retryable; the fold
     # decides, not the field.
@@ -226,7 +226,7 @@ def test_error_frame_inside_a_200_stream_is_raised() -> None:
 
 
 def test_html_shell_is_reported_as_a_wrong_endpoint() -> None:
-    shell = "<!doctype html>\n<html><head><title>Account settings</title></head><body></body></html>"
+    shell = "<!doctype html>\n<html><head><title>AgentScope</title></head><body></body></html>"
 
     for content_type in ("text/html", "application/octet-stream"):
         with pytest.raises(ModelError) as excinfo:
