@@ -32,6 +32,7 @@ import {
   isQuotaErrorCode,
   markCreditsExhausted,
   markSnapshotCredits,
+  observeSessionAfterCreditsDismissal,
   useModelCreditsStore,
 } from "@/store/modelCreditsStore";
 
@@ -531,6 +532,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       response: Awaited<ReturnType<typeof getCreatorSession>>,
       generation: number,
       current: CreatorSessionState,
+      readSequence: number,
       reopening = false,
     ): Partial<CreatorSessionState> => {
       if (
@@ -560,6 +562,9 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       // The Credits notice lives across projects while this snapshot belongs to
       // one of them, so re-adopting a session that still carries the refusal is
       // what keeps the navigation bar honest after a reload.
+      const afterDismissal =
+        readSequence > useModelCreditsStore.getState().lastReadAtDismissal;
+      if (afterDismissal) observeSessionAfterCreditsDismissal(response.session);
       if (isQuotaErrorCode(response.session.error?.code)) {
         const refusedAt = response.session.error?.details?.refusedAt;
         markSnapshotCredits(
@@ -568,7 +573,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             sessionId: response.session.id,
             at: typeof refusedAt === "string" ? refusedAt : undefined,
           },
-          { reopening, status: response.session.status },
+          reopening && afterDismissal,
         );
       }
       const currentProgressSeq =
@@ -809,8 +814,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 sessionResponse,
                 sessionGeneration,
                 current,
-                creatorReadSequence(sessionRead) >
-                  useModelCreditsStore.getState().lastReadAtDismissal,
+                creatorReadSequence(sessionRead),
+                true,
               ),
               conversations,
               activeConversationId,
@@ -1031,9 +1036,16 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
         const { projectId } = get();
         if (!projectId) return;
         const generation = ++sessionRefreshGeneration;
-        const response = await getCreatorSession(projectId);
+        const read = getCreatorSession(projectId);
+        const response = await read;
         set((current) =>
-          sessionResponsePatch(projectId, response, generation, current),
+          sessionResponsePatch(
+            projectId,
+            response,
+            generation,
+            current,
+            creatorReadSequence(read),
+          ),
         );
       },
 

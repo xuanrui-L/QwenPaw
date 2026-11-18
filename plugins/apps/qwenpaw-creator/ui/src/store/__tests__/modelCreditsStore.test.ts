@@ -585,6 +585,67 @@ describe("cross-project Credits notice", () => {
     },
   );
 
+  it.each(["before", "after"] as const)(
+    "keeps old SSE hidden when a legacy cursor fails %s its delivery",
+    async (order) => {
+      const { fetchMock } = installMockFetch(
+        bootstrapRoutes({ session: { status: "CANCELLED", lastEventSeq: 11 } }),
+      );
+      let finish!: (value: Response) => void;
+      fetchMock.mockReturnValueOnce(
+        new Promise<Response>((done) => {
+          finish = done;
+        }),
+      );
+      const failRead = () =>
+        act(async () => {
+          finish(Response.json({}, { status: 503 }));
+        });
+      useModelCreditsStore.setState({
+        notice: { projectId: "p1", at: "2099-01-01" },
+      });
+      useModelCreditsStore.getState().clear();
+      if (order === "before") await failRead();
+      // An older shared open had only seen seq 4. From that stream seq 7
+      // looks live, although the server had already stopped at seq 11.
+      useCreatorSessionStore.setState({
+        session: sessionView({ lastEventSeq: 4 }),
+        replayUntilSeq: 4,
+      });
+      session().ingestEvent(ev(7, "agent.run.failed", { error: quotaFailure }));
+      expect(notice()).toBeNull();
+      if (order === "after") await failRead();
+      await session().refreshSession();
+      expect(notice()).toBeNull();
+      expect(useModelCreditsStore.getState().dismissed?.source?.seq).toBe(11);
+      session().ingestEvent(
+        ev(12, "agent.run.failed", { error: quotaFailure }),
+      );
+      expect(notice()?.source?.seq).toBe(12);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("uses a fresh quota-error poll even if its matching live event arrives after the 503", async () => {
+    const at = "2026-11-18T10:00:00Z";
+    const error = { ...quotaFailure, details: { refusedAt: at } };
+    const { fetchMock } = installMockFetch(
+      bootstrapRoutes({ session: { status: "ERROR", lastEventSeq: 7, error } }),
+    );
+    fetchMock.mockResolvedValueOnce(Response.json({}, { status: 503 }));
+    useModelCreditsStore.setState({
+      notice: { projectId: "p1", at: "2099-01-01" },
+    });
+    await act(async () => {
+      useModelCreditsStore.getState().clear();
+    });
+    await session().refreshSession();
+    expect(notice()).toBeNull();
+    session().ingestEvent({ ...ev(7, "agent.run.failed", { error }), at });
+    expect(notice()?.source?.seq).toBe(7);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["ERROR", "CANCELLED", "RUNNING"] as const)(
     "uses the active %s state if a legacy dismissal cursor is unavailable",
     async (status) => {
