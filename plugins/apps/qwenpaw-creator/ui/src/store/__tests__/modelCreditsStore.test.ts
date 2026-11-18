@@ -122,6 +122,51 @@ describe("cross-project Credits notice", () => {
     expect(notice()).toBeNull();
   });
 
+  it("clears a persisted refusal when replay reaches a later success in the same session", () => {
+    session().ingestEvent(ev(4, "agent.run.failed", { error: quotaFailure }));
+    expect(JSON.parse(written.get(STORAGE_KEY)!)).toMatchObject({
+      source: { seq: 4 },
+    });
+    session().reset();
+    useCreatorSessionStore.setState({
+      projectId: "p1",
+      session: sessionView({ lastEventSeq: 7 }),
+      isReplaying: true,
+      replayUntilSeq: 7,
+    });
+    session().ingestEvent(ev(3, "agent.run.completed"));
+    expect(notice()?.projectId).toBe("p1");
+    session().ingestEvent(ev(7, "agent.run.completed"));
+    expect(notice()).toBeNull();
+    expect(written.has(STORAGE_KEY)).toBe(false);
+  });
+
+  it("orders another project's replay by server time", () => {
+    const time = (minute: number) =>
+      new Date(Date.UTC(2026, 9, 1, 12, minute)).toISOString();
+    session().ingestEvent({
+      ...ev(10, "agent.run.failed", { error: quotaFailure }),
+      at: time(2),
+    });
+    session().reset();
+    useCreatorSessionStore.setState({
+      projectId: "p2",
+      session: sessionView({ id: "s2", projectId: "p2", lastEventSeq: 2 }),
+      isReplaying: true,
+      replayUntilSeq: 2,
+    });
+    const completed = (seq: number, minute: number) => ({
+      ...ev(seq, "agent.run.completed"),
+      projectId: "p2",
+      creatorSessionId: "s2",
+      at: time(minute),
+    });
+    session().ingestEvent(completed(1, 1));
+    expect(notice()?.projectId).toBe("p1");
+    session().ingestEvent(completed(2, 3));
+    expect(notice()).toBeNull();
+  });
+
   it("keeps the original timestamp while the same project keeps failing", () => {
     useModelCreditsStore.getState().markExhausted("p1");
     const raisedAt = notice()?.at;

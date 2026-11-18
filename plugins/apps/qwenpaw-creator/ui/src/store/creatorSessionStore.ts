@@ -25,7 +25,7 @@ import {
 } from "@/lib/creatorMessagePresentation";
 import i18n from "@/i18n";
 import {
-  clearCreditsNotice,
+  clearCreditsAfterCompletion,
   isQuotaErrorCode,
   markCreditsExhausted,
 } from "@/store/modelCreditsStore";
@@ -521,7 +521,11 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       // one of them, so re-adopting a session that still carries the refusal is
       // what keeps the navigation bar honest after a reload.
       if (isQuotaErrorCode(response.session.error?.code)) {
-        markCreditsExhausted(response.session.projectId);
+        markCreditsExhausted(projectId, {
+          sessionId: response.session.id,
+          seq: response.session.lastEventSeq,
+          at: response.session.updatedAt,
+        });
       }
       const currentProgressSeq =
         current.agentStatusBar?.progress.sourceEventSeq ?? -1;
@@ -1574,11 +1578,19 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               event.type === "agent.run.completed"
             ) {
               const terminalRunId = eventString(event.data, "runId");
-              if (event.type === "agent.run.completed" && !historical) {
+              if (event.type === "agent.run.completed") {
                 // A run that reaches its end spent Credits, so the balance
                 // recovered: leaving the notice up would accuse every other
                 // project of a condition that just stopped being true.
-                clearCreditsNotice();
+                clearCreditsAfterCompletion(
+                  event.projectId,
+                  {
+                    sessionId: event.creatorSessionId,
+                    seq: event.seq,
+                    at: event.at,
+                  },
+                  !historical && event.seq > (session?.lastEventSeq ?? 0),
+                );
               }
               if (rateLimitRetry?.runId === terminalRunId)
                 rateLimitRetry = null;
@@ -1620,7 +1632,11 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                   };
                 }
                 if (isQuotaErrorCode(errorPayload?.code)) {
-                  markCreditsExhausted(session.projectId);
+                  markCreditsExhausted(session.projectId, {
+                    sessionId: event.creatorSessionId,
+                    seq: event.seq,
+                    at: event.at,
+                  });
                 }
               }
             }

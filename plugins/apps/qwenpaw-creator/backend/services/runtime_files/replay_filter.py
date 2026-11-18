@@ -191,6 +191,8 @@ def replay_noise_line(line: bytes) -> bool:
 
 def make_replay_noise_line(
     active_run_ids: Iterable[str] = (),
+    *,
+    drop_types: frozenset[str] = REPLAY_SKIP_TYPES,
 ) -> "Callable[[bytes], bool]":
     """Byte-level classifier that spares deltas of still-active runs.
 
@@ -209,7 +211,7 @@ def make_replay_noise_line(
     """
 
     ids = sorted({run_id for run_id in active_run_ids if run_id})
-    if not ids:
+    if not ids and drop_types is REPLAY_SKIP_TYPES:
         return replay_noise_line
     active_markers: tuple[bytes, ...] = tuple(
         pattern
@@ -222,7 +224,7 @@ def make_replay_noise_line(
     )
 
     def is_noise(line: bytes) -> bool:
-        if _outer_event_type(line) not in REPLAY_SKIP_TYPES:
+        if _outer_event_type(line) not in drop_types:
             return False
         # The active-set check stays a substring test on purpose: a
         # false positive here only keeps a delta that could have been
@@ -281,6 +283,7 @@ def filter_replay_events(
     *,
     active_run_ids: Iterable[str] = (),
     result_max_bytes: int = DEFAULT_RESULT_MAX_BYTES,
+    drop_types: frozenset[str] = REPLAY_SKIP_TYPES,
 ) -> list[SessionEventRecord]:
     """Drop historical streaming deltas and summarize oversized results.
 
@@ -296,7 +299,7 @@ def filter_replay_events(
     kept: list[SessionEventRecord] = []
     for event in events:
         payload = event.payload or {}
-        if event.event_type in REPLAY_SKIP_TYPES:
+        if event.event_type in drop_types:
             if _run_id(payload) in active:
                 kept.append(event)
             continue

@@ -450,6 +450,37 @@ def test_startup_schedules_memory_workers_only_after_recovery(
     asyncio.run(scenario())
 
 
+def test_shutdown_joins_recovered_workers_and_leaves_their_task_resumable(
+    tmp_path,
+    monkeypatch,
+):
+    service = _service(tmp_path)
+    job = _build_job(tmp_path)
+    queued = _running_task(tmp_path)
+    queued.status = TaskStatus.QUEUED
+    service.executions = _RecordingExecutions(queued)
+    monkeypatch.setattr(service, "_recoverable_jobs", lambda: iter([job]))
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def wait_for_approval(_job):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(service, "_drive", wait_for_approval)
+        await service.resume_interrupted()
+        await started.wait()
+        worker = service._jobs[job.task_id]
+        await service.shutdown()
+        assert worker.cancelled()
+        assert not service._jobs
+        assert service._spawn(job) is None
+
+    asyncio.run(scenario())
+    assert not service.executions.transitions
+
+
 def test_cancel_for_asset_stops_a_live_build_before_its_next_stage(
     tmp_path,
     monkeypatch,

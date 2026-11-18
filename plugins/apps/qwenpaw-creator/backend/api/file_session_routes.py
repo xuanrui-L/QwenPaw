@@ -47,6 +47,7 @@ from services.file_agent_runtime import (
 from services.project_files.facade import CreatorFileServices
 from services.runtime_files.errors import JsonlCorruptionError
 from services.runtime_files.replay_filter import (
+    REPLAY_SKIP_TYPES,
     filter_replay_events,
     make_replay_noise_line,
     replay_filter_enabled,
@@ -224,6 +225,7 @@ def _session_view(session: Any) -> dict[str, Any]:
         "activeGoalId": session.active_goal_id,
         "lastMessageSeq": session.last_message_seq,
         "lastEventSeq": session.last_event_seq,
+        "updatedAt": session.updated_at.isoformat(),
         "lastConsumedMessageSeq": session.last_consumed_message_seq,
         "error": session.error,
     }
@@ -720,6 +722,7 @@ async def stream_events(
         #   constructing the reader lets both layers agree on what to
         #   spare.
         filter_enabled = replay_filter_enabled()
+        drop_types = REPLAY_SKIP_TYPES
         active_run_ids: set[str] = set()
         if filter_enabled:
             specialist_ids = await asyncio.to_thread(
@@ -728,8 +731,9 @@ async def stream_events(
                 project_id,
             )
             if specialist_ids is None:
-                # An in-flight reply may exist only in the raw event history.
-                filter_enabled = False
+                # Only specialist text has unknown ownership. Keep summarizing
+                # historical tool results and dropping settled mainline deltas.
+                drop_types = REPLAY_SKIP_TYPES - {"subagent.message_delta"}
             else:
                 active_run_ids = specialist_ids
             # The mainline agent run carries ``agent.message_delta``
@@ -750,7 +754,7 @@ async def stream_events(
             session.session_id,
             after_seq=cursor,
             skip_noise=(
-                make_replay_noise_line(active_run_ids)
+                make_replay_noise_line(active_run_ids, drop_types=drop_types)
                 if filter_enabled
                 else None
             ),
@@ -805,6 +809,7 @@ async def stream_events(
                             replayed,
                             active_run_ids=active_run_ids,
                             result_max_bytes=result_max_bytes,
+                            drop_types=drop_types,
                         )
                         + live
                     )

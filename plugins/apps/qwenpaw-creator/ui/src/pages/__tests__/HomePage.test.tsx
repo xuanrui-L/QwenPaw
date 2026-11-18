@@ -61,65 +61,77 @@ it("keeps the latest sort when an earlier list arrives last", async () => {
   }
 });
 
-it("keeps the refreshed storage notice after a slower pre-reclaim read", async () => {
-  const items = [
-    {
-      projectId: "sample",
-      name: "Sample",
-      description: "",
-      updatedAt: "2026-11-01",
-      createdAt: "2026-11-01",
-    },
-  ];
-  const profile = (pending: number) => ({
-    autoReclaimMaxBytes: 1,
-    projects: [
+it.each(["here", "another tab"])(
+  "keeps fresh storage when reclaim finishes in %s",
+  async (where) => {
+    const items = [
       {
         projectId: "sample",
-        pendingReclaimBytes: 0,
-        pendingTransactionCleanupBytes: pending,
-        reclaimConfirmedAt: "2026-10-01",
-        historyKeptAt: null,
+        name: "Sample",
+        description: "",
+        updatedAt: "2026-11-01",
+        createdAt: "2026-11-01",
       },
-    ],
-  });
-  const { fetchMock } = installMockFetch([
-    { match: "/projects?", response: { json: { items } } },
-    { match: "/models/config", response: { ok: false, status: 503 } },
-    {
-      match: "/reclaim-history",
-      response: { json: { releasedBytes: 64, transactionBytes: 0 } },
-    },
-  ]);
-  let reads = 0;
-  let finishFocus!: (response: Response) => void;
-  const focusRead = new Promise<Response>((resolve) => {
-    finishFocus = resolve;
-  });
-  vi.stubGlobal("fetch", (input: RequestInfo | URL, options?: RequestInit) => {
-    if (!String(input).includes("/storage/profile"))
-      return fetchMock(input, options);
-    reads++;
-    return reads === 2
-      ? focusRead
-      : Promise.resolve(Response.json(profile(reads === 1 ? 64 : 0)));
-  });
-  render(
-    <MemoryRouter initialEntries={["/?view=projects"]}>
-      <HomePage />
-    </MemoryRouter>,
-  );
-  const retry = await screen.findByRole("button", { name: "继续清理" });
-  fireEvent.focus(window);
-  expect(reads).toBe(2);
-  fireEvent.click(retry);
-  await vi.waitFor(() => expect(reads).toBe(3));
-  fireEvent.focus(window);
-  await act(async () => {
-    finishFocus(Response.json(profile(64)));
-  });
-  expect(screen.queryByRole("button", { name: "继续清理" })).toBeNull();
-});
+    ];
+    const profile = (pending: number) => ({
+      autoReclaimMaxBytes: 1,
+      projects: [
+        {
+          projectId: "sample",
+          pendingReclaimBytes: 0,
+          pendingTransactionCleanupBytes: pending,
+          reclaimConfirmedAt: "2026-10-01",
+          historyKeptAt: null,
+        },
+      ],
+    });
+    const { fetchMock } = installMockFetch([
+      { match: "/projects?", response: { json: { items } } },
+      { match: "/models/config", response: { ok: false, status: 503 } },
+      {
+        match: "/reclaim-history",
+        response: { json: { releasedBytes: 64, transactionBytes: 0 } },
+      },
+    ]);
+    let reads = 0;
+    let finishFocus!: (response: Response) => void;
+    const focusRead = new Promise<Response>((resolve) => {
+      finishFocus = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      (input: RequestInfo | URL, options?: RequestInit) => {
+        if (!String(input).includes("/storage/profile"))
+          return fetchMock(input, options);
+        reads++;
+        return reads === 2
+          ? focusRead
+          : Promise.resolve(Response.json(profile(reads === 1 ? 64 : 0)));
+      },
+    );
+    render(
+      <MemoryRouter initialEntries={["/?view=projects"]}>
+        <HomePage />
+      </MemoryRouter>,
+    );
+    const retry = await screen.findByRole("button", { name: "继续清理" });
+    fireEvent.focus(window);
+    expect(reads).toBe(2);
+    if (where === "here") {
+      fireEvent.click(retry);
+    } else {
+      fireEvent.blur(window);
+      fireEvent.focus(window);
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+    await vi.waitFor(() => expect(reads).toBe(3));
+    fireEvent.focus(window);
+    await act(async () => {
+      finishFocus(Response.json(profile(64)));
+    });
+    expect(screen.queryByRole("button", { name: "继续清理" })).toBeNull();
+  },
+);
 
 it("reloads the list after a project disappears while the same GET is in flight", async () => {
   const items = [

@@ -360,7 +360,6 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
-        await source_memory_service(services).resume_interrupted()
         # Observation/read workers live only in process memory: fail their
         # orphaned QUEUED/RUNNING Tasks closed so waiters see a retryable
         # error instead of polling a record no worker will ever finish.
@@ -372,6 +371,7 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
             recover_interrupted_source_video_reads,
             services,
         )
+        await source_memory_service(services).resume_interrupted()
     except BaseException as exc:
         trace_event(
             "creator.runtime.startup_failed",
@@ -382,13 +382,7 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
                 "error": str(exc),
             },
         )
-        try:
-            await shutdown_file_media_execution_services()
-        finally:
-            try:
-                await stop_creator_agent_runtime()
-            finally:
-                clear_creator_file_service_registry()
+        await _shutdown_file_runtime(services)
         raise
     _file_services = services
     logger.info("QwenPaw Creator file runtime ready at %s", data_root)
@@ -471,6 +465,7 @@ async def _shutdown() -> None:
         "creator.runtime.stopping",
         component="pawapp",
     )
+    services = _file_services
     _file_services = None
     if _maintenance_task is not None:
         # A sweep -- or a collapse child holding a rewritten session file --
@@ -487,16 +482,16 @@ async def _shutdown() -> None:
             await drain_timeline_render_jobs()
         finally:
             try:
-                await _shutdown_file_runtime()
+                await _shutdown_file_runtime(services)
             finally:
                 mem_probe.stop_probe()
 
 
-async def _shutdown_file_runtime() -> None:
+async def _shutdown_file_runtime(services: CreatorFileServices | None) -> None:
     """Stop the media/agent runtime layers in dependency order."""
 
     try:
-        await _drain_source_media_services()
+        await _drain_source_media_services(services)
     finally:
         try:
             await shutdown_file_media_execution_services()
@@ -514,13 +509,19 @@ async def _shutdown_file_runtime() -> None:
                     )
 
 
-async def _drain_source_media_services() -> None:
+async def _drain_source_media_services(
+    services: CreatorFileServices | None,
+) -> None:
     """Terminalize in-flight observation/read Tasks before shutdown."""
 
     try:
         await drain_source_observation_services()
     finally:
-        await drain_source_video_reader_services()
+        try:
+            await drain_source_video_reader_services()
+        finally:
+            if services is not None:
+                await source_memory_service(services).shutdown()
 
 
 # The 'plugin' variable is what PluginLoader looks for.

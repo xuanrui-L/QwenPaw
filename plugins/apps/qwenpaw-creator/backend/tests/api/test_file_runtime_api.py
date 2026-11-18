@@ -348,6 +348,10 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
             "text": "Complete reply",
         },
     )
+    append("agent.message_delta", {"runId": "finished-main", "delta": "old"})
+    append(
+        "subagent.tool_completed", {"result": {"text": "x" * (1024 * 1024)}}
+    )
     if status == SpecialistRunStatus.FAILED:
         append(
             "subagent.failed",
@@ -436,6 +440,10 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
     assert "prefix" in active_delta
     # An available index lets the replay discard the settled run's duplicate.
     assert (3 in seqs) is index_unavailable
+    assert 5 not in seqs
+    summary = next(data for seq, _, data in events if seq == 6)
+    assert "replayTruncated" in summary
+    assert len(summary) < 1024
 
 
 def test_lifecycle_event_embedding_an_event_record_survives_the_filter(

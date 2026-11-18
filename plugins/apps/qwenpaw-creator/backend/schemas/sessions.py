@@ -34,6 +34,7 @@ class CreatorSessionView(StrictModel):
         ge=0,
     )
     last_event_seq: int = Field(alias="lastEventSeq", ge=0)
+    updated_at: str | None = Field(None, alias="updatedAt")
     error: dict[str, Any] | None = None
 
 

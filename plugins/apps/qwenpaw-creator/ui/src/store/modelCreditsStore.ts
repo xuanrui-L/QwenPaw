@@ -23,16 +23,23 @@ const STORAGE_KEY = "qwenpaw-creator:model-credits:v1";
 /** Session error code the runtime reports for a refused Credits spend. */
 export const MODEL_QUOTA_ERROR_CODE = "MODEL_QUOTA_EXCEEDED";
 
+interface CreditsSource {
+  sessionId: string;
+  seq: number;
+  at?: string;
+}
+
 export interface CreditsNotice {
   /** Project whose run last proved the balance is empty. */
   projectId: string;
   /** ISO timestamp of the first refusal seen for that project. */
   at: string;
+  source?: CreditsSource;
 }
 
 interface ModelCreditsState {
   notice: CreditsNotice | null;
-  markExhausted: (projectId: string) => void;
+  markExhausted: (projectId: string, source?: CreditsSource) => void;
   clear: () => void;
 }
 
@@ -51,7 +58,11 @@ function readPersisted(): CreditsNotice | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<CreditsNotice> | null;
     return typeof parsed?.projectId === "string"
-      ? { projectId: parsed.projectId, at: String(parsed.at ?? "") }
+      ? {
+          projectId: parsed.projectId,
+          at: String(parsed.at ?? ""),
+          source: parsed.source,
+        }
       : null;
   } catch {
     return null;
@@ -78,16 +89,46 @@ export function isQuotaErrorCode(code: unknown): code is string {
   return code === MODEL_QUOTA_ERROR_CODE;
 }
 
+// Sequence numbers order events within a session. Across sessions the server
+// timestamp orders them; v1 notices without a source retain their observed time.
+function newerThanNotice(
+  notice: CreditsNotice,
+  projectId: string,
+  source: CreditsSource,
+  live: boolean,
+): boolean {
+  if (
+    notice.projectId === projectId &&
+    notice.source?.sessionId === source.sessionId
+  ) {
+    return source.seq > notice.source.seq;
+  }
+  const previous = Date.parse(notice.source?.at ?? notice.at);
+  const incoming = Date.parse(source.at ?? "");
+  return Number.isFinite(previous) && Number.isFinite(incoming)
+    ? incoming > previous
+    : live;
+}
+
 export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
   notice: readPersisted(),
-  markExhausted: (projectId) => {
+  markExhausted: (projectId, source) => {
     if (!projectId) return;
-    // Re-reporting the same project keeps the original timestamp, so the
-    // notice cannot look freshly raised while a run keeps failing.
-    if (get().notice?.projectId === projectId) return;
+    const previous = get().notice;
+    if (
+      previous &&
+      (source
+        ? !newerThanNotice(previous, projectId, source, true)
+        : previous.projectId === projectId)
+    )
+      return;
     const notice: CreditsNotice = {
       projectId,
-      at: new Date().toISOString(),
+      at:
+        previous?.projectId === projectId
+          ? previous.at
+          : new Date().toISOString(),
+      ...(source && { source }),
     };
     set({ notice });
     persist(notice);
@@ -106,10 +147,19 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
  * notice is cross-project, so the calls stay as small as they can be and the
  * store itself remains the only thing that touches localStorage.
  */
-export function markCreditsExhausted(projectId: string): void {
-  useModelCreditsStore.getState().markExhausted(projectId);
+export function markCreditsExhausted(
+  projectId: string,
+  source: CreditsSource,
+): void {
+  useModelCreditsStore.getState().markExhausted(projectId, source);
 }
 
-export function clearCreditsNotice(): void {
-  useModelCreditsStore.getState().clear();
+export function clearCreditsAfterCompletion(
+  projectId: string,
+  source: CreditsSource,
+  live: boolean,
+): void {
+  const state = useModelCreditsStore.getState();
+  if (state.notice && newerThanNotice(state.notice, projectId, source, live))
+    state.clear();
 }

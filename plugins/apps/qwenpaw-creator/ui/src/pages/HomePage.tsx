@@ -339,9 +339,9 @@ export default function HomePage() {
   const latestStorageRead = useRef<ReturnType<typeof getStorageProfile> | null>(
     null,
   );
-  const fetchStorage = useCallback(async (afterReclaim = false) => {
+  const fetchStorage = useCallback(async (fresh = false) => {
     try {
-      if (afterReclaim) invalidateCreatorListReads("/storage/profile");
+      if (fresh) invalidateCreatorListReads("/storage/profile");
       const request = getStorageProfile();
       latestStorageRead.current = request;
       const profile = await request;
@@ -369,12 +369,23 @@ export default function HomePage() {
   // profile, so coming back to the window refreshes the notice instead of
   // leaving a button for space that is already gone.
   useEffect(() => {
-    const refresh = () => {
-      if (document.visibilityState === "visible") void fetchStorage();
+    let refreshedOnReturn = false;
+    const leave = () => {
+      refreshedOnReturn = false;
     };
+    const refresh = () => {
+      if (document.visibilityState !== "visible") {
+        leave();
+      } else if (!refreshedOnReturn) {
+        refreshedOnReturn = true;
+        void fetchStorage(true);
+      }
+    };
+    window.addEventListener("blur", leave);
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
     return () => {
+      window.removeEventListener("blur", leave);
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };

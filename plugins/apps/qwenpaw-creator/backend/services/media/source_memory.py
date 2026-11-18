@@ -698,6 +698,7 @@ class SourceMemoryService:
     def __init__(self, services: Any) -> None:
         self.services = services
         self.executions = ProjectExecutionStore(services.root)
+        self._stopping = False
         self._jobs: dict[str, asyncio.Task[None]] = {}
         self._job_specs: dict[str, SourceMemoryBuildJob] = {}
         self._toolkits: dict[str, tuple[float, MemoryToolkit]] = {}
@@ -744,7 +745,7 @@ class SourceMemoryService:
         the task starts immediately.
         """
         project_root = self.services.projects.project_root(project_id)
-        if not self.should_build(index, project_root):
+        if self._stopping or not self.should_build(index, project_root):
             return None
         if local_path is None or not local_path.is_file():
             logger.info(
@@ -753,7 +754,7 @@ class SourceMemoryService:
             )
             return None
         duration_ms = int(index.media.duration_ms or 0)
-        task = await asyncio.to_thread(
+        task = await run_sync_io(
             self._admit_sync,
             project_id,
             index,
@@ -774,7 +775,8 @@ class SourceMemoryService:
             duration_ms=duration_ms,
             local_path=str(local_path),
         )
-        self._spawn(job)
+        if self._spawn(job) is None:
+            return None
         return {"taskId": task.task_id}
 
     def _admit_sync(
@@ -832,7 +834,18 @@ class SourceMemoryService:
         )
         return task
 
+    async def shutdown(self) -> None:
+        """Stop local workers; the next startup reconciles their durable tasks."""
+        self._stopping = True
+        workers = list(self._jobs.values())
+        for worker in workers:
+            worker.cancel()
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+
     def _spawn(self, job: SourceMemoryBuildJob) -> asyncio.Task[None] | None:
+        if self._stopping:
+            return None
         current = self._jobs.get(job.task_id)
         if current is not None and not current.done():
             return current
@@ -870,7 +883,7 @@ class SourceMemoryService:
                 job.project_id,
                 job.task_id,
             )
-            await asyncio.to_thread(self._fail_sync, job, error)
+            await run_sync_io(self._fail_sync, job, error)
 
     async def _await_authorization(self, job: SourceMemoryBuildJob) -> bool:
         if not job.authorization_id:
@@ -887,7 +900,7 @@ class SourceMemoryService:
                 ExecutionAuthorizationStatus.REJECTED,
                 ExecutionAuthorizationStatus.EXPIRED,
             }:
-                await asyncio.to_thread(
+                await run_sync_io(
                     self._cancel_sync,
                     job,
                     f"execution authorization {record.status.value.lower()}",
@@ -1085,7 +1098,7 @@ class SourceMemoryService:
         # replay billed model calls under the same authorization.
         existing = await asyncio.to_thread(self._existing_ref, job)
         if existing is not None:
-            await asyncio.to_thread(
+            await run_sync_io(
                 self.executions.append_attempt,
                 job.project_id,
                 job.task_id,
@@ -1097,7 +1110,7 @@ class SourceMemoryService:
                     "converged": True,
                 },
             )
-            await asyncio.to_thread(
+            await run_sync_io(
                 self.executions.append_attempt,
                 job.project_id,
                 job.task_id,
@@ -1118,7 +1131,7 @@ class SourceMemoryService:
                 job.task_id,
             )
             return
-        await asyncio.to_thread(
+        await run_sync_io(
             self.executions.append_attempt,
             job.project_id,
             job.task_id,
@@ -1188,7 +1201,7 @@ class SourceMemoryService:
                     chunk_segments[chunk_key] = [
                         [start, end] for start, end in segments
                     ]
-                    await asyncio.to_thread(
+                    await run_sync_io(
                         _write_checkpoint,
                         segments_ckpt_path,
                         job.source_checksum,
@@ -1234,7 +1247,7 @@ class SourceMemoryService:
                 await asyncio.gather(*subgraph_jobs, return_exceptions=True)
             raise
         finally:
-            await asyncio.to_thread(shutil.rmtree, work_root, True)
+            await run_sync_io(shutil.rmtree, work_root, True)
         extracted = sum(
             1
             for macro in macros
@@ -1301,7 +1314,7 @@ class SourceMemoryService:
         )
         projection = await self._review_projection(draft_projection)
 
-        output = await asyncio.to_thread(
+        output = await run_sync_io(
             self._persist_artifacts_sync,
             job,
             memory,
@@ -1311,8 +1324,8 @@ class SourceMemoryService:
         )
         # Final artifacts are durable — the stage checkpoints have served
         # their purpose and must not shadow a future rebuild.
-        await asyncio.to_thread(shutil.rmtree, checkpoints, True)
-        await asyncio.to_thread(
+        await run_sync_io(shutil.rmtree, checkpoints, True)
+        await run_sync_io(
             self.executions.append_attempt,
             job.project_id,
             job.task_id,
@@ -1434,7 +1447,7 @@ class SourceMemoryService:
                 error,
             )
             return []
-        await asyncio.to_thread(
+        await run_sync_io(
             _write_checkpoint,
             ckpt_path,
             job.source_checksum,
@@ -1466,7 +1479,7 @@ class SourceMemoryService:
             start, end = macro.time_range
             clip_path = work_root / f"{macro.macro_id}.mp4"
             try:
-                await asyncio.to_thread(
+                await run_sync_io(
                     _clip_segment_for_transport_sync,
                     local_path,
                     clip_path,
@@ -1519,7 +1532,7 @@ class SourceMemoryService:
                 return
             # Persist before applying: apply_subgraph_payload mutates
             # the payload's relative times in place.
-            await asyncio.to_thread(
+            await run_sync_io(
                 _write_checkpoint,
                 ckpt_path,
                 source_checksum,
