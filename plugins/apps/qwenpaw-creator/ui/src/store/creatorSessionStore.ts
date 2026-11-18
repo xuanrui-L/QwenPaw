@@ -31,6 +31,8 @@ import {
   tracksCreditsHistory,
   isQuotaErrorCode,
   markCreditsExhausted,
+  markSnapshotCredits,
+  useModelCreditsStore,
 } from "@/store/modelCreditsStore";
 
 const conversationRetryIds = new Map<string, string>();
@@ -475,16 +477,15 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       sessionId: string;
       success?: CreditsSource;
       refusal?: CreditsSource;
+      firstRefusal?: CreditsSource;
     } | null = null;
 
     const finishCreditsReplay = () => {
       if (!creditsReplay) return;
-      const { projectId, success, refusal } = creditsReplay;
+      const { projectId, success, refusal, firstRefusal } = creditsReplay;
       creditsReplay = null;
-      const showRefusal =
-        refusal && canReplayCreditsRefusal(projectId, refusal);
       if (success) clearCreditsAfterCompletion(projectId, success, false);
-      if (refusal && showRefusal)
+      if (refusal && canReplayCreditsRefusal(projectId, refusal, firstRefusal))
         markCreditsExhausted(projectId, refusal, false);
     };
 
@@ -532,6 +533,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       response: Awaited<ReturnType<typeof getCreatorSession>>,
       generation: number,
       current: CreatorSessionState,
+      reopening = false,
     ): Partial<CreatorSessionState> => {
       if (
         generation !== sessionRefreshGeneration ||
@@ -562,13 +564,13 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       // what keeps the navigation bar honest after a reload.
       if (isQuotaErrorCode(response.session.error?.code)) {
         const refusedAt = response.session.error?.details?.refusedAt;
-        markCreditsExhausted(
+        markSnapshotCredits(
           projectId,
           {
             sessionId: response.session.id,
             at: typeof refusedAt === "string" ? refusedAt : undefined,
           },
-          false,
+          reopening,
         );
       }
       const currentProgressSeq =
@@ -714,6 +716,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       bootstrap: async (projectId) => {
         const bootstrapGeneration = ++lifecycleGeneration;
         const sessionGeneration = ++sessionRefreshGeneration;
+        const dismissalAtOpen = useModelCreditsStore.getState().dismissed;
         const state = get();
         const sameProject = state.projectId === projectId;
         if (!sameProject) creditsReplay = null;
@@ -808,6 +811,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 sessionResponse,
                 sessionGeneration,
                 current,
+                useModelCreditsStore.getState().dismissed === dismissalAtOpen,
               ),
               conversations,
               activeConversationId,
@@ -1703,14 +1707,14 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                     if (
                       !isQuotaErrorCode(session.error?.code) ||
                       matchesSnapshot
-                    )
+                    ) {
+                      replay.firstRefusal ??= source;
                       replay.refusal = source;
-                  } else if (liveCreditEvent || matchesSnapshot) {
-                    markCreditsExhausted(
-                      session.projectId,
-                      source,
-                      liveCreditEvent,
-                    );
+                    }
+                  } else if (liveCreditEvent) {
+                    markCreditsExhausted(session.projectId, source, true);
+                  } else if (matchesSnapshot) {
+                    markSnapshotCredits(session.projectId, source);
                   }
                 }
               }

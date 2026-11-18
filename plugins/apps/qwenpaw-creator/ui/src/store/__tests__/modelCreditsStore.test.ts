@@ -109,6 +109,30 @@ describe("cross-project Credits notice", () => {
     expect(notice()?.projectId).toBe("p1");
   });
 
+  it.each(["poll", "open"])(
+    "keeps an in-flight %s response from undoing a dismissal",
+    async (kind) => {
+      const at = "2026-11-18T10:00:00Z";
+      const error = { ...quotaFailure, details: { refusedAt: at } };
+      installMockFetch(
+        bootstrapRoutes({
+          session: { status: "ERROR", lastEventSeq: 4, error },
+        }),
+      );
+      session().ingestEvent({ ...ev(4, "agent.run.failed", { error }), at });
+      const pending =
+        kind === "poll"
+          ? session().refreshSession()
+          : session().bootstrap("p1");
+      useModelCreditsStore.getState().clear();
+      await pending;
+      await session().refreshSession();
+      expect(notice()).toBeNull();
+      await session().bootstrap("p1");
+      expect(notice()?.source?.at).toBe(at);
+    },
+  );
+
   it("keeps the current Credits notice through historical failures and successes", () => {
     useCreatorSessionStore.setState({
       isReplaying: true,
@@ -398,6 +422,47 @@ describe("cross-project Credits notice", () => {
     session().ingestEvent(ev(4, "agent.run.failed", { error: quotaFailure }));
     expect(notice()?.source?.seq).toBe(4);
   });
+
+  it.each([false, true])(
+    "reconciles an old dismissal with a refusal before recovery: %s",
+    (hasEarlierRefusal) => {
+      useModelCreditsStore.setState({
+        notice: { projectId: "p1", at: "2099-01-01" },
+      });
+      useModelCreditsStore.getState().clear();
+      useModelCreditsStore
+        .getState()
+        .markExhausted("p3", { sessionId: "s3", at: "2026-11-18T09:00:00Z" });
+      useCreatorSessionStore.setState({
+        projectId: "p2",
+        session: sessionView({ projectId: "p2", id: "s2", lastEventSeq: 1 }),
+        replayUntilSeq: 1,
+      });
+      session().ingestEvent({
+        ...ev(1, "agent.run.completed"),
+        projectId: "p2",
+        creatorSessionId: "s2",
+        at: "2026-11-18T10:00:00Z",
+      });
+      session().reset();
+      useCreatorSessionStore.setState({
+        projectId: "p1",
+        session: sessionView({ status: "CANCELLED", lastEventSeq: 4 }),
+        replayUntilSeq: 4,
+      });
+      if (hasEarlierRefusal)
+        session().ingestEvent({
+          ...ev(1, "agent.run.failed", { error: quotaFailure }),
+          at: "2026-11-18T08:00:00Z",
+        });
+      session().ingestEvent({
+        ...ev(3, "agent.run.failed", { error: quotaFailure }),
+        at: "2026-11-18T11:00:00Z",
+      });
+      session().ingestEvent(ev(4, "agent.run.cancelled"));
+      expect(notice()?.source?.seq).toBe(hasEarlierRefusal ? 3 : undefined);
+    },
+  );
 
   it("orders another project's replay by server time", () => {
     const time = (microsecond: number) =>

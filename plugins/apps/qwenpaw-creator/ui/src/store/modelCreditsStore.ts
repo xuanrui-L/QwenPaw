@@ -253,13 +253,25 @@ export function tracksCreditsHistory(projectId: string): boolean {
 export function canReplayCreditsRefusal(
   projectId: string,
   source: CreditsSource,
+  firstRefusal?: CreditsSource,
 ): boolean {
   const { notice, recovery, dismissed } = useModelCreditsStore.getState();
   // A current quota-error snapshot may legitimately show the notice again.
   if (notice?.projectId === projectId) return true;
-  return (
-    recovery?.clearedNotice === true &&
-    (!dismissed || afterDismissal(dismissed, projectId, source, false))
+  if (!recovery?.clearedNotice) return false;
+  if (!dismissed) return true;
+  if (dismissed.source?.seq !== undefined || dismissed.source?.at)
+    return newerThanNotice(dismissed, projectId, source, false);
+  // An upgraded browser can have a dismissal without a server timestamp. When
+  // A's history shows a refusal before the known recovery and another after
+  // it, the second refusal is evidence from a separate period of exhaustion.
+  if (dismissed.projectId !== projectId || !firstRefusal || !recovery.source)
+    return false;
+  return newerThanNotice(
+    { ...dismissed, source: firstRefusal },
+    recovery.projectId,
+    recovery.source,
+    false,
   );
 }
 
@@ -286,6 +298,23 @@ export function markCreditsExhausted(
   live: boolean,
 ): void {
   useModelCreditsStore.getState().markExhausted(projectId, source, live);
+}
+
+export function markSnapshotCredits(
+  projectId: string,
+  source: CreditsSource,
+  reopening = false,
+): void {
+  const { dismissed, markExhausted } = useModelCreditsStore.getState();
+  // Reopening adopts the current server error. Background observations of the
+  // same refusal must respect a dismissal made while the project is open.
+  if (
+    !reopening &&
+    dismissed?.projectId === projectId &&
+    !afterDismissal(dismissed, projectId, source, false)
+  )
+    return;
+  markExhausted(projectId, source, false);
 }
 
 export function clearCreditsAfterCompletion(
