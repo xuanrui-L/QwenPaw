@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import type { MentionInputDraft } from "@/components/agent/MentionInput";
+
 export interface SelectionAttachment {
   text: string;
   ref: string | null;
@@ -32,6 +34,14 @@ interface AgentDockUiState {
   overviewHeight: number | null;
   runFilter: string;
   draft: string;
+  /**
+   * The input's structured content stashed when the dock folds or unmounts.
+   * Live typing never reaches the store — that re-rendered the whole dock per
+   * keystroke — but unmounting used to eat an unsent instruction with it.
+   * Tagged with the Project that produced it so navigation cannot restore one
+   * Project's half-typed instruction into another's composer.
+   */
+  unsentDraft: { projectId: string; content: MentionInputDraft } | null;
   selection: SelectionAttachment | null;
   allowExpandDetails: boolean;
   /**
@@ -46,6 +56,9 @@ interface AgentDockUiState {
   setOverviewHeight: (height: number | null) => void;
   setRunFilter: (filter: string) => void;
   setDraft: (draft: string) => void;
+  setUnsentDraft: (
+    draft: { projectId: string; content: MentionInputDraft } | null,
+  ) => void;
   setSelection: (selection: SelectionAttachment | null) => void;
   setAllowExpandDetails: (allow: boolean) => void;
   setDecisionTrayCollapsed: (collapsed: boolean) => void;
@@ -61,6 +74,7 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
   overviewHeight: null,
   runFilter: "all",
   draft: "",
+  unsentDraft: null,
   selection: null,
   allowExpandDetails: false,
   decisionTrayCollapsed: false,
@@ -74,6 +88,7 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
   setOverviewHeight: (overviewHeight) => set({ overviewHeight }),
   setRunFilter: (runFilter) => set({ runFilter }),
   setDraft: (draft) => set({ draft }),
+  setUnsentDraft: (unsentDraft) => set({ unsentDraft }),
   setSelection: (selection) =>
     set({ selection, tab: "conversation", open: true }),
   setAllowExpandDetails: (allowExpandDetails) => set({ allowExpandDetails }),
@@ -88,6 +103,7 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
       overviewHeight: null,
       runFilter: "all",
       draft: "",
+      unsentDraft: null,
       selection: null,
       allowExpandDetails: false,
       decisionTrayCollapsed: false,
