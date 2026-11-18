@@ -29,8 +29,10 @@ import os
 import shutil
 import subprocess  # nosec B404 - fixed ffmpeg argv, no shell
 import tempfile
+import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -38,7 +40,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
 from pydantic import Field
-from qwenpaw.utils.io_utils import run_sync_io
+from qwenpaw.utils.io_utils import run_async_to_completion, run_sync_io
 
 from domain.enums import CreatorSessionStatus, TaskKind, TaskStatus
 from domain.errors import ValidationError
@@ -532,6 +534,7 @@ def _detect_segments_sync(
     local_path: Path,
     start_sec: float,
     end_sec: float,
+    stop: threading.Event,
 ) -> list[tuple[float, float]]:
     """Phase 1: parallel frame-diff scene detection for one time range
     (no API calls). Chunked builds call this per chunk; chunk edges are
@@ -546,6 +549,8 @@ def _detect_segments_sync(
     ] or [start_sec]
 
     def _extract(ts: float) -> tuple[float, bytes | None]:
+        if stop.is_set():
+            return ts, None
         return ts, _seek_jpeg(
             ffmpeg,
             str(local_path),
@@ -564,6 +569,8 @@ def _detect_segments_sync(
     )
     with ThreadPoolExecutor(max_workers=FRAME_WORKERS) as pool:
         results = list(pool.map(_extract, timestamps))
+    if stop.is_set():
+        return []
 
     hls_frames = []
     for ts, data in results:
@@ -606,6 +613,24 @@ def _detect_segments_sync(
         min_scene_sec=MIN_SCENE_SEC,
         max_scene_sec=MAX_SCENE_SEC,
     )
+
+
+async def _detect_segments(
+    local_path: Path,
+    start: float,
+    end: float,
+) -> list[tuple[float, float]]:
+    stop = threading.Event()
+    worker = asyncio.create_task(
+        asyncio.to_thread(_detect_segments_sync, local_path, start, end, stop)
+    )
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        stop.set()
+        with suppress(Exception):
+            await run_async_to_completion(worker)
+        raise
 
 
 def _chunk_plan(duration_sec: float) -> list[tuple[float, float]]:
@@ -834,14 +859,29 @@ class SourceMemoryService:
         )
         return task
 
+    def cancel_workers(
+        self, project_id: str, task_id: str | None = None
+    ) -> None:
+        """Signal matching workers on the event loop without delaying the stop API."""
+        for key, job in self._job_specs.items():
+            if job.project_id == project_id and (
+                task_id is None or key == task_id
+            ):
+                self._jobs[key].cancel()
+
+    def stop(self) -> None:
+        """Close admission and interrupt workers before other services drain."""
+        if not self._stopping:
+            self._stopping = True
+            for worker in self._jobs.values():
+                if not worker.cancelling():
+                    worker.cancel()
+
     async def shutdown(self) -> None:
-        """Stop local workers; the next startup reconciles their durable tasks."""
-        self._stopping = True
-        workers = list(self._jobs.values())
-        for worker in workers:
-            worker.cancel()
-        if workers:
-            await asyncio.gather(*workers, return_exceptions=True)
+        """Join workers; the next startup reconciles their durable tasks."""
+        self.stop()
+        if self._jobs:
+            await asyncio.gather(*self._jobs.values(), return_exceptions=True)
 
     def _spawn(self, job: SourceMemoryBuildJob) -> asyncio.Task[None] | None:
         if self._stopping:
@@ -952,9 +992,7 @@ class SourceMemoryService:
             specs[task_id] = job
         if not workers:
             return 0
-        for task_id in workers:
-            self._jobs.pop(task_id, None)
-            self._job_specs.pop(task_id, None)
+        # Let the done callback remove the worker so shutdown can also join it.
         for worker in workers.values():
             worker.cancel()
         await asyncio.gather(*workers.values(), return_exceptions=True)
@@ -1192,8 +1230,7 @@ class SourceMemoryService:
                         (float(pair[0]), float(pair[1])) for pair in cached
                     ]
                 else:
-                    segments = await asyncio.to_thread(
-                        _detect_segments_sync,
+                    segments = await _detect_segments(
                         local_path,
                         chunk_start,
                         chunk_end,
@@ -1314,9 +1351,10 @@ class SourceMemoryService:
         )
         projection = await self._review_projection(draft_projection)
 
-        output = await run_sync_io(
+        await run_sync_io(
             self._persist_artifacts_sync,
             job,
+            attempt_id,
             memory,
             index_obj,
             len(nodes),
@@ -1325,16 +1363,6 @@ class SourceMemoryService:
         # Final artifacts are durable — the stage checkpoints have served
         # their purpose and must not shadow a future rebuild.
         await run_sync_io(shutil.rmtree, checkpoints, True)
-        await run_sync_io(
-            self.executions.append_attempt,
-            job.project_id,
-            job.task_id,
-            event_id=f"{attempt_id}-succeeded",
-            attempt_id=attempt_id,
-            status=TaskAttemptStatus.SUCCEEDED,
-            output=output,
-            output_refs=[str(output["graphPath"])],
-        )
         logger.info(
             "source memory build succeeded: task=%s macros=%d supers=%d "
             "nodes=%d",
@@ -1634,11 +1662,12 @@ class SourceMemoryService:
     def _persist_artifacts_sync(
         self,
         job: SourceMemoryBuildJob,
+        attempt_id: str,
         memory: HierarchicalGraphMemory,
         index_obj: EmbeddingIndex,
         node_count: int,
         projection: SourceMemoryProjection,
-    ) -> dict[str, Any]:
+    ) -> None:
         project_root = self.services.projects.project_root(job.project_id)
         directory = memory_dir(project_root, job.index_id)
         directory.mkdir(parents=True, exist_ok=True)
@@ -1680,9 +1709,8 @@ class SourceMemoryService:
             json.dumps(meta, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        atomic_replace_path(tmp, meta_path)
         relative = directory.relative_to(project_root).as_posix()
-        return {
+        output = {
             "analysisVersionId": job.index_id,
             "macroCount": len(memory.macro_events),
             "superCount": len(memory.super_events),
@@ -1691,6 +1719,24 @@ class SourceMemoryService:
             "embeddingsPath": f"{relative}/{EMBEDDINGS_FILENAME}",
             "builtAt": built_at,
         }
+        # The manifest makes the graph visible. Serialize that publication
+        # and the success record with the cancellation endpoint.
+        with self.services.projects.lifecycle_lock(job.project_id):
+            task = self.executions.get_task(job.project_id, job.task_id)
+            if task.status is TaskStatus.CANCELLED:
+                tmp.unlink(missing_ok=True)
+                raise asyncio.CancelledError
+            atomic_replace_path(tmp, meta_path)
+            self.executions.append_attempt(
+                job.project_id,
+                job.task_id,
+                event_id=f"{attempt_id}-succeeded",
+                attempt_id=attempt_id,
+                status=TaskAttemptStatus.SUCCEEDED,
+                output=output,
+                output_refs=[str(output["graphPath"])],
+                _lifecycle_lock_held=True,
+            )
 
     @staticmethod
     def _projection_summary(memory: HierarchicalGraphMemory) -> str:

@@ -21,6 +21,7 @@ from services.file_agent_runtime.registry import (  # noqa: E402
     start_creator_agent_runtime,
     stop_creator_agent_runtime,
 )
+from services.media.source_memory import source_memory_service  # noqa: E402
 from services.media_files import (  # noqa: E402
     shutdown_file_media_execution_services,
     start_file_media_execution_services,
@@ -75,6 +76,7 @@ async def lifespan(_app: FastAPI):
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
+        await source_memory_service(services).resume_interrupted()
         trace_event(
             "creator.runtime.started",
             component="standalone",
@@ -87,7 +89,10 @@ async def lifespan(_app: FastAPI):
             component="standalone",
         )
         try:
-            await shutdown_file_media_execution_services()
+            try:
+                await source_memory_service(services).shutdown()
+            finally:
+                await shutdown_file_media_execution_services()
         finally:
             try:
                 await shutdown_source_analysis_services()

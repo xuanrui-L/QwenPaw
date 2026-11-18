@@ -446,6 +446,69 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
     assert len(summary) < 1024
 
 
+@pytest.mark.parametrize("endpoint", ["interrupt", "tasks/memory/cancel"])
+def test_stop_signals_a_recovered_memory_build(
+    tmp_path, monkeypatch, endpoint
+):
+    from httpx import ASGITransport, AsyncClient
+    from services.media.source_memory import source_memory_service
+
+    app, services, _, _ = _app(tmp_path)
+    memory = source_memory_service(services)
+    memory.executions.create_task(
+        TaskRecord(
+            task_id="memory",
+            project_id="project-1",
+            kind=TaskKind.SOURCE_MEMORY_BUILD,
+            request_fingerprint="memory",
+            metadata={
+                "targetRef": "asset:source",
+                "analysisVersionId": "index",
+                "assetVersionId": "version",
+                "sourceChecksum": "source",
+                "durationMs": 1_500_000,
+                "localPath": str(tmp_path / "clip.mp4"),
+            },
+        )
+    )
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def drive(_job):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(memory, "_drive", drive)
+        await memory.resume_interrupted()
+        await asyncio.wait_for(started.wait(), 5)
+        worker = memory._jobs["memory"]
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/projects/project-1/{endpoint}",
+                headers={"Idempotency-Key": "cancel-memory"},
+                json={"reason": "stop"},
+            )
+        assert response.status_code == 202
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(worker), 2)
+        for _ in range(100):
+            if (
+                memory.executions.get_task("project-1", "memory").status
+                is TaskStatus.CANCELLED
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert (
+            memory.executions.get_task("project-1", "memory").status
+            is TaskStatus.CANCELLED
+        )
+
+    asyncio.run(scenario())
+
+
 def test_lifecycle_event_embedding_an_event_record_survives_the_filter(
     tmp_path,
     monkeypatch,

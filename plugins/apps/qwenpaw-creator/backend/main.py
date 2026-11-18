@@ -467,6 +467,8 @@ async def _shutdown() -> None:
     )
     services = _file_services
     _file_services = None
+    if services is not None:
+        source_memory_service(services).stop()
     if _maintenance_task is not None:
         # A sweep -- or a collapse child holding a rewritten session file --
         # must not outlive the app that owns the data root.  Cancelling the

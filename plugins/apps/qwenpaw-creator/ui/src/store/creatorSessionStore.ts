@@ -521,11 +521,15 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       // one of them, so re-adopting a session that still carries the refusal is
       // what keeps the navigation bar honest after a reload.
       if (isQuotaErrorCode(response.session.error?.code)) {
-        markCreditsExhausted(projectId, {
-          sessionId: response.session.id,
-          seq: response.session.lastEventSeq,
-          at: response.session.updatedAt,
-        });
+        const refusedAt = response.session.error?.details?.refusedAt;
+        markCreditsExhausted(
+          projectId,
+          {
+            sessionId: response.session.id,
+            at: typeof refusedAt === "string" ? refusedAt : undefined,
+          },
+          false,
+        );
       }
       const currentProgressSeq =
         current.agentStatusBar?.progress.sourceEventSeq ?? -1;
@@ -1607,11 +1611,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                   streamingAssistantMessages = remaining;
                 }
               }
-              if (
-                event.type === "agent.run.failed" &&
-                session &&
-                event.seq > session.lastEventSeq
-              ) {
+              if (event.type === "agent.run.failed" && session) {
                 const errorPayload = event.data.error as
                   | {
                       code?: string;
@@ -1620,7 +1620,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                       details?: Record<string, unknown>;
                     }
                   | undefined;
-                if (errorPayload?.message) {
+                const liveFailure = event.seq > session.lastEventSeq;
+                if (errorPayload?.message && liveFailure) {
                   session = {
                     ...session,
                     error: errorPayload as {
@@ -1631,12 +1632,20 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                     },
                   };
                 }
-                if (isQuotaErrorCode(errorPayload?.code)) {
-                  markCreditsExhausted(session.projectId, {
-                    sessionId: event.creatorSessionId,
-                    seq: event.seq,
-                    at: event.at,
-                  });
+                if (
+                  isQuotaErrorCode(errorPayload?.code) &&
+                  (liveFailure || isQuotaErrorCode(session.error?.code))
+                ) {
+                  const refusedAt = errorPayload?.details?.refusedAt;
+                  markCreditsExhausted(
+                    session.projectId,
+                    {
+                      sessionId: event.creatorSessionId,
+                      seq: event.seq,
+                      at: typeof refusedAt === "string" ? refusedAt : event.at,
+                    },
+                    liveFailure,
+                  );
                 }
               }
             }

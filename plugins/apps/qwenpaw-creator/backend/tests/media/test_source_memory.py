@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -111,6 +112,7 @@ def _service(tmp_path: Path) -> SourceMemoryService:
         root=tmp_path,
         projects=SimpleNamespace(
             project_root=lambda project_id: tmp_path / "projects" / project_id,
+            lifecycle_lock=lambda _project_id: nullcontext(),
         ),
     )
     return SourceMemoryService(services)
@@ -450,6 +452,39 @@ def test_startup_schedules_memory_workers_only_after_recovery(
     asyncio.run(scenario())
 
 
+def test_cancelled_frame_detection_joins_inflight_seeks_and_skips_queued_frames(
+    tmp_path, monkeypatch
+):
+    entered, release = threading.Event(), threading.Event()
+    seeks = []
+
+    def seek(*args, **kwargs):
+        seeks.append(args[2])
+        entered.set()
+        assert release.wait(5)
+        return None
+
+    monkeypatch.setattr(source_memory, "_require_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(source_memory, "_seek_jpeg", seek)
+
+    async def scenario():
+        detecting = asyncio.create_task(
+            source_memory._detect_segments(tmp_path / "video", 0, 300)
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            detecting.cancel()
+            done, _ = await asyncio.wait({detecting}, timeout=0.03)
+            assert not done
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await detecting
+
+    asyncio.run(scenario())
+    assert 0 < len(seeks) <= source_memory.FRAME_WORKERS
+
+
 def test_shutdown_joins_recovered_workers_and_leaves_their_task_resumable(
     tmp_path,
     monkeypatch,
@@ -759,7 +794,7 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
 
     detected: list[tuple[float, float]] = []
 
-    def fake_detect(_path, start_sec, end_sec):
+    def fake_detect(_path, start_sec, end_sec, _stop):
         detected.append((start_sec, end_sec))
         return [(start_sec, end_sec)]
 

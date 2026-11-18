@@ -19,13 +19,14 @@ import { create } from "zustand";
  */
 
 const STORAGE_KEY = "qwenpaw-creator:model-credits:v1";
+const RECOVERY_KEY = "qwenpaw-creator:model-credits:last-success";
 
 /** Session error code the runtime reports for a refused Credits spend. */
 export const MODEL_QUOTA_ERROR_CODE = "MODEL_QUOTA_EXCEEDED";
 
 interface CreditsSource {
   sessionId: string;
-  seq: number;
+  seq?: number;
   at?: string;
 }
 
@@ -39,7 +40,12 @@ export interface CreditsNotice {
 
 interface ModelCreditsState {
   notice: CreditsNotice | null;
-  markExhausted: (projectId: string, source?: CreditsSource) => void;
+  recovery: CreditsNotice | null;
+  markExhausted: (
+    projectId: string,
+    source?: CreditsSource,
+    live?: boolean,
+  ) => void;
   clear: () => void;
 }
 
@@ -52,9 +58,9 @@ function getStorage(): Storage | undefined {
   }
 }
 
-function readPersisted(): CreditsNotice | null {
+function readPersisted(key: string): CreditsNotice | null {
   try {
-    const raw = getStorage()?.getItem(STORAGE_KEY);
+    const raw = getStorage()?.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<CreditsNotice> | null;
     return typeof parsed?.projectId === "string"
@@ -69,12 +75,12 @@ function readPersisted(): CreditsNotice | null {
   }
 }
 
-function persist(notice: CreditsNotice | null) {
+function persist(key: string, notice: CreditsNotice | null) {
   const storage = getStorage();
   if (!storage) return;
   try {
-    if (notice) storage.setItem(STORAGE_KEY, JSON.stringify(notice));
-    else storage.removeItem(STORAGE_KEY);
+    if (notice) storage.setItem(key, JSON.stringify(notice));
+    else storage.removeItem(key);
   } catch {
     // Storage unavailable (private mode): degrade to session-only state.
   }
@@ -89,8 +95,15 @@ export function isQuotaErrorCode(code: unknown): code is string {
   return code === MODEL_QUOTA_ERROR_CODE;
 }
 
+// Python's ISO timestamps retain microseconds even when two events share a millisecond.
+function serverMicros(at = ""): number {
+  const remainder = at.match(/\.\d{3}(\d{1,3})/u)?.[1] ?? "";
+  return Date.parse(at) * 1000 + Number(remainder.padEnd(3, "0"));
+}
+
 // Sequence numbers order events within a session. Across sessions the server
-// timestamp orders them; v1 notices without a source retain their observed time.
+// timestamps order them. Legacy notices have only a browser timestamp, so
+// use a live completion as evidence until a server observation is available.
 function newerThanNotice(
   notice: CreditsNotice,
   projectId: string,
@@ -99,26 +112,43 @@ function newerThanNotice(
 ): boolean {
   if (
     notice.projectId === projectId &&
-    notice.source?.sessionId === source.sessionId
+    notice.source?.sessionId === source.sessionId &&
+    notice.source.seq !== undefined &&
+    source.seq !== undefined
   ) {
     return source.seq > notice.source.seq;
   }
-  const previous = Date.parse(notice.source?.at ?? notice.at);
-  const incoming = Date.parse(source.at ?? "");
+  if (
+    notice.projectId === projectId &&
+    notice.source?.sessionId === source.sessionId &&
+    notice.source.seq === undefined &&
+    !notice.source.at &&
+    source.seq !== undefined
+  )
+    return true;
+  const previous = serverMicros(notice.source?.at);
+  const incoming = serverMicros(source.at);
   return Number.isFinite(previous) && Number.isFinite(incoming)
     ? incoming > previous
     : live;
 }
 
 export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
-  notice: readPersisted(),
-  markExhausted: (projectId, source) => {
+  notice: readPersisted(STORAGE_KEY),
+  recovery: readPersisted(RECOVERY_KEY),
+  markExhausted: (projectId, source, live = true) => {
     if (!projectId) return;
-    const previous = get().notice;
+    const { notice: previous, recovery } = get();
+    if (
+      source &&
+      recovery &&
+      !newerThanNotice(recovery, projectId, source, live)
+    )
+      return;
     if (
       previous &&
       (source
-        ? !newerThanNotice(previous, projectId, source, true)
+        ? !newerThanNotice(previous, projectId, source, live)
         : previous.projectId === projectId)
     )
       return;
@@ -131,12 +161,12 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
       ...(source && { source }),
     };
     set({ notice });
-    persist(notice);
+    persist(STORAGE_KEY, notice);
   },
   clear: () => {
     if (!get().notice) return;
     set({ notice: null });
-    persist(null);
+    persist(STORAGE_KEY, null);
   },
 }));
 
@@ -150,8 +180,9 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
 export function markCreditsExhausted(
   projectId: string,
   source: CreditsSource,
+  live: boolean,
 ): void {
-  useModelCreditsStore.getState().markExhausted(projectId, source);
+  useModelCreditsStore.getState().markExhausted(projectId, source, live);
 }
 
 export function clearCreditsAfterCompletion(
@@ -162,4 +193,12 @@ export function clearCreditsAfterCompletion(
   const state = useModelCreditsStore.getState();
   if (state.notice && newerThanNotice(state.notice, projectId, source, live))
     state.clear();
+  if (
+    !state.recovery ||
+    newerThanNotice(state.recovery, projectId, source, live)
+  ) {
+    const recovery = { projectId, at: source.at ?? "", source };
+    useModelCreditsStore.setState({ recovery });
+    persist(RECOVERY_KEY, recovery);
+  }
 }

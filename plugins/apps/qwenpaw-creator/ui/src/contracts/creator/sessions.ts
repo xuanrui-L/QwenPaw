@@ -74,7 +74,6 @@ export interface CreatorSessionView {
   lastMessageSeq: number;
   lastConsumedMessageSeq: number;
   lastEventSeq: number;
-  updatedAt?: string;
   error?: {
     code: string;
     message: string;

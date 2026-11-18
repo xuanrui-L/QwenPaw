@@ -10452,6 +10452,8 @@ class FileCreatorAgentRuntime:
         }
         if extra_details:
             details.update(extra_details)
+        if code == "MODEL_QUOTA_EXCEEDED":
+            details["refusedAt"] = datetime.now(UTC).isoformat()
         report = report_error(
             component="file-agent-runtime",
             code=code,

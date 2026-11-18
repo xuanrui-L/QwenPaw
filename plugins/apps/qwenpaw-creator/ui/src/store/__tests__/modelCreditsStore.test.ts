@@ -35,7 +35,7 @@ describe("cross-project Credits notice", () => {
         clear: () => written.clear(),
       },
     });
-    useModelCreditsStore.setState({ notice: null });
+    useModelCreditsStore.setState({ notice: null, recovery: null });
     session().reset();
     useCreatorSessionStore.setState({
       projectId: "p1",
@@ -141,9 +141,32 @@ describe("cross-project Credits notice", () => {
     expect(written.has(STORAGE_KEY)).toBe(false);
   });
 
+  it.each(["2000-01-01", "2099-01-01"])(
+    "ignores a legacy notice's browser clock (%s)",
+    (at) => {
+      const legacy = { projectId: "p2", at };
+      written.set(STORAGE_KEY, JSON.stringify(legacy));
+      useModelCreditsStore.setState({ notice: legacy });
+      useCreatorSessionStore.setState({
+        session: sessionView({ lastEventSeq: 3 }),
+        isReplaying: true,
+        replayUntilSeq: 3,
+      });
+      const completed = (seq: number) => ({
+        ...ev(seq, "agent.run.completed"),
+        at: "2026-11-18T10:00:00Z",
+      });
+      session().ingestEvent(completed(3));
+      expect(notice()).toEqual(legacy);
+      session().ingestEvent(completed(4));
+      expect(notice()).toBeNull();
+      expect(written.has(STORAGE_KEY)).toBe(false);
+    },
+  );
+
   it("orders another project's replay by server time", () => {
-    const time = (minute: number) =>
-      new Date(Date.UTC(2026, 9, 1, 12, minute)).toISOString();
+    const time = (microsecond: number) =>
+      `2026-10-01T12:00:00.${String(microsecond).padStart(6, "0")}+00:00`;
     session().ingestEvent({
       ...ev(10, "agent.run.failed", { error: quotaFailure }),
       at: time(2),
@@ -165,6 +188,50 @@ describe("cross-project Credits notice", () => {
     expect(notice()?.projectId).toBe("p1");
     session().ingestEvent(completed(2, 3));
     expect(notice()).toBeNull();
+  });
+
+  it("keeps an older refusal snapshot from reviving a recovered balance", async () => {
+    const at = (minute: number) =>
+      new Date(Date.UTC(2026, 9, 1, 12, minute)).toISOString();
+    const old = { ...quotaFailure, details: { refusedAt: at(1) } };
+    session().ingestEvent({
+      ...ev(1, "agent.run.failed", { error: old }),
+      at: at(1),
+    });
+    session().reset();
+    useCreatorSessionStore.setState({
+      projectId: "p2",
+      session: sessionView({ projectId: "p2", id: "s2" }),
+    });
+    session().ingestEvent({
+      ...ev(1, "agent.run.completed"),
+      projectId: "p2",
+      creatorSessionId: "s2",
+      at: at(2),
+    });
+    expect(notice()).toBeNull();
+    expect(
+      JSON.parse(written.get("qwenpaw-creator:model-credits:last-success")!)
+        .projectId,
+    ).toBe("p2");
+    session().reset();
+    installMockFetch(
+      bootstrapRoutes({
+        session: { lastEventSeq: 100, status: "ERROR", error: old },
+      }),
+    );
+    await session().bootstrap("p1");
+    expect(notice()).toBeNull();
+    session().ingestEvent({
+      ...ev(1, "agent.run.failed", { error: old }),
+      at: at(1),
+    });
+    expect(notice()).toBeNull();
+    session().ingestEvent({
+      ...ev(101, "agent.run.failed", { error: quotaFailure }),
+      at: at(3),
+    });
+    expect(notice()?.projectId).toBe("p1");
   });
 
   it("keeps the original timestamp while the same project keeps failing", () => {

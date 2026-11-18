@@ -165,12 +165,14 @@ def _cancel_detached_project_tasks(
         file_image_execution_service,
     )
     from services.media_files.r2v_execution import file_r2v_execution_service
+    from services.media.source_memory import source_memory_service
     from services.run_review.media_review import cancel_project_media_reviews
     from services.source_analysis.service import source_analysis_service
 
     file_image_execution_service(services).cancel_project(project_id)
     file_r2v_execution_service(services).cancel_project(project_id)
     source_analysis_service(services).cancel_project(project_id)
+    source_memory_service(services).cancel_workers(project_id)
     cancel_project_media_reviews(project_id)
 
 
@@ -225,7 +227,6 @@ def _session_view(session: Any) -> dict[str, Any]:
         "activeGoalId": session.active_goal_id,
         "lastMessageSeq": session.last_message_seq,
         "lastEventSeq": session.last_event_seq,
-        "updatedAt": session.updated_at.isoformat(),
         "lastConsumedMessageSeq": session.last_consumed_message_seq,
         "error": session.error,
     }

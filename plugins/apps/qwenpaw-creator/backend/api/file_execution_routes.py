@@ -395,6 +395,10 @@ async def cancel_task(
         )
 
         file_image_execution_service(services).notify_terminal_task(task)
+    elif task.kind is TaskKind.SOURCE_MEMORY_BUILD:
+        from services.media.source_memory import source_memory_service
+
+        source_memory_service(services).cancel_workers(project_id, task_id)
     return _task_view(task)
 
 
