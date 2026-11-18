@@ -30,6 +30,8 @@ export interface CreditsSource {
   sessionId: string;
   seq?: number;
   at?: string;
+  /** The sequence was observed at the click, rather than at the refusal. */
+  isDismissalCursor?: true;
 }
 
 export interface CreditsNotice {
@@ -182,6 +184,7 @@ function atSessionCursor(
     source: {
       sessionId: session.id,
       seq: session.lastEventSeq,
+      isDismissalCursor: true,
       ...(typeof refusedAt === "string" && { at: refusedAt }),
     },
   };
@@ -342,8 +345,14 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
  * store itself remains the only thing that touches localStorage.
  */
 export function tracksCreditsHistory(projectId: string): boolean {
-  const { notice, recovery } = useModelCreditsStore.getState();
-  return notice?.projectId === projectId || recovery?.clearedNotice === true;
+  const { notice, recovery, dismissed } = useModelCreditsStore.getState();
+  return (
+    notice?.projectId === projectId ||
+    recovery?.clearedNotice === true ||
+    (dismissed?.projectId === projectId &&
+      (dismissed.source?.isDismissalCursor === true ||
+        pendingLegacyDismissal?.notice === dismissed))
+  );
 }
 
 function canReplayCreditsRefusal(
@@ -353,8 +362,11 @@ function canReplayCreditsRefusal(
   const { notice, recovery, dismissed } = useModelCreditsStore.getState();
   // A current quota-error snapshot may legitimately show the notice again.
   if (notice?.projectId === projectId) return true;
+  const hasClickCursor =
+    dismissed?.projectId === projectId &&
+    dismissed.source?.isDismissalCursor === true;
   return (
-    recovery?.clearedNotice === true &&
+    (hasClickCursor || recovery?.clearedNotice === true) &&
     (!dismissed || afterDismissal(dismissed, projectId, source, false))
   );
 }
@@ -443,10 +455,11 @@ export function clearCreditsAfterCompletion(
       source,
     };
     // A stream opened before the click can deliver an older success as live.
-    // Record the success, but keep the dismissal until its cursor is known.
+    // Keep the click cursor for later history, even when another run recovers.
     const dismissed =
       state.dismissed &&
       pendingLegacyDismissal?.notice !== state.dismissed &&
+      !state.dismissed.source?.isDismissalCursor &&
       afterDismissal(state.dismissed, projectId, source, live)
         ? null
         : state.dismissed;

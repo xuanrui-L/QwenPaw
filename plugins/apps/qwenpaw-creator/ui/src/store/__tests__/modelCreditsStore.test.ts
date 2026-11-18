@@ -444,7 +444,8 @@ describe("cross-project Credits notice", () => {
     session().ingestEvent(ev(2, "agent.run.cancelled"));
     expect(notice()).toBeNull();
     session().ingestEvent(ev(3, "agent.run.completed"));
-    expect(useModelCreditsStore.getState().dismissed).toBeNull();
+    expect(notice()).toBeNull();
+    expect(useModelCreditsStore.getState().recovery?.source?.seq).toBe(3);
     session().ingestEvent(ev(4, "agent.run.failed", { error: quotaFailure }));
     expect(notice()?.source?.seq).toBe(4);
   });
@@ -576,6 +577,29 @@ describe("cross-project Credits notice", () => {
       });
       expect(notice()?.source?.seq).toBe(status === "ERROR" ? 7 : undefined);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([false, true])(
+    "shows a refusal after the click cursor with no intervening project (success: %s)",
+    (hasSuccess) => {
+      useModelCreditsStore.setState({
+        notice: { projectId: "p1", at: "2099-01-01" },
+      });
+      useModelCreditsStore
+        .getState()
+        .clear(() => sessionView({ lastEventSeq: 4 }));
+      session().reset();
+      useCreatorSessionStore.setState({
+        projectId: "p1",
+        session: sessionView({ lastEventSeq: 9, status: "CANCELLED" }),
+        replayUntilSeq: 9,
+      });
+      session().ingestEvent(ev(4, "agent.run.failed", { error: quotaFailure }));
+      if (hasSuccess) session().ingestEvent(ev(6, "agent.run.completed"));
+      session().ingestEvent(ev(7, "agent.run.failed", { error: quotaFailure }));
+      session().ingestEvent(ev(9, "agent.run.cancelled"));
+      expect(notice()?.source?.seq).toBe(7);
     },
   );
 
