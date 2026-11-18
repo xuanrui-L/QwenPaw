@@ -760,13 +760,25 @@ def test_mainline_interaction_approval_review_and_idle_snapshot_stability(
             assert len(calls) == 1
             assert len(runtime.executions.list_tasks(PROJECT_ID)) == 1
             assert services.reviews.all_pending(PROJECT_ID)
-            _, _, graph, blocked = await ready_request_context(
+            (
+                _,
+                _,
+                graph,
+                blocked,
+                blocked_reviews,
+            ) = await ready_request_context(
                 services,
                 runtime.executions,
                 PROJECT_ID,
             )
             assert graph.by_id[node_id].status.value == "waiting_review"
             assert blocked[node_id] == "WAITING_REVIEW"
+            # The gate names the Review that holds the node so the authorize
+            # endpoint can point at it instead of guessing from node text.
+            assert blocked_reviews[node_id] == tuple(
+                review.review_id
+                for review in services.reviews.all_pending(PROJECT_ID)
+            )
             _decide_all(services)
             baseline = services.projects.read(PROJECT_ID)
             for _ in range(20):
