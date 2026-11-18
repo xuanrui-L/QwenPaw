@@ -10,6 +10,7 @@ import type {
 import {
   orderedTimelineElements,
   selectLiveTimelineIds,
+  selectNarrativeShape,
   timelineEndTick,
 } from "./timelineElementSelectors";
 
@@ -179,7 +180,7 @@ export function isVoiceOnlyVisualEntity(
   );
 }
 
-export type RoughCutSource = "final" | "storyboard" | "none";
+export type RoughCutSource = "final" | "storyboard" | "design" | "none";
 
 /** Media namespace of RoughCutFrame.versionId: generated artifact vs uploaded/recorded source asset. */
 export type RoughCutVersionKind = "artifact" | "source";
@@ -201,31 +202,39 @@ export interface RoughCutFrame {
  * Rough-cut frame of one element, derived purely from existing artifacts
  * (plan §4.8): selected element_video ▸ render_source media (real clips of
  * the video_edit path / pinned artifact) ▸ motion_clip's carried motion
- * document ▸ r2v_storyboard_image ▸ empty placeholder. Character / scene
- * reference sheets are inputs to generation, never a picture of the shot.
+ * document ▸ r2v_storyboard_image ▸ the referenced entity's visual design
+ * image ▸ empty placeholder.
  */
 export function roughCutFrameForElement(
   project: ProjectDocument,
   element: TimelineElementDocument,
+  branching = selectNarrativeShape(project) === "branching",
 ): {
   versionId: string | null;
   versionKind: RoughCutVersionKind | null;
   mediaKind: "image" | "video" | null;
   source: RoughCutSource;
 } {
+  // Interactive playback follows an authored path. A missing or stale
+  // storyboard must stop playback at that node instead of showing a design sheet.
+  const hasFrame = (id: string, kind: "video" | "image" | "either") => {
+    if (!branching) return true;
+    const version = project.assets.artifact_versions_by_id[id];
+    if (!version || version.stale) return false;
+    const mediaType =
+      project.assets.files_by_id[version.file_id]?.media_type ?? "";
+    return kind === "either"
+      ? /^(image|video)\//.test(mediaType)
+      : mediaType.startsWith(`${kind}/`);
+  };
   // 1. Selected element_video output.
   for (const output of Object.values(element.outputs)) {
     const slot = project.assets.artifact_slots_by_id[output.slot_id];
-    if (!slot || slot.kind !== "element_video" || !slot.selected_version_id)
-      continue;
-    const version =
-      project.assets.artifact_versions_by_id[slot.selected_version_id];
     if (
-      !version ||
-      version.stale ||
-      !project.assets.files_by_id[version.file_id]?.media_type?.startsWith(
-        "video/",
-      )
+      !slot ||
+      slot.kind !== "element_video" ||
+      !slot.selected_version_id ||
+      !hasFrame(slot.selected_version_id, "video")
     )
       continue;
     return {
@@ -257,12 +266,8 @@ export function roughCutFrameForElement(
   } else if (renderSource?.type === "artifact_version") {
     const version =
       project.assets.artifact_versions_by_id[renderSource.version_id];
-    const file = version ? project.assets.files_by_id[version.file_id] : null;
-    if (
-      version &&
-      !version.stale &&
-      /^(image|video)\//.test(file?.media_type ?? "")
-    ) {
+    if (version && !version.stale && hasFrame(version.version_id, "either")) {
+      const file = project.assets.files_by_id[version.file_id];
       return {
         versionId: version.version_id,
         versionKind: "artifact",
@@ -295,17 +300,7 @@ export function roughCutFrameForElement(
       (slot.kind === "r2v_storyboard_image" ||
         slot.slot_id.endsWith(":storyboard")) &&
       slot.selected_version_id &&
-      (() => {
-        const version =
-          project.assets.artifact_versions_by_id[slot.selected_version_id];
-        return (
-          version &&
-          !version.stale &&
-          project.assets.files_by_id[version.file_id]?.media_type?.startsWith(
-            "image/",
-          )
-        );
-      })(),
+      hasFrame(slot.selected_version_id, "image"),
   );
   if (storyboard?.selected_version_id) {
     return {
@@ -314,6 +309,29 @@ export function roughCutFrameForElement(
       mediaKind: "image",
       source: "storyboard",
     };
+  }
+  // 5. Referenced visual entity design image.
+  if (!branching) {
+    const creation = element.creation;
+    const entityRefs: string[] = [];
+    if (creation.type === "r2v") {
+      entityRefs.push(...creation.character_refs);
+      if (creation.scene_ref) entityRefs.push(creation.scene_ref);
+    } else if (creation.type === "s2v" && creation.character_ref) {
+      entityRefs.push(creation.character_ref);
+    }
+    for (const ref of entityRefs) {
+      const entity =
+        project.visual.entities.items[ref.replace(/^visual-entity:/, "")];
+      const versionId = selectedEntityVersionId(entity);
+      if (versionId)
+        return {
+          versionId,
+          versionKind: "artifact",
+          mediaKind: "image",
+          source: "design",
+        };
+    }
   }
   return {
     versionId: null,
@@ -334,7 +352,7 @@ export function hasTimelinePreviewContent(
       ["r2v", "t2v", "i2v", "s2v", "edit", "motion_clip"].includes(
         element.creation.type,
       ) &&
-      roughCutFrameForElement(project, element).source !== "none",
+      roughCutFrameForElement(project, element, true).source !== "none",
   );
 }
 
@@ -343,6 +361,7 @@ export function selectRoughCutFrames(
   project: ProjectDocument | null | undefined,
 ): RoughCutFrame[] {
   if (!project) return [];
+  const branching = selectNarrativeShape(project) === "branching";
   return selectLiveTimelineIds(project).flatMap((timelineId, timelineIndex) => {
     const timeline = project.timelines.items[timelineId];
     if (!timeline) return [];
@@ -361,7 +380,7 @@ export function selectRoughCutFrames(
         timelineIndex,
         elementId: element.element_id,
         label: element.label || element.element_id,
-        ...roughCutFrameForElement(project, element),
+        ...roughCutFrameForElement(project, element, branching),
       }));
   });
 }

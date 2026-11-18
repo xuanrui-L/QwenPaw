@@ -48,7 +48,6 @@ import type {
   HostProviderInfo,
   TtsCapabilities,
   TtsModelCapability,
-  TtsProvider,
   VideoModelCapabilities,
 } from "@/api/creator";
 import type {
@@ -267,6 +266,7 @@ export function llmPresetFor(
   providerId: string | undefined,
   providers: HostProviderInfo[],
 ): ProtocolPreset | null {
+  if (!providerId && protocol !== "AgentScope Platform") return null;
   // OpenCode publishes no host provider record, so its own tables stand in for
   // one; the model list is merged rather than replaced because a host may also
   // report OpenCode models of its own.
@@ -284,12 +284,14 @@ export function llmPresetFor(
       };
     }
     const fallback = LLM_PROTOCOL_FALLBACK_BASE_URLS[protocol];
-    return fallback
-      ? {
-          base_url: fallback,
-          models: LLM_PROTOCOL_FALLBACK_MODELS[protocol] ?? [],
-        }
-      : null;
+    if (!fallback) return null;
+    return {
+      base_url: fallback,
+      models:
+        protocol === "AgentScope Platform"
+          ? LLM_PROTOCOL_FALLBACK_MODELS[protocol]
+          : [],
+    };
   }
   const hostIds = [
     ...provider.models.map((model) => model.id),
@@ -392,15 +394,6 @@ const ASR_PRESETS: Record<string, ProtocolPreset> = {
 };
 
 /**
- * Which endpoint a TTS protocol talks to, matching `providers` in the
- * capability table. Only the proxy narrows the choice: it publishes its own
- * model list and rejects anything outside it with MODEL_NOT_ALLOWED, while a
- * Bailian or custom base is assumed to serve every listed speech model.
- */
-const ttsProviderFor = (protocol: string): TtsProvider =>
-  protocol === "AgentScope Platform" ? "gateway" : "bailian";
-
-/**
  * Speech models the given protocol can actually drive, in table order.
  *
  * Exported so the narrowing itself is testable: offering a Bailian-only name
@@ -419,8 +412,9 @@ export function ttsModelChoices(
   if (roster.length) {
     return models.filter((item) => roster.includes(item.model));
   }
-  const provider = ttsProviderFor(protocol);
-  return models.filter((item) => item.providers.includes(provider));
+  if (protocol === "AgentScope Platform")
+    return models.filter((item) => item.providers?.includes("gateway"));
+  return models;
 }
 
 const TTS_PRESETS: Record<string, ProtocolPreset> = {
@@ -851,8 +845,7 @@ type SettingsPane =
   | "mode"
   | "review"
   | "skills"
-  | "guide"
-  | "platform";
+  | "guide";
 
 const PANE_MODELS: Record<"lang" | "perception" | "media", TabType[]> = {
   lang: ["llm", "vlm", "embedding"],
@@ -2183,7 +2176,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       // to the ones this endpoint actually serves.
       return {
         ...preset,
-        models: ttsModelChoices(protocol, ttsModels).map((item) => item.model),
+        models: preset.models.length
+          ? preset.models
+          : ttsModelChoices(protocol, ttsModels).map((item) => item.model),
       };
     }
     if (type === "embedding") return EMBEDDING_PRESETS[protocol] || null;

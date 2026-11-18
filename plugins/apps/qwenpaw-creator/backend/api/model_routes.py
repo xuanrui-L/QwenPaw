@@ -469,7 +469,8 @@ def _assemble_model_config(
         field = ".".join(str(part) for part in loc) if loc else "unknown field"
         message = first_error.get("msg", str(exc))
         raise ValidationError(
-            f"模型配置文件不可用: {field} {message}；" "请修正 model_config.json 或重新保存模型配置",
+            f"模型配置文件不可用: {field} {message}；"
+            "请先备份并修正 model_config.json，再重新加载配置",
         ) from exc
 
 
@@ -645,9 +646,8 @@ def mutate_model_config(
     config_path = _config_paths()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with CrossProcessFileLock(config_path.parent / ".model-config.lock"):
-        raw_config = _load_json(config_path)
         persisted = _assemble_model_config(
-            raw_config,
+            _load_json(config_path),
             include_environment=False,
         )
         updated = mutator(persisted)
@@ -658,11 +658,6 @@ def mutate_model_config(
         updated_dict = updated.model_dump(
             exclude={"self_review": {"env_overrides", "operator_status"}},
         )
-        # Operator runtime limits are not part of the model-settings form.
-        # Preserve them under the same lock so a model or review-mode save
-        # cannot reset the media budget and concurrency to their defaults.
-        if isinstance(raw_config.get("agent_runtime"), dict):
-            updated_dict["agent_runtime"] = raw_config["agent_runtime"]
         _encrypt_secret_fields(updated_dict)
 
         atomic_replace_bytes(
@@ -1171,8 +1166,6 @@ async def get_tts_capabilities() -> dict[str, Any]:
                 "transport": item.transport,
                 "systemVoices": list(item.system_voices),
                 "supportsDesign": item.supports_design,
-                # Which endpoint actually serves the model, so the UI can hide
-                # names this provider would reject outright.
                 "providers": list(item.providers),
             }
             for item in supported_models()

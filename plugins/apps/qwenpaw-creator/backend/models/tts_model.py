@@ -605,6 +605,7 @@ async def _sample_url(sample_media_url: str, api_key: str, model: str) -> str:
             media_type=media_type,
             base_url=config.get_tts_base_url(),
             protocol=config.get_tts_protocol(),
+            allow_inline=False,
         )
     if parsed.scheme in {"http", "https", "oss"}:
         return sample_media_url

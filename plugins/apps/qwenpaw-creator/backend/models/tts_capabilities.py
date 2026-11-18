@@ -8,27 +8,22 @@ The provider exposes two families that share nothing but the credential:
   voice design live on separate companion models (``-vc-`` / ``-vd-``) and are
   managed through ``qwen-voice-enrollment`` / ``qwen-voice-design``.
 - ``cosyvoice``: synthesis over WebSocket; one ``voice-enrollment`` surface
-  handles both cloning and design. ``cosyvoice-v3.5-plus`` ships no system
-  voice at all, so there a character voice must be created before anything can
-  be spoken.
-- ``qwen-audio``: shares the CosyVoice enrollment surface but does ship system
-  voices, and the set is per model - ``3.0-plus`` carries two flagship voices
-  and ``3.0-flash`` a dozen social/companion ones, while ``3.1-plus`` grows to
-  four and ``3.1-flash`` publishes 139. Plus's four names are all inside
-  Flash's list, yet Plus accepts nothing beyond them - a voice is only good
-  for a model that publishes it, so each model needs its own list. Only the
-  Chinese and English names are
-  recorded here - ``3.1-flash`` publishes 51 further low-resource locales whose
-  ids start with the model name, and a name absent from its model's list is
-  refused locally before any call. ``providers`` records the endpoints that
-  actually serve a model: the 3.0 pair is the only speech the model proxy
-  routes today, so 3.1 stays Bailian-only until it publishes those names.
+  handles both cloning and design. Only ``cosyvoice-v3.5-plus`` ships no
+  system voices, so it needs a created voice before anything can be spoken;
+  every Qwen-Audio model publishes its own list, and a voice is accepted only
+  by a model that publishes it: ``longanfengyue`` is a 3.0 id while
+  ``longanfengyue_v3.1`` is a 3.1 id, 3.0's own list mixes bare ids with
+  ``_v3.6`` ones, and 3.1 Plus publishes four names out of Flash's
+  eighty-eight - so no model can borrow another model's list as its own.
+  Only the Chinese and
+  English names are recorded: ``3.1-flash`` publishes 51 further low-resource
+  locales whose ids start with the model name, and a name missing from its
+  model's list is refused locally before any call.
 
 Keeping the differences in one table lets the rest of the backend ask
 capability questions ("does this model have system voices?", "which model do I
-enroll against?", "can this endpoint serve it?") instead of pattern-matching
-model names, and lets the UI ask for a model list without duplicating the
-knowledge.
+enroll against?") instead of pattern-matching model names, and lets the UI ask
+for a model list without duplicating the knowledge.
 """
 
 from __future__ import annotations
@@ -38,9 +33,6 @@ from typing import Literal
 
 TtsFamily = Literal["qwen-tts", "cosyvoice"]
 TtsTransport = Literal["http", "websocket"]
-# ``bailian`` is the direct DashScope endpoint, ``gateway`` the AgentScope model
-# proxy. A model listed under neither would be unselectable everywhere, so the
-# default is the endpoint this table was written for.
 TtsProvider = Literal["bailian", "gateway"]
 
 
@@ -58,10 +50,7 @@ class TtsModelCapability:
     clone_target: str = ""
     # Model that designed voices are bound to; empty means "not supported".
     design_target: str = ""
-    # Endpoints that actually serve this model. The proxy publishes its own
-    # model list and answers anything outside it with
-    # ``ASP.BIZ.MODEL_NOT_ALLOWED``, so offering a Bailian-only name there is
-    # a guaranteed failure the user has to discover by hand.
+    # Providers this model is available on (protocol→provider mapping).
     providers: tuple[TtsProvider, ...] = ("bailian",)
 
     @property
@@ -94,15 +83,11 @@ _QWEN_TTS_VOICES = (
     "Roy",
 )
 
-# From the Qwen-Audio-TTS voice list: a voice outside its own model's list is
-# rejected upstream, and the model proxy reports that rejection as 502 with
-# ``retryable: true``, so a wrong name here reads as a broken endpoint.
-_QWEN_AUDIO_PLUS_VOICES = (
-    "longanlingxin",
-    "longanlufeng",
-)
-
-_QWEN_AUDIO_FLASH_VOICES = (
+# Qwen-Audio 3.0 Flash's published system voices. The ids are read straight
+# from the provider's voice list: a voice outside its own model's list is
+# rejected upstream, and the proxy reports that rejection as a retryable 502,
+# which reads exactly like a broken route.
+_QWEN_AUDIO_30_FLASH_VOICES = (
     "longanfengyue",
     "longanyuanfei",
     "longanlingxi",
@@ -117,9 +102,16 @@ _QWEN_AUDIO_FLASH_VOICES = (
     "loongjohn",
 )
 
-# The 3.1 pair speaks the same WebSocket protocol and enrolls through the same
-# ``voice-enrollment`` surface as 3.0; only the published voices are new, and
-# their ids carry a ``_v3.1`` revision suffix.
+# Qwen-Audio 3.0 Plus ships two flagship voices; the ids do not carry the
+# ``_v3.6`` suffix that Flash's new voices use and are not interchangeable
+# with the 3.1 names.
+_QWEN_AUDIO_30_PLUS_VOICES = (
+    "longanlingxin",
+    "longanlufeng",
+)
+
+# Qwen-Audio 3.1 Plus ships four flagship voices; the ids carry the ``_v3.1``
+# revision suffix and are not interchangeable with the 3.0 names.
 _QWEN_AUDIO_31_PLUS_VOICES = (
     "longanlingxin_v3.1",
     "xunanchuan_v3.1",
@@ -127,11 +119,11 @@ _QWEN_AUDIO_31_PLUS_VOICES = (
     "longanfengyue_v3.1",
 )
 
-# 3.1-flash publishes 139 voices. The 51 low-resource-language ones
-# (``qwen-audio-3.1-tts-flash-<name>_<locale>``) are left out: Creator
-# narration is Chinese or English, and each of those voices is restricted to
-# its own locale, so listing them would offer 51 names that fail on any other
-# text.
+# Qwen-Audio 3.1 Flash publishes 139 voices. The 51 low-resource-language
+# ones (``qwen-audio-3.1-tts-flash-<name>_<locale>``) are left out: Creator
+# narration is Chinese or English, and the provider restricts those voices to
+# their own locale, so listing them would offer 51 names that fail on any
+# other text.
 _QWEN_AUDIO_31_FLASH_VOICES = (
     # Multi-language and dialect voices: these four also carry the regional
     # dialects reachable through the instruction field.
@@ -249,8 +241,8 @@ _CAPABILITIES: tuple[TtsModelCapability, ...] = (
         model="qwen-audio-3.0-tts-flash",
         family="cosyvoice",
         transport="websocket",
-        label="Qwen-Audio 3.0 TTS Flash（12 个系统音色，快速）",
-        system_voices=_QWEN_AUDIO_FLASH_VOICES,
+        label="Qwen-Audio 3.0 TTS Flash（12 个系统音色）",
+        system_voices=_QWEN_AUDIO_30_FLASH_VOICES,
         providers=("bailian", "gateway"),
     ),
     # Listed after its cheaper sibling on purpose: a protocol switch that has
@@ -261,13 +253,15 @@ _CAPABILITIES: tuple[TtsModelCapability, ...] = (
         family="cosyvoice",
         transport="websocket",
         label="Qwen-Audio 3.0 TTS Plus（旗舰音色，2 个系统音色）",
-        system_voices=_QWEN_AUDIO_PLUS_VOICES,
+        system_voices=_QWEN_AUDIO_30_PLUS_VOICES,
         providers=("bailian", "gateway"),
     ),
-    # 3.1 keeps the flash-before-plus order for the reason noted above, and
-    # stays on the default ``providers=("bailian",)``: the proxy has not
-    # published these names yet, and asking it for one reads back as a 502
-    # rather than as a configuration error.
+    # 3.1 speaks the same WebSocket protocol and enrolls voices through the
+    # same ``voice-enrollment`` surface as 3.0; only the published voices are
+    # new. Flash is listed before Plus - the order the interactive-video table
+    # uses too, so merging the two tables never renumbers the choices the
+    # configuration page renders in table order. 3.1 stays on the default
+    # ``providers=("bailian",)``: the proxy has not published these names yet.
     TtsModelCapability(
         model="qwen-audio-3.1-tts-flash",
         family="cosyvoice",
@@ -294,7 +288,7 @@ def supported_models() -> tuple[TtsModelCapability, ...]:
 
 
 def models_for(provider: TtsProvider) -> tuple[TtsModelCapability, ...]:
-    """Models one endpoint actually serves, in table order."""
+    """Models available on ``provider`` (e.g. ``"bailian"`` or ``"gateway"``)."""
 
     return tuple(item for item in _CAPABILITIES if provider in item.providers)
 
@@ -327,8 +321,7 @@ def resolve_system_voice(
     """The system voice this call will actually speak, or None if rejected.
 
     ``None`` means the caller named a voice this model does not publish; the
-    caller turns that into an error - or, on the model proxy, into a
-    pass-through it trusts the proxy to judge.
+    caller turns that into an error before any provider round-trip.
 
     A name that did not come from the caller is a different case: one
     ``TTS_VOICE`` default is shared by every model while each model publishes

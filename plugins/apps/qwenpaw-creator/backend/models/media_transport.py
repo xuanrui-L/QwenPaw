@@ -931,6 +931,7 @@ async def upload_reference_file_for_provider(
     media_type: str,
     base_url: str,
     protocol: str = "",
+    allow_inline: bool = True,
     destination_guard: Callable[[str], None] | None = None,
 ) -> str:
     """Return a URL the configured provider can fetch for one local file.
@@ -940,7 +941,7 @@ async def upload_reference_file_for_provider(
     AgentScope proxy has no Bailian upload identity and takes its own public
     URL, a DashScope endpoint keeps the model-bound ``oss://`` temporary
     upload, and any other OpenAI-compatible gateway is served the bytes
-    inline, because it can neither fetch a DashScope OSS object nor accept a
+    inline when the caller supports inline media, because it can neither fetch a DashScope OSS object nor accept a
     Bailian upload credential.
     """
     if model_config.is_agentscope_gateway(
@@ -954,7 +955,9 @@ async def upload_reference_file_for_provider(
             media_type=media_type,
             destination_guard=destination_guard,
         )
-    if not reference_transport_needs_upload_key(base_url, protocol):
+    if allow_inline and not reference_transport_needs_upload_key(
+        base_url, protocol
+    ):
         from models.vlm_model import (  # local import: see above
             transport_local_media_url,
         )

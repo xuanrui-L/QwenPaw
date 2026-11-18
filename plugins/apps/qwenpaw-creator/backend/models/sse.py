@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
+
 from utils.exceptions import ModelError
 
 _EVENT_DONE = "[DONE]"
@@ -306,3 +308,23 @@ def decode_chat_response(
             model_name=model_name,
         )
     return payload
+
+
+def read_chat_response(
+    response: httpx.Response, *, gateway: bool, model_name: str, url: str
+) -> dict:
+    """Read the native JSON response or a provider's streamed completion."""
+    content_type = response.headers.get("content-type", "")
+    if (
+        gateway
+        or is_event_stream(content_type)
+        or response.text.lstrip().startswith("data:")
+    ):
+        return decode_chat_response(
+            status_code=response.status_code,
+            content_type=content_type,
+            text=response.text,
+            model_name=model_name,
+            url=url,
+        )
+    return response.json()

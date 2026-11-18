@@ -113,6 +113,7 @@ def test_keyless_openai_protocol_omits_authorization_header(
     assert result == "pong"
     assert captured["url"] == "https://gateway.example.com/v1/chat/completions"
     assert "Authorization" not in captured["headers"]
+    assert "stream" not in captured["body"]
 
 
 def test_openai_protocol_sends_bearer_when_key_present(monkeypatch) -> None:
@@ -125,7 +126,7 @@ def test_openai_protocol_sends_bearer_when_key_present(monkeypatch) -> None:
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
 
 
-def test_openai_protocol_asks_the_provider_to_stream(monkeypatch) -> None:
+def test_agentscope_gateway_asks_the_provider_to_stream(monkeypatch) -> None:
     """A non-streaming request dies at the gateway, not at our own budget.
 
     Measured: platform-pre's nginx answered 504 at 180.36s for a four-screen
@@ -134,7 +135,7 @@ def test_openai_protocol_asks_the_provider_to_stream(monkeypatch) -> None:
     Streaming keeps bytes moving, which resets that clock, and the decoder
     folds the stream back into the single completion callers here expect.
     """
-    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
+    _patch_config(monkeypatch, protocol="AgentScope", api_key="sk-test")
     captured: dict = {}
     _fake_httpx(monkeypatch, captured)
 
@@ -393,3 +394,19 @@ def test_unsupported_temperature_learns_and_retries_without_it(
         assert model_config.chat_temperature("brand-new-model", 0.2) is None
     finally:
         cache.clear(key)
+
+
+@pytest.mark.parametrize(
+    ("protocol", "retryable"), [("OpenAI", False), ("AgentScope", True)]
+)
+def test_429_retryability_uses_the_configured_endpoint(
+    monkeypatch, protocol, retryable
+):
+    _patch_config(monkeypatch, protocol=protocol, api_key="test")
+    error = text_model._http_error(
+        text_model.httpx.Response(429, text="too many requests"),
+        model_name="test-model",
+        protocol=protocol,
+        url="https://gateway.example.com/v1/chat/completions",
+    )
+    assert error.retryable is retryable

@@ -1,6 +1,7 @@
 # Creator's build only consumes this plugin. Keep its runtime Markdown skills;
 # the repository-wide Docker context excludes Markdown for the host image.
 **
+!.nvmrc
 !plugins/
 !plugins/apps/
 !plugins/apps/qwenpaw-creator/
@@ -17,8 +18,6 @@
 **/.vite
 **/*.log
 **/.DS_Store
-# Local e2e scratch data (exported bundles, recordings) — hundreds of MB, never
-# needed in the image: the runtime reads player sources, not .e2e output.
 **/.e2e
 plugins/apps/qwenpaw-creator/backend/tests
 plugins/apps/qwenpaw-creator/backend/scripts

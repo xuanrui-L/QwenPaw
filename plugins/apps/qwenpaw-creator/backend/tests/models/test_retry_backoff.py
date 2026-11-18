@@ -124,23 +124,33 @@ def test_jitter_spreads_a_fanout_without_losing_the_schedule() -> None:
 def test_unenveloped_server_errors_are_retryable() -> None:
     # The regression this fixes: an nginx 503 has no gateway code, so the
     # status alone decides, and it used to end the task on its first attempt.
-    assert _is_retryable_response(_Response(503, NGINX_503))
-    assert _is_retryable_response(_Response(429, "too many requests"))
-    assert _is_retryable_response(_Response(502, ""))
+    assert _is_retryable_response(_Response(503, NGINX_503), gateway=True)
+    assert _is_retryable_response(
+        _Response(429, "too many requests"), gateway=True
+    )
+    assert _is_retryable_response(_Response(502, ""), gateway=True)
 
 
 def test_a_gateway_code_no_longer_overrides_the_status() -> None:
     # The proxy is fixing its stamping on its side, so a deterministic-looking
     # code no longer vetoes the status: a 502 retries. A 4xx still does not -
     # that is the status rule, not the code.
-    assert _is_retryable_response(_Response(502, GATEWAY_DETERMINISTIC_502))
-    assert not _is_retryable_response(_Response(403, GATEWAY_CREDITS_403))
+    assert _is_retryable_response(
+        _Response(502, GATEWAY_DETERMINISTIC_502), gateway=True
+    )
+    assert not _is_retryable_response(
+        _Response(403, GATEWAY_CREDITS_403), gateway=True
+    )
 
 
 def test_client_errors_and_successes_are_never_retried() -> None:
-    assert not _is_retryable_response(_Response(400, "bad request"))
-    assert not _is_retryable_response(_Response(404, "not found"))
-    assert not _is_retryable_response(_Response(200, "{}"))
+    assert not _is_retryable_response(
+        _Response(400, "bad request"), gateway=True
+    )
+    assert not _is_retryable_response(
+        _Response(404, "not found"), gateway=True
+    )
+    assert not _is_retryable_response(_Response(200, "{}"), gateway=True)
 
 
 # -- the throttle signal the scheduler holds dispatch on ----------------
@@ -162,10 +172,19 @@ def test_rate_limit_signal_recognises_both_wordings() -> None:
 def test_rate_limit_text_is_narrower_than_retryability() -> None:
     # A 503 is retryable for this node but says nothing about the other
     # branches, so it must not hold the whole project.
-    assert _is_retryable_response(_Response(503, NGINX_503))
+    assert _is_retryable_response(_Response(503, NGINX_503), gateway=True)
     assert not is_rate_limit_text("Image generation failed with status 503")
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503])
 def test_lane_decision_matches_shared_status_rule(status: int) -> None:
-    assert _is_retryable_response(_Response(status, "no envelope here"))
+    assert _is_retryable_response(
+        _Response(status, "no envelope here"), gateway=True
+    )
+
+
+@pytest.mark.parametrize(
+    "status, expected", [(429, True), (500, False), (502, False), (503, False)]
+)
+def test_direct_image_submission_only_retries_rate_limits(status, expected):
+    assert _is_retryable_response(_Response(status), gateway=False) is expected

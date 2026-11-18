@@ -918,6 +918,11 @@ def test_reasoning_budget_reaches_sdk_request_without_limiting_tool_output(
     _configure_text_model(monkeypatch)
     monkeypatch.setattr(
         model_client.model_config,
+        "get_text_protocol",
+        lambda: "AgentScope",
+    )
+    monkeypatch.setattr(
+        model_client.model_config,
         "get_text_model_name",
         lambda: name,
     )

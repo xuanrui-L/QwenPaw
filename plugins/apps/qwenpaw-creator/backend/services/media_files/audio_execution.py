@@ -28,11 +28,9 @@ from domain.errors import ConflictError, ValidationError
 from models import config as model_config
 from models import tts_model
 from models.tts_capabilities import require_capability, resolve_system_voice
-from services.media_files import media_gate
 from services.project_files.assets import AssetAlreadyExists, AssetFileStore
 from services.project_files.commit import ProjectCommitError
 from services.project_files.facade import CreatorFileServices
-from services.observability import mem_probe
 from services.project_files.models import (
     CharacterVoice,
     IndexedFile,
@@ -344,8 +342,8 @@ def _requested_tts_identity(
         (voice or "").strip(),
         model_config.get_tts_voice(),
     )
-    # ``None`` is a name the runner refuses or forwards as typed, so no asset
-    # can have been stored under it; keep the request as handed over.
+    # ``None`` is a name the runner rejects before any call, so no asset can
+    # have been stored under it; keep the request as typed.
     return (capability.model, voice if active is None else active)
 
 
@@ -540,7 +538,7 @@ def _extracted_video_audio_bytes(payload: bytes, *, suffix: str) -> bytes:
         output = Path(tmp) / "sample.wav"
         source.write_bytes(payload)
         try:
-            result = media_gate.run(
+            result = subprocess.run(
                 [
                     executable,
                     "-hide_banner",
@@ -576,13 +574,7 @@ def _extracted_video_audio_bytes(payload: bytes, *, suffix: str) -> bytes:
                 "视频音轨提取失败（该视频可能没有音轨）："
                 + (result.stderr or result.stdout or "unknown")[-300:],
             )
-        payload = output.read_bytes()
-        mem_probe.stage(
-            "audio.extracted_track_bytes",
-            name=output.name,
-            bytes=len(payload),
-        )
-        return payload
+        return output.read_bytes()
 
 
 def _sample_bytes_for_version(

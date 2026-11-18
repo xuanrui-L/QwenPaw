@@ -326,12 +326,24 @@ def test_scheduler_regenerates_stale_script_once_and_keeps_saved_body(
     monkeypatch,
     automatic,
 ):
-    services = _services(tmp_path)
+    services = _branching_services(tmp_path)
     calls = _mock_chat(monkeypatch, [DRAFT, DRAFT + "\n**管家**：请保管钥匙。\n"])
     monkeypatch.setattr(
         work_scheduler,
         "get_execution_authorization_mode",
         lambda: "allow_all" if automatic else "required",
+    )
+
+    # This test exercises script scheduling on a branching project. The
+    # independent poster/page lanes have their own provider tests.
+    async def ignore_other_lane(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        work_scheduler, "_default_cover_dispatch", ignore_other_lane
+    )
+    monkeypatch.setattr(
+        work_scheduler, "_default_interaction_dispatch", ignore_other_lane
     )
 
     async def scenario():
@@ -539,7 +551,7 @@ def test_identical_redraft_is_fresh_and_next_retry_does_not_regenerate(
     monkeypatch,
     change,
 ):
-    services = _services(tmp_path)
+    services = _branching_services(tmp_path)
     calls = _mock_chat(monkeypatch, [DRAFT])
     first = _draft(services, key="original")
     if change == "stale":
@@ -583,7 +595,7 @@ def test_changed_inputs_during_model_call_do_not_publish_old_script(
     monkeypatch,
     field,
 ):
-    services = _services(tmp_path)
+    services = _branching_services(tmp_path)
 
     async def change_then_return(*_args, **_kwargs):
         base = services.projects.read(PROJECT_ID)

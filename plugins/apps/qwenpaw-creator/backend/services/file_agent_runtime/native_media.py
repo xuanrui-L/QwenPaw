@@ -19,7 +19,6 @@ from models.media_transport import (
     reference_transport_needs_upload_key,
     upload_reference_file_for_provider,
 )
-from services.media_files import media_gate
 from services.project_files.assets import AssetFileStore
 from services.project_files.facade import CreatorFileServices
 from services.project_files.remote_cache import resolve_remote_cache
@@ -170,7 +169,7 @@ def _extract_video_frames_sync(
     frames: list[tuple[int, Path]] = []
     for index, stamp in enumerate(stamps):
         frame_path = output_dir / f"frame-{index:02d}.jpg"
-        completed = media_gate.run(
+        completed = subprocess.run(
             [
                 ffmpeg,
                 "-hide_banner",

@@ -257,7 +257,7 @@ def test_a_gateway_timeout_is_transient_despite_the_hyphen() -> None:
     that names its own status now decides by status, not by substring.
     """
 
-    assert is_transient_error_message(GATEWAY_TIMEOUT_504) is True
+    assert is_transient_error_message(GATEWAY_TIMEOUT_504, gateway=True) is True
 
 
 def test_a_named_status_does_not_rescue_a_client_error() -> None:
@@ -309,7 +309,7 @@ def test_the_text_lane_wording_still_reads_back_as_transient() -> None:
     )
 
     assert "HTTP 504" in str(error)
-    assert is_transient_error_message(str(error)) is True
+    assert is_transient_error_message(str(error), gateway=True) is True
     # The flag persisted alongside the message has to agree with the classifier,
     # because the two used to contradict each other on this very failure.
     assert error.retryable is True
@@ -329,7 +329,8 @@ def test_an_unrecognised_failure_is_retried_by_the_scheduler_only() -> None:
     unknown = "provider answered something we have never seen"
 
     assert is_unclassified_failure(unknown) is True
-    assert _is_transient_dispatch_error(Exception(unknown)) is True
+    assert _is_transient_dispatch_error(Exception(unknown)) is False
+    assert _is_transient_dispatch_error(Exception(unknown), gateway=True) is True
     # The media-side verdict stays conservative.
     assert is_transient_error_message(unknown) is False
 

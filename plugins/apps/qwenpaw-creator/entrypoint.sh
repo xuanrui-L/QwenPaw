@@ -45,15 +45,13 @@ else
   echo "✓ Config found in ${QWENPAW_WORKING_DIR}, skipping initialization."
 fi
 
-# Install the bundled Creator plugin on every start by default, so a rebuilt
-# image's plugin wins over a stale copy left behind in a persisted working
-# dir. Set CREATOR_FORCE_PLUGIN_UPDATE=false to keep an existing plugin
-# (e.g. when bind-mounting the plugin directory for live editing).
+# Auto-install bundled Creator plugin if not already present.
+# Set CREATOR_FORCE_PLUGIN_UPDATE=true to force overwrite existing plugins.
 if [ -d "/app/bundled-plugins/qwenpaw-creator" ]; then
   case "${QWENPAW_WORKING_DIR}" in
     ""|"/") echo "ERROR: QWENPAW_WORKING_DIR is unset or /" >&2; exit 1 ;;
   esac
-  if [ "${CREATOR_FORCE_PLUGIN_UPDATE:-true}" = "true" ] || [ ! -d "${QWENPAW_WORKING_DIR}/plugins/qwenpaw-creator" ]; then
+  if [ "${CREATOR_FORCE_PLUGIN_UPDATE:-}" = "true" ] || [ ! -d "${QWENPAW_WORKING_DIR}/plugins/qwenpaw-creator" ]; then
     echo "📦 Installing bundled Creator plugin..."
     mkdir -p "${QWENPAW_WORKING_DIR}/plugins"
     rm -rf "${QWENPAW_WORKING_DIR}/plugins/qwenpaw-creator"
@@ -61,7 +59,7 @@ if [ -d "/app/bundled-plugins/qwenpaw-creator" ]; then
     CREATOR_VERSION=$(python3 -c "import json;print(json.load(open('/app/bundled-plugins/qwenpaw-creator/plugin.json'))['version'])" 2>/dev/null || echo "unknown")
     echo "✅ Creator plugin v${CREATOR_VERSION} installed."
   else
-    echo "✓ CREATOR_FORCE_PLUGIN_UPDATE=false, keeping the existing plugin."
+    echo "✓ Creator plugin already installed (set CREATOR_FORCE_PLUGIN_UPDATE=true to overwrite)."
   fi
 else
   echo "✓ Creator plugin not bundled."
@@ -76,15 +74,6 @@ export QWENPAW_PORT="${QWENPAW_PORT:-8088}"
 # of the lock-free benefit at 256 MB of arena ground; raise it only if
 # malloc contention shows up in CPU.
 export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-4}"
-# HTML source understanding stays OFF by default until the renderer is actually
-# isolated. The image does bundle the Chromium this build's playwright pins, but
-# vendor/media_toolkit/renderers/web.py opens file:// documents without blocking
-# subresources: an uploaded HTML can pull in files the service process can read
-# outside the document directory, and reach loopback/private networks through
-# image subresources, carrying those responses into later screenshots and model
-# input. A local-path check on the entry point does not constrain any of that.
-# Set 1 only once a verifiable resource allowlist/deny policy exists.
-export CREATOR_DOC_READER_WEB_ENABLED="${CREATOR_DOC_READER_WEB_ENABLED:-0}"
 warn_if_auth_off_container_bind
 
 envsubst '${QWENPAW_PORT}' \

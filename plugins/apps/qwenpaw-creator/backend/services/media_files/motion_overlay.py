@@ -47,8 +47,6 @@ from services.media_files.motion_engine import (
     resolve_vendor_files,
 )
 from services.media_files.overlay import OverlayRenderResult
-from services.media_files import media_gate
-from services.observability import mem_probe
 from utils.logger import setup_logger
 
 logger = setup_logger("services.media_files.motion_overlay")
@@ -873,7 +871,7 @@ def _frame_alpha_stats(
     frame, all ``-1.0`` when the alpha plane cannot be inspected."""
 
     try:
-        result = media_gate.run(
+        result = subprocess.run(
             [
                 ffmpeg_path,
                 "-v",
@@ -982,7 +980,7 @@ def _frame_rgba_bytes(
     """Raw RGBA plane of one PNG frame, ``None`` when inspection fails."""
 
     try:
-        result = media_gate.run(
+        result = subprocess.run(
             [
                 ffmpeg_path,
                 "-v",
@@ -1061,12 +1059,6 @@ def _frames_visually_static(
 
     if len(frame_paths) <= 1:
         return False
-    total_mb = sum(path.stat().st_size for path in frame_paths) / 1048576.0
-    mem_probe.stage(
-        "motion_overlay.static_frame_check",
-        frames=len(frame_paths),
-        total_mb=round(total_mb, 1),
-    )
     if len({path.read_bytes() for path in frame_paths}) == 1:
         return True
     if not ffmpeg_path:
@@ -1168,7 +1160,7 @@ def _verify_captured_frames(
         if frame_ring and frame_window is not None:
             frame_path = frames_dir / f"{index:05d}.png"
             try:
-                result = media_gate.run(
+                result = subprocess.run(
                     [
                         ffmpeg_path,
                         "-v",
@@ -1447,12 +1439,7 @@ def render_motion_poster(
     )
     if target.is_file():
         try:
-            payload = target.read_bytes()
-            mem_probe.stage(
-                "motion_overlay.poster_cache_bytes",
-                bytes=len(payload),
-            )
-            return payload
+            return target.read_bytes()
         except OSError:
             pass
     with tempfile.TemporaryDirectory(prefix="motion-poster-") as poster_dir:
@@ -2069,7 +2056,7 @@ def composite_motion_layers(
         os.fspath(output_path),
     ]
     try:
-        result = media_gate.run(
+        result = subprocess.run(
             command,
             stdin=subprocess.DEVNULL,
             capture_output=True,

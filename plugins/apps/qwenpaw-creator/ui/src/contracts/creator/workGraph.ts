@@ -39,6 +39,7 @@ export interface WorkGraphView {
   generation: number;
   counts: Record<string, number>;
   mediaCalls: number;
+  mediaCallBudget: number;
   manualHold?: { revision: number; nodeIds: string[] };
   nodes: WorkGraphNode[];
 }

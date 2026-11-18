@@ -40,7 +40,6 @@ from domain.errors import (
     ValidationError,
     BadRequestError,
 )
-from domain.enums import TaskStatus
 from models.config import (
     EXECUTION_AUTHORIZATION_REQUIRED,
     get_execution_authorization_mode,
@@ -87,7 +86,6 @@ from services.project_files.store import (
     _safe_project_id,
 )
 from services.runtime_files.errors import RuntimeFileError
-from services.runtime_files.execution_store import ProjectExecutionStore
 from services.runtime_files.idempotency_store import IdempotencyRecordStore
 from services.runtime_files.locking import CrossProcessFileLock
 from services.runtime_files.session_store import (
@@ -131,7 +129,7 @@ router = APIRouter(
     tags=["projects"],
     route_class=_RemovedProjectPutRoute,
 )
-archive_router = APIRouter(
+storage_router = APIRouter(
     prefix="/projects",
     tags=["projects"],
     route_class=CreatorErrorRoute,
@@ -339,7 +337,7 @@ def _existing_copy_receipt(
     return {"projectId": target_project_id}
 
 
-@router.get("")
+@storage_router.get("")
 async def list_projects(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -359,7 +357,6 @@ async def list_projects(
 
     def _build_items() -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
-        executions = ProjectExecutionStore(services.root)
         for item in page:
             try:
                 session = services.sessions.get_project_session_snapshot(
@@ -379,25 +376,6 @@ async def list_projects(
                     exc,
                 )
                 session_status = None
-            # The home-page "working" badge used to cost one GET /tasks per
-            # Project: 1 + N round trips, each queued behind the Agent driver in
-            # the shared thread pool, and the page waited for the slowest before
-            # rendering anything.  The same predicate is answered here, once, for
-            # the whole page.
-            try:
-                tasks = executions.list_tasks(item.project_id)
-            except RuntimeFileError as exc:
-                logger.warning(
-                    "project list: task scan failed for %s: %s",
-                    item.project_id,
-                    exc,
-                )
-                has_active_task = False
-            else:
-                has_active_task = any(
-                    task.status in (TaskStatus.QUEUED, TaskStatus.RUNNING)
-                    for task in tasks
-                )
             items.append(
                 {
                     "projectId": item.project_id,
@@ -413,7 +391,6 @@ async def list_projects(
                     "coverVersionSource": item.cover_version_source,
                     "finalVideoVersionId": item.final_video_version_id,
                     "status": session_status,
-                    "hasActiveTask": has_active_task,
                 },
             )
         return items
@@ -799,8 +776,7 @@ async def set_subtitle_style(
             or "subtitle_style" in request.model_fields_set
         ):
             raise ValidationError(
-                "elementIds 只能配合入场/出场/循环选择；"
-                "风格包与覆盖样式始终作用于全项目字幕。",
+                "elementIds 只能配合入场/出场/循环选择；" "风格包与覆盖样式始终作用于全项目字幕。",
             )
         # A present key is authoritative, so the UI can also go back:
         # ``null``/``""`` mean smart recommend and an explicit ``null`` style
@@ -845,6 +821,7 @@ async def set_subtitle_style(
             stored, indexed = externalize_motion_document(document, file_store)
             indexed_files[indexed.file_id] = indexed
             return stored.model_dump(mode="json")
+
         timelines = candidate["timelines"]["items"]
         # The caption boxes are validated against the same canvas the design
         # pass and the renderer use, so a switch here cannot bake a document
@@ -1038,6 +1015,13 @@ async def delete_project(
     from api.file_session_routes import _cancel_detached_project_tasks
 
     _cancel_detached_project_tasks(services, project_id)
+    # Release the poller and the per-project log before the directory
+    # rename. On Windows an open creator.log inside the tree makes
+    # os.replace fail with WinError 5.
+    services.poller.close(project_id)
+    from utils.logger import close_creator_project_logging
+
+    close_creator_project_logging(project_id)
     try:
         await asyncio.to_thread(
             services.projects.delete,
@@ -1048,9 +1032,9 @@ async def delete_project(
         pass
     except (ProjectIntegrityError, ProjectStoreError) as exc:
         raise StorageIntegrityError(str(exc)) from exc
-    services.poller.close(project_id)
-    from utils.logger import close_creator_project_logging
-
+    # Cancellation only signals workers; a late project-scoped emit can
+    # reopen the log between the pre-delete close and rename. Drop that
+    # handler again so deleted projects do not keep an open target.
     close_creator_project_logging(project_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -1257,7 +1241,7 @@ async def copy_project(
 # pylint: enable=too-many-statements
 
 
-@archive_router.get("/{project_id}/export")
+@storage_router.get("/{project_id}/export")
 async def export_project(
     project_id: str,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
@@ -1444,7 +1428,7 @@ async def _run_import(upload) -> str:
         )
 
 
-@archive_router.post("/import")
+@storage_router.post("/import")
 async def import_project(
     request: Request,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),

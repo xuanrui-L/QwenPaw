@@ -42,8 +42,7 @@ from models.media_transport import (
     upload_local_file_to_dashscope_temp,
 )
 from models.model_capability_cache import get_capability_cache
-from models.sse import decode_chat_response
-from services.observability import mem_probe
+from models.sse import read_chat_response
 from services.runtime_files.safe_remote_download import (
     SafeRemoteDownloadError,
     open_safe_remote_stream,
@@ -225,26 +224,13 @@ def _inline_payload(path: Path, fallback_mime: str) -> tuple[str, bytes]:
 def _data_url(path: Path, fallback_mime: str) -> str:
     mime, payload = _inline_payload(path, fallback_mime)
     encoded = base64.b64encode(payload).decode("utf-8")
-    mem_probe.stage(
-        "vlm.inline_base64",
-        name=path.name,
-        file_bytes=len(payload),
-        base64_mb=round(len(encoded) / 1048576.0, 1),
-    )
     return f"data:{mime};base64,{encoded}"
 
 
 def _inline_base64(path: Path, fallback_mime: str) -> tuple[str, str]:
     """Return ``(mime_type, base64_data)`` for a local file."""
     mime, payload = _inline_payload(path, fallback_mime)
-    data = base64.b64encode(payload).decode("utf-8")
-    mem_probe.stage(
-        "vlm.inline_base64",
-        name=path.name,
-        file_bytes=len(payload),
-        base64_mb=round(len(data) / 1048576.0, 1),
-    )
-    return mime, data
+    return mime, base64.b64encode(payload).decode("utf-8")
 
 
 def multimodal_media_part(
@@ -1000,10 +986,9 @@ async def _call_openai_vlm(
     # A gateway may force text/event-stream on this call even though the body
     # never asked for ``stream``; fold it back into the chat.completion shape
     # that _parse_openai_response already expects.
-    return decode_chat_response(
-        status_code=response.status_code,
-        text=response.text,
-        content_type=str(response.headers.get("content-type") or ""),
+    return read_chat_response(
+        response,
+        gateway=model_config.is_agentscope_gateway(protocol, base_url),
         model_name=model_name,
         url=f"{base_url.rstrip('/')}/chat/completions",
     )

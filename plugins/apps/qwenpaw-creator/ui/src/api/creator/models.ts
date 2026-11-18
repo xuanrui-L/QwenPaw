@@ -103,7 +103,7 @@ export interface TtsModelCapability {
   systemVoices: string[];
   supportsDesign: boolean;
   /** Endpoints that actually serve this model. */
-  providers: TtsProvider[];
+  providers?: TtsProvider[];
 }
 
 export interface TtsCapabilities {

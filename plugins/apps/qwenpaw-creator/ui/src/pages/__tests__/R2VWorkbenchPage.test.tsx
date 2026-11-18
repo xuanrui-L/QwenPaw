@@ -76,6 +76,7 @@ function modelRoutes(model: string): Parameters<typeof installMockFetch>[0] {
           counts: {},
           nodes: [],
           mediaCalls: 0,
+          mediaCallBudget: 20,
         },
       },
     },
@@ -206,6 +207,7 @@ function seedWorkGraph(...nodes: WorkGraphNode[]) {
       generation: 1,
       counts: {},
       mediaCalls: 0,
+      mediaCallBudget: 20,
       nodes,
     },
   });

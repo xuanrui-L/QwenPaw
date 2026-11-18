@@ -21,7 +21,6 @@ from typing import Any
 
 # pylint: disable=no-name-in-module
 from utils.logger import setup_logger
-from services.media_files import media_gate
 from services.media_files.motion_blueprints import subtitle_pack_typography
 from services.media_files.motion_templates import (
     DEFAULT_CAPTION_LOCATION,
@@ -132,8 +131,7 @@ _SUBTITLE_FONT_FAMILIES: dict[str, tuple[str, ...]] = {
         "/System/Library/Fonts/Kaiti.ttc",
         "/System/Library/Fonts/Supplemental/STKaiti.ttf",
         "/System/Library/Fonts/STKaiti.ttf",
-        # noqa 补自合并：上游行超长但漏标，非本分支回归
-        "/System/Library/AssetsV2/com_apple_MobileAsset_Font8/*/AssetData/Kaiti.ttc",  # noqa: E501
+        "/System/Library/AssetsV2/com_apple_MobileAsset_Font8/*/AssetData/Kaiti.ttc",
         "/usr/share/fonts/truetype/arphic/ukai.ttc",
         "{WINDIR}/Fonts/simkai.ttf",
     ),
@@ -567,7 +565,7 @@ def _composite_overlay(
         str(output_path),
     ]
     try:
-        result = media_gate.run(
+        result = subprocess.run(
             command,
             # Detach stdin so ffmpeg is not suspended by SIGTTIN when it
             # reads the tty from a background process group.

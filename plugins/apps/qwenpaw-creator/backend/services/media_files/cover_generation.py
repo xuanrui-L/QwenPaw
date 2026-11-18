@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Sequence
 from uuid import uuid4
 
-from services.media_files import media_gate
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +330,7 @@ def _run_ffmpeg_frame(
             str(output),
         ]
         try:
-            media_gate.run(  # noqa: S603
+            subprocess.run(  # noqa: S603
                 command,
                 capture_output=True,
                 timeout=30,

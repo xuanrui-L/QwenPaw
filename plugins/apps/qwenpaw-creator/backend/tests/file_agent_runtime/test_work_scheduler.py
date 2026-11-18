@@ -7,12 +7,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from domain.enums import TaskKind, TaskStatus
+from domain.enums import CreatorCommandType, TaskStatus
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
     WorkNode,
@@ -21,11 +20,9 @@ from services.file_agent_runtime.work_graph import (
 from services.file_agent_runtime import work_scheduler
 from services.file_agent_runtime.work_scheduler import (
     WorkGraphScheduler,
-    _abandoned_queued_targets,
     _blocked_by_active_media_review,
     _blocked_by_active_sync_review,
 )
-from services.runtime_files.execution_models import TaskRecord
 from services.runtime_files.path_safety import require_safe_runtime_segment
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
@@ -348,64 +345,6 @@ def test_tick_dispatches_up_to_media_parallelism(tmp_path, monkeypatch):
     assert len(variant_ids) == 3  # three distinct nodes, no duplicates
 
 
-@pytest.mark.parametrize("enabled", [True, False])
-def test_stale_script_dispatch_requires_automatic_execution(
-    tmp_path,
-    monkeypatch,
-    enabled,
-):
-    services = _services(tmp_path, monkeypatch, ready_variants=0)
-    node = WorkNode(
-        node_id="script:timeline:main",
-        kind="script",
-        label="Script",
-        status=WorkNodeStatus.STALE,
-        timeline_id="timeline:main",
-        command="GENERATE_TIMELINE_SCRIPT",
-        target_ref="timeline:timeline:main",
-        dispatch_fingerprint="script-inputs",
-        regeneration_of="script-old",
-    )
-    graph = WorkGraph(nodes=(node,), generation=1)
-    monkeypatch.setattr(
-        work_scheduler,
-        "derive_work_graph",
-        lambda *a, **k: graph,
-    )
-    scheduler = WorkGraphScheduler(services)
-    monkeypatch.setattr(scheduler, "enabled", lambda: enabled)
-    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
-    dispatch = _RecordingDispatch()
-
-    async def scenario():
-        dispatched = asyncio.Event()
-
-        async def script_dispatch(*args, **kwargs):
-            result = await dispatch(*args, **kwargs)
-            dispatched.set()
-            return result
-
-        monkeypatch.setattr(
-            work_scheduler,
-            "_default_script_dispatch",
-            script_dispatch,
-        )
-        try:
-            await scheduler.tick(PROJECT_ID)
-            if enabled:
-                await asyncio.wait_for(dispatched.wait(), timeout=2)
-        finally:
-            await scheduler.shutdown()
-
-    asyncio.run(scenario())
-    assert len(dispatch.calls) == int(enabled)
-    if enabled:
-        call = dispatch.calls[0]
-        assert call["target_ref"] == "timeline:timeline:main"
-        assert call["command"] == "GENERATE_TIMELINE_SCRIPT"
-        assert "-regen-" in call["idempotency_key"]
-
-
 def _failed_record(dispatch: _RecordingDispatch, *, error: str):
     """The durable FAILED record a real executor leaves after admission."""
     call = dispatch.calls[0]
@@ -430,14 +369,7 @@ def test_same_inputs_are_never_redispatched(tmp_path, monkeypatch):
     async def scenario():
         await scheduler.tick(PROJECT_ID)
         await _drain()
-        record = _failed_record(
-            dispatch,
-            # A settled failure, not an unknown one: an unrecognised wording is
-            # retried on purpose (see _is_transient_dispatch_error), which is
-            # what keeps a gateway timeout from walling a project forever.
-            error="Image generation failed: check creator_image_model "
-            "configuration.",
-        )
+        record = _failed_record(dispatch, error="provider down")
         monkeypatch.setattr(
             scheduler.executions,
             "list_tasks",
@@ -533,31 +465,6 @@ def test_dispatched_idempotency_key_is_a_safe_runtime_segment(
     )
 
 
-def test_idempotency_key_is_a_safe_runtime_segment(tmp_path, monkeypatch):
-    """Regression: the ledger fingerprint carries "|img:<model>|vid:<model>"
-    and "|" is rejected by require_safe_runtime_segment. Media executors
-    persist the dispatch key verbatim as Task idempotency_key /
-    caused_by_request_id, so a raw fingerprint in the key failed every
-    work-graph dispatch ("caused_by_request_id is not a safe path
-    segment") and media generation never started."""
-    services = _services(tmp_path, monkeypatch, ready_variants=1)
-    _enable_yolo(monkeypatch)
-    dispatch = _RecordingDispatch()
-    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
-
-    async def scenario():
-        await scheduler.tick(PROJECT_ID)
-        await _drain()
-
-    asyncio.run(scenario())
-
-    key = dispatch.calls[0]["idempotency_key"]
-    assert "|" not in key
-    assert (
-        require_safe_runtime_segment(key, label="caused_by_request_id") == key
-    )
-
-
 def test_quarantined_stale_result_reopens_dispatch(tmp_path, monkeypatch):
     """Field run 2026-08-07: the first commit of a four-wide storyboard
     wave staled the other three; their tasks went QUARANTINED (invisible
@@ -595,203 +502,6 @@ def test_quarantined_stale_result_reopens_dispatch(tmp_path, monkeypatch):
 
     # 1 initial dispatch + 2 bounded rescue re-dispatches, then locked.
     assert len(dispatch.calls) == 3
-
-
-def _queued_task(target_ref, *, updated_at, last_attempt_seq=0):
-    return SimpleNamespace(
-        kind="image_generation",
-        status=TaskStatus.QUEUED,
-        updated_at=updated_at,
-        last_attempt_seq=last_attempt_seq,
-        metadata={"targetRef": target_ref},
-        input_refs=[target_ref],
-        error=None,
-        result=None,
-    )
-
-
-def test_abandoned_queued_targets_requires_no_attempt_and_age():
-    """Only a never-claimed QUEUED task past the grace window counts, so a
-    task with real progress or a fresh admission is never reopened."""
-
-    now = datetime(2026, 11, 6, 12, tzinfo=UTC)
-    stale = now - timedelta(minutes=16)
-    assert _abandoned_queued_targets(
-        [_queued_task("element:e1", updated_at=stale)],
-        now=now,
-    ) == {"element:e1"}
-    assert (
-        _abandoned_queued_targets(
-            [_queued_task("element:e1", updated_at=now)],
-            now=now,
-        )
-        == set()
-    )
-    assert (
-        _abandoned_queued_targets(
-            [_queued_task("element:e1", updated_at=stale, last_attempt_seq=1)],
-            now=now,
-        )
-        == set()
-    )
-
-
-def _stranded_admission_case(tmp_path, monkeypatch, *, age: timedelta):
-    """Dispatch once, then leave one QUEUED zero-attempt task of the given
-    age and report how many extra dispatches the following ticks admit."""
-    services = _services(tmp_path, monkeypatch, ready_variants=1)
-    _enable_yolo(monkeypatch)
-    dispatch = _RecordingDispatch()
-    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
-
-    async def scenario():
-        await scheduler.tick(PROJECT_ID)
-        await _drain()
-        target_ref = dispatch.calls[0]["target_ref"]
-        admitted = len(dispatch.calls)
-        monkeypatch.setattr(
-            scheduler.executions,
-            "list_tasks",
-            lambda _project_id: [
-                _queued_task(
-                    target_ref,
-                    updated_at=datetime.now(UTC) - age,
-                ),
-            ],
-        )
-        await scheduler.tick(PROJECT_ID)
-        await _drain()
-        reclaimed = len(dispatch.calls) - admitted
-        await scheduler.shutdown()
-        return reclaimed
-
-    return asyncio.run(scenario())
-
-
-def test_queued_task_without_attempt_reopens_dispatch(tmp_path, monkeypatch):
-    """Field case 2026-11-06: the dispatch coroutine admitted the run and
-    task, then died before recording a first attempt. The graph read the
-    node as running, none of the re-entry paths recognised a QUEUED task,
-    and the manual dispatch gate answers running with dispatched=false —
-    the node sat unclaimed for 69 hours with compose gated behind it."""
-    # The stub dispatch never records an attempt, so a still-stranded
-    # admission re-enters on each wake up to the transient hard cap; what
-    # is under test is that it re-enters at all.
-    assert (
-        _stranded_admission_case(
-            tmp_path,
-            monkeypatch,
-            age=timedelta(minutes=16),
-        )
-        >= 1
-    )
-
-
-def test_fresh_queued_admission_is_not_requeued(tmp_path, monkeypatch):
-    """A task admitted moments ago may still be starting; only the grace
-    window separates it from a stranded one."""
-
-    assert (
-        _stranded_admission_case(
-            tmp_path,
-            monkeypatch,
-            age=timedelta(minutes=1),
-        )
-        == 0
-    )
-
-
-def _admitted_failure_case(tmp_path, monkeypatch, *, last_attempt_seq):
-    """Dispatch that admits a task record and then fails deterministically.
-
-    Returns the dispatch count plus the scheduler's own warnings: the plugin
-    logger does not propagate to the root, so caplog can never see it and the
-    warning has to be recorded at its call site.
-    """
-    services = _services(tmp_path, monkeypatch, ready_variants=1)
-    _enable_yolo(monkeypatch)
-    notices: list[str] = []
-
-    def record_warning(message, *args, **kwargs):
-        notices.append(message % args if args else str(message))
-
-    monkeypatch.setattr(work_scheduler.logger, "warning", record_warning)
-    records: list = []
-    dispatch = _RecordingDispatch(
-        fail=True,
-        error="reference budget exceeded",
-        records=records,
-    )
-    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
-    # The stranded-node case is exactly the one where the paid-retry budget is
-    # already spent: an unrecognised RuntimeError classifies as transient, so
-    # only with no budget left does dispatch reach the zero-attempt reopen.
-    monkeypatch.setattr(
-        scheduler,
-        "_transient_budget_available",
-        lambda _key: False,
-    )
-    monkeypatch.setattr(
-        scheduler.executions,
-        "list_tasks",
-        lambda _project_id: [
-            SimpleNamespace(
-                kind="image_generation",
-                status=TaskStatus.FAILED,
-                error={"code": "IMAGE_GENERATION_FAILED", "message": "x"},
-                result=None,
-                metadata=record.metadata,
-                input_refs=record.input_refs,
-                idempotency_key=record.idempotency_key,
-                updated_at=record.updated_at,
-                last_attempt_seq=last_attempt_seq,
-            )
-            for record in records
-        ],
-    )
-
-    async def scenario():
-        for _ in range(4):
-            await scheduler.tick(PROJECT_ID)
-            await _drain()
-        await scheduler.shutdown()
-        return len(dispatch.calls)
-
-    dispatched = asyncio.run(scenario())
-    reopened = any("left no attempt" in line for line in notices)
-    return dispatched, reopened
-
-
-def test_failure_without_any_attempt_reopens_the_ledger(
-    tmp_path,
-    monkeypatch,
-):
-    """Field case 2026-11-06: the executor never claimed the admitted task, so
-    nothing was spent, yet the ledger mark stayed and the node stranded as
-    "running" with zero attempts for 69 hours."""
-
-    _, reopened = _admitted_failure_case(
-        tmp_path,
-        monkeypatch,
-        last_attempt_seq=0,
-    )
-    assert reopened
-
-
-def test_failure_after_an_attempt_keeps_the_ledger_mark(
-    tmp_path,
-    monkeypatch,
-):
-    """Once an attempt exists the provider may already have been paid, so the
-    zero-attempt reopen must not fire; the existing recordless path is a
-    separate decision and is not what this asserts about."""
-
-    _, reopened = _admitted_failure_case(
-        tmp_path,
-        monkeypatch,
-        last_attempt_seq=1,
-    )
-    assert not reopened
 
 
 def test_transient_budget_reopens_after_the_cooldown(tmp_path, monkeypatch):
@@ -1274,7 +984,6 @@ def test_dispatch_start_and_image_success_emit_quiet(tmp_path, monkeypatch):
 
 
 def test_r2v_submit_does_not_emit_success(tmp_path, monkeypatch):
-    from domain.enums import CreatorCommandType
     from services.file_agent_runtime.notifications import RuntimeEventKind
 
     services = _services(tmp_path, monkeypatch, ready_variants=0)
@@ -1421,6 +1130,11 @@ def test_credits_refusal_holds_the_project_and_reports_once(
     services = _services(tmp_path, monkeypatch, ready_variants=3)
     _enable_yolo(monkeypatch)
     monkeypatch.setattr(
+        work_scheduler.model_config,
+        "get_image_protocol",
+        lambda: "AgentScope Platform",
+    )
+    monkeypatch.setattr(
         "services.file_agent_runtime.work_scheduler.get_media_parallelism",
         lambda: 1,
     )
@@ -1526,9 +1240,13 @@ def test_rate_limit_breaker_holds_the_fan_out_and_expires(
     services = _services(tmp_path, monkeypatch, ready_variants=1)
     scheduler = WorkGraphScheduler(services)
 
+    assert not scheduler._trip_rate_limit_breaker(
+        PROJECT_ID, Exception(RATE_LIMIT_ERROR),
+    )
     assert scheduler._trip_rate_limit_breaker(
         PROJECT_ID,
         Exception(RATE_LIMIT_ERROR),
+        gateway=True,
     )
     assert scheduler._rate_limit_breaker_open(PROJECT_ID)
     # One window produces one line: the rest of the fan-out would hear the same
@@ -1536,6 +1254,7 @@ def test_rate_limit_breaker_holds_the_fan_out_and_expires(
     assert not scheduler._trip_rate_limit_breaker(
         PROJECT_ID,
         Exception(RATE_LIMIT_ERROR),
+        gateway=True,
     )
 
     # A bare status says the same thing in the provider's own words.
@@ -1546,6 +1265,7 @@ def test_rate_limit_breaker_holds_the_fan_out_and_expires(
         Exception(
             "Image generation failed with status 429: too many requests",
         ),
+        gateway=True,
     )
 
     # Credits is the better diagnosis when a refusal looks like both: its
@@ -1571,11 +1291,62 @@ def test_rate_limit_breaker_holds_the_fan_out_and_expires(
     assert scheduler._trip_rate_limit_breaker(
         PROJECT_ID,
         Exception(RATE_LIMIT_ERROR),
+        gateway=True,
     )
     scheduler._rate_limited_tripped[PROJECT_ID] -= (
         work_scheduler._RATE_LIMIT_BREAKER_SECONDS + 1
     )
     assert not scheduler._rate_limit_breaker_open(PROJECT_ID)
+
+
+def test_platform_throttle_leaves_direct_models_dispatchable(
+    tmp_path, monkeypatch
+):
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    scheduler = WorkGraphScheduler(services)
+    monkeypatch.setattr(
+        work_scheduler.model_config,
+        "get_image_protocol",
+        lambda: "AgentScope Platform",
+    )
+    monkeypatch.setattr(
+        work_scheduler.model_config,
+        "get_video_protocol",
+        lambda: "Wan",
+    )
+    monkeypatch.setattr(
+        work_scheduler.model_config,
+        "get_video_base_url",
+        lambda: "https://dashscope.aliyuncs.com/api/v1",
+    )
+    graph = WorkGraph(
+        nodes=(
+            WorkNode(
+                node_id="visual:x",
+                kind="visual",
+                label="Image",
+                status=WorkNodeStatus.READY,
+                command=CreatorCommandType.GENERATE_ASSET.value,
+            ),
+            WorkNode(
+                node_id="video:x",
+                kind="video",
+                label="Video",
+                status=WorkNodeStatus.READY,
+                command=CreatorCommandType.GENERATE_R2V_VIDEO.value,
+            ),
+        ),
+        generation=1,
+    )
+    assert scheduler._trip_rate_limit_breaker(
+        PROJECT_ID,
+        Exception(RATE_LIMIT_ERROR),
+        gateway=True,
+    )
+    assert [
+        node.node_id
+        for node in scheduler._dispatch_candidates(PROJECT_ID, graph)
+    ] == ["video:x"]
 
 
 def test_credits_breaker_also_holds_prompt_preparation(
@@ -1595,6 +1366,11 @@ def test_credits_breaker_also_holds_prompt_preparation(
         Sentinel,
     )
     scheduler = WorkGraphScheduler(services)
+    monkeypatch.setattr(
+        work_scheduler.model_config,
+        "get_text_protocol",
+        lambda: "AgentScope Platform",
+    )
     scheduler._trip_quota_breaker(PROJECT_ID, Exception(CREDITS_ERROR))
     graph = WorkGraph(
         nodes=(
@@ -2049,97 +1825,3 @@ def test_manual_fingerprint_re_rolls_a_succeeded_slot() -> None:
     assert WorkGraphScheduler.manual_retry_fingerprint(node, [succeeded]) == (
         fresh
     )
-
-
-def test_media_history_does_not_block_dispatch_but_gates_still_apply(
-    tmp_path,
-    monkeypatch,
-):
-    services = _services(tmp_path, monkeypatch, ready_variants=0)
-    history = [
-        TaskRecord(
-            task_id=f"historical-media-{index}",
-            project_id=PROJECT_ID,
-            kind=TaskKind.R2V_GENERATION,
-            status=TaskStatus.SUCCEEDED,
-            request_fingerprint=f"historical-{index}",
-        )
-        for index in range(250)
-    ]
-    monkeypatch.setattr(
-        work_scheduler.ProjectExecutionStore,
-        "list_tasks",
-        lambda _store, _project_id: history,
-    )
-    monkeypatch.setattr(work_scheduler, "get_media_parallelism", lambda: 1)
-    monkeypatch.setattr(
-        work_scheduler,
-        "get_execution_authorization_mode",
-        lambda: "required",
-    )
-    graph = WorkGraph(
-        nodes=tuple(
-            WorkNode(
-                node_id=kind + ":test",
-                kind=kind,
-                label=kind,
-                status=WorkNodeStatus.READY,
-                command=command,
-                target_ref="timeline:main"
-                if kind == "compose"
-                else "element:test",
-            )
-            for kind, command in [
-                ("video", "GENERATE_R2V_VIDEO"),
-                ("interaction", "GENERATE_INTERACTION_MOTION"),
-                ("compose", "COMPOSE_FINAL_VIDEO"),
-            ]
-        ),
-        generation=1,
-    )
-    completed = set()
-    monkeypatch.setattr(
-        work_scheduler,
-        "derive_work_graph",
-        lambda *_args, **_kwargs: WorkGraph(
-            nodes=tuple(
-                node for node in graph.nodes if node.kind not in completed
-            ),
-            generation=graph.generation,
-        ),
-    )
-    scheduler = WorkGraphScheduler(services)
-    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
-    calls = []
-    release = asyncio.Event()
-
-    async def dispatch(_project, node, *_args, **_kwargs):
-        calls.append(node.kind)
-        await release.wait()
-        completed.add(node.kind)
-
-    scheduler.dispatch_node = dispatch
-
-    async def scenario():
-        try:
-            await scheduler.tick(PROJECT_ID)
-            await _drain()
-            assert not calls, "automatic dispatch still requires authorization"
-            _enable_yolo(monkeypatch)
-            for count in range(1, 4):
-                release.clear()
-                await scheduler.tick(PROJECT_ID)
-                await _drain()
-                assert len(calls) == count
-                await scheduler.tick(PROJECT_ID)
-                await _drain()
-                assert (
-                    len(calls) == count
-                ), "inflight work still occupies capacity"
-                release.set()
-                await asyncio.gather(*scheduler._dispatch_tasks[PROJECT_ID])
-        finally:
-            await scheduler.shutdown()
-
-    asyncio.run(scenario())
-    assert sorted(calls) == ["compose", "interaction", "video"]

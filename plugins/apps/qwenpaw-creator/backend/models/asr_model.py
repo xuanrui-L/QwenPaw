@@ -14,7 +14,6 @@ import re
 import subprocess
 import tempfile
 import logging
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -244,6 +243,7 @@ async def _upload_asr_reference(
         media_type=media_type,
         base_url=config.get_asr_base_url(),
         protocol=config.get_asr_protocol(),
+        allow_inline=False,
     )
 
 
@@ -893,37 +893,45 @@ def _is_qwen_multimodal_asr(model: str) -> bool:
 
 def _qwen3_sentences(body: Mapping[str, Any]) -> list[str]:
     choices = body.get("output", {}).get("choices") or ()
+    if not choices:
+        return _qwen_audio_sentences(body)
+    content = choices[0].get("message", {}).get("content") or ()
     sentences: list[str] = []
-    if choices:
-        content = choices[0].get("message", {}).get("content") or ()
-        for item in content:
-            if isinstance(item, Mapping):
-                text = str(item.get("text") or "").strip()
-            elif isinstance(item, str):
-                text = item.strip()
-            else:
-                text = ""
-            if text:
-                sentences.append(text)
-    if sentences:
-        return sentences
-    # ``qwen-audio-*-asr-*`` answers without ``choices``: the transcript sits
-    # in ``output.sentence`` (one object, or one per segment) and is repeated
-    # at the top level. Reading only ``choices`` yields an empty transcript
-    # for a call that actually succeeded.
-    output = body.get("output")
-    sentence = output.get("sentence") if isinstance(output, Mapping) else None
-    candidates: list[Mapping[str, Any]] = []
-    if isinstance(sentence, Mapping):
-        candidates = [sentence]
-    elif isinstance(sentence, Sequence):
-        candidates = [item for item in sentence if isinstance(item, Mapping)]
-    for item in candidates:
-        text = str(item.get("text") or "").strip()
+    for item in content:
+        if isinstance(item, Mapping):
+            text = str(item.get("text") or "").strip()
+        elif isinstance(item, str):
+            text = item.strip()
+        else:
+            text = ""
         if text:
             sentences.append(text)
-    if sentences:
-        return sentences
+    return sentences
+
+
+def _qwen_audio_sentences(body: Mapping[str, Any]) -> list[str]:
+    """Transcript text from a qwen-audio-3.0-asr-flash response.
+
+    This family answers with a cumulative ``output.text`` (plus an
+    ``output.sentence`` block carrying real begin/end timings) rather than
+    the qwen3-asr ``output.choices`` chat shape, so it needs its own reader.
+    """
+    output = body.get("output") or {}
+    text = str(output.get("text") or "").strip()
+    if text:
+        return [text]
+    sentence = output.get("sentence")
+    if isinstance(sentence, list):
+        return [
+            str(item["text"]).strip()
+            for item in sentence
+            if isinstance(item, Mapping)
+            and str(item.get("text") or "").strip()
+        ]
+    if isinstance(sentence, Mapping):
+        sentence_text = str(sentence.get("text") or "").strip()
+        if sentence_text:
+            return [sentence_text]
     top_level = str(body.get("text") or "").strip()
     return [top_level] if top_level else []
 

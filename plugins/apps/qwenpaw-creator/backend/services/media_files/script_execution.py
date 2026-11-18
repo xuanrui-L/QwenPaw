@@ -230,13 +230,28 @@ def _request_fingerprint(
     *,
     guidance: str,
     source: str = "generate",
+    branch_inputs: bool,
 ) -> str:
     if source == "timeline":
         content = "\x1f".join(
             ("timeline-script", timeline.timeline_id, timeline.description),
         )
         return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
-    # Every persisted input consumed by the model must fence publication.
+    # Preserve fingerprints recorded by the shared linear workflow.
+    project_inputs = (
+        [
+            project.name,
+            project.description,
+            project.scenario,
+            (
+                str(project.settings.target_duration_seconds or "")
+                if not timeline.planned_duration_seconds
+                else ""
+            ),
+        ]
+        if branch_inputs
+        else []
+    )
     digest = hashlib.sha256(
         "\x1f".join(
             [
@@ -245,14 +260,7 @@ def _request_fingerprint(
                 timeline.synopsis,
                 timeline.description,
                 str(timeline.planned_duration_seconds or ""),
-                project.name,
-                project.description,
-                project.scenario,
-                str(
-                    project.settings.target_duration_seconds or ""
-                    if not timeline.planned_duration_seconds
-                    else "",
-                ),
+                *project_inputs,
                 project.strategy.creative_brief,
                 project.strategy.audience,
                 project.strategy.creative_direction,
@@ -316,6 +324,7 @@ def _publish_script_version(
     provenance_refs: list[str],
     guidance: str,
     source: str,
+    project_requires_fence: bool,
 ) -> FileScriptExecutionResult:
     """落盘 markdown 文件并通过提交边界写回索引（commit 时全量校验）。"""
 
@@ -331,12 +340,13 @@ def _publish_script_version(
         base = services.projects.read(project_id)
         if timeline_id not in narrative_timeline_ids(base.project):
             raise ValidationError(f"timeline 已不存在: {timeline_id}")
-        if (
+        if project_requires_fence and (
             _request_fingerprint(
                 base.project,
                 base.project.timelines.items[timeline_id],
                 guidance=guidance,
                 source=source,
+                branch_inputs=project_requires_fence,
             )
             != fingerprint
         ):
@@ -357,7 +367,8 @@ def _publish_script_version(
             provenance_refs=provenance_refs,
             input_fingerprint=fingerprint,
         )
-        version.metadata = {**version.metadata, "scriptSource": source}
+        if project_requires_fence:
+            version.metadata = {**version.metadata, "scriptSource": source}
         indexed = working.assets.files_by_id[version.file_id]
         if version.file_id == file_id:
             staged = file_store.stage_bytes(
@@ -425,11 +436,27 @@ async def execute_file_script_command(
         raise ValidationError("不支持的剧本来源")
     if source == "timeline" and (guidance or not timeline.description.strip()):
         raise ValidationError("正文同步需要已有剧本，修改意见请通过剧本生成提交")
+    slot = project.assets.artifact_slots_by_id.get(
+        timeline_script_slot_id(timeline_id),
+    )
+    selected = (
+        project.assets.artifact_versions_by_id.get(slot.selected_version_id)
+        if slot is not None and slot.selected_version_id
+        else None
+    )
+    # Existing versions authored with the interactive fingerprint retain
+    # that format even when the last branch is removed.
+    project_requires_fence = (
+        bool(project.narrative_edges)
+        or source == "timeline"
+        or bool(selected and selected.metadata.get("scriptSource"))
+    )
     fingerprint = _request_fingerprint(
         project,
         timeline,
         guidance=guidance,
         source=source,
+        branch_inputs=project_requires_fence,
     )
     # Stale re-drafts share the node's dispatch idempotency key but must not
     # reuse a previous publish transaction. Staleness triggers on more inputs
@@ -438,9 +465,6 @@ async def execute_file_script_command(
     # re-draft of identical prompt inputs is still a fresh transaction.
     # Identical fresh inputs never reach publish: the semantic replay below
     # returns the existing version first.
-    slot = project.assets.artifact_slots_by_id.get(
-        timeline_script_slot_id(timeline_id),
-    )
     revision = len(slot.version_ids) if slot is not None else 0
     idempotency_key = f"{idempotency_key}:{fingerprint[:16]}:r{revision}"
     replay = _existing_replay(
@@ -501,6 +525,7 @@ async def execute_file_script_command(
         provenance_refs=intelligence_refs,
         guidance=guidance,
         source=source,
+        project_requires_fence=project_requires_fence,
     )
 
 

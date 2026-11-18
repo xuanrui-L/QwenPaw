@@ -11,6 +11,7 @@ import type {
   FileProjectReviewRejectionFeedback,
   FileProjectReviewRecord,
 } from "@/contracts/creator";
+import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import i18n from "@/i18n";
 import {
   interactiveReviewKey,
@@ -139,10 +140,24 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
     const autoReviewAttempts = new Set<string>();
     const modeChecks = new Map<string, { at: number; allowed: boolean }>();
 
-    const autoReviewCandidates = (reviews: FileProjectReviewRecord[]) =>
+    const isInteractiveCandidate = (
+      projectId: string,
+      review: FileProjectReviewRecord,
+    ) => {
+      const snapshot = useProjectSnapshotStore.getState();
+      return isInteractiveDesignReview(
+        review,
+        snapshot.projectId === projectId ? snapshot.project : null,
+      );
+    };
+
+    const autoReviewCandidates = (
+      projectId: string,
+      reviews: FileProjectReviewRecord[],
+    ) =>
       reviews.filter(
         (review) =>
-          isInteractiveDesignReview(review) &&
+          isInteractiveCandidate(projectId, review) &&
           !autoReviewAttempts.has(interactiveReviewKey(review)),
       );
 
@@ -153,7 +168,7 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
       const current = () =>
         epoch === projectEpoch && get().projectId === projectId;
       if (!current() || get().decisionInFlight) return;
-      const candidates = autoReviewCandidates(get().reviews);
+      const candidates = autoReviewCandidates(projectId, get().reviews);
       if (!candidates.length) return;
       const lastMode = modeChecks.get(projectId);
       if (lastMode && !lastMode.allowed && Date.now() - lastMode.at < 15_000)
@@ -175,7 +190,7 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
             !fresh ||
             fresh.decision_token !== candidate.decision_token ||
             interactiveReviewKey(fresh) !== interactiveReviewKey(candidate) ||
-            !isInteractiveDesignReview(fresh)
+            !isInteractiveCandidate(projectId, fresh)
           )
             continue;
           autoReviewAttempts.add(interactiveReviewKey(fresh));
@@ -350,7 +365,7 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
               autoReviewIds:
                 modeChecks.get(projectId)?.allowed === false
                   ? []
-                  : autoReviewCandidates(pendingReviews).map(
+                  : autoReviewCandidates(projectId, pendingReviews).map(
                       (review) => review.review_id,
                     ),
               etag: result.etag,

@@ -141,6 +141,13 @@ def _element_pointer(element_id: str, *suffix: str) -> str:
 
 def _script_project() -> dict:
     project = _project()
+    project["narrative_edges"] = [
+        {
+            "edge_id": "next",
+            "source_timeline_id": "timeline:main",
+            "target_timeline_id": "timeline:next",
+        },
+    ]
     project["timelines"]["order"] = [
         "timeline:main",
         "timeline:next",
@@ -578,7 +585,7 @@ def test_video_input_invalidates_video_and_final_but_not_storyboard(
     mode,
     field,
 ) -> None:
-    document = _project()
+    document = _script_project()
     document["timelines"]["items"]["timeline:main"]["elements_by_id"]["r2v-1"][
         "creation"
     ]["type"] = mode

@@ -11,23 +11,20 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
-from typing import Any, Sequence
+from typing import Any
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
 
 from domain.errors import NotFoundError, ValidationError
 from models.config import (
+    get_media_call_budget,
     get_image_model_name,
     get_video_model_name,
 )
 from services.file_agent_runtime import manual_regeneration_hold
 from services.file_agent_runtime.work_graph import derive_work_graph
-from services.file_agent_runtime.work_scheduler import (
-    WorkGraphScheduler,
-    _abandoned_queued_targets,
-)
+from services.file_agent_runtime.work_scheduler import WorkGraphScheduler
 from services.media_files.call_budget import media_call_count
 from services.project_files.facade import CreatorFileServices
 from services.project_files.store import ProjectNotFound
@@ -55,7 +52,11 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
     graph = derive_work_graph(
         snapshot.project,
         tasks=tasks,
-        pending_reviews=services.reviews.all_pending(project_id),
+        pending_reviews=(
+            services.reviews.all_pending(project_id)
+            if snapshot.project.narrative_edges
+            else ()
+        ),
         media_models=(get_image_model_name(), get_video_model_name()),
     )
     hold = manual_regeneration_hold.ManualRegenerationHoldStore(
@@ -66,7 +67,9 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
         "manualHold": hold.payload(),
         "generation": graph.generation,
         "counts": graph.counts(),
+        # Honest spend metric: billable provider calls, never estimated money.
         "mediaCalls": media_call_count(services, project_id),
+        "mediaCallBudget": get_media_call_budget(),
         "nodes": [
             {
                 "id": node.node_id,
@@ -152,47 +155,6 @@ async def resume_work_graph(
     return {"ok": True}
 
 
-def _task_admission_detail(
-    tasks: Sequence[Any],
-    target_ref: str | None,
-) -> dict[str, Any]:
-    """Describe the task behind a running node so the caller can tell a real
-    render apart from an admission that no executor ever claimed."""
-
-    if not target_ref:
-        return {}
-    for task in tasks:
-        metadata = getattr(task, "metadata", None) or {}
-        input_refs = getattr(task, "input_refs", None) or []
-        found = str(
-            getattr(task, "target_ref", "")
-            or metadata.get("targetRef")
-            or (input_refs[0] if input_refs else ""),
-        )
-        if found != target_ref:
-            continue
-        updated = getattr(task, "updated_at", None)
-        age = None
-        if isinstance(updated, datetime):
-            age = round(
-                (datetime.now(UTC) - updated).total_seconds(),
-                1,
-            )
-        return {
-            "taskId": getattr(task, "task_id", None),
-            "taskStatus": getattr(
-                getattr(task, "status", None),
-                "value",
-                None,
-            ),
-            "lastAttemptSeq": int(
-                getattr(task, "last_attempt_seq", 0) or 0,
-            ),
-            "ageSeconds": age,
-        }
-    return {}
-
-
 @router.post("/work-graph/nodes/{node_id:path}/dispatch")
 async def dispatch_work_graph_node(
     project_id: str,
@@ -226,30 +188,18 @@ async def dispatch_work_graph_node(
     regenerate = bool(request and request.regenerate)
     if regenerate and node.kind != "interaction":
         raise ValidationError("Explicit regeneration is only for interaction")
-    # A node whose task was admitted but never claimed reads as "running" and
-    # used to be answered with a silent dispatched=false, which left the user
-    # staring at a queue label while nothing was queued (field case
-    # 2026-11-06: 69 hours). That one is allowed through to the real dispatch
-    # path; a genuinely running render is still refused, now with a reason.
-    unclaimed = (
-        node.status.value == "running"
-        and bool(node.target_ref)
-        and (node.target_ref in _abandoned_queued_targets(tasks))
-    )
-    if (node.status.value == "running" and not unclaimed) or (
+    if node.status.value == "running" or (
         node.kind == "interaction"
         and node.status.value == "done"
         and not regenerate
     ):
-        # Existing media controls request a reroll without a request body.
-        # Interaction controls explicitly opt in to bypass semantic reuse.
+        # An in-flight execution is provider spend already committed; the
+        # click races the run instead of authorizing a second one.
         return {
             "ok": True,
             "nodeId": node_id,
             "status": node.status.value,
             "dispatched": False,
-            "reason": "already_running",
-            **_task_admission_detail(tasks, node.target_ref),
         }
     if node.missing:
         raise ValidationError(
