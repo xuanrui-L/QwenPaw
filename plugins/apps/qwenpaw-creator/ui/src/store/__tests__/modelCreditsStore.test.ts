@@ -1,5 +1,6 @@
 import { act, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
+import { getCreatorSession } from "@/api/creator/sessions";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import {
   MODEL_QUOTA_ERROR_CODE,
@@ -496,6 +497,44 @@ describe("cross-project Credits notice", () => {
       });
       session().ingestEvent(ev(4, "agent.run.cancelled"));
       expect(notice()?.source?.seq).toBe(cursor === 1 ? 3 : undefined);
+    },
+  );
+
+  it.each([4, 11])(
+    "uses the cursor at the click while an older open and a refusal are in flight (%i)",
+    async (cursor) => {
+      const { fetchMock } = installMockFetch([]);
+      let finishOpen!: (value: Response) => void;
+      let finishClick!: (value: Response) => void;
+      fetchMock.mockReturnValueOnce(
+        new Promise<Response>((done) => {
+          finishOpen = done;
+        }),
+      );
+      fetchMock.mockReturnValueOnce(
+        new Promise<Response>((done) => {
+          finishClick = done;
+        }),
+      );
+      const opening = getCreatorSession("p1");
+      useModelCreditsStore.setState({
+        notice: { projectId: "p1", at: "2099-01-01" },
+      });
+      useModelCreditsStore.getState().clear(null);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      finishOpen(Response.json({ session: sessionView({ lastEventSeq: 4 }) }));
+      await opening;
+      session().ingestEvent(ev(7, "agent.run.failed", { error: quotaFailure }));
+      expect(notice()).toBeNull();
+      finishClick(
+        Response.json({ session: sessionView({ lastEventSeq: cursor }) }),
+      );
+      await waitFor(() =>
+        expect(useModelCreditsStore.getState().dismissed?.source?.seq).toBe(
+          cursor,
+        ),
+      );
+      expect(notice()?.source?.seq).toBe(cursor < 7 ? 7 : undefined);
     },
   );
 

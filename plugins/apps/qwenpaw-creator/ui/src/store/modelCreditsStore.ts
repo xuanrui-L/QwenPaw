@@ -49,6 +49,14 @@ interface PersistedCreditsHistory extends Partial<CreditsRecovery> {
   dismissed?: CreditsNotice;
 }
 
+interface PendingLegacyDismissal {
+  notice: CreditsNotice;
+  refusal?: { source: CreditsSource; live: boolean };
+}
+
+// Only an explicit click on an old, unbound notice can have a cursor in flight.
+let pendingLegacyDismissal: PendingLegacyDismissal | null = null;
+
 interface ModelCreditsState {
   notice: CreditsNotice | null;
   recovery: CreditsRecovery | null;
@@ -279,21 +287,33 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
 
     // Old notices have no server identity. Only a manual dismissal away from
     // their project needs to read that project's cursor once.
+    if (pendingLegacyDismissal?.notice !== latest)
+      pendingLegacyDismissal = null;
     if (latest !== closing || hasServerSource(latest)) return;
-    void getCreatorSession(latest.projectId)
+    const pending: PendingLegacyDismissal = { notice: latest };
+    pendingLegacyDismissal = pending;
+    // An open started before the click may have read a different event cursor.
+    void getCreatorSession(latest.projectId, { dedupe: false })
       .then(({ session }) => {
+        if (pendingLegacyDismissal !== pending) return;
+        pendingLegacyDismissal = null;
+        if (session.projectId !== latest.projectId) return;
         const state = get();
-        if (
-          state.dismissed !== latest ||
-          session.projectId !== latest.projectId
-        )
-          return;
-        const bound = atSessionCursor(latest, session);
-        set({ dismissed: bound });
-        persist(RECOVERY_KEY, { ...state.recovery, dismissed: bound });
+        if (state.dismissed === latest) {
+          const bound = atSessionCursor(latest, session);
+          set({ dismissed: bound });
+          persist(RECOVERY_KEY, { ...state.recovery, dismissed: bound });
+        }
+        if (pending.refusal)
+          markCreditsExhausted(
+            latest.projectId,
+            pending.refusal.source,
+            pending.refusal.live,
+          );
       })
       .catch(() => {
-        // Offline or deleted project: the dismissal still hides its old history.
+        if (pendingLegacyDismissal === pending) pendingLegacyDismissal = null;
+        // Offline or deleted project: keep its unbound historical dismissal.
       });
   },
 }));
@@ -310,7 +330,7 @@ export function tracksCreditsHistory(projectId: string): boolean {
   return notice?.projectId === projectId || recovery?.clearedNotice === true;
 }
 
-export function canReplayCreditsRefusal(
+function canReplayCreditsRefusal(
   projectId: string,
   source: CreditsSource,
 ): boolean {
@@ -345,7 +365,28 @@ export function markCreditsExhausted(
   source: CreditsSource,
   live: boolean,
 ): void {
-  useModelCreditsStore.getState().markExhausted(projectId, source, live);
+  const state = useModelCreditsStore.getState();
+  const pending = pendingLegacyDismissal;
+  if (
+    pending &&
+    pending.notice === state.dismissed &&
+    pending.notice.projectId === projectId
+  ) {
+    const previous = pending.refusal?.source;
+    if (
+      !previous ||
+      newerThanNotice(
+        { ...pending.notice, source: previous },
+        projectId,
+        source,
+        live,
+      )
+    )
+      pending.refusal = { source, live };
+    return;
+  }
+  if (live || canReplayCreditsRefusal(projectId, source))
+    state.markExhausted(projectId, source, live);
 }
 
 export function markSnapshotCredits(

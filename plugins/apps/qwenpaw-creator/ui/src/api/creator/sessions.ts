@@ -11,8 +11,13 @@ import i18n from "@/i18n";
 
 export function getCreatorSession(
   projectId: string,
+  options?: { dedupe?: boolean },
 ): Promise<CreatorSessionResponse> {
-  return creatorRequest(`/projects/${encodeURIComponent(projectId)}/session`);
+  return creatorRequest(
+    `/projects/${encodeURIComponent(projectId)}/session`,
+    {},
+    options,
+  );
 }
 
 export function listConversations(
