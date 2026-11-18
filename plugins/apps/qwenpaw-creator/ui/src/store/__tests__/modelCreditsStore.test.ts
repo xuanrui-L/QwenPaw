@@ -162,7 +162,7 @@ describe("cross-project Credits notice", () => {
       });
     useModelCreditsStore
       .getState()
-      .clear(() => sessionView({ lastEventSeq: 11, status: "CANCELLED" }));
+      .clear(sessionView({ lastEventSeq: 11, status: "CANCELLED" }));
     const reopening = session().bootstrap("p1");
     release(
       Response.json({
@@ -468,7 +468,7 @@ describe("cross-project Credits notice", () => {
     });
     useModelCreditsStore
       .getState()
-      .clear(() => sessionView({ lastEventSeq: 2 }));
+      .clear(sessionView({ lastEventSeq: 2 }));
     expect(
       JSON.parse(written.get("qwenpaw-creator:model-credits:last-success")!)
         .dismissed.projectId,
@@ -500,7 +500,7 @@ describe("cross-project Credits notice", () => {
       });
       const view = sessionView({ status: "CANCELLED", lastEventSeq: cursor });
       const { calls } = installMockFetch(bootstrapRoutes({ session: view }));
-      useModelCreditsStore.getState().clear(() => (isCurrent ? view : null));
+      useModelCreditsStore.getState().clear(isCurrent ? view : null);
       await waitFor(() =>
         expect(useModelCreditsStore.getState().dismissed?.source?.seq).toBe(
           cursor,
@@ -585,8 +585,8 @@ describe("cross-project Credits notice", () => {
     },
   );
 
-  it.each(["before", "after"] as const)(
-    "keeps old SSE hidden when a legacy cursor fails %s its delivery",
+  it.each(["before", "between", "after"] as const)(
+    "keeps the notice hidden when a 503 arrives %s the replayed refusal and cancellation",
     async (order) => {
       const { fetchMock } = installMockFetch(
         bootstrapRoutes({ session: { status: "CANCELLED", lastEventSeq: 11 } }),
@@ -604,16 +604,36 @@ describe("cross-project Credits notice", () => {
       useModelCreditsStore.setState({
         notice: { projectId: "p1", at: "2099-01-01" },
       });
-      useModelCreditsStore.getState().clear();
+      useCreatorSessionStore.setState({
+        projectId: "other",
+        session: sessionView({ projectId: "other" }),
+      });
+      useModelCreditsStore.getState().clear(session().session);
       if (order === "before") await failRead();
       // An older shared open had only seen seq 4. From that stream seq 7
       // looks live, although the server had already stopped at seq 11.
       useCreatorSessionStore.setState({
-        session: sessionView({ lastEventSeq: 4 }),
+        projectId: "p1",
+        session: sessionView({
+          status: "ERROR",
+          lastEventSeq: 4,
+          error: quotaFailure,
+        }),
         replayUntilSeq: 4,
       });
-      session().ingestEvent(ev(7, "agent.run.failed", { error: quotaFailure }));
+      const at = "2026-11-18T10:00:00Z";
+      const error = { ...quotaFailure, details: { refusedAt: at } };
+      session().ingestEvent({ ...ev(7, "agent.run.failed", { error }), at });
       expect(notice()).toBeNull();
+      if (order === "between") {
+        expect(session().session?.status).toBe("ERROR");
+        expect(session().session?.error?.details?.refusedAt).toBe(at);
+        await failRead();
+        expect(notice()).toBeNull();
+      }
+      session().ingestEvent(
+        ev(11, "session.status_changed", { status: "CANCELLED" }),
+      );
       if (order === "after") await failRead();
       await session().refreshSession();
       expect(notice()).toBeNull();
@@ -647,37 +667,39 @@ describe("cross-project Credits notice", () => {
   });
 
   it.each(["ERROR", "CANCELLED", "RUNNING"] as const)(
-    "uses the active %s state if a legacy dismissal cursor is unavailable",
+    "uses an accepted %s poll if a legacy dismissal cursor is unavailable",
     async (status) => {
-      const { fetchMock } = installMockFetch([]);
+      const at = "2026-11-18T10:00:00Z";
+      const error = { ...quotaFailure, details: { refusedAt: at } };
+      const view = sessionView({
+        status,
+        lastEventSeq: 7,
+        error: status === "ERROR" ? error : null,
+      });
+      const { fetchMock } = installMockFetch(
+        bootstrapRoutes({ session: view }),
+      );
       let finish!: (value: Response) => void;
       fetchMock.mockReturnValueOnce(
         new Promise<Response>((done) => {
           finish = done;
         }),
       );
-      let active: ReturnType<typeof sessionView> | null = null;
       useModelCreditsStore.setState({
         notice: { projectId: "p1", at: "2099-01-01" },
       });
-      useModelCreditsStore.getState().clear(() => active);
-      const at = "2026-11-18T10:00:00Z";
-      const error = { ...quotaFailure, details: { refusedAt: at } };
+      useModelCreditsStore.getState().clear();
       session().ingestEvent({ ...ev(7, "agent.run.failed", { error }), at });
-      active = sessionView({
-        status,
-        lastEventSeq: 7,
-        error: status === "ERROR" ? error : null,
-      });
+      await session().refreshSession();
       expect(notice()).toBeNull();
       await act(async () => {
         finish(Response.json({}, { status: 503 }));
       });
       expect(notice()?.source?.seq).toBe(status === "ERROR" ? 7 : undefined);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
       if (status === "RUNNING") {
         installMockFetch(
-          bootstrapRoutes({ session: { ...active, status: "ERROR", error } }),
+          bootstrapRoutes({ session: { ...view, status: "ERROR", error } }),
         );
         await session().refreshSession();
         expect(notice()?.source?.seq).toBe(7);
@@ -704,7 +726,7 @@ describe("cross-project Credits notice", () => {
       });
       useModelCreditsStore
         .getState()
-        .clear(() => (storedSource ? null : current));
+        .clear(storedSource ? null : current);
       expect(calls).toHaveLength(0);
       session().reset();
       useCreatorSessionStore.setState({

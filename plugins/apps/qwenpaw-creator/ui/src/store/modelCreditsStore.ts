@@ -53,7 +53,7 @@ interface PersistedCreditsHistory extends Partial<CreditsRecovery> {
 interface PendingLegacyDismissal {
   notice: CreditsNotice;
   refusal?: { source: CreditsSource; live: boolean };
-  firstSessionAfterClick?: CreatorSessionView;
+  observed?: { first: CreatorSessionView; current: CreatorSessionView };
   readFailed?: true;
 }
 
@@ -70,7 +70,7 @@ interface ModelCreditsState {
     source?: CreditsSource,
     live?: boolean,
   ) => void;
-  clear: (readSession?: () => CreatorSessionView | null) => void;
+  clear: (currentSession?: CreatorSessionView | null) => void;
 }
 
 // Lazy lookup: tests replace window.localStorage; don't capture at load.
@@ -264,10 +264,9 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
     set({ notice });
     persist(STORAGE_KEY, notice);
   },
-  clear: (readSession) => {
+  clear: (currentSession) => {
     const { notice, recovery, dismissed } = get();
     if (!notice) return;
-    const currentSession = readSession?.();
     // Ignore this refusal (or older history) after a manual dismissal. An
     // unrelated project's snapshot and recovery do not acknowledge a new refusal.
     const closing =
@@ -309,7 +308,7 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
         if (pendingLegacyDismissal !== pending) return;
         // The next SSE event can still belong to a read started before the click.
         pending.readFailed = true;
-        settleFailedDismissal(pending, readSession?.());
+        settleFailedDismissal(pending);
       });
   },
 }));
@@ -385,8 +384,7 @@ export function markCreditsExhausted(
       )
     )
       pending.refusal = { source, live };
-    if (pending.readFailed)
-      settleFailedDismissal(pending, pending.firstSessionAfterClick);
+    if (pending.readFailed) settleFailedDismissal(pending);
     return;
   }
   if (live || canReplayCreditsRefusal(projectId, source))
@@ -415,25 +413,22 @@ function bindLegacyDismissal(
     );
 }
 
-function settleFailedDismissal(
-  pending: PendingLegacyDismissal,
-  active?: CreatorSessionView | null,
-): void {
-  const first = pending.firstSessionAfterClick;
+function settleFailedDismissal(pending: PendingLegacyDismissal): void {
+  // Partially replayed SSE can pair an old ERROR status with a later refusal.
+  // Only session reads started after the click can confirm what is current.
+  if (!pending.observed) return;
+  const { first, current } = pending.observed;
   const refusal = pending.refusal;
   // Even this fallback snapshot was read after the click, so everything
   // beyond its cursor definitely happened after the dismissal.
-  if (first && (refusal?.source.seq ?? -1) > first.lastEventSeq) {
+  if ((refusal?.source.seq ?? -1) > first.lastEventSeq) {
     bindLegacyDismissal(pending, first);
     return;
   }
-  const current =
-    active?.projectId === pending.notice.projectId ? active : null;
   const currentError =
-    current?.status === "ERROR" && isQuotaErrorCode(current.error?.code);
+    current.status === "ERROR" && isQuotaErrorCode(current.error?.code);
   if (
     refusal?.live &&
-    current &&
     currentError &&
     current.id === refusal.source.sessionId
   ) {
@@ -453,10 +448,9 @@ function settleFailedDismissal(
   // A stopped retry can replay the old refusal as apparently live. Wait for
   // an accepted read of this project before releasing those events.
   if (
-    first &&
-    (first.status !== "ERROR" ||
-      !isQuotaErrorCode(first.error?.code) ||
-      (current && !currentError))
+    current.status === "IDLE" ||
+    current.status === "CANCELLED" ||
+    (current.status === "ERROR" && !currentError)
   )
     bindLegacyDismissal(pending, first);
 }
@@ -466,8 +460,9 @@ export function observeSessionAfterCreditsDismissal(
 ): void {
   const pending = pendingLegacyDismissal;
   if (!pending || pending.notice.projectId !== session.projectId) return;
-  pending.firstSessionAfterClick ??= session;
-  if (pending.readFailed) settleFailedDismissal(pending, session);
+  if (pending.observed) pending.observed.current = session;
+  else pending.observed = { first: session, current: session };
+  if (pending.readFailed) settleFailedDismissal(pending);
 }
 
 export function markSnapshotCredits(

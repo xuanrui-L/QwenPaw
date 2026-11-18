@@ -45,7 +45,7 @@ export default function ModelCreditsNotice() {
       </Tooltip>
       <button
         type="button"
-        onClick={() => clear(() => useCreatorSessionStore.getState().session)}
+        onClick={() => clear(useCreatorSessionStore.getState().session)}
         aria-label={t("nav.creditsDismiss")}
         title={t("nav.creditsDismiss")}
         className="icon-button shrink-0"
