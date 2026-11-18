@@ -70,7 +70,7 @@ from .json_pointer import (
 )
 from .locator_map import derive_ui_locator
 from .models import CURRENT_PROJECT_SCHEMA_VERSION, Project
-from .serialization import project_etag
+from .serialization import project_document_etag, project_etag
 from .review_bookkeeping import is_human_review_change
 from .store import ProjectSnapshot, ProjectStore
 from .transaction_index import (
@@ -269,18 +269,19 @@ def _snapshot_document(snapshot: ProjectSnapshot) -> dict[str, Any]:
     Recovery recomputes ``touched_pointers`` the same way -- it normalizes
     ``base.json`` before diffing it against ``candidate.json``.
 
-    Only a source already at ``CURRENT_PROJECT_SCHEMA_VERSION`` is used
-    verbatim; a legacy source below it is not guaranteed to re-hash to its
-    stored ETag once migrated, so those keep the migrated ``model_dump``.
+    An older source also anchors its first migration when its historical
+    encoding reproduces the authority ETag. If it cannot, retain the previous
+    frozen-snapshot behavior.
     Snapshots built in memory (``source_document is None``) also keep the
     ``model_dump`` -- their model already is the authority ``project_etag``
     hashed.
     """
 
     source = snapshot.source_document
-    if (
-        source is not None
-        and source.get("schema_version") == CURRENT_PROJECT_SCHEMA_VERSION
+    if source is not None and (
+        source.get("schema_version") == CURRENT_PROJECT_SCHEMA_VERSION
+        or project_document_etag(source, project=snapshot.project)
+        == snapshot.etag
     ):
         return copy.deepcopy(dict(source))
     return _json(snapshot.project)
@@ -364,14 +365,17 @@ def _update_manual_edit_buffer(
 
 
 class ProjectCommitBoundary:
+
     def __init__(
         self,
         store: ProjectStore,
         *,
         lock_timeout_seconds: float = 10.0,
+        schedule_history_sweep: bool = True,
     ) -> None:
         self.store = store
         self.lock_timeout_seconds = lock_timeout_seconds
+        self.schedule_history_sweep = schedule_history_sweep
 
     def runtime_review_boundary(
         self,
@@ -662,6 +666,7 @@ class ProjectCommitBoundary:
                 runtime_root=runtime_root,
                 current_transaction_id=transaction_id,
                 authority_etag=authority.etag,
+                schedule_history_sweep=self.schedule_history_sweep,
             )
             with CrossProcessFileLock(
                 lock_path,
@@ -1163,6 +1168,7 @@ class ProjectCommitBoundary:
         runtime_root: Path,
         current_transaction_id: str,
         authority_etag: str,
+        schedule_history_sweep: bool = True,
     ) -> None:
         # Reading every transaction journal made this grow with project history
         # (72 ms at 242 transactions, on the path of every agent patch).  The
@@ -1255,10 +1261,11 @@ class ProjectCommitBoundary:
         # level edge here closes that cycle and breaks plugin installation.
         from .transaction_gc import request_project_sweep
 
-        request_project_sweep(
-            runtime_root.parent,
-            directory_count=plan.directory_count,
-        )
+        if schedule_history_sweep:
+            request_project_sweep(
+                runtime_root.parent,
+                directory_count=plan.directory_count,
+            )
 
     def _finalize_no_change(
         self,

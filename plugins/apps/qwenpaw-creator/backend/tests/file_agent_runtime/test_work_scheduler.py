@@ -21,7 +21,7 @@ from services.file_agent_runtime.work_graph import (
 from services.file_agent_runtime import work_scheduler
 from services.file_agent_runtime.work_scheduler import (
     WorkGraphScheduler,
-    _abandoned_queued_targets,
+    _abandoned_queued_task_ids,
     _blocked_by_active_media_review,
     _blocked_by_active_sync_review,
 )
@@ -599,6 +599,7 @@ def test_quarantined_stale_result_reopens_dispatch(tmp_path, monkeypatch):
 
 def _queued_task(target_ref, *, updated_at, last_attempt_seq=0):
     return SimpleNamespace(
+        task_id="task-queued",
         kind="image_generation",
         status=TaskStatus.QUEUED,
         updated_at=updated_at,
@@ -610,25 +611,76 @@ def _queued_task(target_ref, *, updated_at, last_attempt_seq=0):
     )
 
 
-def test_abandoned_queued_targets_requires_no_attempt_and_age():
+def test_stranded_variant_does_not_reopen_a_running_sibling(
+    tmp_path, monkeypatch
+):
+    from api.work_graph_routes import dispatch_work_graph_node
+    from services.file_agent_runtime.work_graph import derive_work_graph
+
+    services = _services(tmp_path, monkeypatch, ready_variants=2)
+    scheduler = WorkGraphScheduler(services)
+    now = datetime.now(UTC)
+    for variant in (0, 1):
+        scheduler.executions.create_task(
+            TaskRecord(
+                task_id=f"task-variant-{variant}",
+                project_id=PROJECT_ID,
+                kind=TaskKind.IMAGE_GENERATION,
+                request_fingerprint=f"hash-{variant}",
+                metadata={
+                    "targetRef": "asset:char:a",
+                    "variantId": f"var:{variant}",
+                },
+                created_at=now - timedelta(hours=1),
+                updated_at=now - timedelta(minutes=30),
+            )
+        )
+    scheduler.executions.append_task_attempt(
+        PROJECT_ID,
+        "task-variant-1",
+        event_id="provider-started",
+        attempt_id="attempt-1",
+        status="RUNNING",
+        provider_task_id="existing-render",
+    )
+    tasks = scheduler.executions.list_tasks(PROJECT_ID)
+    graph = derive_work_graph(
+        services.projects.read(PROJECT_ID).project, tasks=tasks
+    )
+    candidates = scheduler._dispatch_candidates(PROJECT_ID, graph, tasks)
+    assert {node.node_id for node in candidates if node.kind == "visual"} == {
+        "visual:char:a:var:0",
+    }
+    result = asyncio.run(
+        dispatch_work_graph_node(
+            PROJECT_ID, "visual:char:a:var:1", services=services
+        )
+    )
+    assert result["dispatched"] is False
+    assert result["taskId"] == "task-variant-1"
+    assert result["lastAttemptSeq"] == 1
+    assert len(scheduler.executions.list_tasks(PROJECT_ID)) == 2
+
+
+def test_abandoned_queued_task_ids_requires_no_attempt_and_age():
     """Only a never-claimed QUEUED task past the grace window counts, so a
     task with real progress or a fresh admission is never reopened."""
 
     now = datetime(2026, 11, 6, 12, tzinfo=UTC)
     stale = now - timedelta(minutes=16)
-    assert _abandoned_queued_targets(
+    assert _abandoned_queued_task_ids(
         [_queued_task("element:e1", updated_at=stale)],
         now=now,
-    ) == {"element:e1"}
+    ) == {"task-queued"}
     assert (
-        _abandoned_queued_targets(
+        _abandoned_queued_task_ids(
             [_queued_task("element:e1", updated_at=now)],
             now=now,
         )
         == set()
     )
     assert (
-        _abandoned_queued_targets(
+        _abandoned_queued_task_ids(
             [_queued_task("element:e1", updated_at=stale, last_attempt_seq=1)],
             now=now,
         )
@@ -2143,3 +2195,158 @@ def test_media_history_does_not_block_dispatch_but_gates_still_apply(
 
     asyncio.run(scenario())
     assert sorted(calls) == ["compose", "interaction", "video"]
+
+
+@pytest.mark.parametrize("manual", [True, False], ids=["click", "scheduler"])
+@pytest.mark.parametrize(
+    "original_first", [True, False], ids=["live", "stranded"]
+)
+@pytest.mark.parametrize("legacy", [False, True], ids=["current", "legacy"])
+def test_queued_image_takeover_shares_original_provider_claim(
+    tmp_path, monkeypatch, manual, original_first, legacy
+):
+    from api.work_graph_routes import dispatch_work_graph_node
+    from services.runtime_files.execution_store import ProjectExecutionStore
+    from services.file_agent_runtime.work_graph import derive_work_graph
+    from services.media_files.image_execution import (
+        ExistingImageProvider,
+        FileImageExecutionService,
+    )
+
+    services = _services(tmp_path, monkeypatch, ready_variants=2)
+    scheduler = WorkGraphScheduler(services)
+    node_id = "visual:char:a:var:1"
+    node = derive_work_graph(services.projects.read(PROJECT_ID).project).by_id[
+        node_id
+    ]
+    worker = FileImageExecutionService(
+        services, provider=ExistingImageProvider()
+    )
+    original_start = worker._start
+    original_dispatch = WorkGraphScheduler.dispatch_node
+    create_task = ProjectExecutionStore.create_task
+    queued = asyncio.Event()
+    start_original = asyncio.Event()
+    provider_entered = asyncio.Event()
+    finish_provider = asyncio.Event()
+    provider_calls = []
+
+    def backdate(store, record, **kwargs):
+        past = record.created_at - timedelta(minutes=20)
+        metadata = dict(record.metadata)
+        if legacy:
+            metadata.pop("commandArguments")
+        return create_task(
+            store,
+            record.model_copy(
+                update={
+                    "created_at": past,
+                    "updated_at": past,
+                    "metadata": metadata,
+                }
+            ),
+            **kwargs,
+        )
+
+    async def paused_start(**kwargs):
+        queued.set()
+        await start_original.wait()
+        return await original_start(**kwargs)
+
+    async def provider(_self, **kwargs):
+        provider_calls.append(kwargs["prompt"])
+        provider_entered.set()
+        await finish_provider.wait()
+        return {
+            "content": b"\x89PNG\r\n\x1a\n" + b"image" * 16,
+            "media_type": "image/png",
+        }
+
+    async def race_after_graph_read(self, *args, **kwargs):
+        if original_first:
+            start_original.set()
+            await provider_entered.wait()
+        return await original_dispatch(self, *args, **kwargs)
+
+    monkeypatch.setattr(ProjectExecutionStore, "create_task", backdate)
+    monkeypatch.setattr(worker, "_start", paused_start)
+    monkeypatch.setattr(ExistingImageProvider, "generate", provider)
+    monkeypatch.setattr(
+        WorkGraphScheduler, "dispatch_node", race_after_graph_read
+    )
+
+    async def scenario():
+        original = asyncio.create_task(
+            worker.execute(
+                project_id=PROJECT_ID,
+                command=node.command,
+                target_ref=node.target_ref,
+                arguments={
+                    **node.dispatch_arguments,
+                    "prompt": "original specialist direction",
+                },
+                idempotency_key="specialist-admitted",
+            )
+        )
+        await asyncio.wait_for(queued.wait(), timeout=3)
+        tasks = scheduler.executions.list_tasks(PROJECT_ID)
+        assert len(tasks) == 1
+        assert tasks[0].last_attempt_seq == 0
+        if not original_first:
+            # Another variant can progress while the original worker is
+            # absent. Its commit must not invalidate the stranded admission.
+            snapshot = services.projects.read(PROJECT_ID)
+            candidate = snapshot.project.model_copy(deep=True)
+            candidate.visual.entities.items["char:a"].variants.items[
+                "var:0"
+            ].prompt = "sibling updated while the worker was down"
+            candidate.generation += 1
+            services.projects.replace(
+                PROJECT_ID, candidate, expected_etag=snapshot.etag
+            )
+        graph = derive_work_graph(
+            services.projects.read(PROJECT_ID).project, tasks=tasks
+        )
+        assert graph.by_id[node_id].task_id == tasks[0].task_id
+        if manual:
+            recovery = dispatch_work_graph_node(
+                PROJECT_ID, node_id, services=services
+            )
+        else:
+            (candidate,) = [
+                n
+                for n in scheduler._dispatch_candidates(
+                    PROJECT_ID, graph, tasks
+                )
+                if n.node_id == node_id
+            ]
+            recovery = scheduler._dispatch(
+                PROJECT_ID, candidate, scheduler._ledger_fingerprint(candidate)
+            )
+        retry = asyncio.create_task(recovery)
+        try:
+            await asyncio.wait_for(provider_entered.wait(), timeout=3)
+            start_original.set()
+            # The losing contender must return even while the provider is busy.
+            loser = retry if original_first else original
+            await asyncio.wait_for(
+                asyncio.gather(loser, return_exceptions=True), timeout=3
+            )
+        finally:
+            start_original.set()
+            finish_provider.set()
+            results = await asyncio.gather(
+                original, retry, return_exceptions=True
+            )
+            await scheduler.shutdown()
+        if manual and original_first:
+            assert results[1]["reason"] == "already_running"
+            assert results[1]["taskId"] == tasks[0].task_id
+        assert len(provider_calls) == 1
+        assert "original specialist direction" in provider_calls[0]
+        (final,) = scheduler.executions.list_tasks(PROJECT_ID)
+        assert final.task_id == tasks[0].task_id
+        assert final.metadata["variantId"] == "var:1"
+        assert final.status is TaskStatus.SUCCEEDED
+
+    asyncio.run(scenario())

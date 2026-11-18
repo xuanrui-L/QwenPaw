@@ -24,7 +24,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import Field
 
-from domain.enums import TERMINAL_SPECIALIST_STATUSES, TaskStatus
+from domain.enums import SpecialistRunStatus, TaskStatus
 from domain.errors import (
     ConflictError,
     NotFoundError,
@@ -269,7 +269,7 @@ def _active_specialist_run_ids(
     services: CreatorFileServices,
     project_id: str,
 ) -> set[str]:
-    """Runs still in flight, so their deltas are the only text they have.
+    """Runs whose partial reply may have no completed message to replay.
 
     Taken once per connection and deliberately generous: a stale extra id
     costs a few deltas, a missing one blanks an in-flight message.
@@ -283,7 +283,7 @@ def _active_specialist_run_ids(
     return {
         run.run_id
         for run in runs
-        if run.status not in TERMINAL_SPECIALIST_STATUSES
+        if run.status != SpecialistRunStatus.SUCCEEDED
     }
 
 

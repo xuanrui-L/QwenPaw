@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+import logging
 import zipfile
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -60,8 +61,11 @@ async def _import(client, filename, archive):
     )
 
 
-@pytest.mark.parametrize("invalid_config", [False, True])
-def test_archive_transfer_does_not_depend_on_current_model_settings(
+@pytest.mark.parametrize(
+    "invalid_config",
+    [False, True, "invalid-json", "invalid-provider", "null-model"],
+)
+def test_listing_and_archive_transfer_ignore_current_model_settings(
     app,
     api_runtime_root,
     monkeypatch,
@@ -98,6 +102,12 @@ def test_archive_transfer_does_not_depend_on_current_model_settings(
                 },
             ),
         )
+        if invalid_config == "invalid-json":
+            config_path.write_text("{broken")
+        elif invalid_config == "invalid-provider":
+            config_path.write_text('{"asr": {"provider": "unsupported"}}')
+        elif invalid_config == "null-model":
+            config_path.write_text('{"llm": {"model_name": null}}')
         config_before = config_path.read_bytes()
         imported = await _import(client, "backup.zip", exported.content)
         assert imported.status_code == 200, imported.text
@@ -107,12 +117,15 @@ def test_archive_transfer_does_not_depend_on_current_model_settings(
         assert config_path.read_bytes() == config_before
         reexported = await _export(client, project_id)
         assert reexported.status_code == 200, reexported.text
-        if not invalid_config:
-            listed = await client.get("/projects")
-            assert listed.status_code == 200
-            assert [item["projectId"] for item in listed.json()["items"]] == [
-                project_id,
-            ]
+        listed = await client.get("/projects")
+        assert listed.status_code == 200, listed.text
+        assert [item["projectId"] for item in listed.json()["items"]] == [
+            project_id,
+        ]
+        assert listed.headers["X-Creator-Trace-ID"]
+        config_read = await client.get("/models/config")
+        assert config_read.status_code == (422 if invalid_config else 200)
+        assert config_path.read_bytes() == config_before
 
     run_scenario(app, scenario)
 
@@ -438,15 +451,240 @@ def test_archive_paths_do_not_silently_rename_or_collide(
         assert (
             destination / "project-1/source_a/file.json"
         ).read_text() == "underscore"
-    # Windows must reject an unrepresentable archive instead of returning
-    # success with dangling references or overwriting one colliding file.
+    # A Windows extraction may rename an unrepresentable member, but a
+    # pair that folds onto the same target is real corruption and has to
+    # be refused rather than silently overwrite one of the two files.
     monkeypatch.setattr(
         project_archive,
         "sys",
         SimpleNamespace(platform="win32"),
     )
-    with pytest.raises(BadRequestError, match="not supported on Windows"):
+    with pytest.raises(
+        BadRequestError,
+        match="collide after Windows sanitization",
+    ):
         extract(path, tmp_path / "windows")
+
+
+@pytest.mark.parametrize(
+    "extract",
+    [_extract_example_archive, _extract_archive_sanitized],
+)
+def test_windows_extraction_renames_illegal_member_and_rewrites_registry(
+    tmp_path,
+    extract,
+    monkeypatch,
+):
+    """One sidecar cannot kill the whole bundle: rename it and keep going.
+
+    Regression for #8547: the bundled ``cat-perspective-0803`` example
+    carries ``assets/source-intelligence/source:cat_cam_1/*.json`` and
+    previously the whole 122 MiB archive failed to open on Windows.
+    """
+    project_json = {
+        "assets": {
+            "files_by_id": {
+                "file-colon": {
+                    "file_id": "file-colon",
+                    "relative_uri": (
+                        "assets/source-intelligence/"
+                        "source:cat_cam_1/index.json"
+                    ),
+                    "sha256": "a" * 64,
+                },
+                "file-plain": {
+                    "file_id": "file-plain",
+                    "relative_uri": "assets/clip.mp4",
+                    "sha256": "b" * 64,
+                },
+            },
+        },
+        "sources": {
+            "items": {
+                "source:cat_cam_1": {
+                    "source_id": "source:cat_cam_1",
+                    "order": ["source:cat_cam_1"],
+                },
+            },
+        },
+    }
+    path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "project-1/project.json",
+            json.dumps(project_json, ensure_ascii=False),
+        )
+        archive.writestr(
+            "project-1/assets/source-intelligence/source:cat_cam_1/"
+            "index.json",
+            "{}",
+        )
+        archive.writestr("project-1/assets/clip.mp4", "binary")
+
+    monkeypatch.setattr(
+        project_archive,
+        "sys",
+        SimpleNamespace(platform="win32"),
+    )
+    destination = tmp_path / "out"
+    extract(path, destination)
+
+    assert (
+        destination
+        / "project-1/assets/source-intelligence/source_cat_cam_1/index.json"
+    ).is_file()
+    assert not (
+        destination / "project-1/assets/source-intelligence/source:cat_cam_1"
+    ).exists()
+    assert (destination / "project-1/assets/clip.mp4").read_text() == (
+        "binary"
+    )
+    restored = json.loads(
+        (destination / "project-1/project.json").read_text(encoding="utf-8"),
+    )
+    files = restored["assets"]["files_by_id"]
+    assert files["file-colon"]["relative_uri"] == (
+        "assets/source-intelligence/source_cat_cam_1/index.json"
+    )
+    assert files["file-plain"]["relative_uri"] == "assets/clip.mp4"
+    # Logical identifiers stay as authored; only on-disk paths move.
+    assert restored["sources"]["items"] == project_json["sources"]["items"]
+
+
+def test_windows_extraction_skips_registry_rewrite_for_skill_bundles(
+    tmp_path,
+    monkeypatch,
+):
+    """A SKILL.md bundle has no project.json; sanitization still works."""
+    path = tmp_path / "skill.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("my:skill/SKILL.md", "# hello")
+    monkeypatch.setattr(
+        project_archive,
+        "sys",
+        SimpleNamespace(platform="win32"),
+    )
+    destination = tmp_path / "out"
+    project_archive.extract_archive(path, destination)
+    assert (destination / "my_skill/SKILL.md").read_text() == "# hello"
+
+
+def test_windows_registry_rewrite_is_atomic_and_canonical(
+    tmp_path,
+    monkeypatch,
+):
+    """CR feedback: the rewrite must publish atomically in canonical form.
+
+    A truncated project.json left behind by a crash mid-rewrite would be
+    published by the example flow, which only checks ``is_file()``. The
+    on-disk bytes also have to match the canonical pretty form (indent 2
+    plus a final newline) so tooling diffing project.json stays quiet.
+    """
+    path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "project-1/project.json",
+            json.dumps(
+                {
+                    "assets": {
+                        "files_by_id": {
+                            "f": {
+                                "relative_uri": "assets/source:a/x.json",
+                            },
+                        },
+                    },
+                },
+            ),
+        )
+        archive.writestr("project-1/assets/source:a/x.json", "{}")
+    monkeypatch.setattr(
+        project_archive,
+        "sys",
+        SimpleNamespace(platform="win32"),
+    )
+    destination = tmp_path / "out"
+    project_archive.extract_archive(path, destination)
+
+    project_dir = destination / "project-1"
+    raw = (project_dir / "project.json").read_text(encoding="utf-8")
+    assert raw.endswith("}\n")
+    assert (
+        json.loads(raw)["assets"]["files_by_id"]["f"]["relative_uri"]
+        == "assets/source_a/x.json"
+    )
+    # The temp file used for the atomic replace never survives.
+    assert not list(project_dir.glob("*.tmp"))
+
+
+def test_windows_registry_rewrite_skip_is_logged_not_fatal(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """CR feedback: substitutions with an unreadable registry must warn.
+
+    The rename already happened on disk; silently returning would leave
+    dangling relative_uris with nothing in creator.log to explain them.
+    """
+    path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("project-1/project.json", "not json at all")
+        archive.writestr("project-1/assets/source:a/x.json", "{}")
+    monkeypatch.setattr(
+        project_archive,
+        "sys",
+        SimpleNamespace(platform="win32"),
+    )
+    destination = tmp_path / "out"
+    # Creator loggers stop propagating at the ``qwenpaw.creator`` family,
+    # so caplog's root handler never sees them; attach it directly.
+    archive_logger = logging.getLogger(
+        "qwenpaw.creator.project_files.archive",
+    )
+    archive_logger.addHandler(caplog.handler)
+    try:
+        project_archive.extract_archive(path, destination)
+    finally:
+        archive_logger.removeHandler(caplog.handler)
+
+    assert any(
+        "skipped Windows relative_uri rewrite" in record.getMessage()
+        for record in caplog.records
+    )
+    # Extraction still succeeds and the corrupt registry is left as-is.
+    assert (destination / "project-1/assets/source_a/x.json").is_file()
+    assert (
+        destination / "project-1/project.json"
+    ).read_text() == "not json at all"
+
+
+def test_sanitize_windows_part_is_idempotent_and_total():
+    """Legal names pass through, illegal ones fold onto a stable safe form."""
+    for name in (
+        "assets",
+        "source-intelligence",
+        "file-abc.json",
+        "clip.mp4",
+    ):
+        assert project_archive._sanitize_windows_part(name) == name
+    assert (
+        project_archive._sanitize_windows_part("source:cat_cam_1")
+        == "source_cat_cam_1"
+    )
+    assert project_archive._sanitize_windows_part("CON") == "_CON"
+    assert project_archive._sanitize_windows_part("NUL.txt") == "_NUL.txt"
+    assert project_archive._sanitize_windows_part("trail ") == "trail"
+    assert project_archive._sanitize_windows_part("trail.") == "trail"
+    assert project_archive._sanitize_windows_part(":") == "_"
+    # Applying the sanitizer twice must not resanitize the already-safe name.
+    for name in (
+        "source:cat",
+        "CON",
+        "trail ",
+        ":",
+    ):
+        once = project_archive._sanitize_windows_part(name)
+        assert project_archive._sanitize_windows_part(once) == once
 
 
 def test_export_rejects_directory_redirects(tmp_path, directory_link):
@@ -587,3 +825,83 @@ def test_copy_member_counts_written_bytes_not_declared_ones(tmp_path):
             member_bytes=16,
         )
     assert not refused.exists()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_windows_uri_rewrite_preserves_archived_transaction(
+    tmp_path, monkeypatch, interrupted
+):
+    from services.project_files.commit import ProjectCommitBoundary
+    from services.project_files.recovery import (
+        ProjectCommitRecoveryCoordinator,
+    )
+
+    original = ProjectStore(tmp_path / "original")
+    project = Project.new(project_id="project-archive", name="Archive")
+    uri = "assets/source-intelligence/source:camera/index.json"
+    project.assets.files_by_id["sidecar"] = IndexedFile(
+        file_id="sidecar",
+        kind="source_intelligence",
+        relative_uri=uri,
+        sha256=hashlib.sha256(b"{}").hexdigest(),
+        size_bytes=2,
+        media_type="application/json",
+        created_at=project.created_at,
+    )
+    base = original.create(project)
+    source = original.project_root(project.project_id) / uri
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"{}")
+    boundary = ProjectCommitBoundary(original)
+    candidate = base.project.model_dump(mode="json")
+    candidate["description"] = "Existing edit"
+
+    def commit():
+        boundary.commit(
+            base=base,
+            candidate=candidate,
+            origin="frontend_edit",
+            transaction_id="archive-edit",
+        )
+
+    if interrupted:
+
+        def interrupt(**_kwargs):
+            raise RuntimeError("interrupted after publication")
+
+        monkeypatch.setattr(boundary, "_record_review", interrupt)
+        with pytest.raises(
+            RuntimeError, match="interrupted after publication"
+        ):
+            commit()
+    else:
+        commit()
+    zip_path = tmp_path / "bundle.zip"
+    project_archive.write_project_archive(
+        original.project_root(project.project_id),
+        original.read(project.project_id).project,
+        zip_path,
+    )
+    destination = tmp_path / "expanded"
+    monkeypatch.setattr(
+        project_archive, "sys", SimpleNamespace(platform="win32")
+    )
+    project_archive.extract_archive(zip_path, destination)
+    imported = ProjectStore(destination)
+    recovered = ProjectCommitRecoveryCoordinator(imported).recover_project(
+        project.project_id
+    )
+    assert recovered.ok
+    snapshot = imported.read(project.project_id)
+    assert snapshot.project.description == "Existing edit"
+    assert snapshot.project.assets.files_by_id[
+        "sidecar"
+    ].relative_uri == uri.replace("source:camera", "source_camera")
+    journal = (
+        imported.project_root(project.project_id)
+        / "runtime"
+        / "transactions"
+        / "archive-edit"
+        / "journal.json"
+    )
+    assert json.loads(journal.read_text())["state"] == "RUNTIME_FINALIZED"

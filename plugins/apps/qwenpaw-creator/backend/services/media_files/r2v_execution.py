@@ -1250,10 +1250,17 @@ def _render_reference_markers(prompt: str) -> str:
     )
 
 
-def _submission_input_fingerprint(project: Project, element_id: str) -> str:
+def _submission_input_fingerprint(
+    project: Project,
+    element_id: str,
+    *,
+    include_default_audio: bool = False,
+) -> str:
     timeline, element = find_timeline_element(project, element_id)
     creation = element.creation.model_dump(mode="json")
     creation.pop("prompt_sync", None)
+    if not include_default_audio and creation.get("generate_audio") is True:
+        del creation["generate_audio"]
     return _fingerprint(
         {
             "creation": creation,
@@ -1267,6 +1274,20 @@ def _submission_input_fingerprint(project: Project, element_id: str) -> str:
                 else ()
             ),
         },
+    )
+
+
+def _matches_submission_inputs(
+    project: Project, element_id: str, frozen: str
+) -> bool:
+    if frozen == _submission_input_fingerprint(project, element_id):
+        return True
+    # Older interactive writers included the enabled default in the digest.
+    # Both historical formats encode an explicit mute as a distinct input.
+    return frozen == _submission_input_fingerprint(
+        project,
+        element_id,
+        include_default_audio=True,
     )
 
 
@@ -2250,6 +2271,11 @@ class FileR2VExecutionService:
                 resolved.element_id,
             ),
         }
+        _, element = find_timeline_element(base.project, resolved.element_id)
+        project_audio = getattr(element.creation, "generate_audio", True)
+        if project_audio != resolved.generate_audio:
+            # An explicit command override can differ from the project intent.
+            payload["projectGenerateAudio"] = project_audio
         if any(resolved.reference_voice_urls):
             # Joins the frozen request only when a voice actually rides
             # along, so legacy tasks keep their fingerprint identity.
@@ -3184,12 +3210,11 @@ class FileR2VExecutionService:
                 return current.model_dump(mode="python")
             snapshot = self.services.projects.read(task.project_id)
             frozen = current.request.get("projectInputFingerprint")
+            element_id = str(current.request["elementId"])
             if (
                 frozen is not None
-                and frozen
-                != _submission_input_fingerprint(
-                    snapshot.project,
-                    str(current.request["elementId"]),
+                and not _matches_submission_inputs(
+                    snapshot.project, element_id, frozen
                 )
             ) or (
                 frozen is None
@@ -4717,6 +4742,21 @@ class FileR2VExecutionService:
             return False
         creation = element.creation
         creation_type = getattr(creation, "type", "r2v")
+        if isinstance(creation, (R2VCreation, T2VCreation, I2VCreation)):
+            admitted_audio = raw.get(
+                "projectGenerateAudio", raw.get("generateAudio", True)
+            )
+            if creation.generate_audio != admitted_audio:
+                # Older requests stored a command override without separately
+                # storing the project's audio intent. An unchanged project
+                # input fingerprint proves the override is still valid.
+                fingerprint = raw.get("projectInputFingerprint")
+                if "projectGenerateAudio" in raw or not fingerprint:
+                    return False
+                if not _matches_submission_inputs(
+                    project, element_id, fingerprint
+                ):
+                    return False
         if creation_type == "r2v":
             if not isinstance(creation, R2VCreation):
                 return False

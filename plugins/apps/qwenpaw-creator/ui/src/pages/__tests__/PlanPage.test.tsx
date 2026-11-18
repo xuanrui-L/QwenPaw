@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { act } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useWorkGraphStore } from "@/store/workGraphStore";
 import PlanPage from "@/pages/PlanPage";
 import { NavigationRuntime } from "@/routing/navigation";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
@@ -12,6 +13,7 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument, TaskView } from "@/contracts/creator";
+import type { WorkGraphView } from "@/contracts/creator/workGraph";
 
 function cloneProject(): ProjectDocument {
   return structuredClone(projectDocument);
@@ -35,6 +37,32 @@ function seedWithoutFinal(project = cloneProject()) {
   delete project.assets.artifact_versions_by_id["final-v1"];
   seedProject(project);
   return project;
+}
+
+function composeGraph(status: "ready" | "stale"): WorkGraphView {
+  return {
+    projectId: "p1",
+    generation: 3,
+    counts: { [status]: 1 },
+    mediaCalls: 0,
+    nodes: [
+      {
+        id: "compose:timeline:main",
+        kind: "compose",
+        label: "最终合成",
+        status,
+        deps: [],
+        lane: "compose",
+        timelineId: "timeline:main",
+        taskId: null,
+        progress: null,
+        error: null,
+        missing: [],
+        locator: { page: "plan" },
+        dispatchable: true,
+      },
+    ],
+  };
 }
 
 function composeTask(
@@ -112,6 +140,7 @@ function installTimelineRect(chart: Element) {
 
 describe("PlanPage Timeline/Element frontend", () => {
   beforeEach(() => {
+    useWorkGraphStore.getState().reset();
     useProjectSnapshotStore.getState().reset();
     useCreatorTaskViewStore.getState().reset();
     useCreatorInteractionStore.getState().reset();
@@ -303,44 +332,223 @@ describe("PlanPage Timeline/Element frontend", () => {
     ).toHaveTextContent(chip);
   });
 
-  it("auto-composes the final render once all compose elements are ready", async () => {
-    vi.useFakeTimers();
-    try {
+  it.each([true, false])(
+    "ignores a late compose response after leaving the project (success=%s)",
+    async (success) => {
       seedWithoutFinal();
-      const { calls } = installMockFetch([
-        {
-          match: "/timelines/timeline%3Amain/render",
-          method: "POST",
-          response: {
-            json: {
-              ok: true,
-              taskId: "task-render",
-              artifactVersionId: "final-v2",
-              generation: 4,
-              etag: '"sha256:g4"',
-              replayed: false,
+      const { fetchMock } = installMockFetch(pollRoutes());
+      const original = fetchMock.getMockImplementation()!;
+      let finish!: (response: Response) => void;
+      const dispatch = new Promise<Response>((resolve) => {
+        finish = resolve;
+      });
+      fetchMock.mockImplementation((input, init) =>
+        String(input).endsWith("/render") ? dispatch : original(input, init),
+      );
+      const mounted = renderPage();
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "合成成片" }));
+      });
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url).endsWith("/render")),
+      ).toBe(true);
+      mounted.unmount();
+      useProjectSnapshotStore.getState().reset("p2");
+      await useCreatorTaskViewStore.getState().refresh("p2");
+      await act(async () =>
+        finish(
+          new Response(
+            JSON.stringify(
+              success ? { taskId: "late-p1" } : { message: "failed" },
+            ),
+            { status: success ? 200 : 409 },
+          ),
+        ),
+      );
+      expect(useProjectSnapshotStore.getState().projectId).toBe("p2");
+      expect(useCreatorTaskViewStore.getState().projectId).toBe("p2");
+    },
+  );
+
+  it.each([
+    [
+      "MANUAL_REGENERATION_HOLD",
+      {
+        ...composeGraph("ready"),
+        manualHold: { revision: 1, nodeIds: ["compose:timeline:main"] },
+      },
+    ],
+    ["AUTOMATIC_COMPOSE_NOT_READY", composeGraph("stale")],
+  ] as const)(
+    "refreshes the graph on %s and still permits an explicit render",
+    async (code, refreshed) => {
+      vi.useFakeTimers();
+      try {
+        seedWithoutFinal();
+        useWorkGraphStore.setState({
+          projectId: "p1",
+          graph: composeGraph("ready"),
+        });
+        const { calls } = installMockFetch([
+          {
+            match: "/render?automatic=true",
+            method: "POST",
+            response: {
+              ok: false,
+              status: 409,
+              json: {
+                message: code,
+                details: { code },
+              },
             },
           },
+          {
+            match: "/work-graph",
+            response: { json: refreshed },
+          },
+          {
+            match: "/render",
+            method: "POST",
+            response: { json: { taskId: "manual-task" } },
+          },
+          ...pollRoutes(),
+        ]);
+        renderPage();
+        await act(() => vi.advanceTimersByTimeAsync(1600));
+        expect(useWorkGraphStore.getState().graph).toEqual(refreshed);
+        await act(() => vi.advanceTimersByTimeAsync(3200));
+        expect(
+          calls.filter((call) => call.url.includes("/render")),
+        ).toHaveLength(1);
+        await act(async () => {
+          fireEvent.click(screen.getByRole("button", { name: "合成成片" }));
+        });
+        expect(
+          calls.filter(
+            (call) => call.method === "POST" && call.url.endsWith("/render"),
+          ),
+        ).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["first", "delegated superseded"])(
+    "auto-composes a %s cut only after its own hold clears",
+    async (cut) => {
+      vi.useFakeTimers();
+      try {
+        if (cut === "first") seedWithoutFinal();
+        else {
+          const project = cloneProject();
+          project.assets.artifact_versions_by_id["final-v1"].stale = true;
+          seedProject(project);
+        }
+        const graph = composeGraph("ready");
+        const { calls } = installMockFetch([
+          {
+            match: "/timelines/timeline%3Amain/render",
+            method: "POST",
+            response: {
+              json: {
+                ok: true,
+                taskId: "task-render",
+                artifactVersionId: "final-v2",
+                generation: 4,
+                etag: '"sha256:g4"',
+                replayed: false,
+              },
+            },
+          },
+          ...pollRoutes(),
+        ]);
+        renderPage();
+
+        // A late graph, including one retained from another project, grants no permission.
+        act(() =>
+          useWorkGraphStore.setState({
+            projectId: "p2",
+            graph: { ...graph, projectId: "p2" },
+          }),
+        );
+        await act(() => vi.advanceTimersByTimeAsync(1600));
+        const renders = () =>
+          calls.filter(
+            (call) => call.method === "POST" && call.url.includes("/render"),
+          );
+        expect(renders()).toHaveLength(0);
+        act(() =>
+          useWorkGraphStore.setState({
+            projectId: "p1",
+            graph: {
+              ...graph,
+              manualHold: { revision: 1, nodeIds: ["compose:timeline:main"] },
+            },
+          }),
+        );
+        await act(() => vi.advanceTimersByTimeAsync(1600));
+        expect(renders()).toHaveLength(0);
+        act(() =>
+          useWorkGraphStore.setState({
+            graph: {
+              ...graph,
+              manualHold: {
+                revision: 2,
+                nodeIds: ["compose:another-timeline"],
+              },
+            },
+          }),
+        );
+        expect(
+          screen.getByRole("button", { name: "合成成片" }),
+        ).toHaveAttribute("title", "点击合成成片");
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1600);
+        });
+        expect(renders()).toHaveLength(1);
+        expect(renders()[0].url).toContain("/render?automatic=true");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps a superseded co-creation cut manual before and after a hold", async () => {
+    vi.useFakeTimers();
+    try {
+      const project = cloneProject();
+      project.assets.artifact_versions_by_id["final-v1"].stale = true;
+      seedProject(project);
+      const ready = composeGraph("ready");
+      const stale = composeGraph("stale");
+      const { calls } = installMockFetch([
+        {
+          match: "/render",
+          method: "POST",
+          response: { json: { taskId: "manual-task" } },
         },
         ...pollRoutes(),
       ]);
       renderPage();
-
-      // All main-track elements ready and no final render → auto-compose.
-      expect(screen.getByRole("button", { name: "合成成片" })).toHaveAttribute(
-        "title",
-        "点击合成成片",
-      );
+      const renders = () =>
+        calls.filter((call) => call.url.includes("/render"));
+      for (const graph of [
+        { ...ready, generation: 2 },
+        { ...ready, nodes: [] },
+        stale,
+        { ...stale, manualHold: { revision: 1, nodeIds: [stale.nodes[0].id] } },
+        { ...stale, manualHold: { revision: 2, nodeIds: [] } },
+      ]) {
+        act(() => useWorkGraphStore.setState({ projectId: "p1", graph }));
+        await act(() => vi.advanceTimersByTimeAsync(1600));
+        expect(renders()).toHaveLength(0);
+      }
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(1600);
+        fireEvent.click(screen.getByRole("button", { name: "合成成片" }));
       });
-      expect(
-        calls.some(
-          (call) =>
-            call.method === "POST" &&
-            call.url.includes("/timelines/timeline%3Amain/render"),
-        ),
-      ).toBe(true);
+      expect(renders()).toHaveLength(1);
+      expect(renders()[0].url).toMatch(/\/render$/);
     } finally {
       vi.useRealTimers();
     }

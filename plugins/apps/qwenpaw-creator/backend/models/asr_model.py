@@ -14,7 +14,6 @@ import re
 import subprocess
 import tempfile
 import logging
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -255,13 +254,7 @@ async def _fun_asr_file_url(media_url: str, api_key: str, model: str) -> str:
     resolves via the ``X-DashScope-OssResourceResolve: enable`` header.
     """
     parsed = urlparse(media_url)
-    logger.info(
-        "Fun-ASR: _fun_asr_file_url called with media_url=%s (scheme=%s, netloc=%s, path=%s)",
-        media_url[:200],
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path[:100],
-    )
+    logger.info("Fun-ASR: preparing reference (scheme=%s)", parsed.scheme)
     if parsed.scheme == "file":
         local_path = local_path_from_file_url(media_url)
         is_video = _is_video_file(local_path)
@@ -287,7 +280,7 @@ async def _fun_asr_file_url(media_url: str, api_key: str, model: str) -> str:
                     Path(directory),
                 )
                 logger.info(
-                    "Fun-ASR: audio extracted -> %s (%.1f MB), uploading to DashScope ...",
+                    "Fun-ASR: audio extracted -> %s (%.1f MB), preparing reference ...",
                     audio_path.name,
                     audio_path.stat().st_size / (1024 * 1024),
                 )
@@ -297,14 +290,17 @@ async def _fun_asr_file_url(media_url: str, api_key: str, model: str) -> str:
                     model=model,
                     media_type="audio/mpeg",
                 )
-                logger.info("Fun-ASR: upload complete -> %s", url[:120])
+                logger.info(
+                    "Fun-ASR: reference ready (scheme=%s)",
+                    url.partition(":")[0],
+                )
                 return url
         media_type = (
             mimetypes.guess_type(local_path.name)[0]
             or "application/octet-stream"
         )
         logger.info(
-            "Fun-ASR: uploading local file %s (%.1f MB) to DashScope ...",
+            "Fun-ASR: preparing local file %s (%.1f MB) ...",
             local_path.name,
             local_path.stat().st_size / (1024 * 1024),
         )
@@ -314,20 +310,13 @@ async def _fun_asr_file_url(media_url: str, api_key: str, model: str) -> str:
             model=model,
             media_type=media_type,
         )
-        logger.info("Fun-ASR: upload complete -> %s", url[:120])
+        logger.info(
+            "Fun-ASR: reference ready (scheme=%s)", url.partition(":")[0]
+        )
         return url
     if parsed.scheme in {"http", "https"}:
-        logger.info(
-            "Fun-ASR: using remote URL directly (scheme=%s): %s",
-            parsed.scheme,
-            media_url[:200],
-        )
         return media_url
-    logger.error(
-        "Fun-ASR: unsupported URL scheme=%s, media_url=%s",
-        parsed.scheme,
-        media_url[:200],
-    )
+    logger.error("Fun-ASR: unsupported URL scheme=%s", parsed.scheme)
     raise ValueError(
         "Fun-ASR input must be a local file or HTTP(S) media URL",
     )
@@ -891,41 +880,43 @@ def _is_qwen_multimodal_asr(model: str) -> bool:
     )
 
 
-def _qwen3_sentences(body: Mapping[str, Any]) -> list[str]:
-    choices = body.get("output", {}).get("choices") or ()
-    sentences: list[str] = []
+def _qwen3_sentences(
+    body: Mapping[str, Any],
+    *,
+    prefer_cumulative: bool = False,
+) -> list[str]:
+    output = body.get("output") or {}
+    cumulative = str(output.get("text") or "").strip()
+    if prefer_cumulative and cumulative:
+        # Direct Qwen Audio returns a complete transcript alongside its last segment.
+        return [cumulative]
+
+    choices = output.get("choices") or ()
     if choices:
-        content = choices[0].get("message", {}).get("content") or ()
+        content = (choices[0].get("message") or {}).get("content") or ()
+        if isinstance(content, (str, Mapping)):
+            content = [content]
+        texts = []
         for item in content:
-            if isinstance(item, Mapping):
-                text = str(item.get("text") or "").strip()
-            elif isinstance(item, str):
-                text = item.strip()
-            else:
-                text = ""
-            if text:
-                sentences.append(text)
-    if sentences:
-        return sentences
-    # ``qwen-audio-*-asr-*`` answers without ``choices``: the transcript sits
-    # in ``output.sentence`` (one object, or one per segment) and is repeated
-    # at the top level. Reading only ``choices`` yields an empty transcript
-    # for a call that actually succeeded.
-    output = body.get("output")
-    sentence = output.get("sentence") if isinstance(output, Mapping) else None
-    candidates: list[Mapping[str, Any]] = []
-    if isinstance(sentence, Mapping):
-        candidates = [sentence]
-    elif isinstance(sentence, Sequence):
-        candidates = [item for item in sentence if isinstance(item, Mapping)]
-    for item in candidates:
-        text = str(item.get("text") or "").strip()
-        if text:
-            sentences.append(text)
-    if sentences:
-        return sentences
-    top_level = str(body.get("text") or "").strip()
-    return [top_level] if top_level else []
+            text = item.get("text") if isinstance(item, Mapping) else item
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+        if texts:
+            return texts
+
+    sentence = output.get("sentence")
+    segments = sentence if isinstance(sentence, list) else [sentence]
+    texts = [
+        item["text"].strip()
+        for item in segments
+        if isinstance(item, Mapping)
+        and isinstance(item.get("text"), str)
+        and item["text"].strip()
+    ]
+    if texts:
+        return texts
+    text = str(body.get("text") or "").strip() or cumulative
+    return [text] if text else []
 
 
 def _spread_segments(
@@ -984,17 +975,21 @@ async def _qwen3_transcribe_url(
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    if not config.is_agentscope_gateway(
+    platform = config.is_agentscope_gateway(
         protocol=config.get_asr_protocol(),
         base_url=config.get_asr_base_url(),
-    ):
+    )
+    if not platform:
         # oss:// resolution is a Bailian mechanism; a model proxy key cannot
         # mint an oss:// URL in the first place (its temporary-upload policy
         # API answers 401 InvalidApiKey), so the header would only advertise
         # a reference form this endpoint cannot fetch.
         headers["X-DashScope-OssResourceResolve"] = "enable"
     body = await _post_with_retry(client, endpoint, payload, headers=headers)
-    return _qwen3_sentences(body)
+    return _qwen3_sentences(
+        body,
+        prefer_cumulative=is_qwen_audio_asr_model(model) and not platform,
+    )
 
 
 async def _qwen3_asr(media_url: str) -> ASRResult:
@@ -1219,9 +1214,9 @@ async def _whisper(media_url: str) -> ASRResult:
 async def transcribe(media_url: str) -> ASRResult:
     provider = config.get_asr_provider()
     logger.info(
-        "ASR transcribe started: provider=%s url=%s",
+        "ASR transcribe started: provider=%s scheme=%s",
         provider,
-        media_url[:120],
+        urlparse(media_url).scheme,
     )
     if provider == "whisper":
         return await _whisper(media_url)

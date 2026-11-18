@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import ipaddress
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -17,7 +19,12 @@ from typing import Any
 
 from .credentials import runtime_credential_name_allowed
 from .models import RuntimeRecord, RuntimeState
-from .provisioner import RuntimeProvisioner, RuntimeProvisionerAvailability
+from .user_profile import runtime_workspace
+from .provisioner import (
+    RuntimeModelNetwork,
+    RuntimeProvisioner,
+    RuntimeProvisionerAvailability,
+)
 
 DOCKER_HUB_IMAGE = "docker.io/agentscope/qwenpaw"
 ALIYUN_ACR_IMAGE = (
@@ -91,6 +98,29 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
         digest = hashlib.sha256(str(self._root_dir).encode("utf-8"))
         self._instance_id = digest.hexdigest()[:12]
 
+    def model_network(self) -> RuntimeModelNetwork:
+        """Use host forwarding on desktop OSes or the Engine bridge IP."""
+        if sys.platform in {"darwin", "win32"}:
+            return RuntimeModelNetwork("127.0.0.1", "host.docker.internal")
+        client = self._get_client()
+        operating_system = client.info().get("OperatingSystem", "")
+        if "docker desktop" in operating_system.lower():
+            return RuntimeModelNetwork("127.0.0.1", "host.docker.internal")
+        network = self._get_network()
+        for config in network.attrs.get("IPAM", {}).get("Config", []):
+            gateway = config.get("Gateway")
+            if not gateway:
+                continue
+            address = ipaddress.ip_address(gateway)
+            if address.version == 4 and not (
+                address.is_unspecified
+                or address.is_multicast
+                or address.is_loopback
+                or address.is_global
+            ):
+                return RuntimeModelNetwork(str(address), str(address))
+        raise RuntimeError("Docker bridge has no private IPv4 gateway")
+
     def configure(self, config: Mapping[str, object]) -> None:
         """Apply validated Docker defaults and resource limits."""
         previous = self._policy
@@ -162,6 +192,7 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
         ):
             path.mkdir(parents=True, exist_ok=True)
 
+        workspace = runtime_workspace(record)
         environment = {
             name: value
             for name, value in credentials.items()
@@ -169,18 +200,27 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
         }
         environment.update(
             {
-                "QWENPAW_WORKING_DIR": "/app/working",
+                "HOME": workspace,
+                "QWENPAW_RUNNING_IN_CONTAINER": "true",
+                "QWENPAW_AUTH_ENABLED": "true",
+                "QWENPAW_WORKING_DIR": workspace,
                 "QWENPAW_SECRET_DIR": "/app/working.secret",
                 "QWENPAW_BACKUP_DIR": "/app/working.backups",
+                "QWENPAW_RUNTIME_MODE": "hub",
                 "QWENPAW_RUNTIME_ID": record.runtime_id,
                 "QWENPAW_TENANT_ID": record.tenant_id,
                 "QWENPAW_RUNTIME_INTERNAL_TOKEN": runtime_token,
             },
         )
+        for name in ("QWENPAW_HUB_MODEL_URL", "QWENPAW_HUB_MODEL_TOKEN"):
+            if credentials.get(name):
+                environment[name] = credentials[name]
         labels = self._labels(record.runtime_id, record.owner_user_id)
         container = self._get_client().containers.run(
             launch_image,
             detach=True,
+            network=self._get_network().id,
+            working_dir=workspace,
             environment=environment,
             init=True,
             labels=labels,
@@ -190,7 +230,7 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
             security_opt=["no-new-privileges:true"],
             volumes={
                 str(record.working_dir): {
-                    "bind": "/app/working",
+                    "bind": workspace,
                     "mode": "rw",
                 },
                 str(record.secret_dir): {
@@ -216,6 +256,7 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
                 metadata=self._runtime_metadata(record, container),
             )
             boundary_mode = self._wait_until_ready(starting, runtime_token)
+            self.verify_model_connection(starting, environment)
             container.reload()
             return replace(
                 starting,
@@ -246,6 +287,8 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
 
     def status(self, record: RuntimeRecord) -> RuntimeRecord:
         """Observe a managed container by immutable Hub labels."""
+        if record.state is RuntimeState.FAILED:
+            return record
         containers = self._containers(record.runtime_id, all_containers=True)
         if not containers:
             if record.state in {RuntimeState.RUNNING, RuntimeState.STARTING}:
@@ -293,16 +336,24 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
         for container in self._containers(all_containers=True):
             self._stop_and_remove(container)
 
+    @staticmethod
+    def validate_image_reference(reference: str) -> str:
+        """Validate an image address independently of runtime defaults."""
+        image = reference.strip()
+        if not _IMAGE_PATTERN.fullmatch(image):
+            raise ValueError("Invalid Docker image reference.")
+        return image
+
     def validate_config(self, value: object) -> dict[str, object]:
         """Normalize and validate Docker-specific runtime configuration."""
         config = value if isinstance(value, Mapping) else {}
         default_image = self._policy.get("image", DEFAULT_DOCKER_IMAGE)
         default_policy = self._policy.get("pull_policy", "if_not_present")
-        image = str(config.get("image", default_image)).strip()
+        image = self.validate_image_reference(
+            str(config.get("image", default_image)),
+        )
         pull_policy = str(config.get("pull_policy", default_policy)).strip()
         pinned_image_id = config.get("image_id")
-        if not _IMAGE_PATTERN.fullmatch(image):
-            raise ValueError("Invalid Docker image reference.")
         if pull_policy not in PULL_POLICIES:
             raise ValueError("Invalid Docker image pull policy.")
         if not pinned_image_id:
@@ -376,9 +427,7 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
         progress: Callable[[int, str], None] | None = None,
     ) -> dict[str, object]:
         """Pull one image while reporting best-effort layer progress."""
-        normalized = str(
-            self.validate_config({"image": reference})["image"],
-        )
+        normalized = self.validate_image_reference(reference)
         layers: dict[str, tuple[int, int]] = {}
         message = "Starting image pull"
         for event in self._get_client().api.pull(
@@ -410,6 +459,32 @@ class DockerRuntimeProvisioner(RuntimeProvisioner):
             "size": int(image.attrs.get("Size") or 0),
             "downloaded": True,
         }
+
+    def _get_network(self) -> Any:
+        """Keep managed containers off the shared, inter-connected bridge."""
+        with self._client_lock:
+            client = self._get_client()
+            name = f"qwenpaw-hub-{self._instance_id}"
+            try:
+                network = client.networks.get(name)
+            except _DockerNotFound:
+                network = client.networks.create(
+                    name,
+                    driver="bridge",
+                    options={"com.docker.network.bridge.enable_icc": "false"},
+                    labels={"qwenpaw.hub.instance": self._instance_id},
+                )
+            if (
+                network.attrs.get("Options", {}).get(
+                    "com.docker.network.bridge.enable_icc",
+                )
+                != "false"
+            ):
+                raise RuntimeError(
+                    f"Docker network {name} must disable container-to-"
+                    "container communication.",
+                )
+            return network
 
     def _get_client(self) -> Any:
         with self._client_lock:

@@ -881,6 +881,99 @@ def test_stale_final_render_recompose_follows_mode(
     assert compose not in graph.regeneration_nodes()
 
 
+@pytest.mark.parametrize(
+    "delegated,existing,automatic,accepted",
+    [
+        (False, False, True, True),
+        (False, True, True, False),
+        (False, True, False, True),
+        (True, True, True, True),
+    ],
+)
+def test_render_admission_follows_saved_compose_state(
+    tmp_path,
+    monkeypatch,
+    delegated,
+    existing,
+    automatic,
+    accepted,
+):
+    import asyncio
+    from api.file_execution_routes import render_timeline
+    from domain.errors import ConflictError
+    from models import config
+    from services.media_files import local_execution
+    from services.project_files.facade import CreatorFileServices
+
+    mode = (
+        config.EXECUTION_MODE_DELEGATED
+        if delegated
+        else config.EXECUTION_MODE_CO_CREATION
+    )
+    monkeypatch.setattr(config, "get_execution_mode", lambda: mode)
+    project = _project()
+    _add_element(project, _element("elem:one"))
+    for output, kind in (
+        ("storyboard", "r2v_storyboard_image"),
+        ("main", "element_video"),
+    ):
+        _select_slot(
+            project,
+            slot_id=f"element:elem:one:{output}",
+            kind=kind,
+            owner_ref="element:elem:one",
+            version_id=f"art:{output}",
+        )
+    if existing:
+        _select_slot(
+            project,
+            slot_id="timeline:timeline:main:render",
+            kind="final_video",
+            owner_ref="timeline:timeline:main",
+            version_id="art:final",
+        )
+        project.assets.artifact_versions_by_id["art:final"].stale = True
+    services = CreatorFileServices.create(tmp_path.resolve())
+    services.projects.create(project)
+    calls = []
+
+    async def compose(*_args, **_kwargs):
+        calls.append("compose")
+
+    monkeypatch.setattr(
+        local_execution,
+        "validate_local_media_execution",
+        lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr(
+        local_execution, "execute_file_local_media_command", compose
+    )
+
+    async def dispatch():
+        result = await render_timeline(
+            project.project_id,
+            "timeline:main",
+            idempotency_key="render-1",
+            services=services,
+            automatic=automatic,
+        )
+        await asyncio.sleep(0)
+        return result
+
+    if accepted:
+        assert asyncio.run(dispatch())["replayed"] is False
+        assert calls == ["compose"]
+    else:
+        with pytest.raises(ConflictError) as blocked:
+            asyncio.run(dispatch())
+        assert blocked.value.details == {
+            "code": "AUTOMATIC_COMPOSE_NOT_READY",
+            "nodeId": "compose:timeline:main",
+            "status": "stale",
+        }
+        assert not calls
+
+
 @pytest.mark.parametrize("delegated", [False, True])
 def test_superseded_render_source_recompose_follows_mode(
     monkeypatch,

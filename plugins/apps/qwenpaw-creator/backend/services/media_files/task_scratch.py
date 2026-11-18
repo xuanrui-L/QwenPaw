@@ -21,7 +21,7 @@ never raised into the generation path.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -164,10 +164,14 @@ class SweepBudget:
     deadline: float | None = None
     consumed_bytes: int = 0
     stopped_early: bool = False
+    stop_requested: threading.Event = field(default_factory=threading.Event)
 
     def has_room(self) -> bool:
         """Whether anything at all may still be deleted this pass."""
 
+        if self.stop_requested.is_set():
+            self.stopped_early = True
+            return False
         if (
             self.max_bytes is not None
             and self.consumed_bytes >= self.max_bytes
@@ -375,7 +379,10 @@ def _flush_directory(dir_fd: int) -> None:
         logger.debug("scratch fsync skipped", exc_info=True)
 
 
-def _release_pinned_tree(dir_fd: int) -> ScratchReleaseResult:
+def _release_pinned_tree(
+    dir_fd: int,
+    budget: SweepBudget | None = None,
+) -> ScratchReleaseResult:
     """Delete the media below one pinned directory handle, best effort."""
 
     removed_files = 0
@@ -387,6 +394,8 @@ def _release_pinned_tree(dir_fd: int) -> ScratchReleaseResult:
         # A directory that cannot be read is left alone rather than guessed at.
         return ScratchReleaseResult()
     for entry in entries:
+        if budget is not None and not budget.has_room():
+            break
         try:
             info = entry.stat(follow_symlinks=False)
         except OSError:
@@ -404,7 +413,7 @@ def _release_pinned_tree(dir_fd: int) -> ScratchReleaseResult:
                 skipped_files += 1
                 continue
             try:
-                below = _release_pinned_tree(child_fd)
+                below = _release_pinned_tree(child_fd, budget)
             finally:
                 os.close(child_fd)
             removed_files += below.removed_files
@@ -434,11 +443,14 @@ def _release_pinned_tree(dir_fd: int) -> ScratchReleaseResult:
     )
 
 
-def _releasable_bytes(scratch_dir: Path) -> int:
+def _releasable_bytes(
+    scratch_dir: Path,
+    budget: SweepBudget | None = None,
+) -> int:
     """Bytes a release would actually take: media files, kept names aside."""
 
     total = 0
-    for path in _releasable_media(Path(scratch_dir)):
+    for path in _releasable_media(Path(scratch_dir), budget):
         try:
             total += path.stat(follow_symlinks=False).st_size
         except OSError:
@@ -473,7 +485,10 @@ def link_asset_into_scratch(
     return True
 
 
-def _releasable_media(scratch_dir: Path) -> Iterator[Path]:
+def _releasable_media(
+    scratch_dir: Path,
+    budget: SweepBudget | None = None,
+) -> Iterator[Path]:
     """Yield releasable media files, never following a symlink."""
 
     pending = [scratch_dir]
@@ -485,6 +500,8 @@ def _releasable_media(scratch_dir: Path) -> Iterator[Path]:
             # A directory we cannot read is left alone rather than guessed at.
             continue
         for entry in entries:
+            if budget is not None and not budget.has_room():
+                return
             path = Path(entry.path)
             try:
                 info = entry.stat(follow_symlinks=False)
@@ -508,6 +525,7 @@ def release_scratch_media(
     scratch_dir: Path,
     *,
     reason: str,
+    budget: SweepBudget | None = None,
 ) -> ScratchReleaseResult:
     """Delete the media left in one scratch directory, best effort.
 
@@ -521,7 +539,7 @@ def release_scratch_media(
     if dir_fd is None:
         return ScratchReleaseResult()
     try:
-        result = _release_pinned_tree(dir_fd)
+        result = _release_pinned_tree(dir_fd, budget)
     finally:
         os.close(dir_fd)
     if result.removed_files:
@@ -926,6 +944,7 @@ def _projected_release_bytes(
     kept: bool,
     moment: datetime,
     grace: timedelta,
+    budget: SweepBudget | None = None,
 ) -> int:
     """What releasing this Project's settled scratch would free.
 
@@ -934,7 +953,7 @@ def _projected_release_bytes(
     """
 
     projected = 0
-    for task in tasks:
+    for task in _until_budget_exhausted(tasks, budget):
         directory = directories.get(task.task_id)
         if directory is None:
             continue
@@ -946,7 +965,7 @@ def _projected_release_bytes(
             grace=grace,
         ):
             continue
-        projected += _releasable_bytes(directory)
+        projected += _releasable_bytes(directory, budget)
     return projected
 
 
@@ -971,6 +990,7 @@ def _withheld_release_bytes(
     kept: bool,
     moment: datetime,
     grace: timedelta,
+    budget: SweepBudget | None = None,
     enforce_cap: bool,
     cap: int,
 ) -> int:
@@ -992,6 +1012,7 @@ def _withheld_release_bytes(
         kept=kept,
         moment=moment,
         grace=grace,
+        budget=budget,
     )
     return projected if projected > cap else 0
 
@@ -1066,6 +1087,7 @@ def release_orphaned_scratch(
             kept=kept,
             moment=moment,
             grace=grace,
+            budget=budget,
             enforce_cap=enforce_cap,
             cap=cap,
         )
@@ -1093,7 +1115,11 @@ def release_orphaned_scratch(
                 grace=grace,
             ):
                 continue
-            result = release_scratch_media(directory, reason="orphan-sweep")
+            result = release_scratch_media(
+                directory,
+                reason="orphan-sweep",
+                budget=budget,
+            )
             if result.removed_files:
                 released_directories += 1
                 removed_files += result.removed_files
@@ -1169,6 +1195,7 @@ def project_storage_profile(
 
     moment = now or datetime.now(timezone.utc)
     executions = ProjectExecutionStore(services.root)
+    release_enabled = scratch_release_enabled()
     totals = {
         "taskWorkBytes": 0,
         "taskWorkLegacyBytes": 0,
@@ -1218,12 +1245,16 @@ def project_storage_profile(
                 measured["taskWorkLegacyBytes"] += size
             else:
                 measured["taskWorkBytes"] += size
-            if task is not None and _releasable_now(
-                task,
-                baseline=baseline or moment,
-                kept=kept,
-                moment=moment,
-                grace=ORPHAN_RELEASE_GRACE,
+            if (
+                release_enabled
+                and task is not None
+                and _releasable_now(
+                    task,
+                    baseline=baseline or moment,
+                    kept=kept,
+                    moment=moment,
+                    grace=ORPHAN_RELEASE_GRACE,
+                )
             ):
                 # The same rule the sweep applies, so the number the console
                 # compares against the cap is the number the sweep would
@@ -1234,8 +1265,24 @@ def project_storage_profile(
                 measured["taskWorkReclaimableBytes"] += _releasable_bytes(
                     directory,
                 )
+        # Already-renamed transactions can lose their journal before rmtree
+        # stops. Measure their remaining bytes in the existing footprint walk.
+        from services.project_files.transaction_gc import (
+            TOMBSTONE_PREFIX,
+            surplus_transaction_bytes,
+            transaction_gc_enabled,
+        )
+
+        cleanup_bytes = 0
+        retry_enabled = (
+            confirmed_at is not None and not kept and transaction_gc_enabled()
+        )
         for directory in _child_directories(root / "runtime" / "transactions"):
+            if is_link_path(directory):
+                continue
             size, newest = _directory_bytes(directory)
+            if retry_enabled and directory.name.startswith(TOMBSTONE_PREFIX):
+                cleanup_bytes += size
             if baseline is None or _utc(newest) < baseline:
                 measured["transactionsLegacyBytes"] += size
             else:
@@ -1244,10 +1291,6 @@ def project_storage_profile(
             measured["orphanBytes"] = _orphan_bytes(services, project_id, root)
         # What the automatic passes would take here if they were allowed: the
         # console shows it next to a confirm button once it exceeds the cap.
-        # Imported late: transaction_gc imports this module at top level.
-        from services.project_files.transaction_gc import (
-            surplus_transaction_bytes,
-        )
 
         pending_bytes = (
             surplus_transaction_bytes(root)
@@ -1266,6 +1309,7 @@ def project_storage_profile(
                     confirmed_at.isoformat() if confirmed_at else None
                 ),
                 "pendingReclaimBytes": pending_bytes,
+                "pendingTransactionCleanupBytes": cleanup_bytes,
                 **measured,
             },
         )

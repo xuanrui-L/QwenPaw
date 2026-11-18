@@ -680,7 +680,7 @@ def test_profile_and_sweep_agree_when_listing_order_is_not_mtime_order(
     monkeypatch.setattr(
         transaction_gc,
         "_eligible_candidates",
-        lambda root, baseline, kept: [
+        lambda root, baseline, kept, budget=None: [
             (transaction_gc._mtime(oldest_big), oldest_big, 8_000),
             (transaction_gc._mtime(newest), newest, 128),
         ],
@@ -734,7 +734,7 @@ def test_an_unsettled_reservation_keeps_its_transaction(
     monkeypatch.setattr(
         transaction_gc,
         "_open_reservation_ids",
-        lambda _root: frozenset({"txn-open"}),
+        lambda _root, budget=None: frozenset({"txn-open"}),
     )
 
     removed, _removed_bytes = collect_project_transactions(
@@ -1042,3 +1042,56 @@ def test_a_partially_deleted_tombstone_is_reclaimed_by_the_next_sweep(
     )
     assert second_removed >= 1
     assert second_bytes > 0
+
+
+def test_cancelled_candidate_scan_cannot_authorize_partial_retention(
+    tmp_path, monkeypatch
+):
+    from services.media_files.task_scratch import SweepBudget
+
+    root = _managed(tmp_path)
+    for index in range(55):
+        _transaction(root, f"txn-{index}", "RUNTIME_FINALIZED", age_days=index)
+    budget = SweepBudget()
+    scanned = 0
+    real_size = transaction_gc._directory_bytes
+
+    def cancel_during_scan(entry, current_budget):
+        nonlocal scanned
+        scanned += 1
+        if scanned == 52:
+            budget.stop_requested.set()
+        return real_size(entry, current_budget)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(transaction_gc, "_directory_bytes", cancel_during_scan)
+        removed = collect_project_transactions(
+            root, budget=budget, enforce_cap=False
+        )
+    assert removed == (0, 0)
+    assert scanned == 52
+    assert budget.stopped_early
+    assert len(list((root / "runtime" / "transactions").glob("txn-*"))) == 55
+    assert collect_project_transactions(root, enforce_cap=False)[0] == 5
+
+
+def test_cancelled_tombstone_scan_keeps_remaining_bytes(tmp_path, monkeypatch):
+    from services.media_files.task_scratch import SweepBudget
+
+    root = _managed(tmp_path)
+    tombstone = root / "runtime" / "transactions" / ".deleted-prior"
+    tombstone.mkdir()
+    (tombstone / "final.json").write_bytes(b"remaining")
+    budget = SweepBudget()
+    real_size = transaction_gc._directory_bytes
+
+    def cancel_after_size(entry, current_budget):
+        size = real_size(entry, current_budget)
+        budget.stop_requested.set()
+        return size
+
+    with monkeypatch.context() as patch:
+        patch.setattr(transaction_gc, "_directory_bytes", cancel_after_size)
+        assert collect_project_transactions(root, budget=budget) == (0, 0)
+    assert (tombstone / "final.json").read_bytes() == b"remaining"
+    assert collect_project_transactions(root) == (1, len(b"remaining"))

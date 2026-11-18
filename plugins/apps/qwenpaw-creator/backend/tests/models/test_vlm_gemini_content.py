@@ -218,3 +218,13 @@ def test_gemini_caller_omits_key_param_when_keyless(monkeypatch) -> None:
     )
 
     assert "key=" not in captured["post_url"]
+
+
+def test_partial_openai_vlm_stream_is_never_a_completed_answer():
+    payload = {
+        "_stream_truncated": True,
+        "choices": [{"message": {"content": "only a prefix"}}],
+    }
+    with pytest.raises(ModelError) as error:
+        vlm_model._parse_openai_response(payload, "test")
+    assert error.value.retryable

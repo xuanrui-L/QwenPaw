@@ -8,7 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import httpx
 import uvicorn
@@ -21,6 +21,7 @@ from fastapi import (
     Request,
     WebSocket,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
     JSONResponse,
@@ -28,12 +29,23 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 
 from ..__version__ import __version__
 from ..app.exception_handlers import register_exception_handlers
+from ..constant import CORS_ORIGINS
 from ..utils.http import is_loopback_host
 from ..utils.oauth_callback import HUB_OAUTH_CALLBACK_URL_HEADER
+from ..plugins.browser_access import PAWAPP_SCOPE_HEADER
 from .access_security import HubAccessSecurity
+from .pawapp_access import (
+    SESSION_SECONDS,
+    clear_sessions,
+    issue_session,
+    read_session,
+    require_session_runtime,
+    validate_app_id,
+)
 from .api_models import (
     AdminUserCreateBody,
     AdminUserPatchBody,
@@ -44,11 +56,16 @@ from .api_models import (
     PasswordChangeBody,
     RuntimeCreateBody,
 )
+from ..user_assets.avatars import AvatarStore
+from ..user_assets.avatar_routes import avatar_router
 from .auth import HubAuthService, HubDatabaseBusyError, HubUser
 from .bootstrap import get_hub_root
 from .config import HubConfig, HubConfigStore
 from .credentials import TenantCredentialVault
-from .provisioner import RuntimeProvisionerUnavailableError
+from .provisioner import (
+    RuntimeModelNetwork,
+    RuntimeProvisionerUnavailableError,
+)
 from .local_provisioner import LocalProcessRuntimeProvisioner
 from .docker_images import DockerImagePullStore
 from .docker_provisioner import (
@@ -77,7 +94,25 @@ from .static_files import (
     resolve_console_response,
     resolve_console_static_dir,
 )
+from .invitations import InvitationError, InvitationService
+from .model_service.storage import GovernanceStore
+from .model_service.catalog import ModelCatalog
+from .model_service.budget import TokenBudgetService
+from .model_service.gateway import ModelGateway
+from .model_service.routes import governance_router
+from .model_service.listener import ModelListener
+from .model_service.runtime_policy import require_model_route
 from . import websocket_proxy
+
+# HTTP semantics for each structured invitation rejection reason. The
+# user-facing message lives next to the reason in invitations.py.
+_INVITATION_ERROR_STATUSES = {
+    "registration_closed": 403,
+    "not_found": 404,
+    "already_used": 409,
+    "revoked": 410,
+    "expired": 410,
+}
 
 
 def build_runtime_service(
@@ -127,6 +162,7 @@ def create_hub_app(  # pylint: disable=too-many-statements
     hub_config: HubConfig | None = None,
     root_dir: Path | None = None,
     public_bind: bool = False,
+    model_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     """Create a Hub control-plane app with an injectable runtime service."""
     runtime_service = service or build_runtime_service(
@@ -147,6 +183,30 @@ def create_hub_app(  # pylint: disable=too-many-statements
         runtime_service.registry.database_path,
         credential_vault,
     )
+    governance = GovernanceStore(runtime_service.registry.database_path)
+    model_catalog = ModelCatalog(governance, credential_vault)
+    model_budgets = TokenBudgetService(governance)
+    model_gateway = ModelGateway(model_catalog, model_budgets, model_transport)
+    invitations = InvitationService(governance, hub_auth)
+    model_listener = ModelListener(governance, model_catalog, model_gateway)
+    model_networks: dict[str, RuntimeModelNetwork] = {}
+    original_credentials = runtime_service.credential_provider
+
+    def managed_credentials(record):
+        values = dict(original_credentials(record))
+        network = model_networks[record.provisioner]
+        values["QWENPAW_HUB_MODEL_URL"] = network.url(model_listener.port)
+        values["QWENPAW_HUB_MODEL_TOKEN"] = model_catalog.issue_token(record)
+        return values
+
+    def user_profile(record):
+        owner = hub_auth.get_user(record.owner_user_id)
+        if owner is None:
+            raise ValueError("Runtime owner is unavailable")
+        return owner.profile
+
+    runtime_service.profile_provider = user_profile
+    runtime_service.credential_provider = managed_credentials
     operations = HubOperationsStore(
         runtime_service.registry.database_path,
         runtime_service.root_dir,
@@ -169,19 +229,19 @@ def create_hub_app(  # pylint: disable=too-many-statements
         return _runtime_payload(
             runtime_service,
             record,
-            owner_username=owner.username if owner else None,
+            owner=owner,
         )
 
     async def runtime_payloads(records: list[Any]) -> list[dict[str, Any]]:
-        owner_usernames = await run_in_threadpool(
-            hub_auth.get_usernames,
+        owners = await run_in_threadpool(
+            hub_auth.get_users,
             {record.owner_user_id for record in records},
         )
         return [
             _runtime_payload(
                 runtime_service,
                 record,
-                owner_username=owner_usernames.get(record.owner_user_id),
+                owner=owners.get(record.owner_user_id),
             )
             for record in records
         ]
@@ -189,7 +249,16 @@ def create_hub_app(  # pylint: disable=too-many-statements
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
-            yield
+            await run_in_threadpool(model_gateway.recover)
+            model_networks.clear()
+            for name, status in runtime_service.provisioner_statuses().items():
+                if status["available"]:
+                    model_networks[name] = await run_in_threadpool(
+                        runtime_service.provisioners[name].model_network,
+                    )
+            bind_hosts = {item.bind_host for item in model_networks.values()}
+            async with model_listener.serve(bind_hosts):
+                yield
         finally:
             if docker_pulls is not None:
                 await run_in_threadpool(docker_pulls.close)
@@ -197,6 +266,17 @@ def create_hub_app(  # pylint: disable=too-many-statements
 
     app = FastAPI(title="QwenPaw Hub", lifespan=lifespan)
     register_exception_handlers(app)
+    if CORS_ORIGINS:
+        origins = [item.strip() for item in CORS_ORIGINS.split(",")]
+        if "*" in origins:
+            raise ValueError("Hub credentialed CORS requires explicit origins")
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[origin for origin in origins if origin],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     app.state.runtime_service = runtime_service
     app.state.auth_service = hub_auth
     app.state.hub_config = effective_config
@@ -242,11 +322,29 @@ def create_hub_app(  # pylint: disable=too-many-statements
             raise HTTPException(status_code=401, detail="Not authenticated")
         return user
 
+    avatar_store = AvatarStore(
+        runtime_service.root_dir / "profile" / "avatars.sqlite3",
+    )
+
+    def avatar_owner(user: HubUser = Depends(require_user)) -> str:
+        return user.user_id
+
+    app.include_router(
+        avatar_router(lambda: avatar_store, avatar_owner),
+        prefix="/api",
+    )
+
     def require_personal_runtime_user(
         path: str,
         request: Request,
         authorization: str | None = Header(default=None),
     ) -> HubUser:
+        if authorization is None:
+            session = read_session(hub_auth, request, path)
+            if session is not None:
+                user, payload = session
+                request.state.pawapp_session = payload
+                return user
         # Match decoding by the Runtime ASGI server and file preview router.
         normalized_path = unquote(unquote(path)).replace("\\", "/")
         # Native file previews cannot attach an Authorization header.
@@ -416,6 +514,15 @@ def create_hub_app(  # pylint: disable=too-many-statements
                 else "Personal runtime is stopped. Restart it to continue."
             )
             raise HTTPException(status_code=423, detail=detail)
+        if record.state is RuntimeState.FAILED:
+            raise HTTPException(
+                status_code=503,
+                detail=record.last_error
+                or (
+                    "Personal QwenPaw failed to start. "
+                    "Resolve the failure and restart it explicitly."
+                ),
+            )
         if record.state is not RuntimeState.RUNNING:
             try:
                 record = await runtime_service.execute(
@@ -456,6 +563,24 @@ def create_hub_app(  # pylint: disable=too-many-statements
             ) from exc
         if record.owner_user_id != user.user_id:
             raise HTTPException(status_code=404, detail="Runtime not found")
+
+    app.include_router(
+        governance_router(
+            governance,
+            model_catalog,
+            model_budgets,
+            model_gateway,
+            invitations,
+            hub_auth,
+            require_user,
+            require_admin,
+            record_audit,
+        ),
+    )
+    app.state.model_listener = model_listener
+    app.state.model_catalog = model_catalog
+    app.state.model_budgets = model_budgets
+    app.state.model_gateway = model_gateway
 
     @app.get("/api/hub/healthz")
     async def healthz(
@@ -523,7 +648,8 @@ def create_hub_app(  # pylint: disable=too-many-statements
 
     @app.get("/api/auth/status")
     async def auth_status() -> dict[str, object]:
-        return await run_in_threadpool(hub_auth.status)
+        result = await run_in_threadpool(hub_auth.status)
+        return result
 
     @app.post("/api/auth/register")
     async def register(
@@ -533,11 +659,34 @@ def create_hub_app(  # pylint: disable=too-many-statements
         client_ip = require_auth_access(request, "registration")
         access_security.record_attempt("registration", client_ip)
         try:
-            user, token = await run_in_threadpool(
-                hub_auth.register,
+            mode = await run_in_threadpool(hub_auth.registration_mode)
+            if mode == "invite" and await run_in_threadpool(
+                hub_auth.user_count,
+            ):
+                user, token = await run_in_threadpool(
+                    invitations.redeem,
+                    body.invite_code or "",
+                    body.username,
+                    body.password,
+                )
+            else:
+                user, token = await run_in_threadpool(
+                    hub_auth.register,
+                    body.username,
+                    body.password,
+                )
+        except InvitationError as exc:
+            await record_auth_event(
+                "auth.register",
                 body.username,
-                body.password,
+                client_ip,
+                outcome="failure",
+                reason=f"invitation.{exc.reason}",
             )
+            raise HTTPException(
+                status_code=_INVITATION_ERROR_STATUSES.get(exc.reason, 403),
+                detail=str(exc),
+            ) from exc
         except PermissionError as exc:
             await record_auth_event(
                 "auth.register",
@@ -739,6 +888,11 @@ def create_hub_app(  # pylint: disable=too-many-statements
                 role=body.role,
                 disabled=body.disabled,
                 actor_user_id=admin.user_id,
+                profile=(
+                    body.profile.model_dump(exclude_unset=True)
+                    if body.profile is not None
+                    else None
+                ),
             )
         except KeyError as exc:
             raise HTTPException(
@@ -1035,7 +1189,9 @@ def create_hub_app(  # pylint: disable=too-many-statements
                     "Hub runtime.create failure audit was not persisted",
                 )
 
-        reserved_metadata = {"local", "docker"} & set(body.metadata)
+        reserved_metadata = {"local", "docker", "user_profile"} & set(
+            body.metadata,
+        )
         if reserved_metadata:
             await audit_creation_failure(
                 "Runtime backend settings are administrator-controlled."
@@ -1370,6 +1526,63 @@ def create_hub_app(  # pylint: disable=too-many-statements
             headers=response_headers,
         )
 
+    @app.delete("/api/hub/pawapps/sessions", status_code=204)
+    async def clear_pawapp_sessions(request: Request) -> Response:
+        response = Response(status_code=204)
+        clear_sessions(request, response)
+        return response
+
+    @app.post("/api/hub/pawapps/{app_id}/session")
+    async def prepare_pawapp_session(
+        app_id: str,
+        request: Request,
+        user: HubUser = Depends(require_user),
+    ) -> Response:
+        validate_app_id(app_id)
+        record = await ensure_personal_runtime(user)
+        internal_token = await run_in_threadpool(
+            credential_vault.get_runtime_secret,
+            tenant_id=record.tenant_id,
+            runtime_id=record.runtime_id,
+            name="QWENPAW_RUNTIME_INTERNAL_TOKEN",
+        )
+        if not internal_token:
+            raise HTTPException(
+                status_code=503,
+                detail="Runtime boundary token unavailable",
+            )
+        async with httpx.AsyncClient(
+            transport=proxy_transport,
+            trust_env=False,
+        ) as client:
+            upstream = await client.get(
+                runtime_url(
+                    record,
+                    scheme="http",
+                    path=f"/api/pawapps/{app_id}",
+                ),
+                headers={"X-QwenPaw-Runtime-Token": internal_token},
+                timeout=10,
+            )
+        if upstream.status_code != 200:
+            raise HTTPException(
+                status_code=upstream.status_code,
+                detail="PawApp is unavailable",
+            )
+        if upstream.json().get("id") != app_id:
+            raise HTTPException(status_code=502, detail="Invalid PawApp")
+        response = JSONResponse({"expires_in": SESSION_SECONDS})
+        issue_session(
+            hub_auth,
+            user,
+            record,
+            app_id,
+            response,
+            secure=request.url.scheme == "https",
+            prefixes=upstream.json().get("browser_prefixes", []),
+        )
+        return response
+
     @app.api_route(
         "/api/{path:path}",
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
@@ -1380,7 +1593,9 @@ def create_hub_app(  # pylint: disable=too-many-statements
         request: Request,
         user: HubUser = Depends(require_personal_runtime_user),
     ) -> Response:
+        require_model_route(path, request.method)
         record = await ensure_personal_runtime(user)
+        require_session_runtime(request, record)
         target = runtime_url(
             record,
             scheme="http",
@@ -1416,6 +1631,9 @@ def create_hub_app(  # pylint: disable=too-many-statements
 
         excluded_request_headers = {
             "authorization",
+            "cookie",
+            PAWAPP_SCOPE_HEADER.lower(),
+            "x-qwenpaw-runtime-token",
             "connection",
             "content-length",
             "host",
@@ -1427,6 +1645,12 @@ def create_hub_app(  # pylint: disable=too-many-statements
             if name.lower() not in excluded_request_headers
         }
         headers["X-QwenPaw-Runtime-Token"] = internal_token
+        session = getattr(request.state, "pawapp_session", None)
+        headers.update(
+            {PAWAPP_SCOPE_HEADER: quote(str(session["app"]), safe="")}
+            if session is not None
+            else {},
+        )
         callback_route = oauth_callback_route(request.method, path)
         if callback_route:
             public_base_url = (
@@ -1468,6 +1692,10 @@ def create_hub_app(  # pylint: disable=too-many-statements
                 request_complete=request_complete,
                 timeout_seconds=(proxy_config.response_header_timeout_seconds),
             )
+        except ClientDisconnect:
+            await client.aclose()
+            # The caller is gone; end the proxy without an ASGI error.
+            return Response(status_code=499)
         except ProxyRequestTooLargeError as exc:
             await client.aclose()
             raise HTTPException(
@@ -1520,6 +1748,9 @@ def create_hub_app(  # pylint: disable=too-many-statements
             for name, value in upstream.headers.items()
             if name.lower() not in excluded_response_headers
         }
+
+        # Personal runtime URLs are reused when the browser changes account.
+        response_headers["cache-control"] = "private, no-store"
 
         async def stream_upstream() -> AsyncIterator[bytes]:
             try:
@@ -1631,11 +1862,14 @@ def _runtime_payload(
     service: RuntimeService,
     record: Any,
     *,
-    owner_username: str | None,
+    owner: HubUser | None,
 ) -> dict[str, Any]:
     payload = record.to_dict()
-    payload["owner_username"] = owner_username
-    payload["endpoint"] = f"http://{record.host}:{record.port}"
+    payload["owner_username"] = owner.username if owner else None
+    payload["owner_role"] = owner.role if owner else None
+    payload["endpoint"] = (
+        f"http://{record.host}:{record.port}" if record.port else ""
+    )
     payload["security_level"] = service.security_level(record.provisioner)
     return payload
 

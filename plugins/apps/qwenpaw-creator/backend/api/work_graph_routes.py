@@ -17,16 +17,21 @@ from typing import Any, Sequence
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
 
-from domain.errors import NotFoundError, ValidationError
+from domain.enums import TERMINAL_TASK_STATUSES
+from domain.errors import (
+    ImageTaskAlreadyClaimed,
+    NotFoundError,
+    ValidationError,
+)
 from models.config import (
     get_image_model_name,
     get_video_model_name,
 )
 from services.file_agent_runtime import manual_regeneration_hold
-from services.file_agent_runtime.work_graph import derive_work_graph
+from services.file_agent_runtime.work_graph import WorkGraph, derive_work_graph
 from services.file_agent_runtime.work_scheduler import (
     WorkGraphScheduler,
-    _abandoned_queued_targets,
+    _abandoned_queued_task_ids,
 )
 from services.media_files.call_budget import media_call_count
 from services.project_files.facade import CreatorFileServices
@@ -46,18 +51,22 @@ class DispatchWorkGraphRequest(BaseModel):
     regenerate: bool = False
 
 
-def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
-    try:
-        snapshot = services.projects.read(project_id)
-    except ProjectNotFound as exc:
-        raise NotFoundError(str(exc)) from exc
+def read_project_work_graph(
+    project_id: str,
+    services: CreatorFileServices,
+) -> WorkGraph:
+    snapshot = _read_project(project_id, services)
     tasks = ProjectExecutionStore(services.root).list_tasks(project_id)
-    graph = derive_work_graph(
+    return derive_work_graph(
         snapshot.project,
         tasks=tasks,
         pending_reviews=services.reviews.all_pending(project_id),
         media_models=(get_image_model_name(), get_video_model_name()),
     )
+
+
+def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
+    graph = read_project_work_graph(project_id, services)
     hold = manual_regeneration_hold.ManualRegenerationHoldStore(
         services.root,
     ).read(project_id)
@@ -154,22 +163,13 @@ async def resume_work_graph(
 
 def _task_admission_detail(
     tasks: Sequence[Any],
-    target_ref: str | None,
+    task_id: str | None,
 ) -> dict[str, Any]:
-    """Describe the task behind a running node so the caller can tell a real
-    render apart from an admission that no executor ever claimed."""
-
-    if not target_ref:
+    """Describe the specific task selected by the work graph."""
+    if not task_id:
         return {}
     for task in tasks:
-        metadata = getattr(task, "metadata", None) or {}
-        input_refs = getattr(task, "input_refs", None) or []
-        found = str(
-            getattr(task, "target_ref", "")
-            or metadata.get("targetRef")
-            or (input_refs[0] if input_refs else ""),
-        )
-        if found != target_ref:
+        if task.task_id != task_id:
             continue
         updated = getattr(task, "updated_at", None)
         age = None
@@ -233,8 +233,7 @@ async def dispatch_work_graph_node(
     # path; a genuinely running render is still refused, now with a reason.
     unclaimed = (
         node.status.value == "running"
-        and bool(node.target_ref)
-        and (node.target_ref in _abandoned_queued_targets(tasks))
+        and node.task_id in _abandoned_queued_task_ids(tasks)
     )
     if (node.status.value == "running" and not unclaimed) or (
         node.kind == "interaction"
@@ -249,7 +248,7 @@ async def dispatch_work_graph_node(
             "status": node.status.value,
             "dispatched": False,
             "reason": "already_running",
-            **_task_admission_detail(tasks, node.target_ref),
+            **_task_admission_detail(tasks, node.task_id),
         }
     if node.missing:
         raise ValidationError(
@@ -302,6 +301,27 @@ async def dispatch_work_graph_node(
                     f"project:{snapshot.etag}:work-graph",
                 ),
             )
+        except ImageTaskAlreadyClaimed as exc:
+            await asyncio.to_thread(holds.finish, admission, succeeded=False)
+            current = await asyncio.to_thread(
+                ProjectExecutionStore(services.root).get_task,
+                project_id,
+                exc.details["taskId"],
+            )
+            settled = current.status in TERMINAL_TASK_STATUSES
+            if settled:
+                current_graph = await asyncio.to_thread(
+                    read_project_work_graph, project_id, services
+                )
+                node = current_graph.by_id.get(node_id, node)
+            return {
+                "ok": True,
+                "nodeId": node_id,
+                "status": node.status.value,
+                "dispatched": False,
+                "reason": "already_settled" if settled else "already_running",
+                **_task_admission_detail([current], current.task_id),
+            }
         except Exception:
             try:
                 await asyncio.to_thread(

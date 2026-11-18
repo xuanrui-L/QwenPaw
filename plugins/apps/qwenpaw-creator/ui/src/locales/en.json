@@ -2624,6 +2624,8 @@
     "responding": "Waiting for the model response"
   },
   "storage": {
+    "retryButton": "Retry cleanup",
+    "retryHint": "{{size}} remains from the interrupted cleanup",
     "pendingHint": "{{size}} of settled history is waiting for your confirmation",
     "confirmButton": "Confirm and free",
     "confirmTitle": "Free {{size}} of settled history in \"{{name}}\"?",

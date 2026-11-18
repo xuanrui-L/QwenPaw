@@ -22,6 +22,9 @@ class ProjectStorageProfileData(StrictModel):
         alias="reclaimConfirmedAt",
     )
     pending_reclaim_bytes: int = Field(default=0, alias="pendingReclaimBytes")
+    pending_transaction_cleanup_bytes: int = Field(
+        default=0, alias="pendingTransactionCleanupBytes"
+    )
     task_work_bytes: int = Field(default=0, alias="taskWorkBytes")
     task_work_legacy_bytes: int = Field(default=0, alias="taskWorkLegacyBytes")
     task_work_reclaimable_bytes: int = Field(

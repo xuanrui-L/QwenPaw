@@ -2,18 +2,11 @@
 """Text model protocol dispatch and keyless free-tier support."""
 
 # pylint: disable=protected-access
-# The response doubles have to expose httpx's ``json()`` method, which
-# shadows the stdlib module this file also imports.
-# pylint: disable=redefined-outer-name
-# The fake transports stand in for a real client's ``post``, so they have
-# to accept the url and headers the caller passes even though the double
-# never looks at them.
-# pylint: disable=unused-argument
 
 from __future__ import annotations
 
 import asyncio
-import json
+import json as json_module
 
 import pytest
 
@@ -60,11 +53,11 @@ def _fake_httpx(
 
         @property
         def text(self) -> str:
-            return body_text or json.dumps(self.json())
+            return body_text or json_module.dumps(self.json())
 
         def json(self) -> dict:
             if body_text:
-                return json.loads(body_text)
+                return json_module.loads(body_text)
             return {
                 "choices": [
                     {"message": {"content": "pong"}},
@@ -262,7 +255,7 @@ def test_anthropic_protocol_dispatches_to_messages_endpoint(
 
         @property
         def text(self) -> str:
-            return json.dumps(self.json())
+            return json_module.dumps(self.json())
 
         def json(self) -> dict:
             return {"content": [{"type": "text", "text": "pong"}]}
@@ -338,7 +331,9 @@ def test_unsupported_temperature_learns_and_retries_without_it(
     cache.clear(key)
 
     bodies: list[dict] = []
-    ok_payload = json.dumps({"choices": [{"message": {"content": "pong"}}]})
+    ok_payload = json_module.dumps(
+        {"choices": [{"message": {"content": "pong"}}]},
+    )
 
     class FakeResponse:
         headers = {"content-type": "application/json"}
@@ -348,7 +343,7 @@ def test_unsupported_temperature_learns_and_retries_without_it(
             self.text = text
 
         def json(self) -> dict:
-            return json.loads(self.text)
+            return json_module.loads(self.text)
 
     class FakeAsyncClient:
         def __init__(self, *, timeout):
@@ -361,6 +356,8 @@ def test_unsupported_temperature_learns_and_retries_without_it(
             return False
 
         async def post(self, url, *, headers, json):
+            assert url == "https://gateway.example.com/v1/chat/completions"
+            assert headers["Authorization"] == "Bearer test-key"
             bodies.append(dict(json))
             if len(bodies) == 1:
                 return FakeResponse(
