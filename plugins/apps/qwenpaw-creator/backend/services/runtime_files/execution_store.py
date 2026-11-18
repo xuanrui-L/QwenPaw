@@ -34,7 +34,7 @@ from domain.enums import (
     TaskStatus,
 )
 
-from .atomic_store import AtomicJsonRecordStore, RecordSnapshot
+from .atomic_store import AtomicJsonRecordStore, RecordSnapshot, WriteStageHook
 from .errors import RuntimeFileError
 from .execution_models import (
     ContinuationState,
@@ -813,6 +813,7 @@ class ProjectExecutionStore:
         expected_checksum: str | None = None,
         updated_at: datetime | None = None,
         _lifecycle_lock_held: bool = False,
+        _write_stage_hook: WriteStageHook | None = None,
     ) -> TaskRecord:
         project_id, task_id = self._safe_project_child(
             project_id,
@@ -836,6 +837,7 @@ class ProjectExecutionStore:
                 updates=updates,
                 expected_checksum=expected_checksum,
                 updated_at=updated_at,
+                write_stage_hook=_write_stage_hook,
             )
         return result
 
@@ -1510,6 +1512,7 @@ class ProjectExecutionStore:
         updates: Mapping[str, Any] | None = None,
         expected_checksum: str | None = None,
         updated_at: datetime | None = None,
+        write_stage_hook: WriteStageHook | None = None,
     ) -> TaskRecord:
         current = snapshot.value
         if current.status not in expected:
@@ -1540,11 +1543,12 @@ class ProjectExecutionStore:
         )
         candidate = TaskRecord.model_validate(dumped)
         checksum = expected_checksum or snapshot.checksum
-        result = (
-            self._task_store(project_id, task_id)
-            .compare_and_swap(expected_checksum=checksum, value=candidate)
-            .value
-        )
+        task_store = self._task_store(project_id, task_id)
+        if write_stage_hook is not None:
+            task_store.stage_hook = write_stage_hook
+        result = task_store.compare_and_swap(
+            expected_checksum=checksum, value=candidate
+        ).value
         logger.info(
             "task transition: project=%s task=%s kind=%s run=%s %s -> %s",
             _log_safe(project_id),

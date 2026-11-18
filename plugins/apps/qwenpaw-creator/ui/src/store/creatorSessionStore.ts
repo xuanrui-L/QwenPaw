@@ -25,8 +25,9 @@ import {
 } from "@/lib/creatorMessagePresentation";
 import i18n from "@/i18n";
 import {
+  type CreditsSource,
   clearCreditsAfterCompletion,
-  hasLegacyCreditsNotice,
+  hasProjectCreditsNotice,
   isQuotaErrorCode,
   markCreditsExhausted,
 } from "@/store/modelCreditsStore";
@@ -468,6 +469,42 @@ function defaultState() {
 export const useCreatorSessionStore = create<CreatorSessionState>(
   (set, get) => {
     let lifecycleGeneration = 0;
+    let creditsReplay: {
+      projectId: string;
+      sessionId: string;
+      success?: CreditsSource;
+      refusal?: CreditsSource;
+    } | null = null;
+
+    const finishCreditsReplay = () => {
+      if (!creditsReplay) return;
+      const { projectId, success, refusal } = creditsReplay;
+      creditsReplay = null;
+      const stillWatching = hasProjectCreditsNotice(projectId);
+      if (success) clearCreditsAfterCompletion(projectId, success, false);
+      if (stillWatching && refusal)
+        markCreditsExhausted(projectId, refusal, false);
+    };
+
+    const creditsHistoryFor = (
+      projectId: string,
+      sessionId: string,
+      live: boolean,
+    ) => {
+      if (live) {
+        finishCreditsReplay();
+        return null;
+      }
+      if (!hasProjectCreditsNotice(projectId)) return null;
+      if (
+        creditsReplay?.projectId !== projectId ||
+        creditsReplay.sessionId !== sessionId
+      ) {
+        creditsReplay = { projectId, sessionId };
+      }
+      return creditsReplay;
+    };
+
     let sessionRefreshGeneration = 0;
     let messageRefreshEpoch = 0;
     let pendingMessageRefresh: { epoch: number; after: number } | null = null;
@@ -677,6 +714,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
         const sessionGeneration = ++sessionRefreshGeneration;
         const state = get();
         const sameProject = state.projectId === projectId;
+        if (!sameProject) creditsReplay = null;
         const preferredConversationId = sameProject
           ? state.activeConversationId
           : null;
@@ -1587,15 +1625,19 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 // A run that reaches its end spent Credits, so the balance
                 // recovered: leaving the notice up would accuse every other
                 // project of a condition that just stopped being true.
-                clearCreditsAfterCompletion(
+                const source = {
+                  sessionId: event.creatorSessionId,
+                  seq: event.seq,
+                  at: event.at,
+                };
+                const live = event.seq > current.replayUntilSeq;
+                const replay = creditsHistoryFor(
                   event.projectId,
-                  {
-                    sessionId: event.creatorSessionId,
-                    seq: event.seq,
-                    at: event.at,
-                  },
-                  event.seq > current.replayUntilSeq,
+                  source.sessionId,
+                  live,
                 );
+                if (replay) replay.success = source;
+                else clearCreditsAfterCompletion(event.projectId, source, live);
               }
               if (rateLimitRetry?.runId === terminalRunId)
                 rateLimitRetry = null;
@@ -1633,27 +1675,41 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                     },
                   };
                 }
-                const currentRefusalRun = session.error?.details?.runId;
-                const failedRun =
-                  errorPayload?.details?.runId ?? event.data.runId;
-                if (
-                  isQuotaErrorCode(errorPayload?.code) &&
-                  (liveFailure ||
-                    (isQuotaErrorCode(session.error?.code)
-                      ? typeof currentRefusalRun !== "string" ||
-                        currentRefusalRun === failedRun
-                      : hasLegacyCreditsNotice(session.projectId)))
-                ) {
+                if (isQuotaErrorCode(errorPayload?.code)) {
+                  const currentRefusalRun = session.error?.details?.runId;
+                  const failedRun =
+                    errorPayload?.details?.runId ?? event.data.runId;
+                  const liveCreditEvent = event.seq > current.replayUntilSeq;
                   const refusedAt = errorPayload?.details?.refusedAt;
-                  markCreditsExhausted(
+                  const source = {
+                    sessionId: event.creatorSessionId,
+                    seq: event.seq,
+                    at: typeof refusedAt === "string" ? refusedAt : event.at,
+                  };
+                  const matchesSnapshot =
+                    isQuotaErrorCode(session.error?.code) &&
+                    (typeof currentRefusalRun !== "string" ||
+                      currentRefusalRun === failedRun);
+                  const replay = creditsHistoryFor(
                     session.projectId,
-                    {
-                      sessionId: event.creatorSessionId,
-                      seq: event.seq,
-                      at: typeof refusedAt === "string" ? refusedAt : event.at,
-                    },
-                    liveFailure,
+                    source.sessionId,
+                    liveCreditEvent,
                   );
+                  if (replay) {
+                    // Resolve only after the full replay. A later batch can
+                    // carry another refusal after an intervening success.
+                    if (
+                      !isQuotaErrorCode(session.error?.code) ||
+                      matchesSnapshot
+                    )
+                      replay.refusal = source;
+                  } else if (liveCreditEvent || matchesSnapshot) {
+                    markCreditsExhausted(
+                      session.projectId,
+                      source,
+                      liveCreditEvent,
+                    );
+                  }
                 }
               }
             }
@@ -1925,6 +1981,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             }
           });
           const lastEventSeq = accepted.at(-1)!.seq;
+          if (creditsReplay && lastEventSeq >= current.replayUntilSeq)
+            finishCreditsReplay();
           if (session && session.lastEventSeq < lastEventSeq)
             session = { ...session, lastEventSeq };
           const combinedEvents = [...current.events, ...accepted];
@@ -1979,6 +2037,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       },
 
       reset: () => {
+        creditsReplay = null;
         lifecycleGeneration += 1;
         sessionRefreshGeneration += 1;
         get().stream?.close();

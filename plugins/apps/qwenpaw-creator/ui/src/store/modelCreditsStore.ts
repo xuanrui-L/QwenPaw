@@ -24,7 +24,7 @@ const RECOVERY_KEY = "qwenpaw-creator:model-credits:last-success";
 /** Session error code the runtime reports for a refused Credits spend. */
 export const MODEL_QUOTA_ERROR_CODE = "MODEL_QUOTA_EXCEEDED";
 
-interface CreditsSource {
+export interface CreditsSource {
   sessionId: string;
   seq?: number;
   at?: string;
@@ -197,9 +197,8 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
  * notice is cross-project, so the calls stay as small as they can be and the
  * store itself remains the only thing that touches localStorage.
  */
-export function hasLegacyCreditsNotice(projectId: string): boolean {
-  const { notice } = useModelCreditsStore.getState();
-  return notice?.projectId === projectId && !notice.source;
+export function hasProjectCreditsNotice(projectId: string): boolean {
+  return useModelCreditsStore.getState().notice?.projectId === projectId;
 }
 
 export function markCreditsExhausted(

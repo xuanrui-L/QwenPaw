@@ -496,9 +496,9 @@ def test_stopping_a_build_signals_its_parallel_clip_while_the_parent_drains(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("write_fails", [False, True])
+@pytest.mark.parametrize("fault", ["none", "before_replace", "after_replace"])
 def test_durable_cancel_stops_a_clip_before_its_next_model_call(
-    tmp_path, monkeypatch, write_fails
+    tmp_path, monkeypatch, fault
 ):
     from api.file_execution_routes import _cancel_task_sync
     from services.project_files.facade import creator_file_services
@@ -542,7 +542,7 @@ def test_durable_cancel_stops_a_clip_before_its_next_model_call(
         )
         model_calls.append(job.task_id)
 
-    if write_fails:
+    if fault == "before_replace":
 
         def fail_write(*_args, **_kwargs):
             published.set()
@@ -551,6 +551,22 @@ def test_durable_cancel_stops_a_clip_before_its_next_model_call(
 
         monkeypatch.setattr(
             ProjectExecutionStore, "_transition_task_unlocked", fail_write
+        )
+
+    if fault == "after_replace":
+        from services.runtime_files import atomic_store
+
+        sync_directory = atomic_store.fsync_directory
+
+        def fail_directory_sync(path):
+            if Path(path).name == job.task_id:
+                published.set()
+                assert return_to_api.wait(5)
+                raise OSError("cancel write failed")
+            sync_directory(path)
+
+        monkeypatch.setattr(
+            atomic_store, "fsync_directory", fail_directory_sync
         )
 
     monkeypatch.setattr(ProjectExecutionStore, "_notify_task_terminal", notify)
@@ -573,19 +589,23 @@ def test_durable_cancel_stops_a_clip_before_its_next_model_call(
             assert service.executions.get_task(
                 job.project_id, job.task_id
             ).status is (
-                TaskStatus.QUEUED if write_fails else TaskStatus.CANCELLED
+                TaskStatus.QUEUED
+                if fault == "before_replace"
+                else TaskStatus.CANCELLED
             )
             release_clip.set()
             assert await asyncio.to_thread(clip_done.wait, 3)
             assert not model_calls
             return_to_api.set()
-            if write_fails:
+            if fault == "none":
+                assert (await cancel).status is TaskStatus.CANCELLED
+            else:
                 with pytest.raises(OSError, match="cancel write failed"):
                     await cancel
+            if fault == "before_replace":
                 await asyncio.wait_for(worker, 3)
                 assert model_calls == [job.task_id]
             else:
-                assert (await cancel).status is TaskStatus.CANCELLED
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(worker, 3)
                 assert not model_calls

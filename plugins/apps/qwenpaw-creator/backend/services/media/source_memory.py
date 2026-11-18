@@ -2475,7 +2475,7 @@ def source_memory_service(services: Any) -> SourceMemoryService:
 @contextmanager
 def source_memory_cancellation(
     root: Path, project_id: str, task_id: str
-) -> Iterator[None]:
+) -> Iterator[Callable[[str, Path], None] | None]:
     """Close new stage admission until the durable transition succeeds or fails."""
     service = _SERVICES.get(str(root))
     build = service._builds.get(task_id) if service is not None else None
@@ -2484,17 +2484,31 @@ def source_memory_cancellation(
         or build.job.project_id != project_id
         or build.stop.is_set()
     ):
-        yield
+        yield None
         return
     # The caller holds the project's lifecycle lock, serializing cancel writes.
     decision: Future[None] = Future()
     build.stop.pending = decision
+
+    def stop_worker() -> None:
+        if not build.stop.is_set():
+            build.stop.set()
+            build.worker.get_loop().call_soon_threadsafe(build.interrupt)
+        if not decision.done():
+            decision.set_result(None)
+
+    def record_write_stage(stage: str, _path: Path) -> None:
+        # After replacement readers can see CANCELLED even if directory fsync fails.
+        if stage == "replaced":
+            stop_worker()
+
     try:
-        yield
-        build.stop.set()
-        build.worker.get_loop().call_soon_threadsafe(build.interrupt)
+        yield record_write_stage
+        # Idempotent cancellation may already have a published task head.
+        stop_worker()
     finally:
-        decision.set_result(None)
+        if not decision.done():
+            decision.set_result(None)
         build.stop.pending = None
 
 
