@@ -477,15 +477,14 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       sessionId: string;
       success?: CreditsSource;
       refusal?: CreditsSource;
-      firstRefusal?: CreditsSource;
     } | null = null;
 
     const finishCreditsReplay = () => {
       if (!creditsReplay) return;
-      const { projectId, success, refusal, firstRefusal } = creditsReplay;
+      const { projectId, success, refusal } = creditsReplay;
       creditsReplay = null;
       if (success) clearCreditsAfterCompletion(projectId, success, false);
-      if (refusal && canReplayCreditsRefusal(projectId, refusal, firstRefusal))
+      if (refusal && canReplayCreditsRefusal(projectId, refusal))
         markCreditsExhausted(projectId, refusal, false);
     };
 
@@ -716,7 +715,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       bootstrap: async (projectId) => {
         const bootstrapGeneration = ++lifecycleGeneration;
         const sessionGeneration = ++sessionRefreshGeneration;
-        const dismissalAtOpen = useModelCreditsStore.getState().dismissed;
+        const dismissalAtOpen =
+          useModelCreditsStore.getState().dismissalVersion;
         const state = get();
         const sameProject = state.projectId === projectId;
         if (!sameProject) creditsReplay = null;
@@ -811,7 +811,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 sessionResponse,
                 sessionGeneration,
                 current,
-                useModelCreditsStore.getState().dismissed === dismissalAtOpen,
+                useModelCreditsStore.getState().dismissalVersion ===
+                  dismissalAtOpen,
               ),
               conversations,
               activeConversationId,
@@ -1708,7 +1709,6 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                       !isQuotaErrorCode(session.error?.code) ||
                       matchesSnapshot
                     ) {
-                      replay.firstRefusal ??= source;
                       replay.refusal = source;
                     }
                   } else if (liveCreditEvent) {

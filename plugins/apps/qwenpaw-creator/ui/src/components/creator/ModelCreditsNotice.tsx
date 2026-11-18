@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { Tooltip } from "antd";
 import { CircleAlert, X } from "lucide-react";
 import { useModelCreditsStore } from "@/store/modelCreditsStore";
+import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 
 /**
  * Navigation-bar Credits notice.
@@ -44,7 +45,7 @@ export default function ModelCreditsNotice() {
       </Tooltip>
       <button
         type="button"
-        onClick={clear}
+        onClick={() => clear(useCreatorSessionStore.getState().session)}
         aria-label={t("nav.creditsDismiss")}
         title={t("nav.creditsDismiss")}
         className="icon-button shrink-0"

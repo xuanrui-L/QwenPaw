@@ -1,4 +1,4 @@
-import { act } from "@testing-library/react";
+import { act, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import {
@@ -130,8 +130,31 @@ describe("cross-project Credits notice", () => {
       expect(notice()).toBeNull();
       await session().bootstrap("p1");
       expect(notice()?.source?.at).toBe(at);
+      const reopened = session().bootstrap("p1");
+      useModelCreditsStore.getState().clear();
+      await reopened;
+      expect(notice()).toBeNull();
     },
   );
+
+  it("keeps a dismissed snapshot hidden when its matching SSE event arrives late", async () => {
+    const at = "2026-11-18T10:00:00Z";
+    const error = { ...quotaFailure, details: { refusedAt: at } };
+    const { calls } = installMockFetch(
+      bootstrapRoutes({ session: { status: "ERROR", lastEventSeq: 4, error } }),
+    );
+    await session().refreshSession();
+    expect(notice()?.source?.at).toBe(at);
+    useModelCreditsStore.getState().clear();
+    session().ingestEvent({ ...ev(4, "agent.run.failed", { error }), at });
+    expect(notice()).toBeNull();
+    expect(calls).toHaveLength(1);
+    session().ingestEvent({
+      ...ev(5, "agent.run.failed", { error: quotaFailure }),
+      at: "2026-11-18T10:01:00Z",
+    });
+    expect(notice()?.source?.seq).toBe(5);
+  });
 
   it("keeps the current Credits notice through historical failures and successes", () => {
     useCreatorSessionStore.setState({
@@ -423,13 +446,26 @@ describe("cross-project Credits notice", () => {
     expect(notice()?.source?.seq).toBe(4);
   });
 
-  it.each([false, true])(
-    "reconciles an old dismissal with a refusal before recovery: %s",
-    (hasEarlierRefusal) => {
+  it.each([
+    [1, true],
+    [1, false],
+    [4, true],
+    [4, false],
+  ] as const)(
+    "orders old dismissals against server cursor %i (current project: %s)",
+    async (cursor, isCurrent) => {
       useModelCreditsStore.setState({
         notice: { projectId: "p1", at: "2099-01-01" },
       });
-      useModelCreditsStore.getState().clear();
+      const view = sessionView({ status: "CANCELLED", lastEventSeq: cursor });
+      const { calls } = installMockFetch(bootstrapRoutes({ session: view }));
+      useModelCreditsStore.getState().clear(isCurrent ? view : null);
+      await waitFor(() =>
+        expect(useModelCreditsStore.getState().dismissed?.source?.seq).toBe(
+          cursor,
+        ),
+      );
+      expect(calls).toHaveLength(isCurrent ? 0 : 1);
       useModelCreditsStore
         .getState()
         .markExhausted("p3", { sessionId: "s3", at: "2026-11-18T09:00:00Z" });
@@ -450,17 +486,16 @@ describe("cross-project Credits notice", () => {
         session: sessionView({ status: "CANCELLED", lastEventSeq: 4 }),
         replayUntilSeq: 4,
       });
-      if (hasEarlierRefusal)
-        session().ingestEvent({
-          ...ev(1, "agent.run.failed", { error: quotaFailure }),
-          at: "2026-11-18T08:00:00Z",
-        });
+      session().ingestEvent({
+        ...ev(1, "agent.run.failed", { error: quotaFailure }),
+        at: "2026-11-18T08:00:00Z",
+      });
       session().ingestEvent({
         ...ev(3, "agent.run.failed", { error: quotaFailure }),
         at: "2026-11-18T11:00:00Z",
       });
       session().ingestEvent(ev(4, "agent.run.cancelled"));
-      expect(notice()?.source?.seq).toBe(hasEarlierRefusal ? 3 : undefined);
+      expect(notice()?.source?.seq).toBe(cursor === 1 ? 3 : undefined);
     },
   );
 

@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { getCreatorSession } from "@/api/creator/sessions";
+import type { CreatorSessionView } from "@/contracts/creator";
 
 /**
  * Account-level "the model provider will not serve us" notice, surfaced in
@@ -51,12 +53,13 @@ interface ModelCreditsState {
   notice: CreditsNotice | null;
   recovery: CreditsRecovery | null;
   dismissed: CreditsNotice | null;
+  dismissalVersion: number;
   markExhausted: (
     projectId: string,
     source?: CreditsSource,
     live?: boolean,
   ) => void;
-  clear: () => void;
+  clear: (currentSession?: CreatorSessionView | null) => void;
 }
 
 // Lazy lookup: tests replace window.localStorage; don't capture at load.
@@ -157,6 +160,25 @@ function newerThanNotice(
     : live;
 }
 
+function hasServerSource(notice: CreditsNotice): boolean {
+  return notice.source?.seq !== undefined || Boolean(notice.source?.at);
+}
+
+function atSessionCursor(
+  notice: CreditsNotice,
+  session: CreatorSessionView,
+): CreditsNotice {
+  const refusedAt = session.error?.details?.refusedAt;
+  return {
+    ...notice,
+    source: {
+      sessionId: session.id,
+      seq: session.lastEventSeq,
+      ...(typeof refusedAt === "string" && { at: refusedAt }),
+    },
+  };
+}
+
 function afterDismissal(
   dismissed: CreditsNotice,
   projectId: string,
@@ -165,16 +187,26 @@ function afterDismissal(
 ): boolean {
   // A legacy timestamp came from the browser. A replay cannot place it
   // relative to a server event unless the dismissal has server evidence.
-  if (dismissed.source?.seq === undefined && !dismissed.source?.at) return live;
+  if (!hasServerSource(dismissed)) return live;
   return newerThanNotice(dismissed, projectId, source, live);
 }
 
 export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
   notice: storedNotice(readStored(STORAGE_KEY)),
   ...readHistory(),
+  dismissalVersion: 0,
   markExhausted: (projectId, source, live = true) => {
     if (!projectId) return;
-    const { notice: previous, recovery } = get();
+    const { notice: previous, recovery, dismissed } = get();
+    // A poll can show a refusal before the live stream delivers the same event.
+    if (
+      live &&
+      source &&
+      dismissed?.projectId === projectId &&
+      previous?.projectId !== projectId &&
+      !afterDismissal(dismissed, projectId, source, true)
+    )
+      return;
     // When the original project replays its own refusal, it supplies the
     // server time that old localStorage records lack.
     const observedLegacyRefusal =
@@ -219,22 +251,50 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
     set({ notice });
     persist(STORAGE_KEY, notice);
   },
-  clear: () => {
-    const { notice, recovery, dismissed } = get();
+  clear: (currentSession) => {
+    const { notice, recovery, dismissed, dismissalVersion } = get();
     if (!notice) return;
     // Ignore this refusal (or older history) after a manual dismissal. An
     // unrelated project's snapshot and recovery do not acknowledge a new refusal.
+    const closing =
+      !hasServerSource(notice) && currentSession?.projectId === notice.projectId
+        ? atSessionCursor(notice, currentSession)
+        : notice;
     const latest =
       !dismissed ||
-      !notice.source ||
-      afterDismissal(dismissed, notice.projectId, notice.source, true)
-        ? notice
+      !closing.source ||
+      afterDismissal(dismissed, closing.projectId, closing.source, true)
+        ? closing
         : dismissed;
     const nextRecovery = recovery && { ...recovery };
     if (nextRecovery) delete nextRecovery.clearedNotice;
-    set({ notice: null, recovery: nextRecovery, dismissed: latest });
+    set({
+      notice: null,
+      recovery: nextRecovery,
+      dismissed: latest,
+      dismissalVersion: dismissalVersion + 1,
+    });
     persist(RECOVERY_KEY, { ...nextRecovery, dismissed: latest });
     persist(STORAGE_KEY, null);
+
+    // Old notices have no server identity. Only a manual dismissal away from
+    // their project needs to read that project's cursor once.
+    if (latest !== closing || hasServerSource(latest)) return;
+    void getCreatorSession(latest.projectId)
+      .then(({ session }) => {
+        const state = get();
+        if (
+          state.dismissed !== latest ||
+          session.projectId !== latest.projectId
+        )
+          return;
+        const bound = atSessionCursor(latest, session);
+        set({ dismissed: bound });
+        persist(RECOVERY_KEY, { ...state.recovery, dismissed: bound });
+      })
+      .catch(() => {
+        // Offline or deleted project: the dismissal still hides its old history.
+      });
   },
 }));
 
@@ -253,25 +313,13 @@ export function tracksCreditsHistory(projectId: string): boolean {
 export function canReplayCreditsRefusal(
   projectId: string,
   source: CreditsSource,
-  firstRefusal?: CreditsSource,
 ): boolean {
   const { notice, recovery, dismissed } = useModelCreditsStore.getState();
   // A current quota-error snapshot may legitimately show the notice again.
   if (notice?.projectId === projectId) return true;
-  if (!recovery?.clearedNotice) return false;
-  if (!dismissed) return true;
-  if (dismissed.source?.seq !== undefined || dismissed.source?.at)
-    return newerThanNotice(dismissed, projectId, source, false);
-  // An upgraded browser can have a dismissal without a server timestamp. When
-  // A's history shows a refusal before the known recovery and another after
-  // it, the second refusal is evidence from a separate period of exhaustion.
-  if (dismissed.projectId !== projectId || !firstRefusal || !recovery.source)
-    return false;
-  return newerThanNotice(
-    { ...dismissed, source: firstRefusal },
-    recovery.projectId,
-    recovery.source,
-    false,
+  return (
+    recovery?.clearedNotice === true &&
+    (!dismissed || afterDismissal(dismissed, projectId, source, false))
   );
 }
 
