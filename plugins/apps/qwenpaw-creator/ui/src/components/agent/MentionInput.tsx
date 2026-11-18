@@ -432,13 +432,21 @@ const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
       saveRange();
     };
 
+    // The editor is the only layer that can still serialize its content when
+    // the dock folds. Keying this cleanup off the callback identity would also
+    // fire on every parent re-render that hands down a fresh callback, writing
+    // a stale draft back into the store mid-edit. Keep the latest callback in
+    // a ref and report solely on the real unmount.
+    const reportUnmountDraft = useRef(onUnmountDraft);
+    reportUnmountDraft.current = onUnmountDraft;
     useEffect(
       () => () => {
-        if (!onUnmountDraft) return;
+        const report = reportUnmountDraft.current;
+        if (!report) return;
         const draft = latestDraft.current;
-        onUnmountDraft(draft.length ? draft : null);
+        report(draft.length ? draft : null);
       },
-      [onUnmountDraft],
+      [],
     );
 
     useImperativeHandle(ref, () => ({
