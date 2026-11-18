@@ -228,13 +228,13 @@ export function listInspirationExamples(): Promise<InspirationExampleListRespons
 export function openInspirationExample(
   exampleId: string,
 ): Promise<InspirationExampleOpenResponse> {
-  return creatorRequest<InspirationExampleOpenResponse>(
+  return creatorRequest(
     `/examples/${encodeURIComponent(exampleId)}/open`,
     { method: "POST" },
     // First open downloads the archive from OSS (tens of MB), so this call
     // gets a much longer budget than regular API requests.
     { timeoutMs: 300_000 },
-  ).then(projectAdded);
+  );
 }
 
 /** Polled archive download progress for one example (while open runs). */
