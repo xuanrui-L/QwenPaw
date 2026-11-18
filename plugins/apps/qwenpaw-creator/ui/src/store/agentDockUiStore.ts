@@ -35,19 +35,15 @@ interface AgentDockUiState {
   runFilter: string;
   draft: string;
   /**
-   * The input's structured content (text segments, mention pills, selection
-   * attachments) stashed when the dock folds or unmounts. Live typing never
-   * reaches the store -- that re-rendered the whole dock per keystroke -- but
-   * unmounting used to eat an unsent instruction with it (review #243).
-   *
-   * Tagged with the Project that produced it: navigation between Projects
-   * can unmount and remount the same dock, and an untagged stash would
-   * restore Project A's half-typed instruction into Project B's composer
-   * -- where a send would deliver it to the wrong session entirely
-   * (review #243 blocking #5). Consumers must compare
-   * ``unsentDraft.projectId`` against the current route id before applying.
+   * Unsent composer drafts keyed by the Project that produced them. Live
+   * typing never reaches the store -- that re-rendered the whole dock per
+   * keystroke -- but folding, unmounting, or switching Projects used to eat an
+   * unsent instruction (review #243). Keying by Project lets A and B each keep
+   * their own draft across a round trip, and this map deliberately survives
+   * `reset()`: the layout resets the dock on every Project switch, so clearing
+   * here would erase the draft just parked by the unmounting editor.
    */
-  unsentDraft: { projectId: string; content: MentionInputDraft } | null;
+  unsentDrafts: Record<string, MentionInputDraft>;
   selection: SelectionAttachment | null;
   allowExpandDetails: boolean;
   /**
@@ -62,9 +58,15 @@ interface AgentDockUiState {
   setOverviewHeight: (height: number | null) => void;
   setRunFilter: (filter: string) => void;
   setDraft: (draft: string) => void;
-  setUnsentDraft: (
-    draft: { projectId: string; content: MentionInputDraft } | null,
+  /** Stashes (or, with null/empty, drops) one Project's unsent draft. */
+  parkUnsentDraft: (
+    projectId: string,
+    content: MentionInputDraft | null,
   ) => void;
+  /** Drops one Project's stashed draft without restoring it. */
+  clearUnsentDraft: (projectId: string) => void;
+  /** Drops every stashed draft; test isolation only. */
+  clearUnsentDrafts: () => void;
   setSelection: (selection: SelectionAttachment | null) => void;
   setAllowExpandDetails: (allow: boolean) => void;
   setDecisionTrayCollapsed: (collapsed: boolean) => void;
@@ -80,7 +82,7 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
   overviewHeight: null,
   runFilter: "all",
   draft: "",
-  unsentDraft: null,
+  unsentDrafts: {},
   selection: null,
   allowExpandDetails: false,
   decisionTrayCollapsed: false,
@@ -94,7 +96,30 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
   setOverviewHeight: (overviewHeight) => set({ overviewHeight }),
   setRunFilter: (runFilter) => set({ runFilter }),
   setDraft: (draft) => set({ draft }),
-  setUnsentDraft: (unsentDraft) => set({ unsentDraft }),
+  parkUnsentDraft: (projectId, content) =>
+    set((state) => {
+      const parked = state.unsentDrafts[projectId];
+      if (!content || !content.length) {
+        if (!parked) return state;
+        const unsentDrafts = { ...state.unsentDrafts };
+        delete unsentDrafts[projectId];
+        return { unsentDrafts };
+      }
+      return {
+        unsentDrafts: { ...state.unsentDrafts, [projectId]: content },
+      };
+    }),
+  clearUnsentDraft: (projectId) =>
+    set((state) => {
+      if (!(projectId in state.unsentDrafts)) return state;
+      const unsentDrafts = { ...state.unsentDrafts };
+      delete unsentDrafts[projectId];
+      return { unsentDrafts };
+    }),
+  clearUnsentDrafts: () =>
+    set((state) =>
+      Object.keys(state.unsentDrafts).length ? { unsentDrafts: {} } : state,
+    ),
   setSelection: (selection) =>
     set({ selection, tab: "conversation", open: true }),
   setAllowExpandDetails: (allowExpandDetails) => set({ allowExpandDetails }),
@@ -109,7 +134,9 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
       overviewHeight: null,
       runFilter: "all",
       draft: "",
-      unsentDraft: null,
+      // `unsentDrafts` intentionally survives: the layout resets the dock on
+      // every Project switch, and that map is the hand-off point for drafts
+      // that must survive the trip. Tests call `clearUnsentDrafts`.
       selection: null,
       allowExpandDetails: false,
       decisionTrayCollapsed: false,

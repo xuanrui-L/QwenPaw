@@ -1766,9 +1766,8 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
-    expect(useAgentDockUiStore.getState().unsentDraft).toEqual({
-      projectId: "p1",
-      content: ["Keep this unsent instruction"],
+    expect(useAgentDockUiStore.getState().unsentDrafts).toEqual({
+      p1: ["Keep this unsent instruction"],
     });
 
     fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
@@ -1784,18 +1783,15 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
     // hand A's half-typed instruction to B's composer -- and one
     // Enter key would send it to the wrong session.
     useAgentDockUiStore.setState({
-      unsentDraft: {
-        projectId: "p-other",
-        content: ["Leaked from another Project"],
-      },
+      unsentDrafts: { "p-other": ["Leaked from another Project"] },
     });
     renderDock();
 
     // The stash is preserved for its own Project but never applied.
     expect(composerBox().textContent ?? "").toBe("");
-    expect(useAgentDockUiStore.getState().unsentDraft?.projectId).toBe(
-      "p-other",
-    );
+    expect(useAgentDockUiStore.getState().unsentDrafts).toEqual({
+      "p-other": ["Leaked from another Project"],
+    });
   });
 
   it("prefers the edited draft over a one-shot injection on reopen", async () => {
@@ -1803,7 +1799,7 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
     // once, and the old effect re-applied that value every time the dock
     // reopened against an empty input -- silently overwriting whatever the
     // user had typed after the injection. The injection is now consumed
-    // after it lands, so unsentDraft wins on the next fold/reopen.
+    // after it lands, so the stashed draft wins on the next fold/reopen.
     renderDock();
     useAgentDockUiStore.getState().setDraft("Original injection");
     await waitFor(() =>
@@ -1818,9 +1814,8 @@ describe("AgentDock older-history paging while replay is suppressed", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
-    expect(useAgentDockUiStore.getState().unsentDraft).toEqual({
-      projectId: "p1",
-      content: ["Edited instruction"],
+    expect(useAgentDockUiStore.getState().unsentDrafts).toEqual({
+      p1: ["Edited instruction"],
     });
 
     fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
