@@ -35,7 +35,11 @@ describe("cross-project Credits notice", () => {
         clear: () => written.clear(),
       },
     });
-    useModelCreditsStore.setState({ notice: null, recovery: null });
+    useModelCreditsStore.setState({
+      notice: null,
+      recovery: null,
+      dismissed: null,
+    });
     session().reset();
     useCreatorSessionStore.setState({
       projectId: "p1",
@@ -332,7 +336,67 @@ describe("cross-project Credits notice", () => {
     useModelCreditsStore.getState().clear();
     reopen();
     expect(notice()).toBeNull();
+
+    const saved = JSON.parse(
+      written.get("qwenpaw-creator:model-credits:last-success")!,
+    );
+    expect(saved.dismissed.source.seq).toBe(4);
+    // C has an explicit current refusal. B's success recovers C but predates
+    // the A refusal the user dismissed.
+    useModelCreditsStore.getState().markExhausted("p3", {
+      sessionId: "s3",
+      seq: 1,
+      at: "2026-11-18T10:15:00Z",
+    });
+    expect(notice()?.projectId).toBe("p3");
+    session().reset();
+    useCreatorSessionStore.setState({
+      projectId: "p2",
+      session: sessionView({ projectId: "p2", id: "s2", lastEventSeq: 2 }),
+      replayUntilSeq: 2,
+    });
+    session().ingestEvent({
+      ...ev(2, "agent.run.completed"),
+      projectId: "p2",
+      creatorSessionId: "s2",
+      at: "2026-11-18T10:30:00Z",
+    });
+    expect(notice()).toBeNull();
+    reopen();
+    expect(notice()).toBeNull();
     expect(written.has(STORAGE_KEY)).toBe(false);
+    useCreatorSessionStore.setState({
+      session: sessionView({ lastEventSeq: 7, status: "CANCELLED" }),
+      replayUntilSeq: 7,
+    });
+    session().ingestEvent(failed(6, 12));
+    session().ingestEvent(
+      ev(7, "agent.run.cancelled", { runId: "later-retry" }),
+    );
+    expect(notice()?.source?.seq).toBe(6);
+  });
+
+  it("keeps a manually dismissed legacy notice hidden until new server evidence arrives", () => {
+    const id = sessionView().id;
+    useModelCreditsStore.setState({
+      notice: { projectId: "p1", at: "2099-01-01", source: { sessionId: id } },
+    });
+    useModelCreditsStore.getState().clear();
+    expect(
+      JSON.parse(written.get("qwenpaw-creator:model-credits:last-success")!)
+        .dismissed.projectId,
+    ).toBe("p1");
+    useCreatorSessionStore.setState({
+      session: sessionView({ status: "CANCELLED", lastEventSeq: 2 }),
+      replayUntilSeq: 2,
+    });
+    session().ingestEvent(ev(1, "agent.run.failed", { error: quotaFailure }));
+    session().ingestEvent(ev(2, "agent.run.cancelled"));
+    expect(notice()).toBeNull();
+    session().ingestEvent(ev(3, "agent.run.completed"));
+    expect(useModelCreditsStore.getState().dismissed).toBeNull();
+    session().ingestEvent(ev(4, "agent.run.failed", { error: quotaFailure }));
+    expect(notice()?.source?.seq).toBe(4);
   });
 
   it("orders another project's replay by server time", () => {

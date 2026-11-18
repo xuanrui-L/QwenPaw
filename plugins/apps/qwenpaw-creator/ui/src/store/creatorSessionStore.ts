@@ -26,6 +26,7 @@ import {
 import i18n from "@/i18n";
 import {
   type CreditsSource,
+  canReplayCreditsRefusal,
   clearCreditsAfterCompletion,
   tracksCreditsHistory,
   isQuotaErrorCode,
@@ -480,9 +481,10 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       if (!creditsReplay) return;
       const { projectId, success, refusal } = creditsReplay;
       creditsReplay = null;
-      const stillWatching = tracksCreditsHistory(projectId);
+      const showRefusal =
+        refusal && canReplayCreditsRefusal(projectId, refusal);
       if (success) clearCreditsAfterCompletion(projectId, success, false);
-      if (stillWatching && refusal)
+      if (refusal && showRefusal)
         markCreditsExhausted(projectId, refusal, false);
     };
 

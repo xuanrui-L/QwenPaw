@@ -39,13 +39,18 @@ export interface CreditsNotice {
 }
 
 interface CreditsRecovery extends CreditsNotice {
-  /** Keep comparing account-wide server evidence after a success cleared the notice. */
+  /** A successful run cleared a visible refusal, so newer history can restore it. */
   clearedNotice?: true;
+}
+
+interface PersistedCreditsHistory extends Partial<CreditsRecovery> {
+  dismissed?: CreditsNotice;
 }
 
 interface ModelCreditsState {
   notice: CreditsNotice | null;
   recovery: CreditsRecovery | null;
+  dismissed: CreditsNotice | null;
   markExhausted: (
     projectId: string,
     source?: CreditsSource,
@@ -63,25 +68,38 @@ function getStorage(): Storage | undefined {
   }
 }
 
-function readPersisted(key: string): CreditsRecovery | null {
+function readStored(key: string): PersistedCreditsHistory | null {
   try {
     const raw = getStorage()?.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<CreditsRecovery> | null;
-    return typeof parsed?.projectId === "string"
-      ? {
-          projectId: parsed.projectId,
-          at: String(parsed.at ?? ""),
-          source: parsed.source,
-          ...(parsed.clearedNotice === true && { clearedNotice: true }),
-        }
-      : null;
+    return raw ? (JSON.parse(raw) as PersistedCreditsHistory | null) : null;
   } catch {
     return null;
   }
 }
 
-function persist(key: string, notice: CreditsNotice | null) {
+function storedNotice(
+  value?: Partial<CreditsNotice> | null,
+): CreditsNotice | null {
+  return typeof value?.projectId === "string"
+    ? {
+        projectId: value.projectId,
+        at: String(value.at ?? ""),
+        source: value.source,
+      }
+    : null;
+}
+
+function readHistory() {
+  const value = readStored(RECOVERY_KEY);
+  const success = storedNotice(value);
+  const recovery: CreditsRecovery | null =
+    success && value?.clearedNotice === true
+      ? { ...success, clearedNotice: true }
+      : success;
+  return { recovery, dismissed: storedNotice(value?.dismissed) };
+}
+
+function persist(key: string, notice: PersistedCreditsHistory | null) {
   const storage = getStorage();
   if (!storage) return;
   try {
@@ -139,9 +157,21 @@ function newerThanNotice(
     : live;
 }
 
+function afterDismissal(
+  dismissed: CreditsNotice,
+  projectId: string,
+  source: CreditsSource,
+  live: boolean,
+): boolean {
+  // A legacy timestamp came from the browser. A replay cannot place it
+  // relative to a server event unless the dismissal has server evidence.
+  if (dismissed.source?.seq === undefined && !dismissed.source?.at) return live;
+  return newerThanNotice(dismissed, projectId, source, live);
+}
+
 export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
-  notice: readPersisted(STORAGE_KEY),
-  recovery: readPersisted(RECOVERY_KEY),
+  notice: storedNotice(readStored(STORAGE_KEY)),
+  ...readHistory(),
   markExhausted: (projectId, source, live = true) => {
     if (!projectId) return;
     const { notice: previous, recovery } = get();
@@ -190,17 +220,20 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
     persist(STORAGE_KEY, notice);
   },
   clear: () => {
-    const { notice, recovery } = get();
+    const { notice, recovery, dismissed } = get();
     if (!notice) return;
-    // An explicit dismissal ends historical tracking for the cleared banner.
-    if (recovery?.clearedNotice) {
-      const next = { ...recovery };
-      delete next.clearedNotice;
-      set({ notice: null, recovery: next });
-      persist(RECOVERY_KEY, next);
-    } else {
-      set({ notice: null });
-    }
+    // Ignore this refusal (or older history) after a manual dismissal. An
+    // unrelated project's snapshot and recovery do not acknowledge a new refusal.
+    const latest =
+      !dismissed ||
+      !notice.source ||
+      afterDismissal(dismissed, notice.projectId, notice.source, true)
+        ? notice
+        : dismissed;
+    const nextRecovery = recovery && { ...recovery };
+    if (nextRecovery) delete nextRecovery.clearedNotice;
+    set({ notice: null, recovery: nextRecovery, dismissed: latest });
+    persist(RECOVERY_KEY, { ...nextRecovery, dismissed: latest });
     persist(STORAGE_KEY, null);
   },
 }));
@@ -217,19 +250,34 @@ export function tracksCreditsHistory(projectId: string): boolean {
   return notice?.projectId === projectId || recovery?.clearedNotice === true;
 }
 
+export function canReplayCreditsRefusal(
+  projectId: string,
+  source: CreditsSource,
+): boolean {
+  const { notice, recovery, dismissed } = useModelCreditsStore.getState();
+  // A current quota-error snapshot may legitimately show the notice again.
+  if (notice?.projectId === projectId) return true;
+  return (
+    recovery?.clearedNotice === true &&
+    (!dismissed || afterDismissal(dismissed, projectId, source, false))
+  );
+}
+
 function recordRecovery(
   recovery: CreditsRecovery,
   cleared?: CreditsNotice,
+  dismissed = useModelCreditsStore.getState().dismissed,
 ): void {
-  if (cleared) {
-    const next: CreditsRecovery = { ...recovery, clearedNotice: true };
-    useModelCreditsStore.setState({ notice: null, recovery: next });
-    persist(RECOVERY_KEY, next);
-    persist(STORAGE_KEY, null);
-  } else {
-    useModelCreditsStore.setState({ recovery });
-    persist(RECOVERY_KEY, recovery);
-  }
+  const next: CreditsRecovery = cleared
+    ? { ...recovery, clearedNotice: true }
+    : recovery;
+  useModelCreditsStore.setState(
+    cleared
+      ? { notice: null, recovery: next, dismissed }
+      : { recovery: next, dismissed },
+  );
+  persist(RECOVERY_KEY, dismissed ? { ...next, dismissed } : next);
+  if (cleared) persist(STORAGE_KEY, null);
 }
 
 export function markCreditsExhausted(
@@ -260,7 +308,12 @@ export function clearCreditsAfterCompletion(
       at: source.at ?? "",
       source,
     };
-    recordRecovery(recovery, cleared);
+    const dismissed =
+      state.dismissed &&
+      afterDismissal(state.dismissed, projectId, source, live)
+        ? null
+        : state.dismissed;
+    recordRecovery(recovery, cleared, dismissed);
   } else if (cleared) {
     recordRecovery(state.recovery, cleared);
   }
