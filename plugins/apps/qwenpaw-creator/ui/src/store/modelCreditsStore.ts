@@ -38,9 +38,14 @@ export interface CreditsNotice {
   source?: CreditsSource;
 }
 
+interface CreditsRecovery extends CreditsNotice {
+  /** Keep comparing account-wide server evidence after a success cleared the notice. */
+  clearedNotice?: true;
+}
+
 interface ModelCreditsState {
   notice: CreditsNotice | null;
-  recovery: CreditsNotice | null;
+  recovery: CreditsRecovery | null;
   markExhausted: (
     projectId: string,
     source?: CreditsSource,
@@ -58,16 +63,17 @@ function getStorage(): Storage | undefined {
   }
 }
 
-function readPersisted(key: string): CreditsNotice | null {
+function readPersisted(key: string): CreditsRecovery | null {
   try {
     const raw = getStorage()?.getItem(key);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<CreditsNotice> | null;
+    const parsed = JSON.parse(raw) as Partial<CreditsRecovery> | null;
     return typeof parsed?.projectId === "string"
       ? {
           projectId: parsed.projectId,
           at: String(parsed.at ?? ""),
           source: parsed.source,
+          ...(parsed.clearedNotice === true && { clearedNotice: true }),
         }
       : null;
   } catch {
@@ -161,7 +167,7 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
           false,
         )
       )
-        get().clear();
+        recordRecovery(recovery, previous);
       return;
     }
     if (
@@ -184,8 +190,17 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
     persist(STORAGE_KEY, notice);
   },
   clear: () => {
-    if (!get().notice) return;
-    set({ notice: null });
+    const { notice, recovery } = get();
+    if (!notice) return;
+    // An explicit dismissal ends historical tracking for the cleared banner.
+    if (recovery?.clearedNotice) {
+      const next = { ...recovery };
+      delete next.clearedNotice;
+      set({ notice: null, recovery: next });
+      persist(RECOVERY_KEY, next);
+    } else {
+      set({ notice: null });
+    }
     persist(STORAGE_KEY, null);
   },
 }));
@@ -197,8 +212,24 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
  * notice is cross-project, so the calls stay as small as they can be and the
  * store itself remains the only thing that touches localStorage.
  */
-export function hasProjectCreditsNotice(projectId: string): boolean {
-  return useModelCreditsStore.getState().notice?.projectId === projectId;
+export function tracksCreditsHistory(projectId: string): boolean {
+  const { notice, recovery } = useModelCreditsStore.getState();
+  return notice?.projectId === projectId || recovery?.clearedNotice === true;
+}
+
+function recordRecovery(
+  recovery: CreditsRecovery,
+  cleared?: CreditsNotice,
+): void {
+  if (cleared) {
+    const next: CreditsRecovery = { ...recovery, clearedNotice: true };
+    useModelCreditsStore.setState({ notice: null, recovery: next });
+    persist(RECOVERY_KEY, next);
+    persist(STORAGE_KEY, null);
+  } else {
+    useModelCreditsStore.setState({ recovery });
+    persist(RECOVERY_KEY, recovery);
+  }
 }
 
 export function markCreditsExhausted(
@@ -215,14 +246,22 @@ export function clearCreditsAfterCompletion(
   live: boolean,
 ): void {
   const state = useModelCreditsStore.getState();
-  if (state.notice && newerThanNotice(state.notice, projectId, source, live))
-    state.clear();
+  const cleared =
+    state.notice && newerThanNotice(state.notice, projectId, source, live)
+      ? state.notice
+      : undefined;
   if (
     !state.recovery ||
     newerThanNotice(state.recovery, projectId, source, live)
   ) {
-    const recovery = { projectId, at: source.at ?? "", source };
-    useModelCreditsStore.setState({ recovery });
-    persist(RECOVERY_KEY, recovery);
+    const recovery: CreditsRecovery = {
+      ...state.recovery,
+      projectId,
+      at: source.at ?? "",
+      source,
+    };
+    recordRecovery(recovery, cleared);
+  } else if (cleared) {
+    recordRecovery(state.recovery, cleared);
   }
 }

@@ -287,6 +287,54 @@ describe("cross-project Credits notice", () => {
     },
   );
 
+  it("reopens a source-bound project's history after another project's success", () => {
+    const failed = (seq: number, hour: number) => ({
+      ...ev(seq, "agent.run.failed", { error: quotaFailure }),
+      at: new Date(Date.UTC(2026, 10, 18, hour)).toISOString(),
+    });
+    session().ingestEvent(failed(1, 8));
+    session().reset();
+    useCreatorSessionStore.setState({
+      projectId: "p2",
+      session: sessionView({ projectId: "p2", id: "s2", lastEventSeq: 1 }),
+      replayUntilSeq: 1,
+    });
+    session().ingestEvent({
+      ...ev(1, "agent.run.completed"),
+      projectId: "p2",
+      creatorSessionId: "s2",
+      at: "2026-11-18T09:00:00Z",
+    });
+    expect(notice()).toBeNull();
+    const receipt = JSON.parse(
+      written.get("qwenpaw-creator:model-credits:last-success")!,
+    );
+    expect(receipt.clearedNotice).toBe(true);
+    useModelCreditsStore.setState({ notice: null, recovery: receipt });
+
+    const reopen = () => {
+      session().reset();
+      useCreatorSessionStore.setState({
+        projectId: "p1",
+        session: sessionView({ lastEventSeq: 5, status: "CANCELLED" }),
+        replayUntilSeq: 5,
+      });
+      session().ingestEvent(failed(1, 8));
+      session().ingestEvent({
+        ...ev(2, "agent.run.completed"),
+        at: "2026-11-18T10:00:00Z",
+      });
+      session().ingestEvent(failed(4, 11));
+      session().ingestEvent(ev(5, "agent.run.cancelled", { runId: "retry" }));
+    };
+    reopen();
+    expect(notice()?.source?.seq).toBe(4);
+    useModelCreditsStore.getState().clear();
+    reopen();
+    expect(notice()).toBeNull();
+    expect(written.has(STORAGE_KEY)).toBe(false);
+  });
+
   it("orders another project's replay by server time", () => {
     const time = (microsecond: number) =>
       `2026-10-01T12:00:00.${String(microsecond).padStart(6, "0")}+00:00`;

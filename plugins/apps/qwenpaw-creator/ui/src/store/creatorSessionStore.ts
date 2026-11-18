@@ -27,7 +27,7 @@ import i18n from "@/i18n";
 import {
   type CreditsSource,
   clearCreditsAfterCompletion,
-  hasProjectCreditsNotice,
+  tracksCreditsHistory,
   isQuotaErrorCode,
   markCreditsExhausted,
 } from "@/store/modelCreditsStore";
@@ -480,7 +480,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       if (!creditsReplay) return;
       const { projectId, success, refusal } = creditsReplay;
       creditsReplay = null;
-      const stillWatching = hasProjectCreditsNotice(projectId);
+      const stillWatching = tracksCreditsHistory(projectId);
       if (success) clearCreditsAfterCompletion(projectId, success, false);
       if (stillWatching && refusal)
         markCreditsExhausted(projectId, refusal, false);
@@ -495,7 +495,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
         finishCreditsReplay();
         return null;
       }
-      if (!hasProjectCreditsNotice(projectId)) return null;
+      if (!tracksCreditsHistory(projectId)) return null;
       if (
         creditsReplay?.projectId !== projectId ||
         creditsReplay.sessionId !== sessionId
