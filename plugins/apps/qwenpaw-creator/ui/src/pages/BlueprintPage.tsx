@@ -1,3 +1,4 @@
+import { isInteractiveDesignField } from "@/lib/interactiveDesignReview";
 import InteractionWorkbench, {
   hasInteractionDesign,
 } from "@/components/interaction/InteractionWorkbench";
@@ -88,7 +89,7 @@ export default function BlueprintPage() {
     if (!project || !timelineFromQuery) return;
     if (!project.timelines.items[timelineFromQuery]) return;
     setSelectedTimelineId(timelineFromQuery);
-    setScriptOpen(!String(query.get("field") || "").includes("/creation/"));
+    setScriptOpen(!isInteractiveDesignField(query.get("field"), project));
     useCreatorInteractionStore
       .getState()
       .select(`timeline:${timelineFromQuery}`);

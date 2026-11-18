@@ -70,7 +70,7 @@ it("loads only visible video thumbnails and releases them when scrolled away", (
   );
 
   try {
-    const { container, unmount } = renderStrip(withBranching(cloneProject()));
+    const { container, unmount } = renderStrip(cloneProject());
     expect(observers.length).toBeGreaterThan(1);
     expect(container.querySelectorAll("video")).toHaveLength(0);
     const first = observers[0];

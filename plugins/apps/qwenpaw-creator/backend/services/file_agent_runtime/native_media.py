@@ -19,6 +19,7 @@ from models.media_transport import (
     reference_transport_needs_upload_key,
     upload_reference_file_for_provider,
 )
+from services.media_files import media_gate
 from services.project_files.assets import AssetFileStore
 from services.project_files.facade import CreatorFileServices
 from services.project_files.remote_cache import resolve_remote_cache
@@ -169,7 +170,7 @@ def _extract_video_frames_sync(
     frames: list[tuple[int, Path]] = []
     for index, stamp in enumerate(stamps):
         frame_path = output_dir / f"frame-{index:02d}.jpg"
-        completed = subprocess.run(
+        completed = media_gate.run(
             [
                 ffmpeg,
                 "-hide_banner",
@@ -375,9 +376,7 @@ async def source_intelligence_content_parts(
     file_store = AssetFileStore(services.projects.project_root(project_id))
     api_key = model_config.get_vlm_api_key().strip()
     model_name = (model_config.get_vlm_model_name() or "qwen3.7-plus").strip()
-    # Both remote transports present this credential: the AgentScope
-    # proxy’s own media upload and the DashScope temporary OSS. Only the
-    # inline Base64 fallback is keyless, so the guard mirrors that routing.
+    # Remote uploads present the configured credential. Inline data needs none.
     needs_upload_key = reference_transport_needs_upload_key(
         model_config.get_vlm_base_url(),
         model_config.get_vlm_protocol(),

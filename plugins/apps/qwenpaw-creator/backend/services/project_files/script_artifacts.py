@@ -58,8 +58,10 @@ def script_version_id(project_id: str, timeline_id: str, checksum: str) -> str:
 
     digest = uuid5(
         NAMESPACE_URL,
-        "qwenpaw-creator:timeline-script:"
-        f"{project_id}:{timeline_id}:{checksum}",
+        # 拆行只为满足 79 列限制：相邻字面量拼接出的键与拆分前逐字节相同，
+        # 不会让已有的 timeline-script 工件 id 失效。
+        f"qwenpaw-creator:timeline-script:{project_id}"
+        f":{timeline_id}:{checksum}",
     ).hex
     return f"artifact-script-{digest}"
 
@@ -112,12 +114,7 @@ def add_script_version(
     slot_id = ensure_timeline_script_slot(project, timeline_id)
     version_id = script_version_id(project.project_id, timeline_id, checksum)
     slot = project.assets.artifact_slots_by_id.get(slot_id)
-    if not project.narrative_edges:
-        existing = project.assets.artifact_versions_by_id.get(version_id)
-        if existing is not None and slot is not None:
-            slot.selected_version_id = version_id
-            return existing
-    elif slot is not None:
+    if slot is not None:
         for previous_id in reversed(slot.version_ids):
             existing = project.assets.artifact_versions_by_id[previous_id]
             if (

@@ -1070,8 +1070,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 target_ref=f"timeline:{timeline_id}",
                 dispatch_arguments=(
                     {"source": "timeline"}
-                    if project.narrative_edges
-                    and status is WorkNodeStatus.STALE
+                    if status is WorkNodeStatus.STALE
                     and timeline.description.strip()
                     else {}
                 ),
@@ -1778,7 +1777,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             ),
             None,
         )
-        final_slot = next(
+        selected_final = next(
             (
                 slot.selected_version_id
                 for slot_id, slot in (
@@ -1790,8 +1789,16 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             ),
             None,
         )
-        if final_slot is not None:
-            version = project.assets.artifact_versions_by_id.get(final_slot)
+        # A cut existed for this Timeline even if it is about to be judged
+        # superseded: that is what separates "never composed" (compose it, the
+        # deliverable does not exist yet) from "composed, now stale"
+        # (re-compose only on request).
+        superseded_final = selected_final is not None
+        final_slot = selected_final
+        if selected_final is not None:
+            version = project.assets.artifact_versions_by_id.get(
+                selected_final,
+            )
             if version is not None and (
                 getattr(version, "stale", False)
                 or not _final_render_reads_current_versions(project, version)
@@ -1803,6 +1810,19 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             status = WorkNodeStatus.GATED
         elif final_slot:
             status = WorkNodeStatus.DONE
+        elif superseded_final:
+            # In co-creation, wait for the author's explicit re-compose.
+            # Delegated runs must still deliver an updated cut automatically.
+            from models.config import (
+                EXECUTION_MODE_DELEGATED,
+                get_execution_mode,
+            )
+
+            status = (
+                WorkNodeStatus.READY
+                if get_execution_mode() == EXECUTION_MODE_DELEGATED
+                else WorkNodeStatus.STALE
+            )
         else:
             status = WorkNodeStatus.READY
         add(

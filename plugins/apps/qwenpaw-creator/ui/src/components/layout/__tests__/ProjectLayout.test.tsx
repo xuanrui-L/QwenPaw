@@ -11,6 +11,7 @@ import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useModelCreditsStore } from "@/store/modelCreditsStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -167,6 +168,52 @@ describe("ProjectLayout visible shell", () => {
     seedProject();
   });
 
+  it.each(["resolved", "rejected"])(
+    "does not pile up authorization polls while a slow request is pending (%s)",
+    async (outcome) => {
+      installMockFetch(commonRoutes());
+      let resolveRequest!: () => void;
+      let rejectRequest!: (error: Error) => void;
+      const pending = new Promise<void>((resolve, reject) => {
+        resolveRequest = resolve;
+        rejectRequest = reject;
+      });
+      const load = vi
+        .spyOn(useExecutionAuthorizationStore.getState(), "load")
+        .mockReturnValueOnce(pending)
+        .mockResolvedValue();
+      try {
+        vi.useFakeTimers();
+        await act(async () => {
+          renderShell("slow-authorization-route");
+        });
+        expect(
+          screen.getByTestId("slow-authorization-route"),
+        ).toBeInTheDocument();
+        await act(() => vi.advanceTimersByTimeAsync(12_000));
+        act(() => {
+          document.dispatchEvent(new Event("visibilitychange"));
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+        expect(load).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          if (outcome === "resolved") resolveRequest();
+          else rejectRequest(new Error("temporary failure"));
+          await pending.catch(() => undefined);
+        });
+        // The cadence now follows activity (5 s while nothing is pending), so
+        // this waits past the idle interval. What is under test is that a slow
+        // request never piles up and polling continues once it lands.
+        await act(() => vi.advanceTimersByTimeAsync(6_000));
+        expect(load).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+        load.mockRestore();
+      }
+    },
+  );
+
   it("preserves the 58px shell and default-open 340px left AgentDock beside the Element Plan", async () => {
     const { calls } = installMockFetch(commonRoutes());
     const router = createMemoryRouter(CREATOR_ROUTE_OBJECTS, {
@@ -247,6 +294,30 @@ describe("ProjectLayout visible shell", () => {
     );
   });
 
+  it("settles a stale session after manual production finishes without lifecycle SSE", async () => {
+    installMockFetch(commonRoutes());
+    renderShell("manual-generation-route");
+    await screen.findByTestId("manual-generation-route");
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().session?.status).toBe("IDLE"),
+    );
+    await waitFor(() =>
+      expect(useCreatorTaskViewStore.getState().loading).toBe(false),
+    );
+    act(() => {
+      useCreatorSessionStore.setState({
+        session: { ...sessionState, status: "WAITING_RUNTIME" },
+      });
+    });
+    // Returning to a visible tab performs the same production revalidation as
+    // its periodic tick; the server has no running tasks and an IDLE session.
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().session?.status).toBe("IDLE"),
+    );
+    expect(document.querySelector("[data-agent-wait-hint]")).toBeNull();
+  });
+
   it.each(["accepted", "manual fallback"])(
     "defers review navigation during mode handling and respects %s",
     async (outcome) => {
@@ -308,13 +379,10 @@ describe("ProjectLayout visible shell", () => {
     "preserves manual navigation %s instead of opening the first Review item",
     async (timing) => {
       const review = elementReview();
-      const firstPointer = "/interactive_presentation/motion/html";
-      review.operations[0].json_pointer = firstPointer;
-      review.operations[0].ui_locator = {
-        page: "blueprint",
-        field: firstPointer,
-      };
-      const secondPointer = "/interactive_presentation/design_prompt";
+      const secondPointer = changedPointer.replace(
+        "video_prompt",
+        "storyboard_prompt",
+      );
       const secondLocator = {
         ...review.operations[0].ui_locator,
         field: secondPointer,

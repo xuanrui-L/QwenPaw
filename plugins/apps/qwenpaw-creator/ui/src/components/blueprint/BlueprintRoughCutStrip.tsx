@@ -737,16 +737,7 @@ export default function BlueprintRoughCutStrip({
                         <span className="relative block h-[82px] w-full overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] transition-colors group-hover:border-[var(--color-accent)]">
                           {url &&
                             (frame.mediaKind === "video" ? (
-                              isBranching ? (
-                                <RoughCutVideoThumbnail src={url} />
-                              ) : (
-                                <video
-                                  src={url}
-                                  muted
-                                  preload="metadata"
-                                  className="h-full w-full object-cover"
-                                />
-                              )
+                              <RoughCutVideoThumbnail src={url} />
                             ) : (
                               <img
                                 src={url}

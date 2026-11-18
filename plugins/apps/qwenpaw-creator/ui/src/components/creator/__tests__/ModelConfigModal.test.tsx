@@ -2,28 +2,27 @@ import { message } from "antd";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import ModelConfigModal, {
+  llmPresetFor,
   ASR_PROTOCOLS,
   EMBEDDING_PROTOCOLS,
   IMAGE_PROTOCOLS,
   LLM_PROTOCOLS,
   OPENCODE_BASE_URL_OPTIONS,
   OPENCODE_MODELS,
-  llmPresetFor,
   PRESETS_BY_TYPE,
   PROTOCOL_LABEL_KEYS,
   S2V_PROTOCOLS,
   TTS_PROTOCOLS,
-  ttsModelChoices,
   VIDEO_PROTOCOLS,
   VLM_PROTOCOLS,
   modelSupportsImage,
+  ttsModelsForProtocol,
 } from "../ModelConfigModal";
 import type { HostProviderInfo } from "@/api/creator";
 import { installMockFetch } from "@/test/mockFetch";
 import en from "@/locales/en.json";
 import zh from "@/locales/zh.json";
 import type { ModelConfigData } from "@/contracts/creator";
-import type { TtsModelCapability } from "@/api/creator";
 
 const DASH = "https://dashscope.aliyuncs.com/api/v1";
 
@@ -157,16 +156,6 @@ const capabilities = {
       transport: "http",
       systemVoices: ["Cherry", "Ethan"],
       supportsDesign: true,
-      providers: ["bailian"],
-    },
-    {
-      model: "qwen-audio-3.0-tts-flash",
-      label: "Qwen-Audio 3.0 TTS Flash（12 个系统音色，快速）",
-      family: "cosyvoice",
-      transport: "websocket",
-      systemVoices: ["longanfengyue", "longanhuan_v3.6"],
-      supportsDesign: true,
-      providers: ["bailian", "gateway"],
     },
   ],
 };
@@ -521,37 +510,9 @@ describe("ModelConfigModal configuration lifecycle", () => {
 });
 
 describe("ModelConfigModal model presets", () => {
-  it("offers Wan3.0 while keeping the legacy Bailian URL as default", () => {
-    const bailian = PRESETS_BY_TYPE.video["DashScope（百炼）"];
-    expect(bailian.models).toContain("wan3.0-video");
-    expect(bailian.models).toContain("wan3.0-video-prime");
-    expect(bailian.base_url).toBe("https://dashscope.aliyuncs.com/api/v1");
-  });
-
-  it("offers every preset protocol in its dropdown", () => {
-    // A preset the dropdown does not list is unreachable, and a saved
-    // protocol outside the list is silently reset on load — which would
-    // strand the media channels that are selected by protocol.
-    const listed: Record<string, readonly string[]> = {
-      asr: ASR_PROTOCOLS,
-      tts: TTS_PROTOCOLS,
-      s2v: S2V_PROTOCOLS,
-      embedding: EMBEDDING_PROTOCOLS,
-      image: IMAGE_PROTOCOLS,
-      video: VIDEO_PROTOCOLS,
-    };
-    for (const [type, presets] of Object.entries(PRESETS_BY_TYPE)) {
-      for (const protocol of Object.keys(presets)) {
-        expect(
-          listed[type],
-          `no protocol list for section "${type}"`,
-        ).toBeTruthy();
-        expect(
-          listed[type],
-          `preset "${protocol}" is missing from ${type} protocols`,
-        ).toContain(protocol);
-      }
-    }
+  it("uses a documented model roster when a fresh host has no provider record", () => {
+    expect(llmPresetFor("Aliyun Token Plan", "aliyun-tokenplan", [])?.models).toContain("qwen3.8-max");
+    expect(llmPresetFor("自定义", undefined, [])).toBeNull();
   });
 
   it("points every AgentScope preset at the proxy API root", () => {
@@ -612,13 +573,50 @@ describe("ModelConfigModal model presets", () => {
     // The proxy publishes its own speech model list and answers anything
     // outside it with MODEL_NOT_ALLOWED, so a Bailian-only name in this
     // dropdown is a guaranteed failure the user has to discover by hand.
-    const models = capabilities.models as unknown as TtsModelCapability[];
+    const models = [
+      { model: "qwen3-tts-flash", label: "Qwen 3 TTS", providers: ["bailian"] },
+      { model: "qwen-audio-3.0-tts-flash", label: "Qwen Audio", providers: ["bailian", "gateway"] },
+    ];
     expect(
-      ttsModelChoices("AgentScope Platform", models).map((item) => item.model),
+      ttsModelsForProtocol(models, "AgentScope Platform").map((item) => item.value),
     ).toEqual(["qwen-audio-3.0-tts-flash"]);
     expect(
-      ttsModelChoices("DashScope（百炼）", models).map((item) => item.model),
+      ttsModelsForProtocol(models, "DashScope（百炼）").map((item) => item.value),
     ).toEqual(["qwen3-tts-flash", "qwen-audio-3.0-tts-flash"]);
+  });
+
+
+  it("offers Wan3.0 while keeping the legacy Bailian URL as default", () => {
+    const bailian = PRESETS_BY_TYPE.video["DashScope（百炼）"];
+    expect(bailian.models).toContain("wan3.0-video");
+    expect(bailian.models).toContain("wan3.0-video-prime");
+    expect(bailian.base_url).toBe("https://dashscope.aliyuncs.com/api/v1");
+  });
+
+  it("offers every preset protocol in its dropdown", () => {
+    // A preset the dropdown does not list is unreachable, and a saved
+    // protocol outside the list is silently reset on load — which would
+    // strand the media channels that are selected by protocol.
+    const listed: Record<string, readonly string[]> = {
+      asr: ASR_PROTOCOLS,
+      tts: TTS_PROTOCOLS,
+      s2v: S2V_PROTOCOLS,
+      embedding: EMBEDDING_PROTOCOLS,
+      image: IMAGE_PROTOCOLS,
+      video: VIDEO_PROTOCOLS,
+    };
+    for (const [type, presets] of Object.entries(PRESETS_BY_TYPE)) {
+      for (const protocol of Object.keys(presets)) {
+        expect(
+          listed[type],
+          `no protocol list for section "${type}"`,
+        ).toBeTruthy();
+        expect(
+          listed[type],
+          `preset "${protocol}" is missing from ${type} protocols`,
+        ).toContain(protocol);
+      }
+    }
   });
 
   it("does NOT change protocol or base_url when model_name is changed", async () => {
@@ -793,33 +791,25 @@ describe("ModelConfigModal OpenCode support", () => {
   });
 });
 
-describe("ttsModelChoices on Token Plan", () => {
+describe("ttsModelsForProtocol", () => {
   const models = [
-    "qwen-audio-3.0-tts-plus",
-    "qwen-audio-3.0-tts-flash",
-    "cosyvoice-v3.5-plus",
-  ].map((model) => ({
-    model,
-    label: model,
-    family: "cosyvoice",
-    transport: "websocket",
-    systemVoices: ["longanlingxin"],
-    supportsDesign: true,
-    providers: ["bailian", "gateway"],
-  })) as unknown as TtsModelCapability[];
+    { model: "qwen-audio-3.0-tts-plus", label: "Qwen-Audio 3.0 TTS Plus" },
+    { model: "qwen-audio-3.0-tts-flash", label: "Qwen-Audio 3.0 TTS Flash" },
+    { model: "cosyvoice-v3.5-plus", label: "CosyVoice 3.5 Plus" },
+  ];
 
   it("narrows Token Plan to the plan's documented synthesis model", () => {
     // The plan's model table lists exactly one speech-synthesis model; the
     // others here are Bailian-direct models the plan gateway answers
     // "Model not exist" for.
     expect(
-      ttsModelChoices("Aliyun Token Plan", models).map((o) => o.model),
+      ttsModelsForProtocol(models, "Aliyun Token Plan").map((o) => o.value),
     ).toEqual(["qwen-audio-3.0-tts-plus"]);
   });
 
-  it("keeps the capability table where the protocol has no roster", () => {
+  it("keeps the whole capability table where no roster exists", () => {
     expect(
-      ttsModelChoices("DashScope（百炼）", models).map((o) => o.model),
+      ttsModelsForProtocol(models, "DashScope（百炼）").map((o) => o.value),
     ).toEqual([
       "qwen-audio-3.0-tts-plus",
       "qwen-audio-3.0-tts-flash",

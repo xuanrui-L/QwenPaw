@@ -5,10 +5,10 @@ from dataclasses import replace
 import hashlib
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 
 from domain.errors import ValidationError
+from services.media_files import media_gate
 from services.runtime_files.media_probe import probe_media
 from services.runtime_files.runtime_dependencies import resolve_ffmpeg
 
@@ -48,7 +48,7 @@ def silence_materialized_video(video: MaterializedVideo) -> MaterializedVideo:
     if video.container in {"mp4", "quicktime"}:
         arguments.extend(["-movflags", "+faststart"])
     try:
-        subprocess.run(
+        media_gate.run(
             [*arguments, os.fspath(output)],
             check=True,
             capture_output=True,

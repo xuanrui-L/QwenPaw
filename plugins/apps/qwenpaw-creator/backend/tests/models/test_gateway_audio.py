@@ -254,15 +254,6 @@ def _bind_gateway_asr(monkeypatch, *, model: str) -> None:
     monkeypatch.setattr(config, "get_asr_protocol", lambda: PROTOCOL)
 
 
-def test_multimodal_route_recognises_both_naming_generations() -> None:
-    """``fun-asr`` is 404 on the proxy, so its model must not route there."""
-    assert asr_model._is_qwen_multimodal_asr("qwen-audio-3.0-asr-flash")
-    assert asr_model._is_qwen_multimodal_asr("qwen3-asr-flash")
-    assert not asr_model._is_qwen_multimodal_asr("paraformer-v2")
-    assert not asr_model._is_qwen_multimodal_asr("fun-asr")
-    assert not asr_model._is_qwen_multimodal_asr("")
-
-
 def test_asr_endpoint_drops_the_token_portal_prefix(monkeypatch) -> None:
     _bind_gateway_asr(monkeypatch, model="qwen-audio-3.0-asr-flash")
     assert asr_model._qwen3_endpoint(GATEWAY_BASE) == (

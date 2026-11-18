@@ -162,11 +162,9 @@ def _mark_timeline_render_stale(
         "artifact_slots_by_id",
     ).items():
         slot = _record(raw_slot)
-        if slot.get("owner_ref") != owner_ref:
-            continue
         if (
-            document.get("narrative_edges")
-            and slot.get("kind") != "final_video"
+            slot.get("owner_ref") != owner_ref
+            or slot.get("kind") != "final_video"
         ):
             continue
         if slot.get("kind") == SCRIPT_SLOT_KIND:
@@ -399,13 +397,7 @@ def _apply_element_path(  # pylint: disable=too-many-branches
     ):
         return
 
-    if creation_type == "r2v" or (
-        creation_type in {"t2v", "i2v"}
-        and (
-            document.get("narrative_edges")
-            or suffix[:2] == ("creation", "generate_audio")
-        )
-    ):
+    if creation_type in {"r2v", "t2v", "i2v"}:
         include_storyboard = creation_type == "r2v"
         generated_input_changed = False
         if suffix[0] == "creation":
@@ -768,13 +760,10 @@ def apply_frontend_edit_impacts(
     impact = EditImpact()
     if (
         "/name" in submitted_pointers
-        and (document.get("narrative_edges") or document.get("name_source"))
         and "/name_source" not in submitted_pointers
     ):
         document["name_source"] = "user"
-    if base is not None and (
-        base.get("narrative_edges") or document.get("narrative_edges")
-    ):
+    if base is not None:
         for slot_id, raw_slot in _items(
             document,
             "assets",

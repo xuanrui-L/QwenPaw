@@ -557,3 +557,18 @@ def test_asr_upload_token_plan_refuses_local_audio(
                 media_type="audio/wav",
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("model", "route"),
+    [
+        ("qwen-audio-3.0-asr-flash", "qwen3-asr"),
+        ("qwen3-asr-flash", "qwen3-asr"),
+        ("paraformer-v2", "fun-asr"),
+        ("fun-asr", "fun-asr"),
+        ("qwen-audio-3.1-tts-flash", "fun-asr"),
+        ("", "fun-asr"),
+    ],
+)
+def test_asr_route_selects_the_multimodal_model_families(model, route):
+    assert asr_model.asr_route(model, "") == route

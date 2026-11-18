@@ -65,7 +65,7 @@ def asr_route(model_name: str, provider: str) -> str:
     """
     if (provider or "").casefold() == "whisper":
         return "whisper"
-    if _is_qwen_multimodal_asr(model_name or ""):
+    if (model_name or "").casefold().startswith("qwen3-asr") or is_qwen_audio_asr_model(model_name):
         return "qwen3-asr"
     return "fun-asr"
 
@@ -77,7 +77,8 @@ def is_qwen_audio_asr_model(model_name: str) -> bool:
     rejects ``result_format=message`` (400), answers ``output.text`` and
     takes ``format``/``sample_rate`` instead.
     """
-    return (model_name or "").casefold().startswith("qwen-audio")
+    folded = (model_name or "").casefold()
+    return folded.startswith("qwen-audio") and "asr" in folded
 
 
 # Provider verdicts meaning "the audio simply contains no speech"; they
@@ -878,19 +879,6 @@ def _prepare_qwen3_chunks(
     return prepared
 
 
-def _is_qwen_multimodal_asr(model: str) -> bool:
-    """True when *model* is served by the aigc multimodal-generation route.
-
-    Two naming generations share that route: ``qwen3-asr-*`` on Bailian and
-    ``qwen-audio-*-asr-*`` on the AgentScope proxy, where the ``fun-asr``
-    transcription route is not deployed at all (measured: 404).
-    """
-    folded = model.casefold()
-    return folded.startswith("qwen3-asr") or (
-        folded.startswith("qwen-audio") and "asr" in folded
-    )
-
-
 def _qwen3_sentences(body: Mapping[str, Any]) -> list[str]:
     choices = body.get("output", {}).get("choices") or ()
     if not choices:
@@ -1233,8 +1221,8 @@ async def transcribe(media_url: str) -> ASRResult:
     )
     if provider == "whisper":
         return await _whisper(media_url)
-    model = config.get_asr_model_name() or ""
-    if _is_qwen_multimodal_asr(model):
+    route = asr_route(config.get_asr_model_name() or "", provider)
+    if route == "qwen3-asr":
         return await _qwen3_asr(media_url)
     return await _fun_asr(media_url)
 

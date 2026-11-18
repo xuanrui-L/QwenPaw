@@ -50,6 +50,7 @@ from domain.errors import (
     ValidationError,
 )
 from models.config import is_self_review_enabled
+from services.media_files import media_gate
 from services.media_files.informal_launch_template import (
     informal_launch_uses_uploaded_bgm,
     compile_informal_launch_captions,
@@ -2225,7 +2226,7 @@ class FfmpegLocalMediaRunner:
         """
 
         try:
-            process = subprocess.run(
+            process = media_gate.run(
                 [
                     self.executable,
                     "-hide_banner",
@@ -2342,42 +2343,55 @@ class FfmpegLocalMediaRunner:
         """Run ffmpeg to completion and return its stderr text."""
 
         try:
-            process = subprocess.Popen(
-                [self.executable, *arguments],
-                cwd=cwd,
-                # ffmpeg reads stdin by default; inheriting the service
-                # process tty triggers SIGTTIN and suspends the process group
-                # when running in the background, so detach explicitly.
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            with media_gate.slot("ffmpeg"):
+                process = subprocess.Popen(
+                    media_gate.thread_limited_argv(
+                        [self.executable, *arguments],
+                    ),
+                    cwd=cwd,
+                    # ffmpeg reads stdin by default; inheriting the service
+                    # process tty triggers SIGTTIN and suspends the process
+                    # group when running in the background, so detach.
+                    **media_gate.popen_options(
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    ),
+                )
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=self.timeout_seconds,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    # The gate owns the signal ladder: the child is a group
+                    # leader, so a stuck filter graph goes down with it.
+                    media_gate.kill_group(
+                        process,
+                        self.termination_grace_seconds,
+                    )
+                    try:
+                        process.communicate(
+                            timeout=self.termination_grace_seconds,
+                        )
+                    except subprocess.TimeoutExpired:
+                        # The group has already received the strongest
+                        # portable signal. Never turn cleanup into another
+                        # unbounded wait -- and that includes the wait
+                        # nobody sees: this frame holds no ``with`` block,
+                        # so when the ConflictError below unwinds it, the
+                        # process object's refcount hits zero and its io
+                        # finalizer closes the pipes; on Windows a reader
+                        # thread blocked inside ``read()`` holds the
+                        # buffer lock and that close waits for it (review
+                        # #243 r4548690072). Detaching first makes the
+                        # dealloc close nothing.
+                        media_gate.abandon_streams(process)
+                    raise ConflictError(
+                        f"ffmpeg 执行超时（{self.timeout_seconds:g} 秒）",
+                    ) from exc
         except FileNotFoundError as exc:
             raise ValidationError("本机未安装 ffmpeg") from exc
-        try:
-            stdout, stderr = process.communicate(timeout=self.timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-            try:
-                process.communicate(timeout=self.termination_grace_seconds)
-            except subprocess.TimeoutExpired:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                try:
-                    process.communicate(timeout=self.termination_grace_seconds)
-                except subprocess.TimeoutExpired:
-                    # The child has already received the strongest portable
-                    # signal.  Never turn cleanup into another unbounded wait.
-                    pass
-            raise ConflictError(
-                f"ffmpeg 执行超时（{self.timeout_seconds:g} 秒）",
-            ) from exc
         if process.returncode != 0:
             detail = (stderr or stdout or "ffmpeg failed")[-4000:]
             raise ConflictError(f"ffmpeg 执行失败: {detail}")
@@ -3475,6 +3489,7 @@ def _resolve_execution(
     command: CreatorCommandType,
     target_ref: str,
     arguments: Mapping[str, Any],
+    enforce_scene_gate: bool = True,
 ) -> _ResolvedExecution:
     project = snapshot.project
     if command is CreatorCommandType.EXECUTE_EDIT:
@@ -3490,11 +3505,19 @@ def _resolve_execution(
         # Scene-loop gate (upstream scene_gate): a declared ledger must be
         # fully locked with fresh fingerprints before the expensive master
         # render; the check itself is pure computation.
-        from services.render_review.scene_review import (
-            validate_scene_ledger_locked,
-        )
+        #
+        # ``enforce_scene_gate`` exists because an expired lock is the one
+        # blocker the pipeline repairs on its own: the dispatch path
+        # auto-rereviews stale scenes just before resolving. Callers that
+        # run *ahead* of that repair (the route precheck) or that replay an
+        # already-rendered Task must pass False, or the stale lock would
+        # reject the request before the repair ever gets a turn.
+        if enforce_scene_gate:
+            from services.render_review.scene_review import (
+                validate_scene_ledger_locked,
+            )
 
-        validate_scene_ledger_locked(timeline)
+            validate_scene_ledger_locked(timeline)
         return _timeline_execution(
             project=project,
             timeline=timeline,
@@ -5221,6 +5244,7 @@ def validate_local_media_execution(
     command: CreatorCommandType | str,
     target_ref: str,
     arguments: Mapping[str, Any] | None = None,
+    enforce_scene_gate: bool = True,
 ) -> None:
     """Synchronously pre-validate the execution plan before dispatching.
 
@@ -5242,6 +5266,7 @@ def validate_local_media_execution(
         command=CreatorCommandType(command),
         target_ref=target_ref,
         arguments=dict(arguments or {}),
+        enforce_scene_gate=enforce_scene_gate,
     )
     assert_media_review_admission(
         reviews=services.reviews.all_pending(project_id),
@@ -5279,6 +5304,9 @@ def find_reusable_local_media_task(
             command=command_value,
             target_ref=target_ref,
             arguments={},
+            # Replaying a succeeded Task renders nothing, so an expired
+            # scene lock must not cost the caller the reuse.
+            enforce_scene_gate=False,
         )
     except (ConflictError, ValidationError):
         return None

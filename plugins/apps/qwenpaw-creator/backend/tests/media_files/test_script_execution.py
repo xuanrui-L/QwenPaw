@@ -326,24 +326,12 @@ def test_scheduler_regenerates_stale_script_once_and_keeps_saved_body(
     monkeypatch,
     automatic,
 ):
-    services = _branching_services(tmp_path)
+    services = _services(tmp_path)
     calls = _mock_chat(monkeypatch, [DRAFT, DRAFT + "\n**管家**：请保管钥匙。\n"])
     monkeypatch.setattr(
         work_scheduler,
         "get_execution_authorization_mode",
         lambda: "allow_all" if automatic else "required",
-    )
-
-    # This test exercises script scheduling on a branching project. The
-    # independent poster/page lanes have their own provider tests.
-    async def ignore_other_lane(*_args, **_kwargs):
-        return {}
-
-    monkeypatch.setattr(
-        work_scheduler, "_default_cover_dispatch", ignore_other_lane
-    )
-    monkeypatch.setattr(
-        work_scheduler, "_default_interaction_dispatch", ignore_other_lane
     )
 
     async def scenario():
@@ -551,7 +539,7 @@ def test_identical_redraft_is_fresh_and_next_retry_does_not_regenerate(
     monkeypatch,
     change,
 ):
-    services = _branching_services(tmp_path)
+    services = _services(tmp_path)
     calls = _mock_chat(monkeypatch, [DRAFT])
     first = _draft(services, key="original")
     if change == "stale":
@@ -595,7 +583,7 @@ def test_changed_inputs_during_model_call_do_not_publish_old_script(
     monkeypatch,
     field,
 ):
-    services = _branching_services(tmp_path)
+    services = _services(tmp_path)
 
     async def change_then_return(*_args, **_kwargs):
         base = services.projects.read(PROJECT_ID)
@@ -698,3 +686,23 @@ def test_explicit_script_revision_includes_existing_authored_body(
     _draft(services, key="revise", guidance="只调整开场动作")
     assert DRAFT in calls[0]["prompt"]
     assert "只调整开场动作" in calls[0]["prompt"]
+
+
+def test_unchanged_legacy_script_replays_without_a_model_call(tmp_path, monkeypatch):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    first = _draft(services, key="original")
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    version = candidate["assets"]["artifact_versions_by_id"][first.artifact_version_id]
+    version["metadata"].pop("scriptSource")
+    version["input_fingerprint"] = "sha256:6bfccdd989dbb00d64bf7921c1674e0a2489d6991c09f59fc234604f75220b24"
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+        review_policy=ReviewPolicy.AUTO_FIX,
+    )
+    replay = _draft(services, key="retry")
+    assert replay.replayed and replay.artifact_version_id == first.artifact_version_id
+    assert len(calls) == 1

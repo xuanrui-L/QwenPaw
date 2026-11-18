@@ -247,11 +247,7 @@ export default function FileProjectReviewPanel({
     const field = locator.field ?? fallbackField ?? undefined;
     navigateToLocator(projectId, locator, {
       review: true,
-      ...(review.operations.some((op) =>
-        isInteractiveDesignField(op.json_pointer, project),
-      )
-        ? { reviewId: review.review_id }
-        : {}),
+      reviewId: review.review_id,
       field: field ?? undefined,
       description: t("fileReview.reviewOrViewChanges"),
     });
