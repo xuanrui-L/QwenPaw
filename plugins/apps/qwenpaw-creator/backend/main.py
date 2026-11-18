@@ -225,11 +225,11 @@ async def _startup() -> None:
         # Observation/read workers live only in process memory: fail their
         # orphaned QUEUED/RUNNING Tasks closed so waiters see a retryable
         # error instead of polling a record no worker will ever finish.
-        await asyncio.to_thread(
+        await run_sync_io(
             recover_interrupted_source_observations,
             services,
         )
-        await asyncio.to_thread(
+        await run_sync_io(
             recover_interrupted_source_video_reads,
             services,
         )
