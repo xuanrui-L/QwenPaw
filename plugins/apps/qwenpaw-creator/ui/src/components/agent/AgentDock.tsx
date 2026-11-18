@@ -1177,8 +1177,13 @@ export default function AgentDock({
   const width = useAgentDockUiStore((state) => state.width);
   const height = useAgentDockUiStore((state) => state.height);
   const draft = useAgentDockUiStore((state) => state.draft);
-  const unsentDraft = useAgentDockUiStore((state) => state.unsentDraft);
-  const setUnsentDraft = useAgentDockUiStore((state) => state.setUnsentDraft);
+  const unsentDrafts = useAgentDockUiStore((state) => state.unsentDrafts);
+  const parkUnsentDraft = useAgentDockUiStore(
+    (state) => state.parkUnsentDraft,
+  );
+  const clearUnsentDraft = useAgentDockUiStore(
+    (state) => state.clearUnsentDraft,
+  );
   const selectionAttachment = useAgentDockUiStore((state) => state.selection);
   const setOpen = useAgentDockUiStore((state) => state.setOpen);
   const setTab = useAgentDockUiStore((state) => state.setTab);
@@ -1309,27 +1314,24 @@ export default function AgentDock({
     setInterruptedDraft(null);
     // Navigation between Projects must not carry the previous composer's
     // in-memory state across. Stash the outgoing draft under its own Project
-    // id before clearing: the restore effect below refuses a stash from a
-    // different Project, so tagging is what lets a return-to-A still find it.
-    // An empty composer leaves whatever stash is already parked in place,
-    // otherwise switching through a blank Project would erase the earlier one.
+    // id before clearing: drafts are keyed per Project, so returning to A
+    // finds its own entry even after B parked one too. An empty composer
+    // leaves whatever A already parked in place, otherwise switching through
+    // a blank Project would erase the earlier draft.
     if (
       previousProjectId.current !== null &&
       previousProjectId.current !== projectId
     ) {
       const pending = inputRef.current?.getDraft() ?? [];
       if (pending.length) {
-        setUnsentDraft({
-          projectId: previousProjectId.current,
-          content: pending,
-        });
+        parkUnsentDraft(previousProjectId.current, pending);
       }
       inputRef.current?.clear();
     }
     previousProjectId.current = projectId;
     submissionVersion.current += 1;
     projectLifecycleVersion.current += 1;
-  }, [projectId, setUnsentDraft]);
+  }, [projectId, parkUnsentDraft]);
   const [showJump, setShowJump] = useState(false);
   const inputRef = useRef<MentionInputHandle>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -1800,10 +1802,11 @@ export default function AgentDock({
     // Consume the injection so a later fold + reopen does not re-fire this
     // effect against an empty box and overwrite the user's edited text with
     // the original injection. Clearing also tells the unsent-draft restore
-    // below that no injection is pending.
+    // below that no injection is pending for this Project; other Projects'
+    // parked drafts are untouched.
     setDraft("");
-    setUnsentDraft(null);
-  }, [draft, open, setDraft, setUnsentDraft]);
+    clearUnsentDraft(projectId);
+  }, [draft, open, projectId, setDraft, clearUnsentDraft]);
 
   // Folding unmounts the input, and live typing never reaches the store, so
   // an unsent instruction would vanish with the component. The editor reports
@@ -1811,23 +1814,21 @@ export default function AgentDock({
   // the handle's ref is already detached, so only the editor itself can
   // serialize its content in time.
   const stashUnmountedDraft = useCallback(
-    (content: MentionInputDraft | null) =>
-      setUnsentDraft(content ? { projectId, content } : null),
-    [projectId, setUnsentDraft],
+    (content: MentionInputDraft | null) => parkUnsentDraft(projectId, content),
+    [parkUnsentDraft, projectId],
   );
 
+  const stashedDraft = unsentDrafts[projectId] ?? null;
   useEffect(() => {
-    if (!open || !unsentDraft || draft) return;
-    // A stash from a different Project is not this composer's business.
-    if (unsentDraft.projectId !== projectId) return;
+    if (!open || !stashedDraft || draft) return;
     if (inputRef.current?.getContent().text) return;
-    inputRef.current?.setDraft(unsentDraft.content);
+    inputRef.current?.setDraft(stashedDraft);
     setCanSend(Boolean(inputRef.current?.getContent().text.trim()));
-    // Handing the stash to the editor consumes it: leaving the value in the
-    // store would let a later fold + reopen restore the same text over newer
-    // edits, and would keep a sent instruction around as "unsent".
-    setUnsentDraft(null);
-  }, [open, unsentDraft, draft, projectId, setUnsentDraft]);
+    // Handing this Project's stash to the editor consumes only that entry:
+    // B keeps its own draft while A is restored, and leaving the entry behind
+    // would restore stale text over newer edits on the next fold + reopen.
+    clearUnsentDraft(projectId);
+  }, [open, stashedDraft, draft, projectId, clearUnsentDraft]);
 
   useEffect(() => {
     if (!open || !selectionAttachment) return;
@@ -2212,7 +2213,7 @@ export default function AgentDock({
       ) === submittedSignature
     ) {
       inputRef.current?.clear();
-      setUnsentDraft(null);
+      clearUnsentDraft(projectId);
       setCanSend(false);
       inlineRefsSignature.current = "";
       setInlineRefs([]);
