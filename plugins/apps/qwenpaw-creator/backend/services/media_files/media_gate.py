@@ -22,7 +22,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 from services.observability import mem_probe
@@ -325,7 +325,7 @@ def active_count() -> int:
 
 
 @contextlib.contextmanager
-def cancel_pending_on(stop: threading.Event) -> Iterator[None]:
+def cancel_pending_on(stop: Callable[[], bool]) -> Iterator[None]:
     """Let this build abandon a permit wait before launching a subprocess."""
     previous = getattr(_held, "stop", None)
     _held.stop = stop
@@ -357,12 +357,12 @@ def slot(where: str) -> Iterator[None]:
     if stop is None:
         gate.acquire()
     else:
-        while not stop.is_set():
+        while not stop():
             if gate.acquire(timeout=0.1):
                 break
         else:
             raise asyncio.CancelledError
-        if stop.is_set():
+        if stop():
             gate.release()
             raise asyncio.CancelledError
     with _guard:

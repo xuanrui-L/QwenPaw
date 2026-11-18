@@ -41,7 +41,7 @@ def test_cancelled_frame_waiter_does_not_launch_after_the_permit_frees(
     marker = tmp_path / "spawned"
 
     def queued():
-        with media_gate.cancel_pending_on(stop):
+        with media_gate.cancel_pending_on(stop.is_set):
             waiting.set()
             with pytest.raises(asyncio.CancelledError):
                 media_gate.run(

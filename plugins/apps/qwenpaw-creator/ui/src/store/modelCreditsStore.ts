@@ -197,6 +197,11 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
  * notice is cross-project, so the calls stay as small as they can be and the
  * store itself remains the only thing that touches localStorage.
  */
+export function hasLegacyCreditsNotice(projectId: string): boolean {
+  const { notice } = useModelCreditsStore.getState();
+  return notice?.projectId === projectId && !notice.source;
+}
+
 export function markCreditsExhausted(
   projectId: string,
   source: CreditsSource,

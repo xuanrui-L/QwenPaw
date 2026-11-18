@@ -26,6 +26,7 @@ import {
 import i18n from "@/i18n";
 import {
   clearCreditsAfterCompletion,
+  hasLegacyCreditsNotice,
   isQuotaErrorCode,
   markCreditsExhausted,
 } from "@/store/modelCreditsStore";
@@ -1638,9 +1639,10 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 if (
                   isQuotaErrorCode(errorPayload?.code) &&
                   (liveFailure ||
-                    (isQuotaErrorCode(session.error?.code) &&
-                      (typeof currentRefusalRun !== "string" ||
-                        currentRefusalRun === failedRun)))
+                    (isQuotaErrorCode(session.error?.code)
+                      ? typeof currentRefusalRun !== "string" ||
+                        currentRefusalRun === failedRun
+                      : hasLegacyCreditsNotice(session.projectId)))
                 ) {
                   const refusedAt = errorPayload?.details?.refusedAt;
                   markCreditsExhausted(

@@ -8,6 +8,7 @@ import logging
 import secrets
 import shutil
 import tempfile
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -213,29 +214,31 @@ def _cancel_task_sync(
             task_id,
             _lifecycle_lock_held=True,
         )
+        cancellation: AbstractContextManager[None] = nullcontext()
         if task.kind is TaskKind.SOURCE_MEMORY_BUILD and task.status in {
             TaskStatus.QUEUED,
             TaskStatus.RUNNING,
             TaskStatus.CANCELLED,
         }:
-            from services.media.source_memory import signal_source_memory_cancel
+            from services.media.source_memory import source_memory_cancellation
 
-            signal_source_memory_cancel(services.root, project_id, task_id)
-        if task.status is TaskStatus.CANCELLED:
-            return task
-        return store.transition_task(
-            project_id,
-            task_id,
-            expected_status={TaskStatus.QUEUED, TaskStatus.RUNNING},
-            status=TaskStatus.CANCELLED,
-            updates={
-                "error": {
-                    "code": "USER_CANCELLED",
-                    "message": reason.strip(),
+            cancellation = source_memory_cancellation(services.root, project_id, task_id)
+        with cancellation:
+            if task.status is TaskStatus.CANCELLED:
+                return task
+            return store.transition_task(
+                project_id,
+                task_id,
+                expected_status={TaskStatus.QUEUED, TaskStatus.RUNNING},
+                status=TaskStatus.CANCELLED,
+                updates={
+                    "error": {
+                        "code": "USER_CANCELLED",
+                        "message": reason.strip(),
+                    },
                 },
-            },
-            _lifecycle_lock_held=True,
-        )
+                _lifecycle_lock_held=True,
+            )
 
 
 def _run_view(

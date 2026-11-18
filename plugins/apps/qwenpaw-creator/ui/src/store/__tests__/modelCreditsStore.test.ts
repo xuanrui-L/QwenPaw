@@ -226,6 +226,27 @@ describe("cross-project Credits notice", () => {
     },
   );
 
+  it("reconciles a legacy notice from the original project's completed history", () => {
+    const legacy = { projectId: "p1", at: "2099-01-01T00:00:00Z" };
+    useModelCreditsStore.setState({ notice: legacy });
+    written.set(STORAGE_KEY, JSON.stringify(legacy));
+    useCreatorSessionStore.setState({
+      session: sessionView({ status: "IDLE", lastEventSeq: 3 }),
+      replayUntilSeq: 3,
+    });
+    session().ingestEvent({
+      ...ev(1, "agent.run.failed", { error: quotaFailure }),
+      at: "2026-11-18T09:00:00Z",
+    });
+    expect(notice()?.source?.seq).toBe(1);
+    session().ingestEvent({
+      ...ev(3, "agent.run.completed"),
+      at: "2026-11-18T11:00:00Z",
+    });
+    expect(notice()).toBeNull();
+    expect(written.has(STORAGE_KEY)).toBe(false);
+  });
+
   it("orders another project's replay by server time", () => {
     const time = (microsecond: number) =>
       `2026-10-01T12:00:00.${String(microsecond).padStart(6, "0")}+00:00`;

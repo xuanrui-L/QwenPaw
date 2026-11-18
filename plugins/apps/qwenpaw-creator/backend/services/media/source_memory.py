@@ -31,8 +31,8 @@ import subprocess  # nosec B404 - fixed ffmpeg argv, no shell
 import tempfile
 import threading
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -531,11 +531,30 @@ def _seek_jpeg(
     return proc.stdout if proc.returncode == 0 and proc.stdout else None
 
 
+class _BuildStop(threading.Event):
+    """Pause new media/model work while a single-task cancellation is being written."""
+
+    pending: Future[None] | None = None
+
+    def blocks_native_work(self) -> bool:
+        decision = self.pending
+        if decision is not None and not self.is_set():
+            decision.result()
+        return self.is_set()
+
+    async def before_stage(self) -> None:
+        decision = self.pending
+        if decision is not None and not self.is_set():
+            await asyncio.shield(asyncio.wrap_future(decision))
+        if self.is_set():
+            raise asyncio.CancelledError
+
+
 def _detect_segments_sync(
     local_path: Path,
     start_sec: float,
     end_sec: float,
-    stop: threading.Event,
+    stop: _BuildStop,
 ) -> list[tuple[float, float]]:
     """Phase 1: parallel frame-diff scene detection for one time range
     (no API calls). Chunked builds call this per chunk; chunk edges are
@@ -552,7 +571,7 @@ def _detect_segments_sync(
     def _extract(ts: float) -> tuple[float, bytes | None]:
         if stop.is_set():
             return ts, None
-        with media_gate.cancel_pending_on(stop):
+        with media_gate.cancel_pending_on(stop.blocks_native_work):
             return ts, _seek_jpeg(
                 ffmpeg,
                 str(local_path),
@@ -621,19 +640,18 @@ _StageResult = TypeVar("_StageResult")
 
 
 async def _run_media_stage(
-    stop: threading.Event, operation: Callable[[], _StageResult]
+    stop: _BuildStop, operation: Callable[[], _StageResult]
 ) -> _StageResult:
     """Cancel queued native work and join the subprocesses already running."""
 
     def run():
-        with media_gate.cancel_pending_on(stop):
+        with media_gate.cancel_pending_on(stop.blocks_native_work):
             return operation()
 
     worker = asyncio.create_task(asyncio.to_thread(run))
     try:
         result = await asyncio.shield(worker)
-        if stop.is_set():
-            raise asyncio.CancelledError
+        await stop.before_stage()
         return result
     except asyncio.CancelledError:
         stop.set()
@@ -643,7 +661,7 @@ async def _run_media_stage(
 
 
 async def _detect_segments(
-    local_path: Path, start: float, end: float, stop: threading.Event
+    local_path: Path, start: float, end: float, stop: _BuildStop
 ) -> list[tuple[float, float]]:
     return await _run_media_stage(
         stop, lambda: _detect_segments_sync(local_path, start, end, stop)
@@ -738,7 +756,7 @@ class SourceMemoryBuildJob(StrictModel):
 class _ActiveBuild:
     job: SourceMemoryBuildJob
     worker: asyncio.Task[None]
-    stop: threading.Event = field(default_factory=threading.Event)
+    stop: _BuildStop = field(default_factory=_BuildStop)
     children: list[asyncio.Task[None]] = field(default_factory=list)
 
     def interrupt(self) -> None:
@@ -1229,6 +1247,7 @@ class SourceMemoryService:
         checkpoints = build_dir(project_root, job.index_id)
         subgraph_ckpt_dir = checkpoints / SUBGRAPH_CHECKPOINT_DIRNAME
 
+        build = self._builds[job.task_id]
         # ASR first: every chunk's macros merge the transcript before
         # their subgraph prompts are built. Standalone (billed)
         # transcriptions are checkpointed and never replayed on resume.
@@ -1257,7 +1276,6 @@ class SourceMemoryService:
             tempfile.mkdtemp(prefix=f"source-memory-{job.task_id[:24]}-"),
         )
         macros: list[MacroEvent] = []
-        build = self._builds[job.task_id]
         subgraph_jobs = build.children
         try:
             macro_counter = 0
@@ -1348,6 +1366,7 @@ class SourceMemoryService:
 
         # Phase 3: text-only aggregation via the configured VLM backend.
         async def call_llm(prompt: str) -> str:
+            await build.stop.before_stage()
             return await vlm_model.chat_completion(
                 [{"type": "text", "text": prompt}],
                 temperature=0.3,
@@ -1370,6 +1389,7 @@ class SourceMemoryService:
         nodes = memory.get_all_nodes()
         vectors: np.ndarray | None = None
         if nodes and model_config.is_embedding_configured():
+            await build.stop.before_stage()
             embedded = await embedding_model.embed(
                 [str(node["text"]) for node in nodes],
             )
@@ -1390,6 +1410,7 @@ class SourceMemoryService:
             summary=self._projection_summary(memory),
             semanticEntries=self._projection_entries(memory),
         )
+        await build.stop.before_stage()
         projection = await self._review_projection(draft_projection)
 
         await run_sync_io(
@@ -1400,6 +1421,7 @@ class SourceMemoryService:
             index_obj,
             len(nodes),
             projection,
+            build.stop,
         )
         # Final artifacts are durable — the stage checkpoints have served
         # their purpose and must not shadow a future rebuild.
@@ -1501,6 +1523,7 @@ class SourceMemoryService:
             ]
         transcript: list[dict[str, float | str]] = []
         try:
+            await self._builds[job.task_id].stop.before_stage()
             result = await asr_model.transcribe(local_path.as_uri())
             transcript = [
                 {
@@ -1532,7 +1555,7 @@ class SourceMemoryService:
         semaphore: asyncio.Semaphore,
         checkpoint_dir: Path,
         source_checksum: str,
-        stop: threading.Event,
+        stop: _BuildStop,
     ) -> None:
         # Resume path: a durable per-macro payload means this VLM call
         # was already billed — apply it and never call again.
@@ -1579,8 +1602,7 @@ class SourceMemoryService:
             ]
             payload: dict[str, Any] | None = None
             for attempt in range(SUBGRAPH_RETRIES + 1):
-                if stop.is_set():
-                    raise asyncio.CancelledError
+                await stop.before_stage()
                 try:
                     response = await vlm_model.chat_completion(
                         content,
@@ -1713,6 +1735,7 @@ class SourceMemoryService:
         index_obj: EmbeddingIndex,
         node_count: int,
         projection: SourceMemoryProjection,
+        stop: _BuildStop,
     ) -> None:
         project_root = self.services.projects.project_root(job.project_id)
         directory = memory_dir(project_root, job.index_id)
@@ -1769,7 +1792,7 @@ class SourceMemoryService:
         # and the success record with the cancellation endpoint.
         with self.services.projects.lifecycle_lock(job.project_id):
             task = self.executions.get_task(job.project_id, job.task_id)
-            if task.status is TaskStatus.CANCELLED:
+            if stop.is_set() or task.status is TaskStatus.CANCELLED:
                 tmp.unlink(missing_ok=True)
                 raise asyncio.CancelledError
             atomic_replace_path(tmp, meta_path)
@@ -2449,21 +2472,30 @@ def source_memory_service(services: Any) -> SourceMemoryService:
     return instance
 
 
-def signal_source_memory_cancel(
+@contextmanager
+def source_memory_cancellation(
     root: Path, project_id: str, task_id: str
-) -> None:
-    """Signal a running build before the filesystem thread exposes CANCELLED."""
+) -> Iterator[None]:
+    """Close new stage admission until the durable transition succeeds or fails."""
     service = _SERVICES.get(str(root))
-    if service is None:
-        return
-    build = service._builds.get(task_id)
+    build = service._builds.get(task_id) if service is not None else None
     if (
-        build
-        and build.job.project_id == project_id
-        and not build.stop.is_set()
+        build is None
+        or build.job.project_id != project_id
+        or build.stop.is_set()
     ):
+        yield
+        return
+    # The caller holds the project's lifecycle lock, serializing cancel writes.
+    decision: Future[None] = Future()
+    build.stop.pending = decision
+    try:
+        yield
         build.stop.set()
         build.worker.get_loop().call_soon_threadsafe(build.interrupt)
+    finally:
+        decision.set_result(None)
+        build.stop.pending = None
 
 
 def clear_source_memory_service_registry() -> None:
@@ -2491,5 +2523,5 @@ __all__ = [
     "memory_guidance_for_targets",
     "recover_interrupted_source_memory",
     "source_memory_service",
-    "signal_source_memory_cancel",
+    "source_memory_cancellation",
 ]
