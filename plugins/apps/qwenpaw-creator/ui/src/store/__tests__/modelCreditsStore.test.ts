@@ -429,7 +429,9 @@ describe("cross-project Credits notice", () => {
     useModelCreditsStore.setState({
       notice: { projectId: "p1", at: "2099-01-01", source: { sessionId: id } },
     });
-    useModelCreditsStore.getState().clear();
+    useModelCreditsStore
+      .getState()
+      .clear(() => sessionView({ lastEventSeq: 2 }));
     expect(
       JSON.parse(written.get("qwenpaw-creator:model-credits:last-success")!)
         .dismissed.projectId,
@@ -460,7 +462,7 @@ describe("cross-project Credits notice", () => {
       });
       const view = sessionView({ status: "CANCELLED", lastEventSeq: cursor });
       const { calls } = installMockFetch(bootstrapRoutes({ session: view }));
-      useModelCreditsStore.getState().clear(isCurrent ? view : null);
+      useModelCreditsStore.getState().clear(() => (isCurrent ? view : null));
       await waitFor(() =>
         expect(useModelCreditsStore.getState().dismissed?.source?.seq).toBe(
           cursor,
@@ -500,9 +502,14 @@ describe("cross-project Credits notice", () => {
     },
   );
 
-  it.each([4, 11])(
-    "uses the cursor at the click while an older open and a refusal are in flight (%i)",
-    async (cursor) => {
+  it.each([
+    [4, false],
+    [11, false],
+    [4, true],
+    [11, true],
+  ] as const)(
+    "uses click cursor %i when an older open is in flight (intervening success: %s)",
+    async (cursor, interveningSuccess) => {
       const { fetchMock } = installMockFetch([]);
       let finishOpen!: (value: Response) => void;
       let finishClick!: (value: Response) => void;
@@ -520,10 +527,12 @@ describe("cross-project Credits notice", () => {
       useModelCreditsStore.setState({
         notice: { projectId: "p1", at: "2099-01-01" },
       });
-      useModelCreditsStore.getState().clear(null);
+      useModelCreditsStore.getState().clear();
       expect(fetchMock).toHaveBeenCalledTimes(2);
       finishOpen(Response.json({ session: sessionView({ lastEventSeq: 4 }) }));
       await opening;
+      if (interveningSuccess)
+        session().ingestEvent(ev(5, "agent.run.completed"));
       session().ingestEvent(ev(7, "agent.run.failed", { error: quotaFailure }));
       expect(notice()).toBeNull();
       finishClick(
@@ -535,6 +544,38 @@ describe("cross-project Credits notice", () => {
         ),
       );
       expect(notice()?.source?.seq).toBe(cursor < 7 ? 7 : undefined);
+    },
+  );
+
+  it.each(["ERROR", "CANCELLED"] as const)(
+    "uses the active %s state if a legacy dismissal cursor is unavailable",
+    async (status) => {
+      const { fetchMock } = installMockFetch([]);
+      let finish!: (value: Response) => void;
+      fetchMock.mockReturnValueOnce(
+        new Promise<Response>((done) => {
+          finish = done;
+        }),
+      );
+      let active: ReturnType<typeof sessionView> | null = null;
+      useModelCreditsStore.setState({
+        notice: { projectId: "p1", at: "2099-01-01" },
+      });
+      useModelCreditsStore.getState().clear(() => active);
+      const at = "2026-11-18T10:00:00Z";
+      const error = { ...quotaFailure, details: { refusedAt: at } };
+      session().ingestEvent({ ...ev(7, "agent.run.failed", { error }), at });
+      active = sessionView({
+        status,
+        lastEventSeq: 7,
+        error: status === "ERROR" ? error : null,
+      });
+      expect(notice()).toBeNull();
+      await act(async () => {
+        finish(Response.json({}, { status: 503 }));
+      });
+      expect(notice()?.source?.seq).toBe(status === "ERROR" ? 7 : undefined);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     },
   );
 

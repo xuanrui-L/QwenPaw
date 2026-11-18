@@ -67,7 +67,7 @@ interface ModelCreditsState {
     source?: CreditsSource,
     live?: boolean,
   ) => void;
-  clear: (currentSession?: CreatorSessionView | null) => void;
+  clear: (readSession?: () => CreatorSessionView | null) => void;
 }
 
 // Lazy lookup: tests replace window.localStorage; don't capture at load.
@@ -259,9 +259,10 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
     set({ notice });
     persist(STORAGE_KEY, notice);
   },
-  clear: (currentSession) => {
+  clear: (readSession) => {
     const { notice, recovery, dismissed, dismissalVersion } = get();
     if (!notice) return;
+    const currentSession = readSession?.();
     // Ignore this refusal (or older history) after a manual dismissal. An
     // unrelated project's snapshot and recovery do not acknowledge a new refusal.
     const closing =
@@ -312,8 +313,23 @@ export const useModelCreditsStore = create<ModelCreditsState>((set, get) => ({
           );
       })
       .catch(() => {
-        if (pendingLegacyDismissal === pending) pendingLegacyDismissal = null;
-        // Offline or deleted project: keep its unbound historical dismissal.
+        if (pendingLegacyDismissal !== pending) return;
+        pendingLegacyDismissal = null;
+        // With no cursor, leave old history hidden. A live refusal that still
+        // matches the active session error is independent evidence.
+        const active = readSession?.();
+        const refusal = pending.refusal;
+        if (
+          !refusal?.live ||
+          active?.projectId !== latest.projectId ||
+          active.id !== refusal.source.sessionId ||
+          active.status !== "ERROR" ||
+          !isQuotaErrorCode(active.error?.code)
+        )
+          return;
+        const at = active.error?.details?.refusedAt;
+        if (typeof at !== "string" || at === refusal.source.at)
+          markCreditsExhausted(latest.projectId, refusal.source, true);
       });
   },
 }));
@@ -426,8 +442,11 @@ export function clearCreditsAfterCompletion(
       at: source.at ?? "",
       source,
     };
+    // A stream opened before the click can deliver an older success as live.
+    // Record the success, but keep the dismissal until its cursor is known.
     const dismissed =
       state.dismissed &&
+      pendingLegacyDismissal?.notice !== state.dismissed &&
       afterDismissal(state.dismissed, projectId, source, live)
         ? null
         : state.dismissed;
