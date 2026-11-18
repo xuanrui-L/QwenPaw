@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useId,
   useMemo,
@@ -214,7 +215,7 @@ function WorkGroupCard({
   );
 }
 
-export default function AgentProgressOverview({
+function AgentProgressOverview({
   projectId,
 }: {
   projectId: string;
@@ -526,3 +527,5 @@ export default function AgentProgressOverview({
     </>
   );
 }
+
+export default memo(AgentProgressOverview);

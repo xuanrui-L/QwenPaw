@@ -313,7 +313,13 @@ const SUBAGENT_MARKDOWN_COMPONENTS: Components = {
   ),
 };
 
-function MarkdownContent({
+// Hoisted so a memo miss (streaming delta, new message) does not allocate a
+// fresh plugin array on every render. react-markdown 10 rebuilds its unified
+// processor per render regardless of this identity; the real saving here is
+// `MarkdownContent` being memoized below.
+const REMARK_PLUGINS = [remarkGfm];
+
+const MarkdownContent = memo(function MarkdownContent({
   children,
   compact = false,
 }: {
@@ -322,7 +328,7 @@ function MarkdownContent({
 }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={REMARK_PLUGINS}
       components={
         compact ? SUBAGENT_MARKDOWN_COMPONENTS : ASSISTANT_MARKDOWN_COMPONENTS
       }
@@ -330,7 +336,7 @@ function MarkdownContent({
       {children}
     </ReactMarkdown>
   );
-}
+});
 
 function MessageParts({
   parts,
@@ -1304,15 +1310,21 @@ export default function AgentDock({
     // Navigation between Projects must not carry the previous composer's
     // in-memory state across. The unsent-draft stash is tagged with its
     // producing Project (review #243 blocking #5) so a legitimate
-    // return-to-A still restores A's instruction; only the switch away
-    // from a Project wipes what the current mount shows. Doing this on
-    // first mount would erase the stash before the restore effect even
-    // got a chance to compare Project ids.
+    // return-to-A still restores A's instruction; parking the outgoing draft
+    // before clearing is what makes that guarantee real. An empty composer
+    // leaves whatever stash is already parked in place, otherwise switching
+    // through a blank Project would erase the earlier one.
     if (
       previousProjectId.current !== null &&
       previousProjectId.current !== projectId
     ) {
-      setUnsentDraft(null);
+      const pending = inputRef.current?.getDraft() ?? [];
+      if (pending.length) {
+        setUnsentDraft({
+          projectId: previousProjectId.current,
+          content: pending,
+        });
+      }
       inputRef.current?.clear();
     }
     previousProjectId.current = projectId;
@@ -1903,7 +1915,11 @@ export default function AgentDock({
     if (inputRef.current?.getContent().text) return;
     inputRef.current?.setDraft(unsentDraft.content);
     setCanSend(Boolean(inputRef.current?.getContent().text.trim()));
-  }, [open, unsentDraft, draft, projectId]);
+    // Handing the stash to the editor consumes it: leaving the value in the
+    // store would let a later fold + reopen restore the same text over newer
+    // edits, and would keep a sent instruction around as "unsent".
+    setUnsentDraft(null);
+  }, [open, unsentDraft, draft, projectId, setUnsentDraft]);
 
   useEffect(() => {
     if (!open || !selectionAttachment) return;
