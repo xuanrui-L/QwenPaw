@@ -7,6 +7,7 @@ import threading
 import pytest
 
 import dev_main
+import main
 from services.project_files.facade import creator_file_services
 
 
@@ -58,3 +59,56 @@ def test_cancelled_standalone_startup_recovers_the_same_root_on_retry(
         assert creator_file_services(other_root) is other
     finally:
         dev_main.clear_creator_file_service_registry()
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        "recover_interrupted_source_observations",
+        "recover_interrupted_source_video_reads",
+    ],
+)
+def test_cancelled_host_startup_joins_task_recovery_before_teardown(
+    tmp_path, monkeypatch, recovery
+):
+    entered, release = threading.Event(), threading.Event()
+    order = []
+
+    def recover(_services):
+        entered.set()
+        assert release.wait(5)
+        order.append("recovery finished")
+
+    async def start(_services):
+        pass
+
+    async def stop():
+        order.append("media stopped")
+
+    monkeypatch.setattr(
+        main, "configure_creator_runtime_environment", lambda: None
+    )
+    monkeypatch.setattr(main, "require_creator_data_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        main, "ensure_creator_runtime_dependencies", lambda: {}
+    )
+    monkeypatch.setattr(main, "ensure_vendor_libs", lambda: None)
+    monkeypatch.setattr(main, "start_file_media_execution_services", start)
+    monkeypatch.setattr(main, "start_creator_agent_runtime", start)
+    monkeypatch.setattr(main, "shutdown_file_media_execution_services", stop)
+    monkeypatch.setattr(main, recovery, recover)
+
+    async def cancel_startup():
+        task = asyncio.create_task(main._startup())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=0.03)
+            assert not done
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(cancel_startup())
+    assert order == ["recovery finished", "media stopped"]
