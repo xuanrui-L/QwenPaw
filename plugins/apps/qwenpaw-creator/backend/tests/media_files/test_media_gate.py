@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -30,6 +31,33 @@ def _fresh_gate():
 
 def _child_script(body: str) -> list[str]:
     return [sys.executable, "-c", body]
+
+
+def test_cancelled_frame_waiter_does_not_launch_after_the_permit_frees(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv(media_gate.ENV_SLOTS, "1")
+    waiting, stop = threading.Event(), threading.Event()
+    marker = tmp_path / "spawned"
+
+    def queued():
+        with media_gate.cancel_pending_on(stop):
+            waiting.set()
+            with pytest.raises(asyncio.CancelledError):
+                media_gate.run(
+                    _child_script(
+                        f"from pathlib import Path; Path({str(marker)!r}).touch()"
+                    )
+                )
+
+    with media_gate.slot("other-project"):
+        worker = threading.Thread(target=queued)
+        worker.start()
+        assert waiting.wait(2)
+        stop.set()
+        worker.join(2)
+        assert not worker.is_alive()
+    assert not marker.exists()
 
 
 def test_gate_never_runs_more_media_processes_than_slots(

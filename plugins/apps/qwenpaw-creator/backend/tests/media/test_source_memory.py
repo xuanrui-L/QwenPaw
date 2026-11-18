@@ -452,6 +452,47 @@ def test_startup_schedules_memory_workers_only_after_recovery(
     asyncio.run(scenario())
 
 
+def test_stopping_a_build_signals_its_parallel_clip_while_the_parent_drains(
+    tmp_path, monkeypatch
+):
+    service = _service(tmp_path)
+    job = _build_job(tmp_path)
+
+    async def scenario():
+        started, release_parent = asyncio.Event(), asyncio.Event()
+        clip_cancelled = asyncio.Event()
+
+        async def clip():
+            try:
+                started.set()
+                await asyncio.Future()
+            finally:
+                clip_cancelled.set()
+
+        async def drive(_job):
+            child = asyncio.create_task(clip())
+            service._subgraph_tasks[job.task_id] = [child]
+            try:
+                await asyncio.Future()
+            finally:
+                await release_parent.wait()
+                child.cancel()
+                await asyncio.gather(child, return_exceptions=True)
+
+        monkeypatch.setattr(service, "_drive", drive)
+        parent = service._spawn(job)
+        await started.wait()
+        service.cancel_workers(job.project_id, job.task_id)
+        try:
+            await asyncio.wait_for(clip_cancelled.wait(), 2)
+            assert not parent.done()
+        finally:
+            release_parent.set()
+            await asyncio.gather(parent, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_cancelled_frame_detection_joins_inflight_seeks_and_skips_queued_frames(
     tmp_path, monkeypatch
 ):

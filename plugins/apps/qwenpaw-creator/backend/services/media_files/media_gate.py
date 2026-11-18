@@ -15,6 +15,7 @@ queue latency to the hot paths that matter least.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import signal
@@ -324,6 +325,17 @@ def active_count() -> int:
 
 
 @contextlib.contextmanager
+def cancel_pending_on(stop: threading.Event) -> Iterator[None]:
+    """Let this build abandon a permit wait before launching a subprocess."""
+    previous = getattr(_held, "stop", None)
+    _held.stop = stop
+    try:
+        yield
+    finally:
+        _held.stop = previous
+
+
+@contextlib.contextmanager
 def slot(where: str) -> Iterator[None]:
     """Hold one media permit while a subprocess runs.
 
@@ -341,7 +353,18 @@ def slot(where: str) -> Iterator[None]:
         )
     gate, slots = _active_gate()
     started = time.monotonic()
-    gate.acquire()
+    stop = getattr(_held, "stop", None)
+    if stop is None:
+        gate.acquire()
+    else:
+        while not stop.is_set():
+            if gate.acquire(timeout=0.1):
+                break
+        else:
+            raise asyncio.CancelledError
+        if stop.is_set():
+            gate.release()
+            raise asyncio.CancelledError
     with _guard:
         _in_flight += 1
         active = _in_flight

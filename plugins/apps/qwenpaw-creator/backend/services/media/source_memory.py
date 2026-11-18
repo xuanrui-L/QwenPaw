@@ -30,12 +30,12 @@ import shutil
 import subprocess  # nosec B404 - fixed ffmpeg argv, no shell
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, TypeVar
 from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
@@ -551,14 +551,15 @@ def _detect_segments_sync(
     def _extract(ts: float) -> tuple[float, bytes | None]:
         if stop.is_set():
             return ts, None
-        return ts, _seek_jpeg(
-            ffmpeg,
-            str(local_path),
-            ts,
-            "360:-2",
-            quality=10,
-            timeout=30,
-        )
+        with media_gate.cancel_pending_on(stop):
+            return ts, _seek_jpeg(
+                ffmpeg,
+                str(local_path),
+                ts,
+                "360:-2",
+                quality=10,
+                timeout=30,
+            )
 
     mem_probe.budget(
         "source_memory.frame_workers",
@@ -615,15 +616,20 @@ def _detect_segments_sync(
     )
 
 
-async def _detect_segments(
-    local_path: Path,
-    start: float,
-    end: float,
-) -> list[tuple[float, float]]:
+_StageResult = TypeVar("_StageResult")
+
+
+async def _run_media_stage(
+    operation: Callable[[threading.Event], _StageResult]
+) -> _StageResult:
+    """Cancel queued native work and join the subprocesses already running."""
     stop = threading.Event()
-    worker = asyncio.create_task(
-        asyncio.to_thread(_detect_segments_sync, local_path, start, end, stop)
-    )
+
+    def run():
+        with media_gate.cancel_pending_on(stop):
+            return operation(stop)
+
+    worker = asyncio.create_task(asyncio.to_thread(run))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
@@ -631,6 +637,14 @@ async def _detect_segments(
         with suppress(Exception):
             await run_async_to_completion(worker)
         raise
+
+
+async def _detect_segments(
+    local_path: Path, start: float, end: float
+) -> list[tuple[float, float]]:
+    return await _run_media_stage(
+        lambda stop: _detect_segments_sync(local_path, start, end, stop)
+    )
 
 
 def _chunk_plan(duration_sec: float) -> list[tuple[float, float]]:
@@ -726,6 +740,7 @@ class SourceMemoryService:
         self._stopping = False
         self._jobs: dict[str, asyncio.Task[None]] = {}
         self._job_specs: dict[str, SourceMemoryBuildJob] = {}
+        self._subgraph_tasks: dict[str, list[asyncio.Task[None]]] = {}
         self._toolkits: dict[str, tuple[float, MemoryToolkit]] = {}
         self._merged_toolkits: dict[
             str,
@@ -859,6 +874,16 @@ class SourceMemoryService:
         )
         return task
 
+    def _interrupt_worker(self, task_id: str) -> None:
+        # A parent's current native operation may still be draining. Signal its
+        # parallel clips now so none can enter the next model stage meanwhile.
+        for child in self._subgraph_tasks.get(task_id, ()):
+            if not child.cancelling():
+                child.cancel()
+        worker = self._jobs[task_id]
+        if not worker.cancelling():
+            worker.cancel()
+
     def cancel_workers(
         self, project_id: str, task_id: str | None = None
     ) -> None:
@@ -867,15 +892,14 @@ class SourceMemoryService:
             if job.project_id == project_id and (
                 task_id is None or key == task_id
             ):
-                self._jobs[key].cancel()
+                self._interrupt_worker(key)
 
     def stop(self) -> None:
         """Close admission and interrupt workers before other services drain."""
         if not self._stopping:
             self._stopping = True
-            for worker in self._jobs.values():
-                if not worker.cancelling():
-                    worker.cancel()
+            for task_id in self._jobs:
+                self._interrupt_worker(task_id)
 
     async def shutdown(self) -> None:
         """Join workers; the next startup reconciles their durable tasks."""
@@ -993,8 +1017,8 @@ class SourceMemoryService:
         if not workers:
             return 0
         # Let the done callback remove the worker so shutdown can also join it.
-        for worker in workers.values():
-            worker.cancel()
+        for task_id in workers:
+            self._interrupt_worker(task_id)
         await asyncio.gather(*workers.values(), return_exceptions=True)
         for job in specs.values():
             await asyncio.to_thread(self._cancel_asset_sync, job)
@@ -1220,6 +1244,7 @@ class SourceMemoryService:
         )
         macros: list[MacroEvent] = []
         subgraph_jobs: list[asyncio.Task[None]] = []
+        self._subgraph_tasks[job.task_id] = subgraph_jobs
         try:
             macro_counter = 0
             for chunk_start, chunk_end in chunks:
@@ -1284,6 +1309,7 @@ class SourceMemoryService:
                 await asyncio.gather(*subgraph_jobs, return_exceptions=True)
             raise
         finally:
+            self._subgraph_tasks.pop(job.task_id, None)
             await run_sync_io(shutil.rmtree, work_root, True)
         extracted = sum(
             1
@@ -1507,12 +1533,13 @@ class SourceMemoryService:
             start, end = macro.time_range
             clip_path = work_root / f"{macro.macro_id}.mp4"
             try:
-                await run_sync_io(
-                    _clip_segment_for_transport_sync,
-                    local_path,
-                    clip_path,
-                    start,
-                    end,
+                await _run_media_stage(
+                    lambda _stop: _clip_segment_for_transport_sync(
+                        local_path,
+                        clip_path,
+                        start,
+                        end,
+                    )
                 )
             except Exception as error:  # pylint: disable=broad-except
                 logger.warning(

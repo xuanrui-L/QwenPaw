@@ -164,6 +164,24 @@ describe("cross-project Credits notice", () => {
     },
   );
 
+  it("accepts a live completion even if polling has already seen its sequence", async () => {
+    const legacy = { projectId: "another", at: "2099-01-01T00:00:00Z" };
+    useModelCreditsStore.setState({ notice: legacy });
+    written.set(STORAGE_KEY, JSON.stringify(legacy));
+    installMockFetch(bootstrapRoutes({ session: { lastEventSeq: 4 } }));
+    await session().bootstrap("p1");
+    installMockFetch(
+      bootstrapRoutes({ session: { lastEventSeq: 5, status: "IDLE" } }),
+    );
+    await session().refreshSession();
+    session().ingestEvent({
+      ...ev(5, "agent.run.completed"),
+      at: "2026-11-18T10:00:00Z",
+    });
+    expect(notice()).toBeNull();
+    expect(written.has(STORAGE_KEY)).toBe(false);
+  });
+
   it("orders another project's replay by server time", () => {
     const time = (microsecond: number) =>
       `2026-10-01T12:00:00.${String(microsecond).padStart(6, "0")}+00:00`;

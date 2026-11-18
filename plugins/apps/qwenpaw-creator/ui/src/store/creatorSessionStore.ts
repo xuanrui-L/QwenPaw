@@ -1593,7 +1593,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                     seq: event.seq,
                     at: event.at,
                   },
-                  !historical && event.seq > (session?.lastEventSeq ?? 0),
+                  event.seq > current.replayUntilSeq,
                 );
               }
               if (rateLimitRetry?.runId === terminalRunId)
