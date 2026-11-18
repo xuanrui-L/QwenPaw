@@ -219,3 +219,17 @@ def test_mark_closed_waits_for_the_in_flight_mark_open(
     # id there and popped it. The file remains as an empty ledger rather
     # than being recreated by a later scan.
     assert idempotency_ledger.open_transaction_ids(root) == frozenset()
+
+
+def test_cancelled_rebuild_never_publishes_partial_reservations(tmp_path):
+    root = tmp_path / "idempotency"
+    root.mkdir()
+    _record(root, "first", "txn-1", "IN_PROGRESS")
+    _record(root, "second", "txn-2", "IN_PROGRESS")
+    decisions = iter((True, False))
+    with pytest.raises(idempotency_ledger.IncompleteLedgerScan):
+        idempotency_ledger.open_transaction_ids(
+            root, can_continue=lambda: next(decisions)
+        )
+    assert not (root / idempotency_ledger.LEDGER_FILE_NAME).exists()
+    assert idempotency_ledger.open_transaction_ids(root) == {"txn-1", "txn-2"}

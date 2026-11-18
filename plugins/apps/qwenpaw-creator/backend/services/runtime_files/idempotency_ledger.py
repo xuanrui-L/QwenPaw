@@ -24,6 +24,7 @@ fails in the safe direction:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import logging
 import os
@@ -46,11 +47,17 @@ _IN_PROGRESS_MARKERS = (
 _SCAN_HEAD_BYTES = 4096
 
 
+class IncompleteLedgerScan(Exception):
+    """Maintenance stopped before the reserved transactions could be proven."""
+
+
 def _ledger_path(root: Path) -> Path:
     return root / LEDGER_FILE_NAME
 
 
-def _ledger_lock(root: Path) -> CrossProcessFileLock:
+def _ledger_lock(
+    root: Path, *, timeout_seconds: float = LEDGER_LOCK_TIMEOUT_SECONDS
+) -> CrossProcessFileLock:
     """Serialize the shared load-modify-save the ledger is built from.
 
     ``mark_open`` and ``mark_closed`` are called with the caller already
@@ -67,7 +74,7 @@ def _ledger_lock(root: Path) -> CrossProcessFileLock:
 
     return CrossProcessFileLock(
         root / LEDGER_LOCK_NAME,
-        timeout_seconds=LEDGER_LOCK_TIMEOUT_SECONDS,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -132,7 +139,9 @@ def _record_id_of(path: Path) -> str | None:
     return None
 
 
-def _scan_open_ids(root: Path) -> dict[str, str]:
+def _scan_open_ids(
+    root: Path, can_continue: Callable[[], bool] | None = None
+) -> dict[str, str]:
     """Rebuild the open set from the records themselves.
 
     Settled history is the overwhelming majority and costs a short read here:
@@ -142,11 +151,11 @@ def _scan_open_ids(root: Path) -> dict[str, str]:
     """
 
     found: dict[str, str] = {}
-    try:
-        paths = sorted(root.glob("*.json"))
-    except OSError:
-        return found
-    for path in paths:
+    # Ledger publication sorts keys; enumeration need not sort all names
+    # before a maintenance worker can observe cancellation.
+    for path in root.glob("*.json"):
+        if can_continue is not None and not can_continue():
+            raise IncompleteLedgerScan
         if path.name == LEDGER_FILE_NAME:
             continue
         try:
@@ -162,7 +171,9 @@ def _scan_open_ids(root: Path) -> dict[str, str]:
     return found
 
 
-def open_transaction_ids(root: Path) -> frozenset[str]:
+def open_transaction_ids(
+    root: Path, *, can_continue: Callable[[], bool] | None = None
+) -> frozenset[str]:
     """Reservation ids that have not completed or failed yet.
 
     A warm read needs no lock: ``os.replace`` publishes the ledger
@@ -178,13 +189,22 @@ def open_transaction_ids(root: Path) -> frozenset[str]:
     if open_ids is not None:
         return frozenset(open_ids)
     try:
-        with _ledger_lock(root):
+        # A cancellable maintenance pass can defer this Project when a writer
+        # owns the cold ledger. Never wait out a lock timeout during shutdown.
+        timeout = (
+            0.0 if can_continue is not None else LEDGER_LOCK_TIMEOUT_SECONDS
+        )
+        with _ledger_lock(root, timeout_seconds=timeout):
             open_ids = _read_ledger(root)
             if open_ids is not None:
                 return frozenset(open_ids)
-            open_ids = _scan_open_ids(root)
+            open_ids = _scan_open_ids(root, can_continue)
+            if can_continue is not None and not can_continue():
+                raise IncompleteLedgerScan
             _write_ledger(root, open_ids)
     except LockTimeoutError as exc:
+        if can_continue is not None:
+            raise IncompleteLedgerScan from exc
         logger.warning(
             "idempotency ledger rebuild timed out for %s: %s; "
             "serving this sweep from a transient scan",

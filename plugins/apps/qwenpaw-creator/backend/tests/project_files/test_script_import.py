@@ -386,6 +386,17 @@ def test_idempotency_key_reconciles_a_committed_import_after_a_crash(
     second = _publish(store, text=REVISED_TEXT, idempotency_key="key-b")
     assert second.artifact_version_id != first.artifact_version_id
 
+    from services.project_files.transaction_gc import (
+        collect_project_transactions,
+    )
+
+    removed, _ = collect_project_transactions(
+        store.project_root(PROJECT_ID),
+        retention=0,
+    )
+    # B has its independent receipt. Only A still needs its transaction.
+    assert removed == 1
+
     # 响应丢失后重试 A/key-a：记录缺失 -> 撞已提交事务 -> 对账重建为回放。
     retry = _publish(store, text=SCRIPT_TEXT, idempotency_key="key-a")
 

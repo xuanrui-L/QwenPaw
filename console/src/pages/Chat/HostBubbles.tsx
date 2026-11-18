@@ -16,15 +16,7 @@
  * replaces individual Markdown/media/tool rendering rather than only framing
  * the default response bubble.
  */
-import React, {
-  useContext,
-  useDeferredValue,
-  useMemo,
-  useSyncExternalStore,
-} from "react";
-import { IconButton } from "@agentscope-ai/design";
-import { SparkReplaceLine } from "@agentscope-ai/icons";
-import { ChatRegenerateContext } from "./ChatRegenerateContext";
+import React, { useMemo, useSyncExternalStore } from "react";
 import VendorRequestCard from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card";
 import AgentScopeRuntimeResponseBuilder from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Builder";
 import ResponseActions from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Actions";
@@ -44,7 +36,10 @@ import {
 import { useChatAnywhereOptions } from "@agentscope-ai/chat/lib/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereOptionsContext";
 import { Avatar, Flex } from "antd";
 import { useTranslation } from "react-i18next";
-import { renderableCodeComponents } from "../../components/RenderableCodeBlock";
+import { AlertTriangle } from "lucide-react";
+import { hasTruncatedModelOutput } from "./completionNotice";
+import { AssistantMarkdown } from "./AssistantMarkdown";
+import { useEffectiveFontSize } from "@/contexts/FontSizeContext";
 import {
   useChatScalarSnapshot,
   useChatListSnapshot,
@@ -56,6 +51,7 @@ import type {
   ChatResponseData,
 } from "../../plugins/registry/types";
 import { DownloadableAudios } from "../../components/Chat/MediaDownload";
+import { ToolCallTurnBoundary } from "./turnEndedProvider";
 import ResponseArtifactList from "../../features/files-workspace/ResponseArtifactList";
 import { isToolLikeResponseMessageType } from "./responseMessageTypes";
 import {
@@ -84,27 +80,6 @@ function sortByOrder<T extends { item: { order?: number } }>(arr: T[]): T[] {
     .sort((a, b) => (a.item.order ?? 100) - (b.item.order ?? 100));
 }
 
-function DeferredMarkdown({
-  content,
-  cursor,
-}: {
-  content: string;
-  cursor: boolean;
-}) {
-  // Parsing Markdown, code fences, and diagrams is substantially more
-  // expensive than appending stream text. A deferred value lets React skip
-  // obsolete intermediate parses while keeping input and scrolling responsive.
-  const deferredContent = useDeferredValue(content);
-
-  return (
-    <Markdown
-      components={renderableCodeComponents}
-      content={deferredContent}
-      cursor={cursor}
-    />
-  );
-}
-
 const HostMessage = React.memo(function HostMessage({
   data,
 }: {
@@ -118,6 +93,7 @@ const HostMessage = React.memo(function HostMessage({
   );
   const formatMediaURL = (url?: string) =>
     url ? replaceMediaURL?.(url) || url : url;
+  const baseFontSize = useEffectiveFontSize();
 
   if (!data.content?.length) return null;
 
@@ -127,14 +103,35 @@ const HostMessage = React.memo(function HostMessage({
         switch (item.type) {
           case AgentScopeRuntimeContentType.TEXT:
             return (
-              <DeferredMarkdown
+              <div
                 key={index}
-                content={item.text}
-                cursor={item.status === AgentScopeRuntimeRunStatus.InProgress}
-              />
+                className={styles.quoteResponse}
+                data-quote-response={
+                  data.role === "assistant" ? "true" : undefined
+                }
+              >
+                <AssistantMarkdown
+                  messageId={`${data.id}:${index}`}
+                  content={item.text}
+                  cursor={item.status === AgentScopeRuntimeRunStatus.InProgress}
+                  // Native text deltas omit content.status; the message owns
+                  // their lifecycle. Keep the legacy Markdown cursor separate.
+                  isStreaming={
+                    (item.status ?? data.status) ===
+                    AgentScopeRuntimeRunStatus.InProgress
+                  }
+                />
+              </div>
             );
           case AgentScopeRuntimeContentType.REFUSAL:
-            return <Markdown key={index} content={item.refusal} raw />;
+            return (
+              <Markdown
+                key={index}
+                content={item.refusal}
+                raw
+                baseFontSize={baseFontSize}
+              />
+            );
           case AgentScopeRuntimeContentType.IMAGE:
             return (
               <DefaultCards.Images
@@ -195,7 +192,11 @@ function renderResponseMessage(item: IAgentScopeRuntimeMessage) {
     case AgentScopeRuntimeMessageType.MCP_APPROVAL_REQUEST:
       return <ResponseTool key={item.id} data={item} isApproval />;
     case AgentScopeRuntimeMessageType.REASONING:
-      return <ResponseReasoning key={item.id} data={item} />;
+      return (
+        <div key={item.id} className={styles.reasoningStep}>
+          <ResponseReasoning data={item} />
+        </div>
+      );
     case AgentScopeRuntimeMessageType.ERROR:
       return <ResponseError key={item.id} data={item} />;
     case AgentScopeRuntimeMessageType.HEARTBEAT:
@@ -220,7 +221,6 @@ function DefaultHostResponseCard({
   contentAppend?: React.ReactNode;
 }) {
   const { t } = useTranslation();
-  const regenerate = useContext(ChatRegenerateContext);
   const avatar = useChatAnywhereOptions((options) => options.welcome?.avatar);
   const nick = useChatAnywhereOptions((options) => options.welcome?.nick);
   const nickNode =
@@ -312,6 +312,12 @@ function DefaultHostResponseCard({
           />
         );
       })}
+      {hasTruncatedModelOutput(data) ? (
+        <div role="status" className={styles.completionWarning}>
+          <AlertTriangle size={16} aria-hidden="true" />
+          <span>{t("chat.outputTruncated")}</span>
+        </div>
+      ) : null}
       {data.error ? <ResponseError data={data.error} /> : null}
       {!messages.length && data.status === "canceled" ? (
         <Bubble.Interrupted title={t("chat.turnCanceled")} />
@@ -321,17 +327,6 @@ function DefaultHostResponseCard({
         <ResponseArtifactList messages={messages} />
       ) : null}
       <ResponseActions data={data} messageId={messageId} isLast={isLast} />
-      {regenerate &&
-      isLast &&
-      AgentScopeRuntimeResponseBuilder.maybeDone(data) ? (
-        <IconButton
-          aria-label={t("chat.regenerate")}
-          title={t("chat.regenerate")}
-          bordered={false}
-          icon={<SparkReplaceLine />}
-          onClick={() => regenerate(messageId)}
-        />
-      ) : null}
     </>
   );
 }
@@ -489,5 +484,15 @@ export function HostResponseCard(props: {
   data: ChatResponseData;
   isLast?: boolean;
 }) {
-  return <MemoizedHostResponseCard {...props} />;
+  // Tool cards cannot tell a running call from one whose turn was interrupted
+  // because both lack a result message. Wrapping the whole card publishes the
+  // turn state without re-rendering its body: the memoized content bails out
+  // on unchanged props.
+  return (
+    <ToolCallTurnBoundary
+      data={props.data as unknown as IAgentScopeRuntimeResponse}
+    >
+      <MemoizedHostResponseCard {...props} />
+    </ToolCallTurnBoundary>
+  );
 }

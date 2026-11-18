@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import http.client
+import json
+import shutil
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from qwenpaw.plugins.download_catalog import (
+    _build_remote_plugin_catalog as build_plugin_catalog,
     _is_entry_compatible,
-    build_plugin_catalog,
 )
 
 
@@ -55,7 +58,17 @@ def test_plugins_catalog_transport_failure_returns_fallback(
     assert result["error"] == "Failed to fetch plugins metadata"
 
 
-def test_build_plugin_catalog_returns_normalized_plugins() -> None:
+@pytest.mark.parametrize(
+    ("kind", "url"),
+    [
+        ("python", "/plugins/demo-1.0.0.zip"),
+        ("harness", "/plugins/harness/demo/demo-1.0.0.zip"),
+    ],
+)
+def test_build_plugin_catalog_returns_normalized_plugins(
+    kind: str,
+    url: str,
+) -> None:
     main_index = {"products": {"plugins": {"index_url": "/plugins.json"}}}
     plugins_index = {
         "updated_at": "2026-09-14T00:00:00Z",
@@ -66,8 +79,8 @@ def test_build_plugin_catalog_returns_normalized_plugins() -> None:
                 "name": {"en-US": "Demo"},
                 "description": {"en-US": "A demo plugin"},
                 "version": "1.0.0",
-                "platform": "python",
-                "url": "/plugins/demo-1.0.0.zip",
+                "platform": kind,
+                "url": url,
             },
         },
     }
@@ -94,18 +107,169 @@ def test_build_plugin_catalog_returns_normalized_plugins() -> None:
             "description_i18n": {"en-US": "A demo plugin"},
             "version": "1.0.0",
             "author": "",
-            "kind": "python",
+            "kind": kind,
             "size": "",
             "sha256": "",
-            "install_url": (
-                "https://download.qwenpaw.agentscope.io"
-                "/plugins/demo-1.0.0.zip"
-            ),
+            "install_url": "https://download.qwenpaw.agentscope.io" + url,
             "installed": False,
             "installed_version": None,
             "upgrade_available": False,
         },
     ]
+
+
+def test_bundled_hubs_remain_installable_when_cdn_is_unavailable() -> None:
+    from qwenpaw.plugins.download_catalog import (
+        build_plugin_catalog as catalog,
+    )
+
+    with (
+        patch(
+            "qwenpaw.plugins.download_catalog._fetch_json",
+            side_effect=ConnectionResetError("offline"),
+        ),
+        patch(
+            "qwenpaw.plugins.download_catalog._installed_plugin_ids",
+            return_value={"qwenpaw-hub": "0.9.0"},
+        ),
+    ):
+        result = catalog()
+
+    hubs = {entry["plugin_id"]: entry for entry in result["plugins"]}
+    assert set(hubs) == {
+        "qwenpaw-hub",
+        "clawhub-hub",
+        "modelscope-hub",
+        "aliyun-hub",
+    }
+    assert result["error"] == "Failed to fetch plugin catalog index"
+    assert hubs["qwenpaw-hub"]["installed_version"] == "0.9.0"
+    assert hubs["qwenpaw-hub"]["upgrade_available"] is True
+    assert hubs["clawhub-hub"]["installed"] is False
+    for entry in hubs.values():
+        assert entry["kind"] == "hub"
+        assert (Path(entry["install_url"]) / "plugin.json").is_file()
+
+
+def test_bundled_hubs_replace_same_cdn_version_and_keep_remote_updates(
+    tmp_path,
+    monkeypatch,
+):
+    from qwenpaw.market.builtin import get_builtin_hub_plugins_dir
+    from qwenpaw.plugins.download_catalog import (
+        build_plugin_catalog as catalog,
+    )
+
+    bundled = tmp_path / "bundled"
+    shutil.copytree(get_builtin_hub_plugins_dir(), bundled / "hub")
+    tool = bundled / "tool" / "bundled-tool"
+    tool.mkdir(parents=True)
+    (tool / "plugin.json").write_text(
+        json.dumps({"id": "bundled-tool", "version": "1.0.0", "type": "tool"}),
+    )
+    monkeypatch.setattr(
+        "qwenpaw.plugins.download_catalog.__file__",
+        str(tmp_path / "download_catalog.py"),
+    )
+    versions = ("1.0.0", "1.1.0")
+    files = {
+        version: {
+            "id": f"qwenpaw-hub-{version}",
+            "plugin_id": "qwenpaw-hub",
+            "version": version,
+            "name": "QwenPaw Hub",
+            "platform": "hub",
+            "url": f"/plugins/qwenpaw-hub-{version}.zip",
+        }
+        for version in versions
+    }
+    with (
+        patch(
+            "qwenpaw.plugins.download_catalog._fetch_json",
+            side_effect=[
+                {"products": {"plugins": {"index_url": "/plugins.json"}}},
+                {"files": files},
+            ],
+        ),
+        patch(
+            "qwenpaw.plugins.download_catalog._installed_plugin_ids",
+            return_value={"qwenpaw-hub": "1.0.0"},
+        ),
+    ):
+        result = catalog()
+
+    qwenpaw = {
+        entry["version"]: entry
+        for entry in result["plugins"]
+        if entry["plugin_id"] == "qwenpaw-hub"
+    }
+    assert set(qwenpaw) == set(versions)
+    assert (Path(qwenpaw["1.0.0"]["install_url"]) / "plugin.json").is_file()
+    assert qwenpaw["1.1.0"]["install_url"].endswith(
+        "/plugins/qwenpaw-hub-1.1.0.zip",
+    )
+    assert qwenpaw["1.1.0"]["upgrade_available"] is True
+    tool_entry = next(
+        entry
+        for entry in result["plugins"]
+        if entry["plugin_id"] == "bundled-tool"
+    )
+    assert tool_entry["kind"] == "tool"
+    assert Path(tool_entry["install_url"]) == tool
+
+
+@pytest.mark.parametrize(
+    "installed_version,upgrade_available",
+    [("0.1.0.dev0", True), ("0.1.0", False), ("0.2.0", False)],
+)
+def test_channel_catalog_matches_local_version_and_host_compatibility(
+    tmp_path,
+    monkeypatch,
+    installed_version,
+    upgrade_available,
+):
+    source = tmp_path / "local-source"
+    source.mkdir()
+    (source / "plugin.json").write_text(
+        json.dumps({"id": "matrix", "version": installed_version}),
+    )
+    monkeypatch.setattr(
+        "qwenpaw.config.utils.get_plugins_dir",
+        lambda: tmp_path,
+    )
+    entry = {
+        "plugin_id": "matrix",
+        "version": "0.1.0",
+        "platform": "channel",
+        "url": "/files/plugins/channel/matrix/matrix-0.1.0.zip",
+        "qwenpaw_version": {"min": "0.0.0"},
+    }
+    with patch(
+        "qwenpaw.plugins.download_catalog._fetch_json",
+        side_effect=[
+            {"products": {"plugins": {"index_url": "/plugins.json"}}},
+            {
+                "files": {
+                    "matrix-0.1.0": entry,
+                    "matrix-0.2.0": {
+                        **entry,
+                        "version": "0.2.0",
+                        "qwenpaw_version": {"min": "999.0.0"},
+                    },
+                },
+            },
+        ],
+    ):
+        catalog = build_plugin_catalog()
+    assert len(catalog["plugins"]) == 1
+    channel = catalog["plugins"][0]
+    assert channel["plugin_id"] == "matrix" and channel["installed"]
+    assert channel["installed_version"] == installed_version
+    assert channel["upgrade_available"] is upgrade_available
+    assert channel["install_url"] == (
+        "https://download.qwenpaw.agentscope.io"
+        "/files/plugins/channel/matrix/matrix-0.1.0.zip"
+    )
 
 
 def test_entry_with_qwenpaw_version_compatible() -> None:

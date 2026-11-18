@@ -2974,7 +2974,11 @@ class FileCreatorAgentRuntime:
         )
         if session is None:
             return
-        if await self._reconcile_is_quiet(project_id, session):
+        # A captured handle makes this tick return before it can dispatch a
+        # pending message, even if its done callback removes it mid-read.
+        if handle is None and await self._reconcile_is_quiet(
+            project_id, session
+        ):
             # Nothing durable moved since the last projection: the pending
             # scan, the outbox read and the work-graph derivation below would
             # produce the same answer from the same bytes.

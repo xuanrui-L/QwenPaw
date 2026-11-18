@@ -24,6 +24,8 @@ from domain.enums import (
 )
 from domain.errors import ConflictError, NotFoundError, StorageIntegrityError
 from schemas.common import StrictModel
+from services.file_agent_runtime import manual_regeneration_hold
+from services.file_agent_runtime.work_graph import WorkNodeStatus
 from services.project_files.facade import CreatorFileServices
 from services.runtime_files.errors import RecordNotFoundError
 from services.runtime_files.execution_models import (
@@ -40,6 +42,7 @@ from services.runtime_files.execution_store import (
     ProjectExecutionStore,
 )
 
+from .work_graph_routes import read_project_work_graph
 from .dependencies import (
     CreatorErrorRoute,
     project_file_services,
@@ -514,6 +517,25 @@ async def _preflight_scene_review(
         )
 
 
+def _check_automatic_compose(
+    project_id: str,
+    timeline_id: str,
+    services: CreatorFileServices,
+) -> None:
+    manual_regeneration_hold.check_automatic(services.root, project_id)
+    node_id = f"compose:{timeline_id}"
+    node = read_project_work_graph(project_id, services).by_id.get(node_id)
+    if node is None or node.status is not WorkNodeStatus.READY:
+        raise ConflictError(
+            "当前工作图不允许自动合成",
+            details={
+                "code": "AUTOMATIC_COMPOSE_NOT_READY",
+                "nodeId": node_id,
+                "status": node.status.value if node else "missing",
+            },
+        )
+
+
 @router.post(
     "/timelines/{timeline_id}/render",
     status_code=status.HTTP_202_ACCEPTED,
@@ -523,8 +545,42 @@ async def render_timeline(
     timeline_id: str,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
+    automatic: bool = False,
 ) -> dict[str, Any]:
-    """User-initiated final video export: deterministic local composition,
+    """Start a local timeline export, respecting a hold for automatic requests."""
+    if automatic:
+        with manual_regeneration_hold.automatic_node(
+            services.root,
+            project_id,
+            f"compose:{timeline_id}",
+        ):
+            await asyncio.to_thread(
+                _check_automatic_compose,
+                project_id,
+                timeline_id,
+                services,
+            )
+            return await _render_timeline(
+                project_id,
+                timeline_id,
+                idempotency_key,
+                services,
+                automatic=True,
+            )
+    return await _render_timeline(
+        project_id, timeline_id, idempotency_key, services
+    )
+
+
+async def _render_timeline(
+    project_id: str,
+    timeline_id: str,
+    idempotency_key: str | None,
+    services: CreatorFileServices,
+    *,
+    automatic: bool = False,
+) -> dict[str, Any]:
+    """Deterministic local composition,
     bypassing the Agent pipeline.
 
     Reads all ready R2V/Edit elements of the target Timeline and composes
@@ -612,6 +668,14 @@ async def render_timeline(
             enforce_scene_gate=False,
         )
         await _preflight_scene_review(services, project_id, timeline_id)
+        if automatic:
+            # Scene review can publish a revision or outlast a mode change.
+            await asyncio.to_thread(
+                _check_automatic_compose,
+                project_id,
+                timeline_id,
+                services,
+            )
 
         async def drive() -> None:
             try:

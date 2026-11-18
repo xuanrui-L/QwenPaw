@@ -1,14 +1,43 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ComponentType } from "react";
-import { useLocation } from "react-router-dom";
+import { Grid } from "antd";
+import { useContext, type ComponentType } from "react";
+import { Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { renderWithProviders } from "@/test/common_setup";
-import { ThemeProvider } from "@/contexts/ThemeContext";
+import { themeApi } from "@/api/modules/theme";
+import { channelApi } from "@/api/modules/channel";
+import * as apiRequest from "@/api/request";
+import type { AgentsRunningConfig } from "@/api/types";
+import { ThemeProvider, useTheme } from "@/contexts/ThemeContext";
 import type { MenuItem } from "@/plugins/registry/types";
 import { DEFAULT_FOCUS_ITEM_IDS, useSidebarStore } from "@/stores/sidebarStore";
 import { useAgentStore } from "@/stores/agentStore";
+import { settingsSearchRegistry } from "@/plugins/settingsSearch";
+import { SettingsSearchNavigation } from "./SettingsSearchNavigation";
+import { SettingsRuntimeConfigContext } from "./SettingsSearchRequest";
+
+// JSDOM cannot run NumberFlow's custom-element animation lifecycle.
+vi.mock("@number-flow/react", () => ({
+  default: ({ value, suffix }: { value: number; suffix?: string }) => (
+    <span>
+      {value}
+      {suffix}
+    </span>
+  ),
+}));
+
+// Verify editor state separately from Motion's browser-only exit lifecycle.
+vi.mock("@/components/interaction/SharedModal", () => ({
+  SharedModal: ({ open, onCancel, children }: import("antd").ModalProps) =>
+    open ? (
+      <div role="dialog">
+        <button onClick={onCancel}>Close</button>
+        {children}
+      </div>
+    ) : null,
+}));
 
 const registry = vi.hoisted(() => ({
   routes: [] as Array<{
@@ -43,6 +72,7 @@ function LocationProbe() {
 describe("SettingsCenter", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.spyOn(Grid, "useBreakpoint").mockReturnValue({ md: true });
     registry.routes = [];
     registry.agentMenu = [];
     registry.settingsMenu = [];
@@ -70,6 +100,181 @@ describe("SettingsCenter", () => {
     });
   });
 
+  it("opens model configuration when searching the legacy maximum-input-length name", async () => {
+    registry.routes = [
+      {
+        id: "core.agent-config",
+        path: "/agent-config",
+        Component: () => <div>Runtime settings</div>,
+      },
+      {
+        id: "core.models",
+        path: "/models",
+        Component: () => <div>Model settings</div>,
+      },
+    ];
+    renderWithProviders(
+      <>
+        <SettingsCenter />
+        <LocationProbe />
+      </>,
+      { initialEntries: ["/settings/general"] },
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText("Search settings"),
+      "Max Input Length",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Max Context Length/ }),
+    );
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/settings/models",
+    );
+    expect(screen.getByText("Model settings")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("Choose an item");
+  });
+
+  it("refreshes result availability after config changes without remounting", async () => {
+    vi.spyOn(apiRequest, "request").mockResolvedValue({
+      memory_manager_backend: "none",
+    });
+    function RuntimeSettings() {
+      const updateSearch = useContext(SettingsRuntimeConfigContext);
+      return (
+        <>
+          <button
+            onClick={() =>
+              updateSearch("native", {
+                memory_manager_backend: "remelight",
+              } as AgentsRunningConfig)
+            }
+          >
+            Enable memory
+          </button>
+          <button
+            onClick={() =>
+              updateSearch("native", {
+                memory_manager_backend: "none",
+              } as AgentsRunningConfig)
+            }
+          >
+            Disable memory
+          </button>
+          <button
+            onClick={() =>
+              updateSearch("other-agent", {
+                memory_manager_backend: "remelight",
+              } as AgentsRunningConfig)
+            }
+          >
+            Other agent saved
+          </button>
+        </>
+      );
+    }
+    registry.routes = [
+      {
+        id: "core.agent-config",
+        path: "/agent-config",
+        Component: RuntimeSettings,
+      },
+    ];
+    renderWithProviders(<SettingsCenter />, {
+      initialEntries: ["/settings/agent-config"],
+    });
+    await userEvent.type(
+      screen.getByPlaceholderText("Search settings"),
+      "Model Name",
+    );
+    const result = screen.getByRole("button", { name: /^Model Name/ });
+    await waitFor(() => expect(result).toBeDisabled());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Enable memory" }),
+    );
+    expect(result).toBeEnabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Disable memory" }),
+    );
+    expect(result).toBeDisabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Other agent saved" }),
+    );
+    expect(result).toBeDisabled();
+  });
+
+  it("keeps a saved config newer than an outstanding availability request", async () => {
+    let resolveRequest!: (config: AgentsRunningConfig) => void;
+    vi.spyOn(apiRequest, "request").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRequest = resolve;
+        }),
+    );
+    function RuntimeSettings() {
+      const updateSearch = useContext(SettingsRuntimeConfigContext);
+      return (
+        <button
+          onClick={() =>
+            updateSearch("native", {
+              memory_manager_backend: "remelight",
+            } as AgentsRunningConfig)
+          }
+        >
+          Enable memory
+        </button>
+      );
+    }
+    registry.routes = [
+      {
+        id: "core.agent-config",
+        path: "/agent-config",
+        Component: RuntimeSettings,
+      },
+    ];
+    renderWithProviders(<SettingsCenter />, {
+      initialEntries: ["/settings/agent-config"],
+    });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Enable memory" }),
+    );
+    await act(async () => {
+      resolveRequest({ memory_manager_backend: "none" } as AgentsRunningConfig);
+    });
+    await userEvent.type(
+      screen.getByPlaceholderText("Search settings"),
+      "Model Name",
+    );
+    expect(screen.getByRole("button", { name: /^Model Name/ })).toBeEnabled();
+  });
+
+  it("opens the plugin section and requested subtab from a search result", async () => {
+    function PluginProbe() {
+      const location = useLocation();
+      const query = new URLSearchParams(location.search);
+      return (
+        <output data-testid="plugin-query">
+          {query.get("tab")}:{query.get("view")}
+        </output>
+      );
+    }
+    registry.routes = [
+      { id: "core.marketplace", path: "/market", Component: PluginProbe },
+    ];
+    renderWithProviders(<SettingsCenter />, {
+      initialEntries: ["/settings/general"],
+    });
+    await userEvent.type(
+      screen.getByPlaceholderText("Search settings"),
+      "Official Plugins",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Official Plugins" }),
+    );
+    expect(screen.getByTestId("plugin-query")).toHaveTextContent(
+      "plugins:official",
+    );
+  });
+
   it("uses dark preset swatches when dark theme is active", async () => {
     localStorage.setItem("qwenpaw-theme", "dark");
 
@@ -81,6 +286,7 @@ describe("SettingsCenter", () => {
     );
 
     expect(container.querySelector('[data-theme="dark"]')).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Custom theme" }));
     await userEvent.click(
       screen.getByRole("combobox", { name: "Theme palette" }),
     );
@@ -96,6 +302,38 @@ describe("SettingsCenter", () => {
     ).toBe(true);
   });
 
+  it("flushes an edited theme when the editor closes", async () => {
+    vi.spyOn(themeApi, "get").mockResolvedValue({ radius: "8px" });
+    const update = vi
+      .spyOn(themeApi, "update")
+      .mockImplementation(async (theme) => theme);
+    function ThemeProbe() {
+      const { previewTheme } = useTheme();
+      return <output data-testid="theme-preview">{previewTheme.radius}</output>;
+    }
+    renderWithProviders(
+      <ThemeProvider>
+        <SettingsCenter />
+        <ThemeProbe />
+      </ThemeProvider>,
+      { initialEntries: ["/settings/general"] },
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("theme-preview")).toHaveTextContent("8px"),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Custom theme" }));
+    const radius = screen.getByRole("spinbutton", { name: "Corner radius" });
+    await userEvent.clear(radius);
+    await userEvent.type(radius, "9");
+    expect(screen.getByTestId("theme-preview")).toHaveTextContent("9px");
+    await userEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(update).toHaveBeenCalledWith({ radius: "9px" }));
+    expect(screen.getByTestId("theme-preview")).toHaveTextContent("9px");
+  });
+
   it("persists the standard and wide message widths", async () => {
     renderWithProviders(<SettingsCenter />, {
       initialEntries: ["/settings/general"],
@@ -109,7 +347,9 @@ describe("SettingsCenter", () => {
       .closest("section");
     expect(appearance).not.toBeNull();
     expect(messageDisplay).not.toBeNull();
-    expect(within(messageDisplay!).getByText("Message width")).toBeVisible();
+    await waitFor(() =>
+      expect(within(messageDisplay!).getByText("Message width")).toBeVisible(),
+    );
     expect(within(appearance!).getByText("Desktop Mode")).toBeVisible();
     expect(
       within(appearance!).getByRole("button", { name: "Open" }),
@@ -140,6 +380,7 @@ describe("SettingsCenter", () => {
       initialEntries: ["/settings/general"],
     });
 
+    await userEvent.click(screen.getByRole("button", { name: "Custom theme" }));
     const palette = screen.getByRole("combobox", {
       name: "Theme palette",
     });
@@ -182,8 +423,10 @@ describe("SettingsCenter", () => {
       initialEntries: ["/settings/general"],
     });
 
-    expect(screen.getByText("Card view")).toBeVisible();
-    const thinkingSwitch = screen.getByRole("switch");
+    await waitFor(() => expect(screen.getByText("Card view")).toBeVisible());
+    const thinkingSwitch = screen.getByRole("switch", {
+      name: "Show thinking",
+    });
     expect(thinkingSwitch).toBeChecked();
     await userEvent.click(thinkingSwitch);
     await userEvent.click(screen.getByText("Raw parameters"));
@@ -277,7 +520,7 @@ describe("SettingsCenter", () => {
     });
   });
 
-  it("keeps operational workspaces out of settings navigation", () => {
+  it("includes scheduled tasks in agent settings", () => {
     const EmptyPage = () => null;
     registry.routes = [
       { id: "core.security", path: "/security", Component: EmptyPage },
@@ -303,11 +546,11 @@ describe("SettingsCenter", () => {
     expect(within(globalGroup!).queryByText("Cron Jobs")).toBeNull();
     expect(within(globalGroup!).queryByText("Heartbeat")).toBeNull();
     expect(within(agentGroup!).getByText("Channels")).toBeVisible();
-    expect(within(agentGroup!).queryByText("Cron Jobs")).toBeNull();
+    expect(within(agentGroup!).getByText("Cron Jobs")).toBeVisible();
     expect(within(agentGroup!).getByText("Heartbeat")).toBeVisible();
   });
 
-  it("keeps sidebar customization out of General settings", () => {
+  it("keeps sidebar customization out of General settings", async () => {
     renderWithProviders(<SettingsCenter />, {
       initialEntries: ["/settings/general"],
     });
@@ -317,16 +560,21 @@ describe("SettingsCenter", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Back to app" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "General" })).toBeVisible();
-    expect(
-      screen.getByRole("heading", { name: "Appearance & language" }),
-    ).toBeVisible();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Appearance & language" }),
+      ).toBeVisible(),
+    );
     expect(screen.getByText("Language")).toBeVisible();
-    expect(screen.getByText("Theme")).toBeVisible();
+    await waitFor(() => expect(screen.getByText("Theme")).toBeVisible());
     expect(screen.getByText("Message width")).toBeVisible();
     expect(screen.queryByText("Sidebar content")).not.toBeInTheDocument();
-    const sidebarButton = screen.getByRole("button", { name: "Sidebar" });
-    expect(sidebarButton).toBeVisible();
-    expect(sidebarButton.querySelector("strong")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Sidebar" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Sidebar", level: 3 }),
+    ).toBeVisible();
     expect(
       screen.queryByText("Language, theme and application behavior"),
     ).not.toBeInTheDocument();
@@ -411,12 +659,9 @@ describe("SettingsCenter", () => {
     expect(useSidebarStore.getState().focusItemIds).not.toContain(
       "core.import",
     );
-    expect(
-      screen.queryByRole("button", { name: "Marketplace" }),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Extension" })).toBeVisible();
     for (const label of [
       "Sessions",
-      "Cron Jobs",
       "Files",
       "Agent Statistics",
       "Checkpoints",
@@ -447,22 +692,23 @@ describe("SettingsCenter", () => {
     ).not.toBeInTheDocument();
     await userEvent.clear(search);
 
-    await userEvent.click(screen.getByRole("button", { name: "Sidebar" }));
+    await userEvent.click(screen.getByRole("button", { name: "General" }));
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
 
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 3, name: "Agent configuration" }),
+      ).toBeVisible(),
+    );
     expect(
-      screen.getByRole("heading", {
-        level: 3,
-        name: "Agent configuration",
-      }),
+      screen.getByRole("button", { name: "Move Sessions" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Move Cron Jobs" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Move Marketplace" }),
     ).toBeVisible();
-    expect(
-      screen.getByRole("checkbox", { name: "Sessions" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("checkbox", { name: "Cron Jobs" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Extension" })).toBeChecked();
-    expect(screen.getByRole("checkbox", { name: "Extension" })).toBeDisabled();
   });
 
   it.each(["codex", "qoder"])(
@@ -521,6 +767,32 @@ describe("SettingsCenter", () => {
     expect(within(globalGroup!).getByText("Skill Pool")).toBeVisible();
   });
 
+  it("reuses sidebar registry icons for matching settings routes", () => {
+    const ChannelIcon = () => <svg data-testid="sidebar-channel-icon" />;
+    registry.routes = [
+      { id: "core.channels", path: "/channels", Component: () => null },
+    ];
+    registry.agentMenu = [
+      {
+        id: "core.channels",
+        location: "primary.agentScoped",
+        label: "Channels",
+        route: "core.channels",
+        icon: ChannelIcon,
+      },
+    ];
+
+    renderWithProviders(<SettingsCenter />, {
+      initialEntries: ["/settings/general"],
+    });
+
+    expect(
+      within(screen.getByRole("button", { name: "Channels" })).getByTestId(
+        "sidebar-channel-icon",
+      ),
+    ).toBeVisible();
+  });
+
   it("opens plugin settings at the original registered path", async () => {
     const PluginSettings = () => <div>Plugin configuration form</div>;
     registry.routes = [
@@ -548,7 +820,7 @@ describe("SettingsCenter", () => {
     );
 
     await userEvent.click(
-      screen.getByRole("button", { name: /Example extension/i }),
+      screen.getByRole("button", { name: "Example extension" }),
     );
     expect(screen.getByTestId("location")).toHaveTextContent(
       "/example-settings",
@@ -556,6 +828,82 @@ describe("SettingsCenter", () => {
     expect(
       screen.queryByText("Plugin configuration form"),
     ).not.toBeInTheDocument();
+  });
+
+  it("searches late plugin registrations and locates fields at their registered route", async () => {
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    });
+    vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([
+      {},
+    ] as unknown as DOMRectList);
+    const PluginSettings = () => (
+      <section
+        data-testid="plugin-timeout"
+        data-settings-target="example.timeout"
+      >
+        Timeout editor
+      </section>
+    );
+    registry.routes = [
+      {
+        id: "example.settings",
+        path: "/example-settings",
+        Component: PluginSettings,
+      },
+    ];
+    registry.settingsMenu = [
+      {
+        id: "example.menu",
+        label: "Example extension",
+        route: "example.settings",
+        location: "primary.settings",
+      },
+    ];
+    renderWithProviders(
+      <>
+        <SettingsSearchNavigation />
+        <LocationProbe />
+        <Routes>
+          <Route path="/settings/*" element={<SettingsCenter />} />
+          <Route path="/example-settings" element={<PluginSettings />} />
+        </Routes>
+      </>,
+      { initialEntries: ["/settings/general"] },
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText("Search settings"),
+      "Example timeout",
+    );
+    expect(screen.getByText("No matching settings")).toBeVisible();
+    let registration: { dispose(): void };
+    act(() => {
+      registration = settingsSearchRegistry.register("example", [
+        {
+          id: "timeout",
+          routeId: "example.settings",
+          label: "Request timeout",
+          groupPath: ["Connection"],
+          keywords: ["timeout"],
+          target: { targetId: "example.timeout" },
+        },
+      ]);
+    });
+    await userEvent.click(
+      screen.getByRole("button", { name: /Request timeout/ }),
+    );
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/example-settings",
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("plugin-timeout")).toHaveAttribute(
+        "data-search-highlight",
+        "true",
+      ),
+    );
+    act(() => registration.dispose());
   });
 
   it("preserves href-only plugin settings", async () => {
@@ -573,7 +921,7 @@ describe("SettingsCenter", () => {
       initialEntries: ["/settings/general"],
     });
     await userEvent.click(
-      screen.getByRole("button", { name: /External settings/i }),
+      screen.getByRole("button", { name: "External settings" }),
     );
 
     expect(open).toHaveBeenCalledWith(
@@ -581,6 +929,46 @@ describe("SettingsCenter", () => {
       "_blank",
       "noopener,noreferrer",
     );
+  });
+
+  it("shows plugin availability and removes field results when their route disappears", async () => {
+    registry.routes = [
+      {
+        id: "example.settings",
+        path: "/example-settings",
+        Component: () => null,
+      },
+    ];
+    const registration = settingsSearchRegistry.register("example", [
+      {
+        id: "horizon",
+        routeId: "example.settings",
+        label: "Recall horizon",
+        groupPath: ["Recall"],
+        target: { targetId: "example.horizon" },
+        availability: {
+          available: false,
+          reason: "Memory backend is disabled",
+        },
+      },
+    ]);
+    const view = renderWithProviders(<SettingsCenter />, {
+      initialEntries: ["/settings/general"],
+    });
+    await userEvent.type(
+      screen.getByPlaceholderText("Search settings"),
+      "horizon",
+    );
+    expect(
+      screen.getByRole("button", { name: /Recall horizon/ }),
+    ).toBeDisabled();
+    expect(screen.getByText("Memory backend is disabled")).toBeVisible();
+    registry.routes = [];
+    view.rerender(<SettingsCenter />);
+    expect(
+      screen.queryByRole("button", { name: /Recall horizon/ }),
+    ).not.toBeInTheDocument();
+    act(() => registration.dispose());
   });
 
   it("allows a plugin shortcut to be selected for the sidebar", async () => {
@@ -601,17 +989,17 @@ describe("SettingsCenter", () => {
     ];
 
     renderWithProviders(<SettingsCenter />, {
-      initialEntries: ["/settings/navigation"],
+      initialEntries: ["/settings/general"],
     });
 
-    const checkbox = screen.getByRole("checkbox", {
-      name: "Example extension",
-    });
-    expect(checkbox).toBeChecked();
-
-    await userEvent.click(checkbox);
-
-    expect(checkbox).not.toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove Example extension" }),
+    );
+    expect(useSidebarStore.getState().hiddenPluginItemIds).not.toContain(
+      "example.settings.menu",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(useSidebarStore.getState().hiddenPluginItemIds).toContain(
       "example.settings.menu",
     );
@@ -636,19 +1024,86 @@ describe("SettingsCenter", () => {
     ];
 
     renderWithProviders(<SettingsCenter />, {
-      initialEntries: ["/settings/navigation"],
+      initialEntries: ["/settings/general"],
     });
 
     expect(
-      screen.getByRole("heading", { level: 3, name: "Global settings" }),
-    ).toBeVisible();
-    const checkbox = screen.getByRole("checkbox", { name: "Security" });
-    expect(checkbox).not.toBeChecked();
-
-    await userEvent.click(checkbox);
-
-    expect(checkbox).toBeChecked();
+      screen.queryByRole("heading", { level: 3, name: "Global settings" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 3, name: "Global settings" }),
+      ).toBeVisible(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Add Security" }));
+    expect(useSidebarStore.getState().focusItemIds).not.toContain(
+      "core.security",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(useSidebarStore.getState().focusItemIds).toContain("core.security");
+  });
+
+  it("finds nested settings and navigates to their page", async () => {
+    registry.routes = [
+      {
+        id: "core.cron-jobs",
+        path: "/cron-jobs",
+        Component: () => <div>Jobs page</div>,
+      },
+    ];
+    renderWithProviders(
+      <>
+        <SettingsCenter />
+        <LocationProbe />
+      </>,
+      { initialEntries: ["/settings/cron-jobs"] },
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText("Search settings"),
+      "sidebar",
+    );
+    const navigation = screen.getByRole("navigation");
+    expect(
+      within(navigation).getByRole("button", { name: "General" }),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      within(navigation).getByRole("button", { name: "Sidebar" }),
+    );
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/settings/general",
+    );
+    expect(
+      screen.getByRole("heading", { name: "Sidebar" }),
+    ).toBeInTheDocument();
+  });
+
+  it("indexes custom channel labels from metadata and drops the previous agent's names", async () => {
+    vi.spyOn(channelApi, "listChannelSchemas").mockResolvedValue({
+      custom_bus: {
+        label: "Team bus",
+        description: "",
+        plugin_id: "bus",
+        config_fields: [],
+      },
+    });
+    registry.routes = [
+      { id: "core.channels", path: "/channels", Component: () => null },
+    ];
+    renderWithProviders(<SettingsCenter />, {
+      initialEntries: ["/settings/general"],
+    });
+    await userEvent.type(
+      screen.getByPlaceholderText("Search settings"),
+      "Team bus",
+    );
+    expect(
+      await screen.findByRole("button", { name: /Team bus/ }),
+    ).toBeVisible();
+    act(() => useAgentStore.setState({ selectedAgent: "codex" }));
+    expect(
+      screen.queryByRole("button", { name: /Team bus/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("controls built-in and plugin shortcuts independently by section", async () => {
@@ -676,35 +1131,18 @@ describe("SettingsCenter", () => {
     ];
 
     renderWithProviders(<SettingsCenter />, {
-      initialEntries: ["/settings/navigation"],
+      initialEntries: ["/settings/general"],
     });
 
-    const security = screen.getByRole("checkbox", { name: "Security" });
-    const plugin = screen.getByRole("checkbox", {
-      name: "Example extension",
-    });
-    expect(security).not.toBeChecked();
-    expect(plugin).toBeChecked();
-
-    const globalSection = screen
-      .getByRole("heading", { level: 3, name: "Global settings" })
-      .closest("section");
-    const pluginSection = screen
-      .getByRole("heading", { name: "Plugin features" })
-      .closest("section");
-    expect(globalSection).not.toBeNull();
-    expect(pluginSection).not.toBeNull();
-
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add Security" }));
     await userEvent.click(
-      within(globalSection!).getByRole("button", { name: "Select all" }),
+      screen.getByRole("button", { name: "Remove Example extension" }),
     );
-    expect(security).toBeChecked();
-    expect(plugin).toBeChecked();
-
-    await userEvent.click(
-      within(pluginSection!).getByRole("button", { name: "Invert" }),
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(useSidebarStore.getState().focusItemIds).toContain("core.security");
+    expect(useSidebarStore.getState().hiddenPluginItemIds).toContain(
+      "example.settings.menu",
     );
-    expect(security).toBeChecked();
-    expect(plugin).not.toBeChecked();
   });
 });

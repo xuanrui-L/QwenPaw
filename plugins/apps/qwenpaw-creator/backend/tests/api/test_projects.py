@@ -926,7 +926,7 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
             """The committed ``project.json`` text at this exact step."""
 
             return (api_runtime_root / project_id / "project.json").read_text(
-                encoding="utf-8"
+                encoding="utf-8",
             )
 
         unknown = await client.patch(
@@ -1096,9 +1096,7 @@ def test_subtitle_style_patch_redraws_prompts_and_documents(
     assert back.settings.subtitle_style is None
     back_elements = back.timelines.items["timeline:main"].elements_by_id
     assert back_elements["caption"].creation.prompt == ""
-    assert (
-        back_elements["authored"].creation.prompt == "手写意图：这里要安静一点"
-    )
+    assert back_elements["authored"].creation.prompt == "手写意图：这里要安静一点"
     back_motion = back_elements["caption"].creation.motion
     assert back_motion.entrance == "soft_fade"
     assert "caption_animation=soft_fade/none/0" in back_motion.design_notes

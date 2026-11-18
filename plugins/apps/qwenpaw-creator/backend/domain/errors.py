@@ -26,6 +26,10 @@ class ConflictError(CreatorError):
     retryable = True
 
 
+class ImageTaskAlreadyClaimed(ConflictError):
+    """The original image admission already has an executor."""
+
+
 class ReviewPendingError(ConflictError):
     """Normal pause while a generated artifact awaits user review."""
 

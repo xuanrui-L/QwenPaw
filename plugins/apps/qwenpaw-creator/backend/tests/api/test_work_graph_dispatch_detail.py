@@ -19,7 +19,7 @@ import pytest
 from api.work_graph_routes import _task_admission_detail
 from domain.enums import TaskStatus
 from services.file_agent_runtime.work_scheduler import (
-    _abandoned_queued_targets,
+    _abandoned_queued_task_ids,
 )
 
 pytestmark = pytest.mark.unit
@@ -53,7 +53,9 @@ def test_admitted_but_unclaimed_is_recognised() -> None:
         updated_at=now - timedelta(minutes=20),
         last_attempt_seq=0,
     )
-    assert _abandoned_queued_targets([stranded], now=now) == {TARGET}
+    assert _abandoned_queued_task_ids([stranded], now=now) == {
+        stranded.task_id
+    }
 
 
 def test_claimed_or_fresh_tasks_are_not_rescued() -> None:
@@ -68,7 +70,7 @@ def test_claimed_or_fresh_tasks_are_not_rescued() -> None:
         updated_at=now - timedelta(minutes=2),
         last_attempt_seq=0,
     )
-    assert _abandoned_queued_targets([running, fresh], now=now) == set()
+    assert _abandoned_queued_task_ids([running, fresh], now=now) == set()
 
 
 def test_admission_detail_reports_the_task_behind_a_running_node() -> None:
@@ -77,7 +79,7 @@ def test_admission_detail_reports_the_task_behind_a_running_node() -> None:
         updated_at=datetime.now(UTC) - timedelta(minutes=20),
         last_attempt_seq=0,
     )
-    detail = _task_admission_detail([stranded], TARGET)
+    detail = _task_admission_detail([stranded], stranded.task_id)
     assert detail["taskId"] == stranded.task_id
     assert detail["taskStatus"] == "QUEUED"
     assert detail["lastAttemptSeq"] == 0

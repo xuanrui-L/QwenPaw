@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -42,6 +42,7 @@ from domain.enums import (
     TaskStatus,
 )
 from domain.errors import (
+    ImageTaskAlreadyClaimed,
     ConflictError,
     NotFoundError,
     StorageIntegrityError,
@@ -613,6 +614,13 @@ def _safety_request_fingerprint(resolved: _ResolvedRequest) -> str:
             "prompt": resolved.prompt,
             "references": sorted(set(_resolved_reference_ids(resolved))),
         },
+    )
+
+
+def _image_task_already_claimed(task: TaskRecord) -> ImageTaskAlreadyClaimed:
+    return ImageTaskAlreadyClaimed(
+        "图片 Task 已由另一个执行者领取",
+        details={"code": "IMAGE_TASK_ALREADY_CLAIMED", "taskId": task.task_id},
     )
 
 
@@ -1870,12 +1878,34 @@ class FileImageExecutionService:
         arguments: Mapping[str, Any],
         idempotency_key: str,
         expected_object_versions: Sequence[str] = (),
+        resume_task_id: str | None = None,
     ) -> FileImageExecutionResult:
         command_value = CreatorCommandType(command)
         if command_value not in _IMAGE_COMMANDS:
             raise ValidationError(
                 f"不支持的文件图片命令: {command_value.value}",
             )
+        legacy_snapshot = None
+        admitted = None
+        if resume_task_id is not None:
+            admitted = await asyncio.to_thread(
+                self.executions.get_task, project_id, resume_task_id
+            )
+            if (
+                admitted.kind is not TaskKind.IMAGE_GENERATION
+                or not admitted.idempotency_key
+                or admitted.metadata.get("commandType") != command_value.value
+                or admitted.metadata.get("targetRef") != target_ref
+                or admitted.metadata.get("variantId")
+                != arguments.get("variantId")
+            ):
+                raise ConflictError("图片 Task 与当前工作节点不匹配")
+            idempotency_key = admitted.idempotency_key
+            saved_arguments = admitted.metadata.get("commandArguments")
+            if isinstance(saved_arguments, dict):
+                arguments = saved_arguments
+            else:
+                legacy_snapshot = admitted.metadata.get("requestSnapshot")
         ids = self._ids(project_id, idempotency_key)
         command_request_hash = _fingerprint(
             {
@@ -1893,6 +1923,8 @@ class FileImageExecutionService:
         for attempt in range(MAX_TRANSIENT_RETRY_SLOTS + 1):
             slot_key = transient_retry_slot_key(idempotency_key, attempt)
             ids = self._ids(project_id, slot_key)
+            if resume_task_id is not None and ids["task_id"] != resume_task_id:
+                continue
             try:
                 existing_task = await asyncio.to_thread(
                     self.executions.get_task,
@@ -1900,14 +1932,55 @@ class FileImageExecutionService:
                     ids["task_id"],
                 )
             except RecordNotFoundError:
+                if resume_task_id is not None:
+                    raise
                 existing_task = None
                 break
-            self._assert_command_replay(
-                existing_task,
-                command=command_value,
-                target_ref=target_ref,
-                command_request_hash=command_request_hash,
-            )
+            if (
+                isinstance(legacy_snapshot, dict)
+                and existing_task.metadata.get("commandRequestHash")
+                != command_request_hash
+            ):
+                # Older admissions froze the resolved prompt and references,
+                # but did not store the specialist's raw command arguments.
+                # Verify the resolved payload against both original receipts
+                # before acquiring the one-shot provider claim.
+                if (
+                    legacy_snapshot.get("command") != command_value.value
+                    or legacy_snapshot.get("targetRef") != target_ref
+                    or legacy_snapshot.get("variantId")
+                    != arguments.get("variantId")
+                ):
+                    raise ConflictError("图片 Task 与其请求快照不匹配")
+                arguments = {
+                    **arguments,
+                    "mode": legacy_snapshot.get("mode", "generate"),
+                }
+                if (
+                    command_value
+                    is not CreatorCommandType.GENERATE_STORYBOARD_IMAGE
+                    and legacy_snapshot.get("referenceVersionIds")
+                ):
+                    arguments["referenceImageRefs"] = legacy_snapshot[
+                        "referenceVersionIds"
+                    ]
+            else:
+                legacy_snapshot = None
+                self._assert_command_replay(
+                    existing_task,
+                    command=command_value,
+                    target_ref=target_ref,
+                    command_request_hash=command_request_hash,
+                )
+            if resume_task_id is not None:
+                if (
+                    existing_task.status is not TaskStatus.QUEUED
+                    or existing_task.last_attempt_seq
+                ):
+                    raise _image_task_already_claimed(existing_task)
+                # Validate the current inputs against the admission again,
+                # then compete for this exact task's one-shot provider claim.
+                break
             if existing_task.status is TaskStatus.SUCCEEDED:
                 return self._result_from_task(existing_task, replayed=True)
             if existing_task.status is TaskStatus.RUNNING:
@@ -1939,6 +2012,8 @@ class FileImageExecutionService:
                 continue
             raise _terminated_task_conflict(existing_task)
         else:
+            if resume_task_id is not None:
+                raise ConflictError("图片 Task 与已受理的幂等请求不匹配")
             raise _terminated_task_conflict(
                 existing_task,
                 exhausted_retries=True,
@@ -1993,6 +2068,8 @@ class FileImageExecutionService:
             arguments=dict(arguments),
             image_model_name=image_model_name,
         )
+        if legacy_snapshot is not None:
+            resolved = replace(resolved, prompt=legacy_snapshot["prompt"])
         await asyncio.to_thread(
             self._assert_visual_anchors_ready,
             base.project,
@@ -2000,6 +2077,19 @@ class FileImageExecutionService:
             resolved.target_ref,
             resolved.variant_id,
         )
+        input_generation, input_etag = base.generation, base.etag
+        if admitted is not None:
+            # An unrelated sibling may have finished during the grace period.
+            # The existing authoring guard checks the target, selection and
+            # referenced bytes before validating the original admission.
+            if base.etag != admitted.input_etag and not (
+                self._read_set_still_current(base.project, admitted)
+            ):
+                raise ConflictError("已受理的图片 Task 输入已变更")
+            input_generation, input_etag = (
+                admitted.input_generation,
+                admitted.input_etag,
+            )
         fingerprint_payload: dict[str, Any] = {
             "command": command_value.value,
             "targetRef": resolved.target_ref,
@@ -2008,8 +2098,8 @@ class FileImageExecutionService:
             "referenceImageUrls": list(resolved.reference_image_urls),
             "referenceVersionIds": list(resolved.reference_version_ids),
             "referenceChecksums": list(resolved.reference_checksums),
-            "inputGeneration": base.generation,
-            "inputEtag": base.etag,
+            "inputGeneration": input_generation,
+            "inputEtag": input_etag,
         }
         if resolved.mode != "generate":
             # Only non-default modes join the fingerprint so legacy generate
@@ -2033,15 +2123,31 @@ class FileImageExecutionService:
             variant_id=resolved.variant_id,
             reference_version_ids=resolved.reference_version_ids,
         )
-        run, task = await self._admit(
-            base=base,
-            resolved=resolved,
-            request_fingerprint=request_fingerprint,
-            command_request_hash=command_request_hash,
-            idempotency_key=idempotency_key,
-            ids=ids,
-            image_model_name=image_model_name,
-        )
+        if admitted is not None:
+            task = admitted
+            run = await asyncio.to_thread(
+                self.executions.get_run, project_id, ids["run_id"]
+            )
+            if (
+                task.run_id != run.run_id
+                or run.input_etag != task.input_etag
+                or run.request_fingerprint != request_fingerprint
+                or task.request_fingerprint != request_fingerprint
+                or task.input_refs
+                != [resolved.target_ref, *resolved.reference_version_ids]
+            ):
+                raise ConflictError("图片 Task 的原始请求无法验证")
+        else:
+            run, task = await self._admit(
+                base=base,
+                resolved=resolved,
+                request_fingerprint=request_fingerprint,
+                command_request_hash=command_request_hash,
+                command_arguments=arguments,
+                idempotency_key=idempotency_key,
+                ids=ids,
+                image_model_name=image_model_name,
+            )
         if task.status is TaskStatus.SUCCEEDED:
             return self._result_from_task(task, replayed=True)
         if task.status in {
@@ -2062,15 +2168,19 @@ class FileImageExecutionService:
             ManualHoldConflict,
         )
 
-        task = await self._start(
-            run=run,
-            task=task,
-            resolved=resolved,
-            ids=ids,
-        )
+        try:
+            task = await self._start(
+                run=run, task=task, resolved=resolved, ids=ids
+            )
+        except ExecutionStateConflict as exc:
+            if resume_task_id is None:
+                raise
+            # The original worker may win the transition while both wait to
+            # start. Its durable provider claim owns any subsequent work.
+            raise _image_task_already_claimed(task) from exc
         try:
             if not await self._claim_provider(task):
-                raise ConflictError("图片 Task 已由另一个执行者领取")
+                raise _image_task_already_claimed(task)
         except (ValidationError, ManualHoldConflict) as exc:
             # An anchor can start repainting after admission. No provider
             # claim exists yet: close this attempt and allow a free retry
@@ -2453,6 +2563,7 @@ class FileImageExecutionService:
         resolved: _ResolvedRequest,
         request_fingerprint: str,
         command_request_hash: str,
+        command_arguments: Mapping[str, Any] | None = None,
         idempotency_key: str,
         ids: Mapping[str, str],
         image_model_name: str = "",
@@ -2514,6 +2625,11 @@ class FileImageExecutionService:
                 "targetRef": resolved.target_ref,
                 "variantId": resolved.variant_id,
                 "commandRequestHash": command_request_hash,
+                **(
+                    {"commandArguments": dict(command_arguments)}
+                    if command_arguments is not None
+                    else {}
+                ),
                 "slotId": resolved.slot_id,
                 "artifactVersionId": ids["artifact_version_id"],
                 "fileId": ids["file_id"],
@@ -3717,6 +3833,7 @@ async def execute_file_image_command(
     idempotency_key: str,
     expected_object_versions: Sequence[str] = (),
     provider: ImageProvider | None = None,
+    resume_task_id: str | None = None,
 ) -> FileImageExecutionResult:
     """Small route/tool entry point with an injectable provider for tests."""
 
@@ -3728,6 +3845,7 @@ async def execute_file_image_command(
         arguments=arguments,
         idempotency_key=idempotency_key,
         expected_object_versions=expected_object_versions,
+        resume_task_id=resume_task_id,
     )
 
 

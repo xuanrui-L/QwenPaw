@@ -467,7 +467,6 @@ function defaultState() {
 export const useCreatorSessionStore = create<CreatorSessionState>(
   (set, get) => {
     let lifecycleGeneration = 0;
-    let replayUntilSeq = 0;
     let sessionRefreshGeneration = 0;
     let messageRefreshEpoch = 0;
     let pendingMessageRefresh: { epoch: number; after: number } | null = null;
@@ -706,9 +705,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           // Replay from the local cursor to rebuild its independent lifecycle.
           // A first view has no local cursor, so it replays a bounded window
           // off the durable head instead of the Project's whole event history.
-          const replayUntilHead = sessionResponse.session.lastEventSeq;
+          const replayUntilSeq = sessionResponse.session.lastEventSeq;
           const resumeAfter = sameProject ? state.lastEventSeq : 0;
-          replayUntilSeq = replayUntilHead;
           let conversations = conversationPage.items;
           let activeConversationId =
             preferredConversationId &&
@@ -1821,7 +1819,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               // lifecycle replay must not undo pagination by pulling from the
               // first old message again (large projects contain huge tool logs).
               const historicalMessage =
-                current.isReplaying && event.seq <= replayUntilSeq;
+                current.isReplaying && event.seq <= current.replayUntilSeq;
               const message = event.data.message as CreatorMessage | undefined;
               if (message && !historicalMessage) {
                 messages = mergeMessages(messages, [message]);
@@ -1876,7 +1874,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                     : ((event.data.status ?? event.data.to) as
                         | CreatorSessionView["status"]
                         | undefined);
-                if (status && session) {
+                if (status && session && event.seq > session.lastEventSeq) {
                   session = { ...session, status, lastEventSeq: event.seq };
                   if (
                     status === "IDLE" ||
@@ -1892,7 +1890,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             }
           });
           const lastEventSeq = accepted.at(-1)!.seq;
-          if (session && session.lastEventSeq !== lastEventSeq)
+          if (session && session.lastEventSeq < lastEventSeq)
             session = { ...session, lastEventSeq };
           const combinedEvents = [...current.events, ...accepted];
           const recentStart = Math.max(0, combinedEvents.length - EVENT_WINDOW);
