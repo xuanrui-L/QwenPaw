@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CREATOR_ROUTE_OBJECTS } from "@/app/router";
 import type { FileProjectReviewRecord } from "@/contracts/creator";
+import { ev } from "@/test/sessionEventBuilders";
 import ProjectLayout from "@/components/layout/ProjectLayout";
 import { NavigationRuntime } from "@/routing/navigation";
 import { navigateToLocator } from "@/routing/locators";
@@ -46,33 +47,33 @@ const sessionState = {
   lastEventSeq: 0,
 } as const;
 
-function commonRoutes(review?: FileProjectReviewRecord) {
+function commonRoutes(review?: FileProjectReviewRecord, projectId = "p1") {
   return [
     {
-      match: "/projects/p1/runtime/reviews/active",
+      match: `/projects/${projectId}/runtime/reviews/active`,
       response: review
         ? { json: [review], headers: { ETag: `"${review.decision_token}"` } }
         : { status: 204 },
     },
     {
-      match: "/projects/p1/project",
+      match: `/projects/${projectId}/project`,
       response: {
         json: {
-          projectId: "p1",
+          projectId,
           generation: 3,
           etag: '"sha256:g3"',
           syncStatus: "healthy",
-          project: cloneProject(),
+          project: { ...cloneProject(), project_id: projectId },
         },
         headers: { ETag: '"sha256:g3"' },
       },
     },
     ...["conversations/c1/messages", "specialist-runs", "tasks"].map((p) => ({
-      match: `/projects/p1/${p}`,
+      match: `/projects/${projectId}/${p}`,
       response: { json: { items: [] } },
     })),
     {
-      match: "/projects/p1/conversations",
+      match: `/projects/${projectId}/conversations`,
       response: {
         json: {
           items: [
@@ -87,14 +88,19 @@ function commonRoutes(review?: FileProjectReviewRecord) {
       },
     },
     {
-      match: "/projects/p1/session",
-      response: { json: { session: sessionState, agentStatusBar: status } },
-    },
-    {
-      match: "/projects/p1/work-graph",
+      match: `/projects/${projectId}/session`,
       response: {
         json: {
-          projectId: "p1",
+          session: { ...sessionState, projectId },
+          agentStatusBar: status,
+        },
+      },
+    },
+    {
+      match: `/projects/${projectId}/work-graph`,
+      response: {
+        json: {
+          projectId,
           counts: {},
           nodes: [],
           generation: 0,
@@ -212,6 +218,137 @@ describe("ProjectLayout visible shell", () => {
       }
     },
   );
+
+  it("keeps the current project's reviews when a previous completion poll returns", async () => {
+    const p2Review = {
+      ...elementReview(),
+      project_id: "p2",
+      review_id: "p2-review",
+    };
+    const { fetchMock } = installMockFetch([
+      ...commonRoutes(elementReview()),
+      ...commonRoutes(p2Review, "p2"),
+    ]);
+    const router = renderShell("project-review-owner");
+    await waitFor(() =>
+      expect(useFileProjectReviewStore.getState().syncStatus).toBe("healthy"),
+    );
+    const fetch = fetchMock.getMockImplementation()!;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let p1Reads = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/projects/p1/runtime/reviews/active")) {
+        p1Reads++;
+        await pending;
+      }
+      return fetch(input, init);
+    });
+    act(() =>
+      useCreatorSessionStore
+        .getState()
+        .ingestEvents([
+          ev(1, "agent.run.completed", {
+            runId: "finished",
+            reviewIds: ["review-element-1"],
+          }),
+        ]),
+    );
+    await waitFor(() => expect(p1Reads).toBe(1));
+    await act(() => router.navigate("/project/p2/plan"));
+    await waitFor(() =>
+      expect(useFileProjectReviewStore.getState().reviews[0]?.review_id).toBe(
+        "p2-review",
+      ),
+    );
+    await act(async () => {
+      release();
+      await pending;
+    });
+    expect(p1Reads).toBe(1);
+    expect(useFileProjectReviewStore.getState().projectId).toBe("p2");
+    expect(useFileProjectReviewStore.getState().reviews[0]?.review_id).toBe(
+      "p2-review",
+    );
+    expect(router.state.location.pathname).toBe("/project/p2/plan");
+    expect(router.state.location.search).toBe("");
+  });
+
+  it("ignores the replay tail for navigation and still handles a live completion", async () => {
+    installMockFetch([
+      {
+        match: "/projects/p1/session",
+        response: {
+          json: {
+            session: { ...sessionState, lastEventSeq: 5 },
+            agentStatusBar: status,
+          },
+        },
+      },
+      ...commonRoutes(elementReview()),
+    ]);
+    const router = renderShell("replay-navigation");
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().replayUntilSeq).toBe(5),
+    );
+    await waitFor(() =>
+      expect(useFileProjectReviewStore.getState().reviews).toHaveLength(1),
+    );
+    const completion = (seq: number) =>
+      ev(seq, "agent.run.completed", {
+        runId: "run-element-1",
+        reviewIds: ["review-element-1"],
+      });
+    await act(async () =>
+      useCreatorSessionStore.getState().ingestEvents([completion(5)]),
+    );
+    expect(useCreatorSessionStore.getState().isReplaying).toBe(false);
+    expect(router.state.location.search).toBe("");
+    await act(async () =>
+      useCreatorSessionStore.getState().ingestEvents([completion(6)]),
+    );
+    await waitFor(() =>
+      expect(router.state.location.search).toContain("review=1"),
+    );
+  });
+
+  it("keeps polling tasks and the graph while the current session request is pending", async () => {
+    const { calls, fetchMock } = installMockFetch(commonRoutes());
+    renderShell("independent-production-polls");
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().session).not.toBeNull(),
+    );
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const original = fetchMock.getMockImplementation()!;
+    let sessionFetches = 0;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).endsWith("/session")) {
+        sessionFetches++;
+        await pending;
+      }
+      return original(input, init);
+    });
+    try {
+      const count = (path: string) =>
+        calls.filter((call) => call.url.endsWith(path)).length;
+      const tasks = count("/tasks"),
+        graphs = count("/work-graph");
+      for (let i = 0; i < 3; i++)
+        await act(async () => {
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+      expect(count("/tasks")).toBe(tasks + 3);
+      expect(count("/work-graph")).toBe(graphs + 3);
+      expect(sessionFetches).toBe(1);
+    } finally {
+      await act(async () => finish());
+    }
+  });
 
   it("preserves the 58px shell and default-open 340px left AgentDock beside the Element Plan", async () => {
     const { calls } = installMockFetch(commonRoutes());

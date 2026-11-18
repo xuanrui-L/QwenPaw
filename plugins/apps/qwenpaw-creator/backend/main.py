@@ -251,8 +251,21 @@ async def _run_storage_maintenance(
 
     await asyncio.sleep(_MAINTENANCE_DELAY_SECONDS)
     budget = budget_from_environment()
-    await _sweep_orphaned_scratch(services, budget)
-    await _collect_settled_transactions(services, budget)
+
+    async def sweep() -> None:
+        await _sweep_orphaned_scratch(services, budget)
+        if not budget.stop_requested.is_set():
+            await _collect_settled_transactions(services, budget)
+
+    # Cancelling asyncio.to_thread only cancels its awaiter. Signal and join
+    # the actual sweeper before shutting down the services that own its data.
+    worker = asyncio.create_task(sweep())
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        budget.stop_requested.set()
+        await worker
+        raise
     await _elide_stored_conversations(services)
 
 

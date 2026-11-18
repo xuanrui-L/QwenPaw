@@ -599,10 +599,10 @@ def _swap_task_work_after_listing(
     # pylint: disable=protected-access
     release_tree = task_scratch._release_pinned_tree
 
-    def listed_then_swapped(dir_fd: int):
+    def listed_then_swapped(dir_fd: int, budget=None):
         list(os.scandir(dir_fd))
         _replace_with_a_link(scratch, outside)
-        return release_tree(dir_fd)
+        return release_tree(dir_fd, budget)
 
     monkeypatch.setattr(
         task_scratch,
@@ -815,9 +815,18 @@ def _asset(
     return store, indexed, project / published.relative_uri
 
 
+@pytest.mark.parametrize("disable_pinned_release", [False, True])
 def test_an_input_links_the_asset_instead_of_doubling_it(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    disable_pinned_release: bool,
 ) -> None:
+    if disable_pinned_release:
+        monkeypatch.setattr(
+            task_scratch,
+            "pinned_release_supported",
+            lambda: False,
+        )
     store, indexed, final = _asset(tmp_path, b"artifact-payload" * 8)
     scratch = _scratch(tmp_path, media=("output.mp4",))
     destination = scratch / "inputs" / "000000-artifact.mp4"
@@ -828,17 +837,18 @@ def test_an_input_links_the_asset_instead_of_doubling_it(
     assert destination.stat().st_ino == final.stat().st_ino
     assert final.stat().st_nlink == 2
 
-    release = release_scratch_media(scratch, reason="terminal")
+    result = release_scratch_media(scratch, reason="terminal")
 
-    # Unlike the marked cases above, what this one claims is that the
-    # linked Asset outlives the release of its scratch entry, and that
-    # holds everywhere.  A platform that cannot pin a directory refuses
-    # to delete anything at all, so only the unlink is conditional.
     if task_scratch.pinned_release_supported():
+        assert result.removed_files == 2
         assert not destination.exists()
+        assert not (scratch / "output.mp4").exists()
+        assert final.stat().st_nlink == 1
     else:
-        assert release.removed_files == 0
-        assert destination.exists()
+        assert result == _empty()
+        assert destination.read_bytes() == b"artifact-payload" * 8
+        assert (scratch / "output.mp4").read_bytes() == b"x" * 64
+        assert final.stat().st_nlink == 2
     assert final.read_bytes() == b"artifact-payload" * 8
 
 
@@ -891,6 +901,7 @@ def _stamp(path: Path, moment: datetime) -> None:
 
 def test_profile_splits_scratch_and_transactions_at_the_baseline(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     legacy = _scratch(tmp_path, "task-legacy")
     transactions = tmp_path / PROJECT_ID / "runtime" / "transactions"
@@ -945,6 +956,11 @@ def test_profile_splits_scratch_and_transactions_at_the_baseline(
     assert project_storage_profile(_services(tmp_path))["totals"][
         "taskWorkReclaimableBytes"
     ] == _media_bytes(fresh) + _media_bytes(legacy)
+
+    monkeypatch.setenv("CREATOR_SCRATCH_RELEASE_ENABLED", "0")
+    disabled = project_storage_profile(_services(tmp_path))["projects"][0]
+    assert disabled["taskWorkReclaimableBytes"] == 0
+    assert disabled["taskWorkBytes"] == entry["taskWorkBytes"]
 
 
 def test_the_scratch_sweep_stops_when_the_pass_budget_runs_out(
@@ -1057,3 +1073,27 @@ def test_an_oversized_projects_scratch_waits_for_a_person(
     assert swept.removed_files == 2
     assert swept.skipped_projects == 0
     assert _media(scratch) == []
+
+
+@_needs_pinned_release
+def test_background_scratch_release_stops_during_one_directory(
+    tmp_path,
+    monkeypatch,
+):
+    scratch = _scratch(tmp_path)
+    budget = task_scratch.SweepBudget()
+    original = task_scratch._releasable_name
+
+    def stop_after_one(name, mode):
+        releasable = original(name, mode)
+        if releasable:
+            budget.stop_requested.set()
+        return releasable
+
+    monkeypatch.setattr(task_scratch, "_releasable_name", stop_after_one)
+    result = release_scratch_media(
+        scratch, reason="orphan-sweep", budget=budget
+    )
+    assert result.removed_files == 1
+    assert len(_media(scratch)) == 1
+    assert budget.stopped_early

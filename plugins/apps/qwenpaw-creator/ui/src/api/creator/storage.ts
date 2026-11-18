@@ -6,6 +6,7 @@ export interface ProjectStorageProfile {
   historyKeptAt: string | null;
   reclaimConfirmedAt: string | null;
   pendingReclaimBytes: number;
+  pendingTransactionCleanupBytes?: number;
   taskWorkBytes: number;
   taskWorkLegacyBytes: number;
   taskWorkReclaimableBytes: number;

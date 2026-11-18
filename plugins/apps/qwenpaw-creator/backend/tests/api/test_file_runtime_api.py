@@ -287,25 +287,14 @@ def _parse_sse_id_type(chunk: str) -> tuple[int, str]:
     return seq, kind
 
 
-def test_replay_deltas_of_an_active_run_survive_the_byte_layer_filter(
+@pytest.mark.parametrize(
+    "status", [SpecialistRunStatus.RUNNING_MODEL, SpecialistRunStatus.FAILED]
+)
+def test_replay_preserves_specialist_text_without_a_completed_message(
     tmp_path,
-    monkeypatch,
+    status,
 ) -> None:
-    """A pre-connect delta of an in-flight run must reach the client.
-
-    Review #243 follow-up P2: the replay-boundary fix stopped the filter
-    from eating live deltas, but on the pre-boundary side the classifier
-    still dropped every delta before the post-parse exemption could
-    see it -- a returning user watched the reply missing its opening
-    stretch until ``message.completed`` arrived. Both layers must
-    agree: the byte-level classifier spares deltas whose ``runId`` is
-    in the active set, and the parse-time filter spares the same set.
-
-    The active-run delta here is the reviewer's exact shape (seq 1 =
-    ``run.started``, seq 2 = delta with the prefix), and a sibling
-    delta from a settled run at seq 3 stays filtered to prove the
-    exemption is bounded by ``active_run_ids``.
-    """
+    """Both replay filters retain partial replies from live and failed workers."""
 
     _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
     store = services.sessions
@@ -324,7 +313,7 @@ def test_replay_deltas_of_an_active_run_survive_the_byte_layer_filter(
         {"runId": "run-active"},
     )
     append(
-        "agent.message_delta",
+        "subagent.message_delta",
         {
             "runId": "run-active",
             "messageId": "m-active",
@@ -335,7 +324,7 @@ def test_replay_deltas_of_an_active_run_survive_the_byte_layer_filter(
     # Same boundary-internal delta from a run that is NOT in the active
     # set at connect -- still should be dropped as replay noise.
     append(
-        "agent.message_delta",
+        "subagent.message_delta",
         {
             "runId": "run-settled",
             "messageId": "m-settled",
@@ -344,11 +333,48 @@ def test_replay_deltas_of_an_active_run_survive_the_byte_layer_filter(
         },
     )
 
-    monkeypatch.setattr(
-        file_session_routes,
-        "_active_specialist_run_ids",
-        lambda *_args, **_kwargs: {"run-active"},
+    append(
+        "subagent.message_completed",
+        {
+            "runId": "run-settled",
+            "messageId": "m-settled",
+            "text": "Complete reply",
+        },
     )
+    if status == SpecialistRunStatus.FAILED:
+        append(
+            "subagent.failed",
+            {"runId": "run-active", "error": "stream interrupted"},
+        )
+
+    executions = ProjectExecutionStore(services.root)
+    for run_id, final_status in (
+        ("run-active", status),
+        ("run-settled", SpecialistRunStatus.SUCCEEDED),
+    ):
+        executions.create_specialist_run(
+            SpecialistRunRecord(
+                run_id=run_id,
+                project_id="project-1",
+                round_id=run_id,
+                role=SpecialistRole.VISUAL_DEVELOPMENT,
+                input_generation=_snapshot.generation,
+                input_etag=_snapshot.etag,
+            )
+        )
+        executions.transition_specialist_run(
+            "project-1",
+            run_id,
+            expected_status=SpecialistRunStatus.QUEUED,
+            status=SpecialistRunStatus.RUNNING_MODEL,
+        )
+        if final_status != SpecialistRunStatus.RUNNING_MODEL:
+            executions.transition_specialist_run(
+                "project-1",
+                run_id,
+                expected_status=SpecialistRunStatus.RUNNING_MODEL,
+                status=final_status,
+            )
 
     class Connection:
         polls = 0
@@ -766,6 +792,65 @@ def test_file_execution_routes_list_and_cancel(tmp_path, run_scenario) -> None:
     assert cancelled.json()["status"] == "CANCELLED"
     assert replay.status_code == 202
     assert replay.json() == cancelled.json()
+
+
+def test_automatic_timeline_render_respects_manual_hold(
+    tmp_path,
+    monkeypatch,
+    run_scenario,
+):
+    from services.file_agent_runtime.manual_regeneration_hold import (
+        ManualRegenerationHoldStore,
+    )
+    from services.file_agent_runtime.work_graph import WorkNode, WorkNodeStatus
+
+    app, services, _, _ = _app(tmp_path)
+    source = WorkNode(
+        node_id="video:shot",
+        kind="video",
+        label="shot",
+        status=WorkNodeStatus.DONE,
+    )
+    compose = WorkNode(
+        node_id="compose:timeline:main",
+        kind="compose",
+        label="compose",
+        status=WorkNodeStatus.READY,
+        deps=(source.node_id,),
+    )
+    holds = ManualRegenerationHoldStore(services.root)
+    holds.admitted(holds.begin("project-1", source, (source, compose)))
+    assert holds.is_held("project-1", compose.node_id)
+    calls = []
+
+    async def fake_execute(*_args, **_kwargs):
+        calls.append("render")
+
+    monkeypatch.setattr(
+        "services.media_files.local_execution.execute_file_local_media_command",
+        fake_execute,
+    )
+    monkeypatch.setattr(
+        "services.media_files.local_execution.validate_local_media_execution",
+        lambda *_args, **_kwargs: None,
+    )
+
+    async def scenario(client):
+        url = "/projects/project-1/timelines/timeline%3Amain/render"
+        blocked = await client.post(
+            url,
+            params={"automatic": True},
+            headers={"Idempotency-Key": "auto"},
+        )
+        assert blocked.status_code == 409
+        assert blocked.json()["details"]["code"] == "MANUAL_REGENERATION_HOLD"
+        assert not calls
+        manual = await client.post(url, headers={"Idempotency-Key": "manual"})
+        assert manual.status_code == 202
+        await asyncio.sleep(0)
+        assert calls == ["render"]
+
+    run_scenario(app, scenario)
 
 
 def test_timeline_render_dispatches_once_and_returns_before_completion(

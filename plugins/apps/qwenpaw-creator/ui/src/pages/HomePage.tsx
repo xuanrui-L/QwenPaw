@@ -65,7 +65,7 @@ interface ProjectCardProps {
   onCopy: (project: ProjectSummary) => void;
   onRecreate: (project: ProjectSummary) => void;
   onPreview: (project: ProjectSummary) => void;
-  onReclaimConfirmed: () => void;
+  onReclaimConfirmed: () => Promise<void>;
   formatDate: (dateStr: string) => string;
 }
 
@@ -113,10 +113,6 @@ const ProjectCard = memo(function ProjectCard({
     projectScenarioLabel = found ? t(found.labelKey) : project.scenario;
   }
   const canPreview = Boolean(project.finalVideoVersionId);
-  const awaitingReclaim =
-    storage !== undefined &&
-    storage.reclaimConfirmedAt === null &&
-    storage.pendingReclaimBytes > reclaimCap;
   // When there are active background tasks, override the session status
   // to match the in-project live status display.
   const displayStatus =
@@ -154,11 +150,12 @@ const ProjectCard = memo(function ProjectCard({
         <p className="line-clamp-2 min-h-[36px] text-xs leading-[18px] text-[var(--color-text-tertiary)]">
           {project.description}
         </p>
-        {awaitingReclaim && (
+        {storage && (
           <StorageReclaimNotice
             projectId={project.projectId}
             projectName={project.name}
-            pendingBytes={storage.pendingReclaimBytes}
+            storage={storage}
+            reclaimCap={reclaimCap}
             onConfirmed={onReclaimConfirmed}
           />
         )}

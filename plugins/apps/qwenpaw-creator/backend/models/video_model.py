@@ -255,8 +255,7 @@ async def _resolve_reference_media_url(
                 protocol=model_config.get_video_protocol(),
             )
             logger.info(
-                f"Uploaded reference media to provider storage | backend={backend}, "
-                f"filename={filename}, url={resolved_url[:100]}",
+                f"Prepared reference media | backend={backend}, filename={filename}",
             )
             return resolved_url, kind
 

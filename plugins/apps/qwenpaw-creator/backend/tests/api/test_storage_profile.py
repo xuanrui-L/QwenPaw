@@ -372,3 +372,40 @@ def test_invalidation_is_scoped_to_one_data_root() -> None:
 
     storage_profile_routes.invalidate_storage_profile_cache()
     assert not storage_profile_routes._profile_cache
+
+
+@pytest.mark.parametrize("journal_removed", [False, True])
+def test_interrupted_confirmed_transaction_cleanup_can_be_retried(
+    api_request, app, api_runtime_root, monkeypatch, journal_removed
+):
+    from services.project_files import transaction_gc
+
+    transactions = _seed_legacy_project(api_runtime_root, PROJECT_A, count=51)
+    monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "10")
+    route = f"/storage/projects/{PROJECT_A}/reclaim-history"
+
+    def interrupt_removal(path, **_kwargs):
+        if journal_removed:
+            (path / "journal.json").unlink()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(transaction_gc.shutil, "rmtree", interrupt_removal)
+        result = api_request(app, "POST", route, json={"confirm": True})
+    assert result.status_code == 200
+    assert result.json()["transactionBytes"] == 0
+
+    def profile():
+        (row,) = api_request(app, "GET", "/storage/profile").json()["projects"]
+        return row
+
+    pending = profile()
+    assert pending["reclaimConfirmedAt"] is not None
+    assert pending["pendingReclaimBytes"] == 0
+    (tombstone,) = transactions.glob(".deleted-*")
+    remaining = sum(file.stat().st_size for file in tombstone.iterdir())
+    assert remaining >= 64
+    assert pending["pendingTransactionCleanupBytes"] == remaining
+    result = api_request(app, "POST", route, json={"confirm": True})
+    assert result.json()["transactionBytes"] == remaining
+    assert profile()["pendingTransactionCleanupBytes"] == 0
+    assert len(list(transactions.iterdir())) == 50

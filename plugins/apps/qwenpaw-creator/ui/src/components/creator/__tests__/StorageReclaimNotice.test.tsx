@@ -10,6 +10,11 @@ vi.mock("@/api/creator", async (importOriginal) => {
 });
 
 const mockedReclaim = vi.mocked(confirmProjectReclaim);
+const awaitingConfirmation = {
+  pendingReclaimBytes: 5 * 1024 * 1024 * 1024,
+  historyKeptAt: null,
+  reclaimConfirmedAt: null,
+};
 
 describe("StorageReclaimNotice", () => {
   beforeEach(() => {
@@ -32,7 +37,8 @@ describe("StorageReclaimNotice", () => {
       <StorageReclaimNotice
         projectId="project-a"
         projectName="被逐出宗门那天"
-        pendingBytes={5 * 1024 * 1024 * 1024}
+        storage={awaitingConfirmation}
+        reclaimCap={1}
         onConfirmed={() => {}}
       />,
     );
@@ -63,7 +69,8 @@ describe("StorageReclaimNotice", () => {
       <StorageReclaimNotice
         projectId="project-a"
         projectName="被逐出宗门那天"
-        pendingBytes={5 * 1024 * 1024 * 1024}
+        storage={awaitingConfirmation}
+        reclaimCap={1}
         onConfirmed={onConfirmed}
       />,
     );
@@ -100,6 +107,58 @@ describe("StorageReclaimNotice", () => {
     ).toBeInTheDocument();
   });
 
+  it("retries only the remaining confirmed cleanup and reloads the profile", async () => {
+    const receipt = "2026-11-03T00:00:00Z";
+    const storage = { ...awaitingConfirmation, reclaimConfirmedAt: receipt };
+    const onConfirmed = vi.fn();
+    const props = {
+      projectId: "project-a",
+      projectName: "Archive",
+      reclaimCap: 1024,
+      onConfirmed,
+    };
+    const { rerender } = render(
+      <StorageReclaimNotice {...props} storage={storage} />,
+    );
+    expect(screen.queryByRole("button")).toBeNull(); // Older response omitted cleanup bytes.
+    rerender(
+      <StorageReclaimNotice
+        {...props}
+        storage={{
+          ...storage,
+          pendingTransactionCleanupBytes: 64,
+          historyKeptAt: receipt,
+        }}
+      />,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+    rerender(
+      <StorageReclaimNotice
+        {...props}
+        storage={{ ...storage, pendingTransactionCleanupBytes: 64 }}
+      />,
+    );
+    mockedReclaim.mockResolvedValue({
+      projectId: "project-a",
+      historyKept: false,
+      confirmedAt: receipt,
+      removedTransactions: 1,
+      transactionBytes: 64,
+      releasedFiles: 0,
+      releasedBytes: 0,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "继续清理" }));
+    await waitFor(() => expect(onConfirmed).toHaveBeenCalledOnce());
+    expect(mockedReclaim).toHaveBeenCalledWith("project-a");
+    rerender(
+      <StorageReclaimNotice
+        {...props}
+        storage={{ ...storage, pendingTransactionCleanupBytes: 0 }}
+      />,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
   it("brings the notice back when the press fails", async () => {
     mockedReclaim.mockRejectedValue(new Error("boom"));
     // The static antd holder races Modal.destroyAll() plus the now-immediate
@@ -110,7 +169,8 @@ describe("StorageReclaimNotice", () => {
       <StorageReclaimNotice
         projectId="project-a"
         projectName="被逐出宗门那天"
-        pendingBytes={5 * 1024 * 1024 * 1024}
+        storage={awaitingConfirmation}
+        reclaimCap={1}
         onConfirmed={onConfirmed}
       />,
     );

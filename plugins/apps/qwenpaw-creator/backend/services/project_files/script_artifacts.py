@@ -58,10 +58,8 @@ def script_version_id(project_id: str, timeline_id: str, checksum: str) -> str:
 
     digest = uuid5(
         NAMESPACE_URL,
-        # 拆行只为满足 79 列限制：相邻字面量拼接出的键与拆分前逐字节相同，
-        # 不会让已有的 timeline-script 工件 id 失效。
-        f"qwenpaw-creator:timeline-script:{project_id}"
-        f":{timeline_id}:{checksum}",
+        "qwenpaw-creator:timeline-script:"
+        f"{project_id}:{timeline_id}:{checksum}",
     ).hex
     return f"artifact-script-{digest}"
 

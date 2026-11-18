@@ -152,7 +152,6 @@ export default function ProjectLayout() {
     (state) => state.refreshSession,
   );
   const disconnect = useCreatorSessionStore((state) => state.disconnect);
-  const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const sessionActive = useCreatorSessionStore(
     (state) =>
       state.projectId === id &&
@@ -218,22 +217,20 @@ export default function ProjectLayout() {
     locationKey: string;
     focus: ReviewFocusRequest | null;
   } | null>(null);
+  const reviewCompletion = useRef<symbol | null>(null);
   const lastConsumedEvent = useRef(0);
   const currentProjectId = useRef(id);
   currentProjectId.current = id;
-  const productionRequest = useRef<{
+  const pendingSession = useRef<{
     projectId: string;
     promise: Promise<void>;
   } | null>(null);
   const refreshProduction = useCallback((): Promise<void> => {
     if (!id || currentProjectId.current !== id) return Promise.resolve();
-    if (productionRequest.current?.projectId === id)
-      return productionRequest.current.promise;
     const tasks = useCreatorTaskViewStore.getState();
     const graph = useWorkGraphStore.getState();
-    // Join this shell's current read and respect reads already started by a
-    // workbench. A slow request must not accumulate overlapping interval/SSE
-    // requests; each store also fences responses across project changes.
+    // Each collection can finish independently. A slow read must only block
+    // the next poll of that same collection.
     const requests: Promise<void>[] = [];
     if (tasks.projectId !== id || !tasks.loading)
       requests.push(refreshTasks(id));
@@ -243,16 +240,19 @@ export default function ProjectLayout() {
     // event. Revalidate the session alongside the authoritative task lists so
     // a stale WAITING_RUNTIME status cannot keep the dock spinning forever.
     const sessionState = useCreatorSessionStore.getState();
-    if (sessionState.projectId === id && sessionState.session)
-      requests.push(refreshSession());
-    const promise = Promise.allSettled(requests)
-      .then(() => undefined)
-      .finally(() => {
-        if (productionRequest.current?.promise === promise)
-          productionRequest.current = null;
+    if (
+      sessionState.projectId === id &&
+      sessionState.session &&
+      pendingSession.current?.projectId !== id
+    ) {
+      const promise = refreshSession().finally(() => {
+        if (pendingSession.current?.promise === promise)
+          pendingSession.current = null;
       });
-    productionRequest.current = { projectId: id, promise };
-    return promise;
+      pendingSession.current = { projectId: id, promise };
+      requests.push(promise);
+    }
+    return Promise.allSettled(requests).then(() => undefined);
   }, [id, refreshTasks, refreshSession]);
 
   useEffect(() => {
@@ -269,6 +269,7 @@ export default function ProjectLayout() {
     if (!id) return;
     const stop = startFileReviewPolling(id);
     return () => {
+      reviewCompletion.current = null;
       stop();
       const reviewStore = useFileProjectReviewStore.getState();
       if (reviewStore.projectId === id) reviewStore.reset();
@@ -354,15 +355,16 @@ export default function ProjectLayout() {
   }, [pathname]);
 
   useEffect(() => {
+    // The batch that ends replay can also contain the first live event.
+    // Navigation and task refreshes belong only to events after the snapshot.
+    const replayBoundary = useCreatorSessionStore.getState().replayUntilSeq;
     const pendingEvents = events.filter(
       (event) =>
-        event.projectId === id && event.seq > lastConsumedEvent.current,
+        event.projectId === id &&
+        event.seq > Math.max(lastConsumedEvent.current, replayBoundary),
     );
     if (!pendingEvents.length) return;
     lastConsumedEvent.current = pendingEvents.at(-1)!.seq;
-    // Bootstrap loads current production/review state independently. Replaying
-    // old lifecycle events must not keep re-fetching expensive current graphs.
-    if (isReplaying) return;
     pendingEvents.forEach((event) =>
       useCreatorTaskViewStore.getState().consumeEvent(event),
     );
@@ -377,20 +379,21 @@ export default function ProjectLayout() {
         locationKey: location.key,
         focus: useNavigationStore.getState().reviewFocus,
       });
-      const reviewStore = useFileProjectReviewStore.getState();
-      void reviewStore
-        .pollOnce(id)
-        // If this call joined a request that began before run completion, the
-        // second poll is guaranteed to observe the completed Review boundary.
-        .then(() => useFileProjectReviewStore.getState().pollOnce(id))
-        .then(() =>
-          setPendingReviewNavigation((current) =>
-            current?.reviewId === completedReviewId
-              ? { ...current, ready: true }
-              : current,
-          ),
-        )
-        .catch(() => undefined);
+      const request = Symbol();
+      reviewCompletion.current = request;
+      void (async () => {
+        const reviews = useFileProjectReviewStore.getState();
+        await reviews.pollOnce(id);
+        if (reviewCompletion.current !== request) return;
+        // The first poll may have joined a request started before completion.
+        await reviews.pollOnce(id);
+        if (reviewCompletion.current !== request) return;
+        setPendingReviewNavigation((current) =>
+          current?.reviewId === completedReviewId
+            ? { ...current, ready: true }
+            : current,
+        );
+      })().catch(() => undefined);
     }
     if (
       pendingEvents.some(
@@ -422,7 +425,6 @@ export default function ProjectLayout() {
   }, [
     events,
     id,
-    isReplaying,
     location.key,
     refreshSession,
     refreshProduction,

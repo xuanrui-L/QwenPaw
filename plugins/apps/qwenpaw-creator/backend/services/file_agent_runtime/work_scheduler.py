@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType, CreatorSessionStatus, TaskStatus
+from domain.errors import ImageTaskAlreadyClaimed
 from models.config import (
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
     get_execution_authorization_mode,
@@ -210,15 +211,15 @@ def _quarantined_stale_targets(tasks: Sequence[Any]) -> set[str]:
 _ABANDONED_QUEUED_GRACE = timedelta(minutes=15)
 
 
-def _abandoned_queued_targets(
+def _abandoned_queued_task_ids(
     tasks: Sequence[Any],
     *,
     now: datetime | None = None,
 ) -> set[str]:
-    """Target refs whose QUEUED task was never claimed by an executor."""
+    """Durable identities of aged QUEUED tasks that no executor has claimed."""
 
     moment = now or datetime.now(UTC)
-    targets: set[str] = set()
+    task_ids: set[str] = set()
     for task in tasks:
         if getattr(task.status, "value", None) != TaskStatus.QUEUED.value:
             continue
@@ -229,14 +230,9 @@ def _abandoned_queued_targets(
             continue
         if moment - updated < _ABANDONED_QUEUED_GRACE:
             continue
-        metadata = getattr(task, "metadata", None) or {}
-        input_refs = getattr(task, "input_refs", None) or []
-        target = str(
-            metadata.get("targetRef") or (input_refs[0] if input_refs else ""),
-        )
-        if target:
-            targets.add(target)
-    return targets
+        if task.task_id:
+            task_ids.add(task.task_id)
+    return task_ids
 
 
 _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}
@@ -1454,13 +1450,13 @@ class WorkGraphScheduler:
         appending it twice would double-dispatch once the ledger is cleared.
         """
 
-        abandoned = _abandoned_queued_targets(tasks)
+        abandoned = _abandoned_queued_task_ids(tasks)
         if not abandoned:
             return
         for node in graph.nodes:
             if node.status.value != "running" or node.command is None:
                 continue
-            if node.target_ref not in abandoned:
+            if node.task_id not in abandoned:
                 continue
             if node.node_id in inflight:
                 continue
@@ -1930,6 +1926,9 @@ class WorkGraphScheduler:
                     text=f"生成完成：{node.label}",
                     node=node,
                 )
+        except ImageTaskAlreadyClaimed:
+            # The task already in the graph still owns its provider request.
+            return
         except manual_regeneration_hold.ManualHoldConflict:
             self._dispatched.discard((project_id, node.node_id, fingerprint))
         except Exception as exc:  # pylint: disable=broad-except
@@ -2129,6 +2128,17 @@ class WorkGraphScheduler:
             dispatch = _default_cover_dispatch
         else:
             dispatch = self._image_dispatch or _default_image_dispatch
+        # Rescuing a QUEUED image drives its existing provider claim. The
+        # specialist that admitted it may still wake under a different key.
+        options: dict[str, Any] = {}
+        if expected_object_versions:
+            options["expected_object_versions"] = expected_object_versions
+        if (
+            dispatch is _default_image_dispatch
+            and node.status is WorkNodeStatus.RUNNING
+            and node.task_id is not None
+        ):
+            options["resume_task_id"] = node.task_id
         return await dispatch(
             self.services,
             project_id=project_id,
@@ -2136,11 +2146,7 @@ class WorkGraphScheduler:
             target_ref=node.target_ref,
             arguments=dict(node.dispatch_arguments),
             idempotency_key=idempotency_key,
-            **(
-                {"expected_object_versions": expected_object_versions}
-                if expected_object_versions
-                else {}
-            ),
+            **options,
         )
 
 
@@ -2153,6 +2159,7 @@ async def _default_image_dispatch(
     arguments: dict[str, Any],
     idempotency_key: str,
     expected_object_versions: Sequence[str] = (),
+    resume_task_id: str | None = None,
 ) -> Any:
     # Imported lazily: media executors pull heavy provider dependencies.
     # pylint: disable=import-outside-toplevel
@@ -2168,6 +2175,7 @@ async def _default_image_dispatch(
         arguments=arguments,
         idempotency_key=idempotency_key,
         expected_object_versions=expected_object_versions,
+        resume_task_id=resume_task_id,
     )
 
 

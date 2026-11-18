@@ -3225,6 +3225,47 @@ def test_durable_interrupt_stops_owner_without_restarting_message(
     assert runs[0].status is AgentRunStatus.CANCELLED
 
 
+def test_finishing_handle_cannot_cache_an_unprocessed_user_message(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    services, _ = _create_project(tmp_path, initial_goal=None)
+    calls = []
+
+    async def model(*_args, **_kwargs):
+        calls.append(True)
+        return AgentModelTurn(content="done")
+
+    async def scenario():
+        driver = _driver(services, model)
+        old = SimpleNamespace(
+            task=asyncio.get_running_loop().create_future(), run_id="old-run"
+        )
+        driver._active[PROJECT_ID] = old
+        settle = driver._reconcile_admission_state
+
+        async def finish_while_reading(project_id, session, handle):
+            snapshot = await settle(project_id, session, handle)
+            old.task.set_result(None)
+            driver._active.pop(project_id)
+            _append_human_message(services, "Please generate that image now.")
+            driver.notify(project_id)
+            return snapshot
+
+        with monkeypatch.context() as local:
+            local.setattr(
+                driver, "_reconcile_admission_state", finish_while_reading
+            )
+            await driver._reconcile_project(PROJECT_ID)
+        await driver._reconcile_project(PROJECT_ID)
+        assert PROJECT_ID in driver._active
+        await driver.wait_until_idle(PROJECT_ID)
+        assert len(calls) == 1
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "legacy_unconsumed_head",
     [False, True],

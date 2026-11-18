@@ -328,9 +328,12 @@ def _is_media_related_error(text: str) -> bool:
     return any(phrase in text_lower for phrase in _MEDIA_REJECT_PHRASES)
 
 
-def _is_dashscope_provider(base_url: str, protocol: str = "") -> bool:
+def _is_dashscope_provider(base_url: str, protocol: str | None = None) -> bool:
     host = urlparse(base_url).hostname or ""
-    if "dashscope" in host:
+    service, _, domain = host.partition(".")
+    if domain == "aliyuncs.com" and (
+        service == "dashscope" or service.startswith("dashscope-")
+    ):
         return True
     # A MaaS deployment serves the same API but never spells ``dashscope`` in
     # its host; classifying it as a generic gateway would drop local media to
@@ -342,11 +345,13 @@ def _is_dashscope_provider(base_url: str, protocol: str = "") -> bool:
     if not model_config.is_maas_endpoint(base_url):
         return False
     return not model_config.is_token_plan_protocol(
-        protocol or model_config.get_vlm_protocol(),
+        model_config.get_vlm_protocol() if protocol is None else protocol,
     )
 
 
-def uses_dashscope_transport(base_url: str = "", protocol: str = "") -> bool:
+def uses_dashscope_transport(
+    base_url: str = "", protocol: str | None = None
+) -> bool:
     """True when local media travels through the DashScope model-bound
     temporary OSS upload (48h TTL, <=1GB) instead of inline Base64 URLs.
 
@@ -370,7 +375,7 @@ async def transport_local_media_url(
     model_name: str,
     media_type: str = "",
     base_url: str = "",
-    protocol: str = "",
+    protocol: str | None = None,
 ) -> str:
     """Return a URL for *local_path* that the configured VLM can ingest.
 
@@ -403,7 +408,7 @@ async def _transport_local_media_part(
     api_key: str,
     model_name: str,
     base_url: str,
-    protocol: str = "",
+    protocol: str | None = None,
 ) -> tuple[dict, bool]:
     """Replace a local media URL with a provider-transportable URL.
 
@@ -522,6 +527,12 @@ async def _download_remote_media(
 
 
 def _parse_openai_response(payload: dict, model_name: str) -> str:
+    if payload.get("_stream_truncated"):
+        raise ModelError(
+            "VLM 响应流被截断，未收到完整结果",
+            model_name=model_name,
+            retryable=True,
+        )
     choices = payload.get("choices") if isinstance(payload, dict) else None
     if not choices:
         raise ModelError(
@@ -760,7 +771,11 @@ async def chat_completion(
     api_key = api_key_override or model_config.get_vlm_api_key()
     base_url = base_url_override or model_config.get_vlm_base_url()
     model_name = model_name_override or model_config.get_vlm_model_name()
-    protocol = protocol_override or model_config.get_vlm_protocol()
+    protocol = (
+        model_config.get_vlm_protocol()
+        if protocol_override is None
+        else protocol_override
+    )
     # Anthropic and Gemini gateways always authenticate; OpenAI-compatible
     # gateways may serve free keyless models (e.g. OpenCode Zen), so an
     # empty key is only an error for protocols that require one.

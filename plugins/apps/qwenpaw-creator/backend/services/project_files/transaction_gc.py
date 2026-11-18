@@ -117,12 +117,28 @@ def _journal_state(transaction_dir: Path) -> str | None:
     if not isinstance(stored, dict):
         return None
     state = stored.get("state")
+    round_id = stored.get("round_id")
+    if (
+        state == "RUNTIME_FINALIZED"
+        and isinstance(round_id, str)
+        and round_id.startswith("round-script-import-")
+    ):
+        from .script_import import script_import_needs_transaction
+
+        operation_id = round_id.removeprefix("round-script-import-")
+        if script_import_needs_transaction(transaction_dir, operation_id):
+            return None
     return state if isinstance(state, str) else None
 
 
-def _directory_bytes(transaction_dir: Path) -> int:
+def _directory_bytes(
+    transaction_dir: Path, budget: SweepBudget | None = None
+) -> int | None:
+    """Return None when the scan stopped before measuring the whole tree."""
     total = 0
     for path in transaction_dir.rglob("*"):
+        if budget is not None and not budget.has_room():
+            return None
         try:
             if path.is_file() and not is_link_path(path):
                 total += path.stat().st_size
@@ -166,18 +182,29 @@ def _eligible_candidates(
     transactions_root: Path,
     baseline: datetime | None,
     kept: bool,
+    budget: SweepBudget | None = None,
 ) -> list[tuple[float, Path, int]]:
     """Settled transaction directories with their mtime and byte size."""
 
     candidates: list[tuple[float, Path, int]] = []
     for entry in transactions_root.iterdir():
+        if budget is not None and not budget.has_room():
+            return []
+        if entry.name.startswith("."):
+            continue
         if not _eligible(entry, baseline=baseline, kept=kept):
             continue
-        candidates.append((_mtime(entry), entry, _directory_bytes(entry)))
+        size = _directory_bytes(entry, budget)
+        if size is None:
+            # Partial lists cannot establish retention order or the cap.
+            return []
+        candidates.append((_mtime(entry), entry, size))
     return candidates
 
 
-def _open_reservation_ids(transactions_root: Path) -> frozenset[str]:
+def _open_reservation_ids(
+    transactions_root: Path, budget: SweepBudget | None = None
+) -> frozenset[str]:
     """Transactions an IN_PROGRESS idempotency reservation still needs.
 
     A PATCH that published its Project but failed to record the HTTP result
@@ -189,6 +216,7 @@ def _open_reservation_ids(transactions_root: Path) -> frozenset[str]:
 
     return idempotency_ledger.open_transaction_ids(
         transactions_root.parent / "commands" / "idempotency",
+        can_continue=budget.has_room if budget is not None else None,
     )
 
 
@@ -198,6 +226,7 @@ def _surplus_candidates(
     kept: bool,
     retention: int,
     protected: frozenset[str] = frozenset(),
+    budget: SweepBudget | None = None,
 ) -> list[tuple[float, Path, int]]:
     """Exactly what a sweep would remove: the newest ``retention`` stay.
 
@@ -211,7 +240,11 @@ def _surplus_candidates(
     deleted nor consume one of the retained slots.
     """
 
-    candidates = _eligible_candidates(transactions_root, baseline, kept)
+    candidates = _eligible_candidates(
+        transactions_root, baseline, kept, budget
+    )
+    if budget is not None and not budget.has_room():
+        return []
     if protected:
         candidates = [
             item for item in candidates if item[1].name not in protected
@@ -234,7 +267,7 @@ def surplus_transaction_bytes(
     """
 
     transactions_root = Path(project_root) / "runtime" / TRANSACTIONS_DIR_NAME
-    if not transactions_root.is_dir():
+    if not transaction_gc_enabled() or not transactions_root.is_dir():
         return 0
     kept = history_reclaim_kept(project_root)
     baseline = read_scratch_baseline(Path(project_root))
@@ -299,7 +332,9 @@ def _atomic_reclaim(entry: Path) -> tuple[bool, bool]:
     return (True, True)
 
 
-def _purge_tombstones(transactions_root: Path) -> tuple[int, int]:
+def _purge_tombstones(
+    transactions_root: Path, budget: SweepBudget | None = None
+) -> tuple[int, int]:
     """Delete leftover ``.deleted-*`` tombstones; return (count, bytes).
 
     Review #243 r4548690102 follow-up: ``_atomic_reclaim`` renames a
@@ -317,9 +352,15 @@ def _purge_tombstones(transactions_root: Path) -> tuple[int, int]:
     purged = 0
     freed_bytes = 0
     for tombstone in transactions_root.glob(TOMBSTONE_PREFIX + "*"):
+        if budget is not None and not budget.has_room():
+            break
         if not tombstone.is_dir() or is_link_path(tombstone):
             continue
-        size = _directory_bytes(tombstone)
+        size = _directory_bytes(tombstone, budget)
+        if size is None:
+            break
+        if budget is not None and not budget.has_room():
+            break
         shutil.rmtree(tombstone, ignore_errors=True)
         if tombstone.exists():
             logger.warning(
@@ -355,7 +396,9 @@ def collect_project_transactions(
     # delete, independent of the journal-based eligibility below -- the
     # bytes it holds are already out of the scan's view and this is the
     # only path that can ever reclaim them (review #243 r4548690102).
-    purged, purged_bytes = _purge_tombstones(transactions_root)
+    purged, purged_bytes = _purge_tombstones(transactions_root, budget)
+    if budget is not None and not budget.has_room():
+        return (purged, purged_bytes)
     kept = history_reclaim_kept(project_root)
     baseline = read_scratch_baseline(Path(project_root))
     if baseline is None and kept:
@@ -364,12 +407,18 @@ def collect_project_transactions(
         # sweep stamps it this boot, so the next one can collect.  A Project
         # whose history is not kept needs no such proof at all.
         return (purged, purged_bytes)
+    try:
+        protected = _open_reservation_ids(transactions_root, budget)
+    except idempotency_ledger.IncompleteLedgerScan:
+        # An incomplete ledger cannot authorize deleting any transaction.
+        return (purged, purged_bytes)
     surplus = _surplus_candidates(
         transactions_root,
         baseline,
         kept,
         retention,
-        _open_reservation_ids(transactions_root),
+        protected,
+        budget,
     )
     if not surplus:
         return (purged, purged_bytes)
@@ -390,7 +439,9 @@ def collect_project_transactions(
     removed_bytes = 0
     for _mtime_value, entry, size in surplus:
         if budget is not None and not budget.may_spend(size):
-            break
+            if not budget.has_room():
+                break
+            continue
         # ``shutil.rmtree`` is not atomic: the journal disappears first and
         # the directory is rmdired last, so a commit scan that already
         # captured this name in ``list_transaction_ids`` can see
