@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from qwenpaw.pawapp import PawApp
+from qwenpaw.utils.io_utils import run_sync_io
 
 logger = logging.getLogger("qwenpaw").getChild("plugin.qwenpaw_creator")
 
@@ -165,7 +166,7 @@ async def _sweep_orphaned_scratch(services: CreatorFileServices) -> None:
     """
 
     try:
-        sweep = await asyncio.to_thread(release_orphaned_scratch, services)
+        sweep = await run_sync_io(release_orphaned_scratch, services)
     except Exception:  # noqa: BLE001 - cleanup must never gate startup
         logger.warning("orphaned task scratch sweep failed", exc_info=True)
         return
@@ -198,7 +199,7 @@ async def _startup() -> None:
             ensure_creator_runtime_dependencies,
         )
         await asyncio.to_thread(ensure_vendor_libs)
-        services = creator_file_services(data_root)
+        services = await run_sync_io(creator_file_services, data_root)
         await asyncio.to_thread(
             recover_interrupted_source_analysis,
             services,
