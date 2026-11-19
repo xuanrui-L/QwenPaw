@@ -223,6 +223,7 @@ const LLM_PROTOCOL_FALLBACK_BASE_URLS: Record<string, string> = {
 const LLM_PROTOCOL_FALLBACK_MODELS: Record<string, string[]> = {
   "AgentScope Platform": ["qwen3.8-flash", "qwen3.8-max"],
   "Aliyun Token Plan": [
+    "qwen4-max",
     "qwen3.8-max",
     "qwen3.8-flash",
     "qwen3.7-max",
