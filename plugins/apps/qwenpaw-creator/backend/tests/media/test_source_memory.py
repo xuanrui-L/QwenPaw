@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from contextlib import nullcontext
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -110,6 +112,7 @@ def _service(tmp_path: Path) -> SourceMemoryService:
         root=tmp_path,
         projects=SimpleNamespace(
             project_root=lambda project_id: tmp_path / "projects" / project_id,
+            lifecycle_lock=lambda _project_id: nullcontext(),
         ),
     )
     return SourceMemoryService(services)
@@ -399,6 +402,286 @@ def test_recover_requeues_only_with_durable_artifacts(
         assert len(spawned) == 1
 
 
+@pytest.mark.parametrize("outcome", ["complete", "cancel", "fail"])
+def test_startup_schedules_memory_workers_only_after_recovery(
+    tmp_path,
+    monkeypatch,
+    outcome,
+) -> None:
+    service = _service(tmp_path)
+    queued = _running_task(tmp_path)
+    queued.status = TaskStatus.QUEUED
+    service.executions = _RecordingExecutions(queued)
+    scanned = threading.Event()
+    finish = threading.Event()
+
+    def project_ids():
+        yield "project-1"
+        scanned.set()
+        assert finish.wait(5)
+        if outcome == "fail":
+            raise OSError("project scan interrupted")
+
+    monkeypatch.setattr(service, "_list_project_ids", project_ids)
+
+    async def scenario():
+        workers = []
+
+        async def record_worker(job):
+            workers.append((job.task_id, asyncio.get_running_loop()))
+
+        monkeypatch.setattr(service, "_drive", record_worker)
+        recovery = asyncio.create_task(service.resume_interrupted())
+        try:
+            assert await asyncio.to_thread(scanned.wait, 5)
+            assert not workers
+            if outcome == "cancel":
+                recovery.cancel()
+        finally:
+            finish.set()
+        if outcome == "complete":
+            await recovery
+        else:
+            error = asyncio.CancelledError if outcome == "cancel" else OSError
+            with pytest.raises(error):
+                await recovery
+        await asyncio.sleep(0)
+        expected = [("task-1", asyncio.get_running_loop())]
+        assert workers == (expected if outcome == "complete" else [])
+
+    asyncio.run(scenario())
+
+
+def test_stopping_a_build_signals_its_parallel_clip_while_the_parent_drains(
+    tmp_path, monkeypatch
+):
+    service = _service(tmp_path)
+    job = _build_job(tmp_path)
+
+    async def scenario():
+        started, release_parent = asyncio.Event(), asyncio.Event()
+        clip_cancelled = asyncio.Event()
+
+        async def clip():
+            try:
+                started.set()
+                await asyncio.Future()
+            finally:
+                clip_cancelled.set()
+
+        async def drive(_job):
+            child = asyncio.create_task(clip())
+            service._builds[job.task_id].children.append(child)
+            try:
+                await asyncio.Future()
+            finally:
+                await release_parent.wait()
+                child.cancel()
+                await asyncio.gather(child, return_exceptions=True)
+
+        monkeypatch.setattr(service, "_drive", drive)
+        parent = service._spawn(job)
+        await started.wait()
+        native_stop = service._builds[job.task_id].stop
+        service.cancel_workers(job.project_id, job.task_id)
+        try:
+            # Native permit waiters may resume before the next loop tick.
+            assert native_stop.is_set()
+            await asyncio.wait_for(clip_cancelled.wait(), 2)
+            assert not parent.done()
+        finally:
+            release_parent.set()
+            await asyncio.gather(parent, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fault", ["none", "before_replace", "after_replace"])
+def test_durable_cancel_stops_a_clip_before_its_next_model_call(
+    tmp_path, monkeypatch, fault
+):
+    from api.file_execution_routes import _cancel_task_sync
+    from services.project_files.facade import creator_file_services
+    from services.project_files.models import Project
+    from services.runtime_files.execution_models import TaskRecord
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    services = creator_file_services(tmp_path)
+    job = _build_job(tmp_path)
+    services.projects.create(
+        Project.new(project_id=job.project_id, name="Cancel")
+    )
+    service = source_memory.source_memory_service(services)
+    service.executions.create_task(
+        TaskRecord(
+            project_id=job.project_id,
+            task_id=job.task_id,
+            kind=source_memory.TaskKind.SOURCE_MEMORY_BUILD,
+            request_fingerprint="cancel",
+        )
+    )
+    entered, release_clip, clip_done = (threading.Event() for _ in range(3))
+    published, return_to_api = threading.Event(), threading.Event()
+    model_calls = []
+    original_notify = ProjectExecutionStore._notify_task_terminal
+
+    def notify(store, task):
+        if task.status is TaskStatus.CANCELLED:
+            published.set()
+            assert return_to_api.wait(5)
+        original_notify(store, task)
+
+    def clip():
+        entered.set()
+        assert release_clip.wait(5)
+        clip_done.set()
+
+    async def drive(_job):
+        await source_memory._run_media_stage(
+            service._builds[job.task_id].stop, clip
+        )
+        model_calls.append(job.task_id)
+
+    if fault == "before_replace":
+
+        def fail_write(*_args, **_kwargs):
+            published.set()
+            assert return_to_api.wait(5)
+            raise OSError("cancel write failed")
+
+        monkeypatch.setattr(
+            ProjectExecutionStore, "_transition_task_unlocked", fail_write
+        )
+
+    if fault == "after_replace":
+        from services.runtime_files import atomic_store
+
+        sync_directory = atomic_store.fsync_directory
+
+        def fail_directory_sync(path):
+            if Path(path).name == job.task_id:
+                published.set()
+                assert return_to_api.wait(5)
+                raise OSError("cancel write failed")
+            sync_directory(path)
+
+        monkeypatch.setattr(
+            atomic_store, "fsync_directory", fail_directory_sync
+        )
+
+    monkeypatch.setattr(ProjectExecutionStore, "_notify_task_terminal", notify)
+    monkeypatch.setattr(service, "_drive", drive)
+
+    async def scenario():
+        worker = service._spawn(job)
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            cancel = asyncio.create_task(
+                asyncio.to_thread(
+                    _cancel_task_sync,
+                    services,
+                    job.project_id,
+                    job.task_id,
+                    "stop",
+                )
+            )
+            assert await asyncio.to_thread(published.wait, 3)
+            assert service.executions.get_task(
+                job.project_id, job.task_id
+            ).status is (
+                TaskStatus.QUEUED
+                if fault == "before_replace"
+                else TaskStatus.CANCELLED
+            )
+            release_clip.set()
+            assert await asyncio.to_thread(clip_done.wait, 3)
+            assert not model_calls
+            return_to_api.set()
+            if fault == "none":
+                assert (await cancel).status is TaskStatus.CANCELLED
+            else:
+                with pytest.raises(OSError, match="cancel write failed"):
+                    await cancel
+            if fault == "before_replace":
+                await asyncio.wait_for(worker, 3)
+                assert model_calls == [job.task_id]
+            else:
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(worker, 3)
+                assert not model_calls
+        finally:
+            release_clip.set()
+            return_to_api.set()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_frame_detection_joins_inflight_seeks_and_skips_queued_frames(
+    tmp_path, monkeypatch
+):
+    entered, release = threading.Event(), threading.Event()
+    seeks = []
+
+    def seek(*args, **kwargs):
+        seeks.append(args[2])
+        entered.set()
+        assert release.wait(5)
+        return None
+
+    monkeypatch.setattr(source_memory, "_require_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(source_memory, "_seek_jpeg", seek)
+
+    async def scenario():
+        detecting = asyncio.create_task(
+            source_memory._detect_segments(
+                tmp_path / "video", 0, 300, source_memory._BuildStop()
+            )
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            detecting.cancel()
+            done, _ = await asyncio.wait({detecting}, timeout=0.03)
+            assert not done
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await detecting
+
+    asyncio.run(scenario())
+    assert 0 < len(seeks) <= source_memory.FRAME_WORKERS
+
+
+def test_shutdown_joins_recovered_workers_and_leaves_their_task_resumable(
+    tmp_path,
+    monkeypatch,
+):
+    service = _service(tmp_path)
+    job = _build_job(tmp_path)
+    queued = _running_task(tmp_path)
+    queued.status = TaskStatus.QUEUED
+    service.executions = _RecordingExecutions(queued)
+    monkeypatch.setattr(service, "_recoverable_jobs", lambda: iter([job]))
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def wait_for_approval(_job):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(service, "_drive", wait_for_approval)
+        await service.resume_interrupted()
+        await started.wait()
+        worker = service._jobs[job.task_id]
+        await service.shutdown()
+        assert worker.cancelled()
+        assert not service._jobs
+        assert service._spawn(job) is None
+
+    asyncio.run(scenario())
+    assert not service.executions.transitions
+
+
 def test_cancel_for_asset_stops_a_live_build_before_its_next_stage(
     tmp_path,
     monkeypatch,
@@ -446,7 +729,7 @@ def test_cancel_for_asset_stops_a_live_build_before_its_next_stage(
         executions.transitions[-1]["updates"]["error"]["code"]
         == "SOURCE_ASSET_DELETED"
     ), "the record a cancellation left behind must still terminalize"
-    assert not service._jobs and not service._job_specs
+    assert not service._jobs and not service._builds
 
 
 def test_merge_projection_folds_reviewed_drafts_and_summary(
@@ -615,6 +898,7 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
                 asyncio.Semaphore(1),
                 ckpt_dir,
                 "checksum-1",
+                source_memory._BuildStop(),
             ),
         )
 
@@ -646,9 +930,11 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
     assert resumed.subgraph.micro_events[0].time_range == [11.0, 12.0]
 
 
+@pytest.mark.parametrize("stop_before_publish", [False, True])
 def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
     tmp_path,
     monkeypatch,
+    stop_before_publish,
 ) -> None:
     # 7300s source → 3 detection chunks; chunk 1 is pre-checkpointed and
     # must not be re-detected. Macro ids stay globally sequential.
@@ -677,7 +963,7 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
 
     detected: list[tuple[float, float]] = []
 
-    def fake_detect(_path, start_sec, end_sec):
+    def fake_detect(_path, start_sec, end_sec, _stop):
         detected.append((start_sec, end_sec))
         return [(start_sec, end_sec)]
 
@@ -727,7 +1013,31 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
         lambda: False,
     )
 
-    asyncio.run(service._execute(job))
+    if stop_before_publish:
+        # Project stop signals workers before its detached task cleanup runs.
+        write = Path.write_text
+
+        def stop_after_staging(path, *args, **kwargs):
+            result = write(path, *args, **kwargs)
+            if (
+                path.name
+                == Path(source_memory.META_FILENAME).with_suffix(".tmp").name
+            ):
+                service._builds[job.task_id].stop.set()
+            return result
+
+        monkeypatch.setattr(Path, "write_text", stop_after_staging)
+
+    async def run_build():
+        await service._spawn(job)
+
+    if stop_before_publish:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(run_build())
+        assert load_memory_ref(project_root, "intel-1", "checksum-1") is None
+        return
+
+    asyncio.run(run_build())
 
     assert detected == [(3600.0, 7200.0), (7200.0, 7300.0)]
     ref = load_memory_ref(project_root, "intel-1", "checksum-1")

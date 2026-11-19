@@ -20,6 +20,7 @@ from functools import partial
 from pathlib import Path
 
 from qwenpaw.pawapp import PawApp
+from qwenpaw.utils.io_utils import run_sync_io
 
 logger = logging.getLogger("qwenpaw").getChild("plugin.qwenpaw_creator")
 
@@ -61,6 +62,7 @@ from services.project_files.facade import (  # noqa: E402
     clear_creator_file_service_registry,
     creator_file_services,
     mark_runtime_preparing,
+    preparing_file_services,
 )
 from services.project_files.transaction_gc import (  # noqa: E402
     collect_terminal_transactions,
@@ -80,9 +82,7 @@ from services.source_analysis import (  # noqa: E402
     recover_interrupted_source_analysis,
     shutdown_source_analysis_services,
 )
-from services.media.source_memory import (  # noqa: E402
-    recover_interrupted_source_memory,
-)
+from services.media.source_memory import source_memory_service  # noqa: E402
 from services.media.source_observation import (  # noqa: E402
     drain_source_observation_services,
     recover_interrupted_source_observations,
@@ -334,18 +334,13 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
         # event loop has to keep answering while it runs, and requests that
         # arrive in that window get a 503 instead of queueing behind the same
         # registry lock the recovery holds.
-        mark_runtime_preparing(True)
-        try:
-            services = await asyncio.to_thread(
-                creator_file_services,
-                data_root,
-            )
-        finally:
-            mark_runtime_preparing(False)
-        await asyncio.to_thread(
-            recover_interrupted_source_analysis,
-            services,
-        )
+        with preparing_file_services(data_root):
+            mark_runtime_preparing(True)
+            try:
+                services = await run_sync_io(creator_file_services, data_root)
+            finally:
+                mark_runtime_preparing(False)
+            await run_sync_io(recover_interrupted_source_analysis, services)
         reset_remote_ingest_admission()
         mem_probe.stage("runtime.prepared")
     except (CreatorDataRootError, CreatorBinaryDependencyError) as exc:
@@ -365,18 +360,18 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
-        await asyncio.to_thread(recover_interrupted_source_memory, services)
         # Observation/read workers live only in process memory: fail their
         # orphaned QUEUED/RUNNING Tasks closed so waiters see a retryable
         # error instead of polling a record no worker will ever finish.
-        await asyncio.to_thread(
+        await run_sync_io(
             recover_interrupted_source_observations,
             services,
         )
-        await asyncio.to_thread(
+        await run_sync_io(
             recover_interrupted_source_video_reads,
             services,
         )
+        await source_memory_service(services).resume_interrupted()
     except BaseException as exc:
         trace_event(
             "creator.runtime.startup_failed",
@@ -387,13 +382,7 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
                 "error": str(exc),
             },
         )
-        try:
-            await shutdown_file_media_execution_services()
-        finally:
-            try:
-                await stop_creator_agent_runtime()
-            finally:
-                clear_creator_file_service_registry()
+        await _shutdown_file_runtime(services)
         raise
     _file_services = services
     logger.info("QwenPaw Creator file runtime ready at %s", data_root)
@@ -476,7 +465,10 @@ async def _shutdown() -> None:
         "creator.runtime.stopping",
         component="pawapp",
     )
+    services = _file_services
     _file_services = None
+    if services is not None:
+        source_memory_service(services).stop()
     if _maintenance_task is not None:
         # A sweep -- or a collapse child holding a rewritten session file --
         # must not outlive the app that owns the data root.  Cancelling the
@@ -492,16 +484,16 @@ async def _shutdown() -> None:
             await drain_timeline_render_jobs()
         finally:
             try:
-                await _shutdown_file_runtime()
+                await _shutdown_file_runtime(services)
             finally:
                 mem_probe.stop_probe()
 
 
-async def _shutdown_file_runtime() -> None:
+async def _shutdown_file_runtime(services: CreatorFileServices | None) -> None:
     """Stop the media/agent runtime layers in dependency order."""
 
     try:
-        await _drain_source_media_services()
+        await _drain_source_media_services(services)
     finally:
         try:
             await shutdown_file_media_execution_services()
@@ -519,13 +511,19 @@ async def _shutdown_file_runtime() -> None:
                     )
 
 
-async def _drain_source_media_services() -> None:
+async def _drain_source_media_services(
+    services: CreatorFileServices | None,
+) -> None:
     """Terminalize in-flight observation/read Tasks before shutdown."""
 
     try:
         await drain_source_observation_services()
     finally:
-        await drain_source_video_reader_services()
+        try:
+            await drain_source_video_reader_services()
+        finally:
+            if services is not None:
+                await source_memory_service(services).shutdown()
 
 
 # The 'plugin' variable is what PluginLoader looks for.

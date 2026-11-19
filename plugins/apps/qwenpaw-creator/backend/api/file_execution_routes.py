@@ -8,6 +8,7 @@ import logging
 import secrets
 import shutil
 import tempfile
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from schemas.common import StrictModel
 from services.file_agent_runtime import manual_regeneration_hold
 from services.file_agent_runtime.work_graph import WorkNodeStatus
 from services.project_files.facade import CreatorFileServices
+from services.runtime_files.atomic_store import WriteStageHook
 from services.runtime_files.errors import RecordNotFoundError
 from services.runtime_files.execution_models import (
     SpecialistRunRecord,
@@ -213,21 +215,36 @@ def _cancel_task_sync(
             task_id,
             _lifecycle_lock_held=True,
         )
-        if task.status is TaskStatus.CANCELLED:
-            return task
-        return store.transition_task(
-            project_id,
-            task_id,
-            expected_status={TaskStatus.QUEUED, TaskStatus.RUNNING},
-            status=TaskStatus.CANCELLED,
-            updates={
-                "error": {
-                    "code": "USER_CANCELLED",
-                    "message": reason.strip(),
+        cancellation: AbstractContextManager[
+            WriteStageHook | None
+        ] = nullcontext()
+        if task.kind is TaskKind.SOURCE_MEMORY_BUILD and task.status in {
+            TaskStatus.QUEUED,
+            TaskStatus.RUNNING,
+            TaskStatus.CANCELLED,
+        }:
+            from services.media.source_memory import source_memory_cancellation
+
+            cancellation = source_memory_cancellation(
+                services.root, project_id, task_id
+            )
+        with cancellation as write_stage_hook:
+            if task.status is TaskStatus.CANCELLED:
+                return task
+            return store.transition_task(
+                project_id,
+                task_id,
+                expected_status={TaskStatus.QUEUED, TaskStatus.RUNNING},
+                status=TaskStatus.CANCELLED,
+                updates={
+                    "error": {
+                        "code": "USER_CANCELLED",
+                        "message": reason.strip(),
+                    },
                 },
-            },
-            _lifecycle_lock_held=True,
-        )
+                _lifecycle_lock_held=True,
+                _write_stage_hook=write_stage_hook,
+            )
 
 
 def _run_view(

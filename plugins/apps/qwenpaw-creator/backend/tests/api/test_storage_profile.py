@@ -353,6 +353,29 @@ def test_the_profile_scan_is_cached_per_reader(
     assert calls == [False, False, False]  # TTL 0 scans per request again
 
 
+def test_inflight_scan_cannot_repopulate_cache_after_reclaim(
+    api_request, app, monkeypatch
+):
+    from api import storage_profile_routes as routes
+
+    real_scan = routes.project_storage_profile
+    calls = []
+
+    def scan(services, *, include_orphans):
+        profile = real_scan(services, include_orphans=include_orphans)
+        calls.append(services.root)
+        if len(calls) == 1:
+            # A reclaim finishes after these bytes were measured.
+            routes.invalidate_storage_profile_cache(str(services.root))
+        return profile
+
+    monkeypatch.setattr(routes, "project_storage_profile", scan)
+    routes.invalidate_storage_profile_cache()
+    for _ in range(3):
+        assert api_request(app, "GET", "/storage/profile").status_code == 200
+    assert len(calls) == 2
+
+
 def test_invalidation_is_scoped_to_one_data_root() -> None:
     """A reclaim must clear its own root and leave another's scan alone.
 
@@ -364,11 +387,11 @@ def test_invalidation_is_scoped_to_one_data_root() -> None:
     from api import storage_profile_routes
 
     storage_profile_routes._profile_cache.clear()
-    storage_profile_routes._profile_cache[("/root-a", False)] = (0.0, {})
-    storage_profile_routes._profile_cache[("/root-b", False)] = (0.0, {})
+    storage_profile_routes._profile_cache["/root-a"] = {False: (0.0, {})}
+    storage_profile_routes._profile_cache["/root-b"] = {False: (0.0, {})}
 
     storage_profile_routes.invalidate_storage_profile_cache("/root-a")
-    assert list(storage_profile_routes._profile_cache) == [("/root-b", False)]
+    assert list(storage_profile_routes._profile_cache) == ["/root-b"]
 
     storage_profile_routes.invalidate_storage_profile_cache()
     assert not storage_profile_routes._profile_cache

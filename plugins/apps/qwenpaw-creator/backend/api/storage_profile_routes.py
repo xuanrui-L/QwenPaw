@@ -31,10 +31,10 @@ router = APIRouter(
 
 PROFILE_TTL_ENV = "CREATOR_STORAGE_PROFILE_TTL_SECONDS"
 DEFAULT_PROFILE_TTL_SECONDS = 60.0
-# (data root, includeOrphans) -> (monotonic deadline, profile payload).
+# data root -> includeOrphans -> (monotonic timestamp, profile payload).
 # The root is part of the key: two data roots must never serve each other's
 # numbers, whether in a test process or after CREATOR_DATA_ROOT moves.
-_profile_cache: dict[tuple[str, bool], tuple[float, dict[str, Any]]] = {}
+_profile_cache: dict[str, dict[bool, tuple[float, dict[str, Any]]]] = {}
 
 
 def _profile_ttl_seconds() -> float:
@@ -59,8 +59,7 @@ def invalidate_storage_profile_cache(root: str | None = None) -> None:
     if root is None:
         _profile_cache.clear()
         return
-    for key in [k for k in _profile_cache if k[0] == root]:
-        _profile_cache.pop(key, None)
+    _profile_cache.pop(root, None)
 
 
 @router.get("/profile", response_model=StorageProfileData)
@@ -82,10 +81,13 @@ async def get_storage_profile(
     """
 
     ttl = _profile_ttl_seconds()
-    cache_key = (str(services.root), bool(include_orphans))
+    # Invalidation detaches this root's cache, including in-flight fills.
+    cache = (
+        _profile_cache.setdefault(str(services.root), {}) if ttl > 0 else {}
+    )
     now = time.monotonic()
-    cached = _profile_cache.get(cache_key)
-    if ttl > 0 and cached is not None and now - cached[0] < ttl:
+    cached = cache.get(include_orphans)
+    if cached is not None and now - cached[0] < ttl:
         return StorageProfileData.model_validate(cached[1])
 
     profile = await asyncio.to_thread(
@@ -94,7 +96,7 @@ async def get_storage_profile(
         include_orphans=include_orphans,
     )
     if ttl > 0:
-        _profile_cache[cache_key] = (time.monotonic(), profile)
+        cache[include_orphans] = (time.monotonic(), profile)
     return StorageProfileData.model_validate(profile)
 
 

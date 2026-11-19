@@ -8,6 +8,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from qwenpaw.utils.io_utils import run_sync_io
 
 from utils.env import load_project_env
 
@@ -20,6 +21,7 @@ from services.file_agent_runtime.registry import (  # noqa: E402
     start_creator_agent_runtime,
     stop_creator_agent_runtime,
 )
+from services.media.source_memory import source_memory_service  # noqa: E402
 from services.media_files import (  # noqa: E402
     shutdown_file_media_execution_services,
     start_file_media_execution_services,
@@ -28,6 +30,7 @@ from services.observability import trace_event  # noqa: E402
 from services.project_files.facade import (  # noqa: E402
     clear_creator_file_service_registry,
     creator_file_services,
+    preparing_file_services,
 )
 from services.runtime_files.runtime_dependencies import (  # noqa: E402
     ensure_creator_runtime_dependencies,
@@ -56,8 +59,9 @@ async def lifespan(_app: FastAPI):
     )
     try:
         await asyncio.to_thread(ensure_creator_runtime_dependencies)
-        services = creator_file_services(data_root)
-        recover_interrupted_source_analysis(services)
+        with preparing_file_services(data_root):
+            services = await run_sync_io(creator_file_services, data_root)
+            await run_sync_io(recover_interrupted_source_analysis, services)
     except BaseException as exc:
         trace_event(
             "creator.runtime.startup_failed",
@@ -72,6 +76,7 @@ async def lifespan(_app: FastAPI):
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
+        await source_memory_service(services).resume_interrupted()
         trace_event(
             "creator.runtime.started",
             component="standalone",
@@ -84,7 +89,10 @@ async def lifespan(_app: FastAPI):
             component="standalone",
         )
         try:
-            await shutdown_file_media_execution_services()
+            try:
+                await source_memory_service(services).shutdown()
+            finally:
+                await shutdown_file_media_execution_services()
         finally:
             try:
                 await shutdown_source_analysis_services()

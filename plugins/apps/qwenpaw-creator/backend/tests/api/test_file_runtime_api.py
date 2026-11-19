@@ -288,11 +288,18 @@ def _parse_sse_id_type(chunk: str) -> tuple[int, str]:
 
 
 @pytest.mark.parametrize(
-    "status", [SpecialistRunStatus.RUNNING_MODEL, SpecialistRunStatus.FAILED]
+    ("status", "index_unavailable"),
+    [
+        (SpecialistRunStatus.RUNNING_MODEL, False),
+        (SpecialistRunStatus.FAILED, False),
+        (SpecialistRunStatus.RUNNING_MODEL, True),
+    ],
 )
 def test_replay_preserves_specialist_text_without_a_completed_message(
     tmp_path,
     status,
+    index_unavailable,
+    monkeypatch,
 ) -> None:
     """Both replay filters retain partial replies from live and failed workers."""
 
@@ -341,6 +348,10 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
             "text": "Complete reply",
         },
     )
+    append("agent.message_delta", {"runId": "finished-main", "delta": "old"})
+    append(
+        "subagent.tool_completed", {"result": {"text": "x" * (1024 * 1024)}}
+    )
     if status == SpecialistRunStatus.FAILED:
         append(
             "subagent.failed",
@@ -375,6 +386,17 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
                 expected_status=SpecialistRunStatus.RUNNING_MODEL,
                 status=final_status,
             )
+
+    if index_unavailable:
+
+        def fail_read(*_args):
+            raise OSError("specialist index unavailable")
+
+        monkeypatch.setattr(
+            ProjectExecutionStore,
+            "list_specialist_runs",
+            fail_read,
+        )
 
     class Connection:
         polls = 0
@@ -416,10 +438,75 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
         f"could exempt it: {events}"
     )
     assert "prefix" in active_delta
-    # The settled run's delta at seq 3 stays filtered -- the exemption
-    # is scoped to ``active_run_ids``, not a blanket "keep every
-    # delta" reversal.
-    assert 3 not in seqs
+    # An available index lets the replay discard the settled run's duplicate.
+    assert (3 in seqs) is index_unavailable
+    assert 5 not in seqs
+    summary = next(data for seq, _, data in events if seq == 6)
+    assert "replayTruncated" in summary
+    assert len(summary) < 1024
+
+
+@pytest.mark.parametrize("endpoint", ["interrupt", "tasks/memory/cancel"])
+def test_stop_signals_a_recovered_memory_build(
+    tmp_path, monkeypatch, endpoint
+):
+    from httpx import ASGITransport, AsyncClient
+    from services.media.source_memory import source_memory_service
+
+    app, services, _, _ = _app(tmp_path)
+    memory = source_memory_service(services)
+    memory.executions.create_task(
+        TaskRecord(
+            task_id="memory",
+            project_id="project-1",
+            kind=TaskKind.SOURCE_MEMORY_BUILD,
+            request_fingerprint="memory",
+            metadata={
+                "targetRef": "asset:source",
+                "analysisVersionId": "index",
+                "assetVersionId": "version",
+                "sourceChecksum": "source",
+                "durationMs": 1_500_000,
+                "localPath": str(tmp_path / "clip.mp4"),
+            },
+        )
+    )
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def drive(_job):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(memory, "_drive", drive)
+        await memory.resume_interrupted()
+        await asyncio.wait_for(started.wait(), 5)
+        worker = memory._jobs["memory"]
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/projects/project-1/{endpoint}",
+                headers={"Idempotency-Key": "cancel-memory"},
+                json={"reason": "stop"},
+            )
+        assert response.status_code == 202
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(worker), 2)
+        for _ in range(100):
+            if (
+                memory.executions.get_task("project-1", "memory").status
+                is TaskStatus.CANCELLED
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert (
+            memory.executions.get_task("project-1", "memory").status
+            is TaskStatus.CANCELLED
+        )
+
+    asyncio.run(scenario())
 
 
 def test_lifecycle_event_embedding_an_event_record_survives_the_filter(

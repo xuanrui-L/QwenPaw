@@ -47,6 +47,7 @@ from services.file_agent_runtime import (
 from services.project_files.facade import CreatorFileServices
 from services.runtime_files.errors import JsonlCorruptionError
 from services.runtime_files.replay_filter import (
+    REPLAY_SKIP_TYPES,
     filter_replay_events,
     make_replay_noise_line,
     replay_filter_enabled,
@@ -164,12 +165,14 @@ def _cancel_detached_project_tasks(
         file_image_execution_service,
     )
     from services.media_files.r2v_execution import file_r2v_execution_service
+    from services.media.source_memory import source_memory_service
     from services.run_review.media_review import cancel_project_media_reviews
     from services.source_analysis.service import source_analysis_service
 
     file_image_execution_service(services).cancel_project(project_id)
     file_r2v_execution_service(services).cancel_project(project_id)
     source_analysis_service(services).cancel_project(project_id)
+    source_memory_service(services).cancel_workers(project_id)
     cancel_project_media_reviews(project_id)
 
 
@@ -268,7 +271,7 @@ def _event_payload(event: SessionEventRecord) -> dict[str, Any]:
 def _active_specialist_run_ids(
     services: CreatorFileServices,
     project_id: str,
-) -> set[str]:
+) -> set[str] | None:
     """Runs whose partial reply may have no completed message to replay.
 
     Taken once per connection and deliberately generous: a stale extra id
@@ -279,7 +282,7 @@ def _active_specialist_run_ids(
             project_id,
         )
     except Exception:  # noqa: BLE001 - a replay must not fail on this read
-        return set()
+        return None
     return {
         run.run_id
         for run in runs
@@ -720,13 +723,20 @@ async def stream_events(
         #   constructing the reader lets both layers agree on what to
         #   spare.
         filter_enabled = replay_filter_enabled()
+        drop_types = REPLAY_SKIP_TYPES
         active_run_ids: set[str] = set()
         if filter_enabled:
-            active_run_ids = await asyncio.to_thread(
+            specialist_ids = await asyncio.to_thread(
                 _active_specialist_run_ids,
                 services,
                 project_id,
             )
+            if specialist_ids is None:
+                # Only specialist text has unknown ownership. Keep summarizing
+                # historical tool results and dropping settled mainline deltas.
+                drop_types = REPLAY_SKIP_TYPES - {"subagent.message_delta"}
+            else:
+                active_run_ids = specialist_ids
             # The mainline agent run carries ``agent.message_delta``
             # events with its own runId, and session.status stays
             # non-terminal for the whole turn. Terminal states
@@ -745,7 +755,7 @@ async def stream_events(
             session.session_id,
             after_seq=cursor,
             skip_noise=(
-                make_replay_noise_line(active_run_ids)
+                make_replay_noise_line(active_run_ids, drop_types=drop_types)
                 if filter_enabled
                 else None
             ),
@@ -800,6 +810,7 @@ async def stream_events(
                             replayed,
                             active_run_ids=active_run_ids,
                             result_max_bytes=result_max_bytes,
+                            drop_types=drop_types,
                         )
                         + live
                     )

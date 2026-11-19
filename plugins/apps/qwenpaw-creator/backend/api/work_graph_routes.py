@@ -247,7 +247,11 @@ async def dispatch_work_graph_node(
             "nodeId": node_id,
             "status": node.status.value,
             "dispatched": False,
-            "reason": "already_running",
+            "reason": (
+                "already_done"
+                if node.status.value == "done"
+                else "already_running"
+            ),
             **_task_admission_detail(tasks, node.task_id),
         }
     if node.missing:
