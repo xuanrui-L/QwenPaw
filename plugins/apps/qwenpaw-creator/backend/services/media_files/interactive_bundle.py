@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import io
 import base64
+import hashlib
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 import json
@@ -405,6 +408,60 @@ def _node_index(
     return nodes
 
 
+#: Characters illegal or unsafe in a filename across Windows/macOS/Linux: the
+#: reserved set, the URL-significant ``#``/``%`` (the offline player resolves
+#: segment paths through ``new URL()``, where ``#`` starts a fragment and ``%``
+#: a percent-escape -- both silently corrupt the path into a 404), plus the C0
+#: control range. Replaced (not dropped) so "第3集 · 双重身份" stays legible.
+_UNSAFE_SEGMENT_CHARS = re.compile(r'[\\/:*?"<>|#%\x00-\x1f]')
+_SEGMENT_SLUG_MAX_LEN = 60
+
+
+def _clip_graphemes(value: str, limit: int) -> str:
+    """Cut to *limit* code points without stranding a combining mark, a
+    variation selector or a ZWJ at the edge (Python slices by code point, so
+    this only needs to drop a non-spacing tail)."""
+
+    clipped = value[:limit]
+    while clipped and (
+        unicodedata.combining(clipped[-1])
+        or clipped[-1] in "\u200d\ufe0f\ufe0e"
+    ):
+        clipped = clipped[:-1]
+    return clipped
+
+
+def _segment_slug(project: Project, timeline_id: str) -> str:
+    """Filesystem-safe, human-readable stem for one exported segment.
+
+    The timeline title is the only thing that tells a user which clip is which,
+    so ``segments/*.mp4`` carry it directly instead of an opaque id.
+    """
+
+    timeline = project.timelines.items.get(timeline_id)
+    raw = (timeline.title if timeline else "") or timeline_id
+    raw = unicodedata.normalize("NFKC", raw).strip()
+    slug = re.sub(r"\s+", "-", _UNSAFE_SEGMENT_CHARS.sub(" ", raw))
+    slug = _clip_graphemes(slug.strip("-. _"), _SEGMENT_SLUG_MAX_LEN).strip(
+        "-. _"
+    )
+    return slug or "segment"
+
+
+def _segment_path(timeline_id: str, slug: str) -> str:
+    """``segments/<title>-<stable-hash>.mp4``.
+
+    The 8-hex suffix comes from the timeline id, not its traversal position,
+    so adding or removing a branch never renames the survivors, two branches
+    sharing a title still get distinct files, and there is no ordinal whose
+    two-digit width breaks past 99 segments. The ``-hash`` tail also keeps a
+    title like ``CON`` off Windows' reserved-name list.
+    """
+
+    digest = hashlib.sha256(timeline_id.encode("utf-8")).hexdigest()[:8]
+    return f"segments/{slug}-{digest}.mp4"
+
+
 def _player_manifest(
     project: Project,
     manifest: InteractiveManifest,
@@ -416,8 +473,13 @@ def _player_manifest(
     player falls back gracefully when either block is missing."""
 
     payload = manifest.model_dump(mode="json")
+    # Naming is per-timeline (title + stable id hash), never positional, so a
+    # branch added or removed downstream cannot rename the remaining clips.
     payload["segments"] = {
-        timeline_id: f"segments/{timeline_id.encode().hex()}.mp4"
+        timeline_id: _segment_path(
+            timeline_id,
+            _segment_slug(project, timeline_id),
+        )
         for timeline_id in manifest.segments
     }
     payload["edge_index"] = _edge_index(project)

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import zipfile
 from pathlib import Path
 from datetime import datetime, timezone
@@ -197,6 +198,62 @@ def test_manifest_derivation_covers_reachable_branches() -> None:
     ]
 
 
+def test_segment_names_are_readable_unique_and_safe() -> None:
+    """导出片段名:可读标题 + 稳定 hash 后缀,跨平台安全且不受分支增删影响。"""
+
+    project, _ = _branching_project()
+    # 两条分支同名 + 一个塞满路径分隔符与 URL 危险字符的敌意标题。
+    project.timelines.items["tl:ep4b"].title = "第4集A · 真相大白"
+    project.timelines.items["tl:ep3"].title = '结局/真相:C"暗?#100%段'
+
+    from services.media_files.interactive_bundle import _player_manifest
+
+    segments = _player_manifest(
+        project,
+        derive_interactive_manifest(project),
+    )["segments"]
+    names = list(segments.values())
+
+    # 每个片段一个文件,标题相同也各自唯一(靠 id 派生的 hash 后缀)。
+    assert len(set(names)) == len(names) == 3
+    for name in names:
+        base = name.rsplit("/", 1)[-1]
+        assert re.fullmatch(r".+-[0-9a-f]{8}\.mp4", base)
+        # basename 不含任何跨平台非法或 URL 危险字符(# 会被播放器当 fragment、
+        # % 会被当转义,离线包据此 404)。
+        assert not any(ch in base for ch in '\\/:*?"<>|#%')
+    # 标题的可读文字在净化后仍然保留。
+    assert any("真相" in n for n in names)
+
+    def _stem(path: str) -> str:
+        return re.sub(r"-[0-9a-f]{8}\.mp4$", "", path.rsplit("/", 1)[-1])
+
+    # 同名分支去掉 hash 后缀后完全一致,唯一性只来自后缀。
+    assert segments["tl:ep4a"] != segments["tl:ep4b"]
+    assert _stem(segments["tl:ep4a"]) == _stem(segments["tl:ep4b"])
+    # 敌意字符被中和,且命名只依赖 timeline id(与遍历顺序无关,稳定)。
+    assert _stem(segments["tl:ep3"]) == "结局-真相-C-暗-100-段"
+
+
+def test_display_stem_sanitizes_reserves_and_caps() -> None:
+    """zip 下载名的清洗、Windows 保留名保护与长度上限。"""
+
+    from api.interactive_bundle_routes import _display_stem
+
+    def named(name: str) -> Project:
+        project, _ = _branching_project()
+        project.name = name
+        return project
+
+    # 路径分隔符与 URL 危险字符被中和。
+    stem = _display_stem(named("雾山#谜案%20/x:y"))
+    assert not any(ch in stem for ch in "#%/:")
+    # Windows 保留名加前缀，避免 CON.zip 落盘失败。
+    assert _display_stem(named("CON")) == "_CON"
+    # 超长名截断到上限。
+    assert len(_display_stem(named("雾" * 200))) <= 80
+
+
 def test_missing_segment_fails_closed() -> None:
     project, _ = _branching_project()
     del project.assets.artifact_slots_by_id["timeline:tl:ep4b:render"]
@@ -226,7 +283,10 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         assert "manifest.json" in names
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["entry_timeline_id"] == "tl:ep3"
-        assert manifest["segments"]["tl:ep4a"] == "segments/746c3a65703461.mp4"
+        ep4a_name = manifest["segments"]["tl:ep4a"]
+        assert re.fullmatch(
+            r"segments/第4集A-·-真相大白-[0-9a-f]{8}\.mp4", ep4a_name
+        )
         assert manifest["edge_index"]["edge:a"] == {
             "label": "选择A · 揭发真相",
             "prompt": "",
@@ -249,9 +309,8 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         }
         assert manifest["nodes"]["tl:ep4a"]["is_ending"] is True
         assert manifest["nodes"]["tl:ep4a"]["synopsis"] == ("真相大白，正义得到伸张。")
-        assert (
-            archive.read("segments/746c3a657033.mp4") == b"video-bytes-tl:ep3"
-        )
+        ep3_bytes = archive.read(manifest["segments"]["tl:ep3"])
+        assert ep3_bytes == b"video-bytes-tl:ep3"
         player = archive.read("index.html").decode()
         assert "edge_index" in player and "countdown" in player
         assert "IVBAuthoredPlayer.offline" in player
@@ -690,7 +749,7 @@ def test_package_is_written_after_the_lifecycle_lock_is_released(
     monkeypatch.setattr(routes, "_plan_locked", lambda *_args: (project, plan))
     monkeypatch.setattr(routes, "write_interactive_bundle", write_outside_lock)
 
-    size, chunks = routes._assemble("bundle", services)
+    size, chunks, _stem = routes._assemble("bundle", services)
 
     assert reachables == [True]
     assert size == len(b"zip-bytes")
@@ -719,7 +778,7 @@ def test_scratch_package_is_removed_on_both_paths(
         target.write(b"complete-package")
 
     monkeypatch.setattr(routes, "write_interactive_bundle", write_and_leave)
-    _size, chunks = routes._assemble("bundle", services)
+    _size, chunks, _stem = routes._assemble("bundle", services)
     assert list(exports.glob("*.zip"))
     assert b"".join(chunks) == b"complete-package"
     assert not list(exports.glob("*.zip"))

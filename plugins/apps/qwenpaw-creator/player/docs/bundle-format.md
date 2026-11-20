@@ -32,7 +32,7 @@
 ├── presentation.json      # 新作品必需：声明 agent_html_css 文档路径
 ├── presentation.html      # 新作品必需：Agent 生成并审阅的完整作品界面
 ├── index.html             # Creator 导出的离线播放器，file:// 可打开
-└── segments/<slug>.mp4    # 每个剧情节点一个成片文件
+└── segments/<slug>-<hash>.mp4  # 每个剧情节点一个成片文件
 ```
 
 `manifest.json` 与 `index.html` 内嵌的是**同一份 payload**。放映端只读
@@ -79,10 +79,13 @@
 
 ### 2.3 `segments` 与 `nodes`
 
-`segments` 是 `timeline_id -> 包内相对路径`。Creator 用 timeline ID 的 UTF-8
-字节十六进制编码再加 `.mp4`，避免 `a:b` 与 `a_b` 碰撞，也兼容 file:// URL。
-放映端按 manifest 中的字面路径读文件，不重新派生；重复 ZIP 成员或两个节点
-引用同一分段路径均为致命错误 `DUPLICATE_MEMBER`。
+`segments` 是 `timeline_id -> 包内相对路径`。Creator 用「净化后的片段标题 +
+timeline_id 的 sha256 前 8 位十六进制」拼成 `segments/<slug>-<hash8>.mp4`：
+标题供人识别，哈希后缀保证唯一（同名分支不撞、与遍历顺序无关，分支增删
+不改名），并过滤跨平台非法与 URL 危险字符（含 `#`/`%`，否则离线播放器
+`new URL()` 会把 `#` 当 fragment 而 404）。放映端按 manifest 中的字面路径读
+文件，不重新派生；重复 ZIP 成员或两个节点引用同一分段路径均为致命错误
+`DUPLICATE_MEMBER`。
 
 `nodes` 是 `timeline_id -> 节点对象`,承载故事地图与 DAG 邻接:
 

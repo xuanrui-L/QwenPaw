@@ -42,9 +42,10 @@ function trimmed(value: unknown): string {
 export async function uploadInteractiveBundle(options: {
   bundle: Blob;
   projectId?: string;
+  filename?: string;
   idempotencyKey?: string;
 }): Promise<IvbUploadResult> {
-  const { bundle, projectId } = options;
+  const { bundle, projectId, filename } = options;
   if (!bundle || bundle.size === 0) {
     throw new Error("互动包为空，无法上传");
   }
@@ -56,7 +57,9 @@ export async function uploadInteractiveBundle(options: {
   form.append(
     "file",
     bundle,
-    projectId ? `${projectId}-interactive.zip` : "interactive.zip",
+    // Reuse the download name (server Content-Disposition) when the caller
+    // has it, so the publish and download filenames never diverge.
+    filename || (projectId ? `${projectId}.zip` : "interactive.zip"),
   );
   if (projectId) form.append("project_id", projectId);
 

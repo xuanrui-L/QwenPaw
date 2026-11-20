@@ -12,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
+import unicodedata
 from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO, Callable
@@ -28,6 +30,7 @@ from domain.enums import TaskStatus
 from services.media_files.interactive_bundle import (
     InteractiveBundleError,
     InteractiveBundlePlan,
+    _clip_graphemes,
     plan_interactive_bundle,
     write_interactive_bundle,
 )
@@ -38,6 +41,7 @@ from services.project_files.store import ProjectNotFound
 from services.runtime_files.execution_store import ProjectExecutionStore
 from services.run_review.media_review import active_media_review_slots
 
+from .content_disposition import attachment_content_disposition
 from .dependencies import CreatorErrorRoute, project_file_services
 
 router = APIRouter(
@@ -50,6 +54,35 @@ router = APIRouter(
 # segments. Serialized by design: two exports in flight would double it.
 _EXPORT_GATE = threading.BoundedSemaphore(1)
 _COPY_CHUNK_BYTES = 1024 * 1024
+
+#: Characters that would break a download filename across browsers/OSes, or
+#: corrupt it through a URL (``#``/``%``).
+_UNSAFE_NAME_CHARS = re.compile(r'[\\/:*?"<>|#%\x00-\x1f]')
+# Windows rejects these stems outright, even with an extension (CON.zip).
+_WINDOWS_RESERVED = re.compile(
+    r"^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])$", re.IGNORECASE
+)
+#: Cap so a pathological project name cannot blow past the header limit.
+_DISPLAY_STEM_MAX_LEN = 80
+
+
+def _display_stem(project: Project) -> str:
+    """Human-readable archive base: the project name, filesystem-safe.
+
+    Mirrors the frontend ``safeFileName`` rule (NFKC, illegal chars to a
+    space, whitespace runs collapsed, single spaces kept) so the two never
+    disagree. Falls back to the (opaque) project id when the name is blank.
+    """
+
+    raw = (
+        unicodedata.normalize("NFKC", (project.name or "").strip())
+        or project.project_id
+    )
+    stem = re.sub(r"\s+", " ", _UNSAFE_NAME_CHARS.sub(" ", raw)).strip(" ._")
+    stem = _clip_graphemes(stem, _DISPLAY_STEM_MAX_LEN).strip(" ._")
+    if not stem:
+        return project.project_id
+    return f"_{stem}" if _WINDOWS_RESERVED.match(stem) else stem
 
 
 def _artifact_readers(
@@ -198,14 +231,15 @@ def _plan_locked(
 def _assemble(
     project_id: str,
     services: CreatorFileServices,
-) -> tuple[int, Iterator[bytes]]:
+) -> tuple[int, Iterator[bytes], str]:
     """Plan under the lock, then stream the package onto the data root.
 
-    Returns the archive size plus a chunk iterator, the same contract as
-    ``ProjectStore.export``: only one segment is ever held in memory, and the
-    exact size lets the download UI show real progress. The file lands in
-    ``exports/`` rather than in the system temp directory because the startup
-    disk GC reaps stale files there if the process dies mid-download.
+    Returns the archive size, a chunk iterator and the readable archive base
+    name (project name) -- the same streaming contract as the project export:
+    only one segment is ever held in memory, and the exact size lets the
+    download UI show real progress. The file lands in ``exports/`` rather than
+    in the system temp directory because the startup disk GC reaps stale files
+    there if the process dies mid-download.
     """
 
     with _EXPORT_GATE:
@@ -246,7 +280,11 @@ def _assemble(
         finally:
             if not written:
                 archive_path.unlink(missing_ok=True)
-        return archive_path.stat().st_size, _stream_package(archive_path)
+        return (
+            archive_path.stat().st_size,
+            _stream_package(archive_path),
+            _display_stem(project),
+        )
 
 
 def _stream_package(archive_path: Path) -> Iterator[bytes]:
@@ -265,17 +303,19 @@ async def export_interactive_bundle(
     project_id: str,
     services: CreatorFileServices = Depends(project_file_services),
 ) -> StreamingResponse:
-    archive_size, archive_chunks = await asyncio.to_thread(
+    archive_size, archive_chunks, display_stem = await asyncio.to_thread(
         _assemble,
         project_id,
         services,
     )
+    # The server owns the download name (attachment_content_disposition);
+    # the client reads it back rather than re-deriving a divergent rule.
     return StreamingResponse(
         content=archive_chunks,
         media_type="application/zip",
         headers={
-            "Content-Disposition": (
-                f'attachment; filename="{project_id}-interactive.zip"'
+            "Content-Disposition": attachment_content_disposition(
+                f"{display_stem}.zip",
             ),
             "Content-Length": str(archive_size),
         },

@@ -8,12 +8,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 
-def inline_content_disposition(name: str, media_type: str = "") -> str:
-    """Build a Latin-1-safe inline filename with an RFC 5987 UTF-8 value.
-
-    When *media_type* is provided and *name* has no suffix, a matching
-    extension is appended so that downloaded files keep a usable extension.
-    """
+def _disposition(disposition: str, name: str, media_type: str) -> str:
+    """Build a Latin-1-safe fallback plus an RFC 5987 UTF-8 filename."""
 
     original = Path(str(name or "media")).name or "media"
     if media_type and not Path(original).suffix:
@@ -34,8 +30,22 @@ def inline_content_disposition(name: str, media_type: str = "") -> str:
     utf8_name = original.encode("utf-8", "replace").decode("utf-8", "replace")
     encoded_name = quote(utf8_name, safe="")
     return (
-        f'inline; filename="{fallback}"; ' f"filename*=UTF-8''{encoded_name}"
+        f'{disposition}; filename="{fallback}"; '
+        f"filename*=UTF-8''{encoded_name}"
     )
 
 
-__all__ = ["inline_content_disposition"]
+def inline_content_disposition(name: str, media_type: str = "") -> str:
+    """Serve inline; append a media-type extension when *name* has none."""
+
+    return _disposition("inline", name, media_type)
+
+
+def attachment_content_disposition(name: str) -> str:
+    """Force a download under *name*; the single source of truth so the
+    client never re-derives the filename with a divergent rule."""
+
+    return _disposition("attachment", name, "")
+
+
+__all__ = ["inline_content_disposition", "attachment_content_disposition"]
