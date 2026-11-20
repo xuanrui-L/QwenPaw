@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -232,7 +233,10 @@ def test_creator_export_segments_are_streamable(exported):
     bundle = inspection.bundle
 
     assert bundle is not None
-    assert bundle.segments["tl:ep4a"] == "segments/746c3a65703461.mp4"
+    assert re.fullmatch(
+        r"segments/第4集A-·-真相大白-[0-9a-f]{8}\.mp4",
+        bundle.segments["tl:ep4a"],
+    )
     assert inspection.durations["tl:ep4a"] == pytest.approx(95.0)
 
 
@@ -312,8 +316,11 @@ def test_player_server_boots_on_the_creator_export(exported, library):
         "danger",
     ]
 
+    segment_name = (
+        inspect_bundle(exported).bundle.segments["tl:ep3"].rsplit("/", 1)[-1]
+    )
     segment = http.get(
-        "/api/projects/project-contract/segments/746c3a657033.mp4",
+        f"/api/projects/project-contract/segments/{segment_name}",
         headers={"Range": "bytes=0-99"},
     )
     assert segment.status_code == 206

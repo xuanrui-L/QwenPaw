@@ -27,6 +27,42 @@ import {
 } from "@/components/creator/ProjectImportExport";
 
 /**
+ * Filesystem-safe download stem, mirroring the backend `_display_stem` rule:
+ * neutralize characters illegal on Windows/macOS/Linux or URL-corrupting
+ * (`#`/`%`) while keeping the title legible (single spaces and CJK are valid
+ * in a filename); slice by code points so an emoji is never cut in half; and
+ * guard Windows reserved names (CON/NUL/COM1…) that fail even with an
+ * extension.
+ */
+const WINDOWS_RESERVED = /^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])$/i;
+
+function safeFileName(value: string): string {
+  const cleaned = value
+    .normalize("NFKC")
+    .replace(/[\\/:*?"<>|#%\u0000-\u001f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[ ._]+|[ ._]+$/g, "");
+  const clipped = Array.from(cleaned).slice(0, 80).join("");
+  return WINDOWS_RESERVED.test(clipped) ? `_${clipped}` : clipped;
+}
+
+/** Read the server's chosen filename back from a Content-Disposition header. */
+export function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1].trim());
+    } catch {
+      // malformed escape -- fall through to the plain form
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header);
+  return plain ? plain[1].trim() : null;
+}
+
+/**
  * Project-level export home (design 83:13383 plan header): a 下载/导出
  * dropdown (final cut + project export) plus, on branching projects, the
  * highlighted 导出互动包 button.
@@ -63,9 +99,9 @@ export default function ProjectExportActions({
   const downloadFilm = async (film: (typeof films)[number]) => {
     if (!film.versionId) return;
     const url = getArtifactVersionMediaUrl(film.versionId);
-    const filename = `${
-      film.name || project.name || t("blueprint.finalCut")
-    }.mp4`;
+    const base =
+      safeFileName(film.name || project.name || "") || t("blueprint.finalCut");
+    const filename = `${base}.mp4`;
     try {
       const response = await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -127,7 +163,12 @@ export default function ProjectExportActions({
 
   // The bundle endpoint 409s until every branch has a final cut; both the
   // download and the publish path read the same bytes, so fetch once here.
-  const fetchBundleBlob = async (): Promise<Blob> => {
+  // The server names the archive (Content-Disposition); we read it back
+  // rather than re-deriving a rule that could drift from the backend's.
+  const fetchBundle = async (): Promise<{
+    blob: Blob;
+    filename: string;
+  }> => {
     const response = await fetch(getInteractiveBundleUrl(projectId));
     if (!response.ok) {
       const error = await response.json().catch(() => null);
@@ -138,17 +179,21 @@ export default function ProjectExportActions({
           `HTTP ${response.status}`,
       );
     }
-    return response.blob();
+    const blob = await response.blob();
+    const filename =
+      filenameFromDisposition(response.headers.get("content-disposition")) ||
+      `${safeFileName(project.name || "") || projectId}.zip`;
+    return { blob, filename };
   };
 
   const exportBundle = async () => {
     setBundleBusy(true);
     try {
-      const blob = await fetchBundleBlob();
+      const { blob, filename } = await fetchBundle();
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `${projectId}-interactive.zip`;
+      anchor.download = filename;
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (error) {
@@ -165,10 +210,11 @@ export default function ProjectExportActions({
   const uploadBundle = async () => {
     setUploadBusy(true);
     try {
-      const blob = await fetchBundleBlob();
+      const { blob, filename } = await fetchBundle();
       const result = await uploadInteractiveBundle({
         bundle: blob,
         projectId,
+        filename,
         idempotencyKey: newUploadIdempotencyKey(),
       });
       message.success(t("blueprint.uploadBundleSubmitted"));
