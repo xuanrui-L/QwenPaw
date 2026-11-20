@@ -2832,6 +2832,11 @@ def test_cancel_during_source_preparation_still_terminalizes_once(
         "subagent.started",
         "subagent.failed",
     ]
+    # `task` stays reserved for TaskView rows; the delegation brief must
+    # never reuse that key or the task view store drops it as a bad row.
+    accepted = lifecycle[0]
+    assert accepted.payload.get("delegationText")
+    assert "task" not in accepted.payload
     assert lifecycle[-1].payload.get("cancelled") is True
 
 
@@ -3721,9 +3726,7 @@ def test_manual_prompt_repair_respects_review_and_never_dispatches_media(
         feedback = messages[0]
         assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
         assert reason in feedback.content_parts[0].text
-        assert (
-            "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
-        )
+        assert "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
         assert feedback.metadata["modelRequiredNodes"] == ["video:ep1"]
         if after_failure:
             assert "瞬态故障" in feedback.content_parts[0].text
@@ -5451,10 +5454,7 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
         requests[-1].message_seq,
     ]
     assert len(received) == 1
-    assert (
-        "还要让酒瓶与张东身份图"
-        in received[0].split("CURRENT_USER_REQUEST=")[-1]
-    )
+    assert "还要让酒瓶与张东身份图" in received[0].split("CURRENT_USER_REQUEST=")[-1]
     # Automated findings remain available as context, without an obsolete
     # paid repair being dispatched ahead of either human request.
     assert "run_review_feedback" in received[0]
