@@ -56,6 +56,21 @@ export interface FileProjectReviewState {
   decisionInFlight: boolean;
   polling: boolean;
   consecutiveFailures: number;
+  /**
+   * Set when a failed decision was reconciled by a later poll and actually
+   * committed server-side. Consumers show a "decision took effect"
+   * correction and then clear it.
+   */
+  reconciledDecision: { reviewId: string; at: string } | null;
+  /**
+   * Set when a failed decision left the pending list without a recorded
+   * decision value proving it landed. Consumers show a "result pending
+   * confirmation" notice and then clear it; nothing here may be credited
+   * as kept.
+   */
+  unconfirmedDecision: { reviewId: string; at: string } | null;
+  clearReconciledDecision: () => void;
+  clearUnconfirmedDecision: () => void;
   reset: (projectId?: string | null) => void;
   pollOnce: (projectId: string) => Promise<void>;
   decide: (
@@ -63,6 +78,7 @@ export interface FileProjectReviewState {
     reviewId: string,
     decisions: FileProjectReviewDecisionItem[],
     rejectionFeedback?: FileProjectReviewRejectionFeedback,
+    options?: { reconcile?: boolean },
   ) => Promise<FileProjectReviewRecord>;
   startPolling: (
     projectId: string,
@@ -92,6 +108,8 @@ const reviewBase = (projectId: string | null = null) => ({
   decisionInFlight: false,
   polling: false,
   consecutiveFailures: 0,
+  reconciledDecision: null as { reviewId: string; at: string } | null,
+  unconfirmedDecision: null as { reviewId: string; at: string } | null,
 });
 
 function semanticEtag(value: string): string {
@@ -195,6 +213,11 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
                 operation_id: operation.operation_id,
                 decision: "ACCEPT",
               })),
+            // The background poll already refreshes a failed automatic
+            // decision; an extra reconcile fetch would race it and can
+            // swallow the rotated token the next poll needs.
+            undefined,
+            { reconcile: false },
           );
         }
       } catch (error) {
@@ -405,11 +428,100 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
       return request;
     };
 
+    const reconcileDecision = async (
+      projectId: string,
+      reviewId: string,
+      decisions: FileProjectReviewDecisionItem[],
+      epoch: number,
+    ): Promise<boolean> => {
+      // The decision endpoint commits before its response can still fail
+      // (e.g. follow-up publication errors on older builds, network reset).
+      // A lost response proves nothing about what was committed, so only a
+      // recorded decision value may credit the submit as kept: the review
+      // can leave the pending list because another tab rejected it.
+      try {
+        const fresh = await getActiveFileProjectReview(projectId);
+        if (epoch !== projectEpoch || get().projectId !== projectId)
+          return false;
+        if (fresh.kind === "not_modified") return false;
+        const reviews = fresh.kind === "updated" ? fresh.reviews : [];
+        const target = reviews.find((r) => r.review_id === reviewId);
+        // Verify the decision this caller requested, not merely that the
+        // operations left the pending state: another tab may have recorded
+        // the opposite outcome for them.
+        const expected = new Map(
+          decisions.map((item) => [
+            item.operation_id,
+            item.decision === "ACCEPT" ? "ACCEPTED" : "REJECTED",
+          ]),
+        );
+        const decidedOperations =
+          target?.operations.filter((operation) =>
+            expected.has(operation.operation_id),
+          ) ?? [];
+        const confirmed =
+          decidedOperations.length === expected.size &&
+          decidedOperations.every(
+            (operation) =>
+              operation.decision === expected.get(operation.operation_id),
+          );
+        const pendingReviews = reviews.filter((r) => r.status === "PENDING");
+        const compositeToken =
+          pendingReviews.length > 0
+            ? pendingReviews.map((r) => r.decision_token).join("|")
+            : null;
+        if (!confirmed) {
+          // Still pending means the submit has not landed yet: keep the
+          // error state so the caller may retry the same idempotent request.
+          if (
+            decidedOperations.some(
+              (operation) => operation.decision === "PENDING",
+            )
+          )
+            return false;
+          set({
+            reviews: pendingReviews,
+            etag: compositeToken ? quotedEtag(compositeToken) : null,
+            syncStatus: "healthy",
+            syncError: null,
+            consecutiveFailures: 0,
+            lastGoodAt: new Date().toISOString(),
+            // A different recorded decision is authoritative; absence is
+            // not. Only that absence has to be reported as unconfirmed.
+            ...(target == null
+              ? {
+                  unconfirmedDecision: {
+                    reviewId,
+                    at: new Date().toISOString(),
+                  },
+                }
+              : {}),
+          });
+          return false;
+        }
+        set({
+          reviews: pendingReviews,
+          etag: compositeToken ? quotedEtag(compositeToken) : null,
+          syncStatus: "healthy",
+          syncError: null,
+          consecutiveFailures: 0,
+          lastGoodAt: new Date().toISOString(),
+          reconciledDecision: { reviewId, at: new Date().toISOString() },
+          unconfirmedDecision: null,
+        });
+        return true;
+      } catch {
+        // Keep the degraded state; the next scheduled poll retries.
+        return false;
+      }
+    };
+
     const decide = async (
       projectId: string,
       reviewId: string,
       decisions: FileProjectReviewDecisionItem[],
       rejectionFeedback?: FileProjectReviewRejectionFeedback,
+      options?: { reconcile?: boolean },
     ): Promise<FileProjectReviewRecord> => {
       ensureProject(projectId);
       const state = get();
@@ -575,6 +687,21 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
               }
             : {},
         );
+        // A CAS conflict is a definite pre-commit rejection: the decision was
+        // not applied, so a reconciliation poll would only add latency.
+        // Awaited, so the caller observes the reconciliation outcome (the
+        // ``reconciledDecision`` stamp) before it handles the failure: a
+        // batch caller must not credit a keep from anything weaker.
+        const casConflict =
+          error instanceof CreatorHttpError && error.status === 409;
+        if (!casConflict && options?.reconcile !== false) {
+          await reconcileDecision(
+            projectId,
+            reviewId,
+            canonicalDecisions,
+            epoch,
+          );
+        }
         throw error;
       }
     };
@@ -621,6 +748,8 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
 
     return {
       ...reviewBase(),
+      clearReconciledDecision: () => set({ reconciledDecision: null }),
+      clearUnconfirmedDecision: () => set({ unconfirmedDecision: null }),
       reset: (projectId = null) => {
         stopController();
         projectEpoch += 1;

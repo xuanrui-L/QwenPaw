@@ -2832,6 +2832,11 @@ def test_cancel_during_source_preparation_still_terminalizes_once(
         "subagent.started",
         "subagent.failed",
     ]
+    # `task` stays reserved for TaskView rows; the delegation brief must
+    # never reuse that key or the task view store drops it as a bad row.
+    accepted = lifecycle[0]
+    assert accepted.payload.get("delegationText")
+    assert "task" not in accepted.payload
     assert lifecycle[-1].payload.get("cancelled") is True
 
 
@@ -3721,9 +3726,7 @@ def test_manual_prompt_repair_respects_review_and_never_dispatches_media(
         feedback = messages[0]
         assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
         assert reason in feedback.content_parts[0].text
-        assert (
-            "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
-        )
+        assert "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
         assert feedback.metadata["modelRequiredNodes"] == ["video:ep1"]
         if after_failure:
             assert "瞬态故障" in feedback.content_parts[0].text
@@ -5117,6 +5120,69 @@ def test_idle_session_flushes_parked_notification_and_consumes_it(
     assert flush_inputs, "the model must see the flushed notification"
 
 
+def test_prompt_sync_deadlock_notification_states_the_next_step_once(
+    tmp_path,
+) -> None:
+    """A run ending on prompt-sync gated shots must tell the user where to
+    unblock it, and repeated reconcile ticks must not spam the same gate."""
+
+    from types import SimpleNamespace
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal=None)
+        driver = _driver(services, lambda *_: AgentModelTurn(content="收到。"))
+        nodes = [
+            SimpleNamespace(
+                node_id="video:e1",
+                label="第 1 镜头 · 视频",
+                dispatch_fingerprint="fp-1",
+            ),
+            SimpleNamespace(
+                node_id="video:e2",
+                label="第 2 镜头 · 视频",
+                dispatch_fingerprint="fp-2",
+            ),
+        ]
+        before = services.sessions.list_messages(
+            PROJECT_ID,
+            SESSION_ID,
+            after_seq=0,
+            limit=None,
+        )
+        await driver._notify_prompt_sync_deadlock(PROJECT_ID, [])
+        unchanged = services.sessions.list_messages(
+            PROJECT_ID,
+            SESSION_ID,
+            after_seq=0,
+            limit=None,
+        )
+        await driver._notify_prompt_sync_deadlock(PROJECT_ID, nodes)
+        await driver._notify_prompt_sync_deadlock(PROJECT_ID, nodes)
+        after = services.sessions.list_messages(
+            PROJECT_ID,
+            SESSION_ID,
+            after_seq=0,
+            limit=None,
+        )
+        await driver.stop()
+        return before, unchanged, after
+
+    before, unchanged, after = asyncio.run(scenario())
+    assert len(unchanged) == len(before)
+    fresh = after[len(before) :]
+    assert len(fresh) == 1, "the same gate must not be announced twice"
+    message = fresh[0]
+    assert message.role == "user"
+    assert message.source == "runtime_notification"
+    assert message.metadata["gate"] == "prompt_sync"
+    assert message.metadata["requestId"].startswith("prompt-sync-deadlock-")
+    assert message.metadata["nodeIds"] == ["video:e1", "video:e2"]
+    text = "".join(part.text for part in message.content_parts)
+    assert "提示词待同步" in text
+    assert "第 1 镜头 · 视频" in text
+    assert "保留现有内容并继续" in text
+
+
 def test_mainline_resume_message_carries_quiet_digest_prefix(
     tmp_path,
     monkeypatch,
@@ -5388,10 +5454,7 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
         requests[-1].message_seq,
     ]
     assert len(received) == 1
-    assert (
-        "还要让酒瓶与张东身份图"
-        in received[0].split("CURRENT_USER_REQUEST=")[-1]
-    )
+    assert "还要让酒瓶与张东身份图" in received[0].split("CURRENT_USER_REQUEST=")[-1]
     # Automated findings remain available as context, without an obsolete
     # paid repair being dispatched ahead of either human request.
     assert "run_review_feedback" in received[0]
