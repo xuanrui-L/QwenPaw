@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { pathForLocator, navigateToLocator } from "@/routing/locators";
 import { useNavigationStore } from "@/store/navigationStore";
+import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { projectDocument } from "@/test/creatorFixtures";
 
 vi.mock("@/routing/navigation", () => ({
   navigate: vi.fn(),
@@ -71,5 +73,34 @@ describe("navigateToLocator", () => {
     expect(target).toContain("version=ver-9");
     expect(target).toContain("review=1");
     expect(target).toContain("field=");
+  });
+
+  it("recovers the assets target for legacy cast lineup locators", () => {
+    // Reviews committed before the backend mapped lineup owners persisted
+    // {page:"plan"}; resolveCreatorLocator must redirect them to the lineup
+    // card on the Assets page using the artifact version's owner_ref.
+    const project = structuredClone(projectDocument);
+    project.assets.artifact_versions_by_id["ver-lineup"] = {
+      ...project.assets.artifact_versions_by_id["cat-anchor-v1"],
+      version_id: "ver-lineup",
+      slot_id: "lineup:lineup:duo:image",
+      kind: "cast_lineup_image",
+      owner_ref: "lineup:lineup:duo",
+    };
+    useProjectSnapshotStore.setState({ projectId: "p1", project });
+    navigateToLocator(
+      "p1",
+      {
+        page: "plan",
+        mediaType: "image",
+        artifactKind: "cast_lineup_image",
+        artifactVersionId: "ver-lineup",
+      },
+      { review: true },
+    );
+    const target = vi.mocked(navigate).mock.calls[0][0] as string;
+    expect(target).toContain("/project/p1/assets");
+    expect(target).toContain("asset=lineup%3Aduo");
+    useProjectSnapshotStore.getState().reset();
   });
 });

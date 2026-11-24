@@ -57,6 +57,22 @@ export function resolveCreatorLocator(
       else if (resolved.page !== "element") resolved.page = "plan";
     }
   }
+  // Reviews committed before the backend mapped lineup owners carry
+  // {"page":"plan"} for cast lineup images, but lineup cards live on the
+  // Assets page. Recover the real target from the persisted owner_ref.
+  if (
+    resolved.page === "plan" &&
+    resolved.artifactKind === "cast_lineup_image" &&
+    project
+  ) {
+    const ownerRef =
+      project.assets?.artifact_versions_by_id[resolved.artifactVersionId ?? ""]
+        ?.owner_ref ?? "";
+    if (ownerRef.startsWith("lineup:")) {
+      resolved.page = "assets";
+      resolved.assetId = ownerRef.slice("lineup:".length);
+    }
+  }
   // Ref search and production cards also supply entity@variant asset keys.
   // Resolve only against a real entity, so an unrelated source id containing
   // '@' is never split by guesswork.
