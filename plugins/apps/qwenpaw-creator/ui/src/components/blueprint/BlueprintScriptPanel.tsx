@@ -65,6 +65,10 @@ export function parseScriptMarkdown(markdown: string): ScriptBlock[] {
 const MD_LINK = /\[([^\]]+)\]\(([^)\s]+)\)/g;
 const MD_BOLD = /\*\*([^*]+)\*\*/g;
 
+// One keyed toast per stale-script action: repeated clicks refresh a single
+// message instead of stacking a wall of identical toasts.
+const STALE_SCRIPT_ACTION_TOAST_KEY = "blueprint-stale-script-action";
+
 function renderInlineBold(text: string, keyBase: number): ReactNode[] {
   MD_BOLD.lastIndex = 0;
   if (!MD_BOLD.test(text)) return [text];
@@ -377,10 +381,10 @@ export default function BlueprintScriptPanel({
     }
   };
 
-  const requestChanges = () => {
-    // Prefill the assistant composer instead of firing a message: the
-    // script rides along as a selection attachment and the user adds
-    // concrete feedback before sending.
+  // Prefill the assistant composer instead of firing a message: the script
+  // rides along as a selection attachment and the user edits the draft
+  // before sending.
+  const prefillComposer = (draft: string) => {
     const dock = useAgentDockUiStore.getState();
     dock.setSelection({
       text: timeline.synopsis || title,
@@ -395,8 +399,11 @@ export default function BlueprintScriptPanel({
       label: t("blueprint.scriptAttachmentLabel", { title }),
       kind: "text",
     });
-    dock.setDraft(t("blueprint.requestChangesDraft", { title }));
+    dock.setDraft(draft);
     dock.setSidebarTab("assistant");
+  };
+  const requestChanges = () => {
+    prefillComposer(t("blueprint.requestChangesDraft", { title }));
     message.success(t("blueprint.requestChangesPrefilled"));
   };
 
@@ -410,7 +417,10 @@ export default function BlueprintScriptPanel({
     const run = () => {
       const button = findButton();
       if (!button) {
-        message.info(t("blueprint.staleScriptConfirmMissing"));
+        message.info({
+          key: STALE_SCRIPT_ACTION_TOAST_KEY,
+          content: t("blueprint.staleScriptConfirmMissing"),
+        });
         return;
       }
       button.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -419,6 +429,20 @@ export default function BlueprintScriptPanel({
     };
     if (!inline) onClose();
     window.setTimeout(run, inline ? 0 : 220);
+  };
+
+  // The confirm button this shortcut targets only renders while the project
+  // still waits for script approval. Once media production is approved a
+  // stale script needs a redraft instead; probing for a button that cannot
+  // exist left users clicking into a dead end (field report 2026-11-24:
+  // stacked "confirm button not found" toasts on a media-stage project).
+  const stageAwaitingConfirm = project.settings.production_stage === "script";
+  const requestScriptRedraft = () => {
+    prefillComposer(t("blueprint.staleScriptRedraftDraft", { title }));
+    message.info({
+      key: STALE_SCRIPT_ACTION_TOAST_KEY,
+      content: t("blueprint.staleScriptNotBlocking"),
+    });
   };
 
   return (
@@ -464,11 +488,21 @@ export default function BlueprintScriptPanel({
                   </span>
                   <button
                     type="button"
-                    data-stale-script-action="confirm-production-stage"
+                    data-stale-script-action={
+                      stageAwaitingConfirm
+                        ? "confirm-production-stage"
+                        : "request-script-redraft"
+                    }
                     className="shrink-0 cursor-pointer text-[11px] font-semibold text-[var(--color-accent)] underline-offset-2 hover:underline"
-                    onClick={focusProductionStageConfirm}
+                    onClick={
+                      stageAwaitingConfirm
+                        ? focusProductionStageConfirm
+                        : requestScriptRedraft
+                    }
                   >
-                    {t("blueprint.staleScriptAction")}
+                    {stageAwaitingConfirm
+                      ? t("blueprint.staleScriptAction")
+                      : t("blueprint.staleScriptRedraftAction")}
                   </button>
                 </>
               )}
