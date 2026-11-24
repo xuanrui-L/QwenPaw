@@ -219,7 +219,7 @@ export default function FileProjectReviewPanel({
             rejectionFeedback,
           )
         : await decide(projectId, review.review_id, decisionItems);
-      if (decided.followupDeferred) {
+      if (decided?.followupDeferred) {
         // The decision is durable, but the follow-up (waking the Agent to
         // regenerate, or publishing accepted assets) was deferred to recovery.
         // A plain success toast here is exactly what made "undo & redo" look

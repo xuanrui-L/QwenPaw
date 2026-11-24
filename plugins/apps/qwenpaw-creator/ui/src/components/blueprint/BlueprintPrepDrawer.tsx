@@ -214,8 +214,19 @@ function VisualDetail({
     );
     if (items.length === 0) return;
     try {
-      await decideReview(projectId, gatingReview.review_id, items);
-      message.success(t("blueprint.designAccepted"));
+      const decided = await decideReview(
+        projectId,
+        gatingReview.review_id,
+        items,
+      );
+      // A deferred follow-up means the accepted design was persisted but its
+      // downstream publish was not launched now; warn instead of a clean
+      // success that hides the deferral.
+      if (decided?.followupDeferred) {
+        message.warning(t("fileReview.followupDeferred"), 6);
+      } else {
+        message.success(t("blueprint.designAccepted"));
+      }
       void pollOnce(projectId);
     } catch (error) {
       message.error(

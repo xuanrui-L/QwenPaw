@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { message } from "antd";
 import InlineReviewDiff, { matchReviewOperations } from "../InlineReviewDiff";
 import type {
   FileProjectReviewOperation,
@@ -126,6 +127,37 @@ describe("matchReviewOperations", () => {
         { action: "UNDO_ONLY" },
       ),
     );
+  });
+
+  it("warns instead of reporting success when the follow-up is deferred", async () => {
+    // The decision commits durably (HTTP 200), but a deferred follow-up means
+    // the undo/redo was not actually launched. Plain success here is exactly the
+    // "undo & redo did nothing" false positive this inline panel must not repeat.
+    const current = review([operation({})]);
+    const decide = vi.fn(async () => ({ ...current, followupDeferred: true }));
+    useFileProjectReviewStore.setState({
+      projectId: "project-1",
+      reviews: [current],
+      decisionInFlight: false,
+      decide,
+    });
+    const warnSpy = vi
+      .spyOn(message, "warning")
+      .mockImplementation(() => (() => {}) as never);
+    const successSpy = vi
+      .spyOn(message, "success")
+      .mockImplementation(() => (() => {}) as never);
+    render(<InlineReviewDiff pointer="/strategy/creative_brief" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "撤销该修改" }));
+    fireEvent.click(screen.getByRole("button", { name: "仅撤销" }));
+
+    await waitFor(() => expect(decide).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(warnSpy).toHaveBeenCalledTimes(1));
+    expect(successSpy).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+    successSpy.mockRestore();
   });
 });
 
