@@ -20,9 +20,11 @@ from services.project_files.commit import (
 from services.project_files.models import Project
 from services.project_files.poller import ProjectPoller
 from services.project_files.recovery import (
+    AUDIT_LEDGER_FILE_NAME,
     ProjectCommitRecoveryCoordinator,
     ProjectRecoveryIntegrityError,
     RecoveryAction,
+    _audit_runtime_dependencies,
 )
 from services.project_files.serialization import (
     canonical_json_bytes,
@@ -1211,6 +1213,86 @@ def test_a_missing_runtime_state_invalidates_the_ledger(tmp_path, monkeypatch):
         "fingerprint still only sees the transaction directory"
     )
     assert report.outcomes[0].action is not None
+
+
+def test_a_corrupt_audit_ledger_degrades_to_a_full_audit(
+    tmp_path,
+    monkeypatch,
+):
+    """The ledger is a cache: corrupt bytes cost time, never false alarms.
+
+    A damaged ledger file used to raise on every transaction lookup,
+    turning an intact Project into a wall of integrity errors.
+    """
+
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
+    store = _finalized_store(tmp_path)
+    ledger = runtime_root(store) / AUDIT_LEDGER_FILE_NAME
+    ledger.write_text("{not json", encoding="utf-8")
+
+    first = recover(store)
+
+    assert first.ok
+    assert first.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+
+    # The damaged file was replaced, so the next boot is a cache hit again.
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+    second = recover(store)
+
+    assert not calls
+    assert second.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+
+
+def test_a_forged_non_terminal_verdict_in_the_ledger_is_not_trusted(
+    tmp_path,
+    monkeypatch,
+):
+    """A planted verdict must never stand in for the real audit.
+
+    Only terminal, repair-free actions are cacheable; anything else in
+    the file is ignored so the deep audit's repair branches still run.
+    """
+
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
+    store = _finalized_store(tmp_path)
+    recover(store)  # build a ledger with a real fingerprint
+
+    from services.project_files.recovery import _audit_fingerprint
+
+    tx_root = transaction_root(store, "tx-ledger")
+    ledger = runtime_root(store) / AUDIT_LEDGER_FILE_NAME
+    table = json.loads(ledger.read_text(encoding="utf-8"))
+    table[tx_root.name] = {
+        "fingerprint": _audit_fingerprint(tx_root, runtime_root(store)),
+        "action": RecoveryAction.INTEGRITY_ERROR.value,
+        "transaction_id": "tx-ledger",
+        "state_before": None,
+        "state_after": None,
+    }
+    ledger.write_text(json.dumps(table), encoding="utf-8")
+
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+    report = recover(store)
+
+    assert calls, "a forged verdict must fall through to the real audit"
+    assert report.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+
+
+def test_dependency_fingerprint_rejects_an_unsafe_round_id(tmp_path):
+    """round.json bytes must not steer the fingerprint outside Runtime."""
+
+    tx_root = tmp_path / "tx"
+    tx_root.mkdir()
+    (tx_root / "round.json").write_text(
+        json.dumps({"round_id": "../secret"}),
+        encoding="utf-8",
+    )
+
+    deps = _audit_runtime_dependencies(tx_root, tmp_path / "runtime")
+
+    assert set(deps) == {"runtime-state"}
 
 
 def test_a_terminal_entry_is_decided_without_its_snapshots(

@@ -30,7 +30,10 @@ from services.runtime_files.atomic_store import (
     AtomicJsonRecordStore,
     RecordSnapshot,
 )
-from services.runtime_files.errors import RecordNotFoundError
+from services.runtime_files.errors import (
+    CorruptRecordError,
+    RecordNotFoundError,
+)
 from services.runtime_files.locking import CrossProcessFileLock
 from services.runtime_files.path_safety import is_link_stat, is_link_path
 from services.runtime_files.models import (
@@ -50,6 +53,7 @@ from services.runtime_files.models import (
 from .commit import (
     DIFF_SEMANTICS_MIGRATED,
     CommitJournalState,
+    ProjectCommitError,
     ProjectCommitJournal,
     _candidate_hash,
     _review_operation_id,
@@ -178,6 +182,13 @@ def _audit_runtime_dependencies(
         return deps
     round_id = raw.get("round_id")
     if isinstance(round_id, str) and round_id:
+        try:
+            _runtime_path_segment(round_id)
+        except ProjectCommitError:
+            # A tampered round.json must not smuggle a traversal segment
+            # into the dependency paths; omit the aggregate entries the
+            # same way an unreadable round.json does.
+            return deps
         label = "aggregate-round"
         if raw.get("status") == TransactionStatus.ACTIVE.value:
             # Pre-fix caches could call a frozen ACTIVE round finalized.
@@ -197,6 +208,17 @@ class RecoveryAction(StrEnum):
     ALREADY_FINALIZED = "already_finalized"
     SKIPPED_ABORTED = "skipped_aborted"
     INTEGRITY_ERROR = "integrity_error"
+
+
+# Only terminal, repair-free verdicts may be replayed from the ledger.  A
+# non-terminal or repair action found in the file is tampering or an old
+# writer's bug; trusting it could skip the deep audit's repair branches.
+_CACHEABLE_ACTIONS = frozenset(
+    {
+        RecoveryAction.ALREADY_FINALIZED,
+        RecoveryAction.SKIPPED_ABORTED,
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +473,8 @@ class ProjectCommitRecoveryCoordinator:
         ):
             return None
         for action in RecoveryAction:
+            if action not in _CACHEABLE_ACTIONS:
+                continue
             if action.value != entry.get("action"):
                 continue
             return TransactionRecoveryOutcome(
@@ -499,7 +523,10 @@ class ProjectCommitRecoveryCoordinator:
         if stored is None:
             try:
                 loaded = self._audit_ledger_store(runtime_root).read_or_none()
-            except OSError:
+            except (OSError, CorruptRecordError):
+                # The ledger is a cache: unreadable or corrupt bytes cost a
+                # full re-audit, never a false integrity verdict, and the
+                # next flush overwrites the damaged file.
                 loaded = None
             stored = loaded if isinstance(loaded, dict) else {}
             self._ledger_tables[key] = stored
