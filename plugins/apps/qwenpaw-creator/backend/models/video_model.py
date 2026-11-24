@@ -1465,6 +1465,11 @@ async def submit_video_task(
         raise ModelError(
             f"Video task submission failed ({type(e).__name__}): {detail}.{hint}",
             model_name=model_name,
+            # When the hint fired we believe the body was too large; resending
+            # the identical references cannot succeed, so mark it permanent to
+            # match the message and stop the driver from inviting a futile
+            # retry that only burns another provider round trip.
+            retryable=not bool(hint),
         )
 
 

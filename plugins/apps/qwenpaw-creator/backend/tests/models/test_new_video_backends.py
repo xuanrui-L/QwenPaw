@@ -1091,3 +1091,44 @@ def test_video_submit_never_surfaces_an_empty_failure_reason(
     assert "RemoteProtocolError" in message
     # References were inlined, so the oversized-body hint is attached.
     assert "413" in message
+    # The hint promises "retrying the same references cannot help", so the
+    # error must be marked non-retryable to match; otherwise the driver surfaces
+    # retryable=true and invites the model to resubmit the identical body.
+    assert excinfo.value.retryable is False
+
+
+def test_video_submit_keeps_a_reference_free_transport_error_retryable(
+    monkeypatch,
+) -> None:
+    """Without inlined references a transport error is not blamed on body size.
+
+    A connection-level failure on a text-to-video submit carries no media, so
+    it may be a transient blip: it must stay retryable and carry no
+    oversized-body hint. This pins the other side of ``retryable=not hint``.
+    """
+    captured: dict = {}
+    _bind(
+        monkeypatch,
+        "kling-2.6",
+        captured,
+        backend="kling",
+        payload={"code": 0, "data": {"id": "task-1"}},
+    )
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _RaisingAsyncClient(httpx.RemoteProtocolError("")),
+    )
+    with pytest.raises(ModelError) as excinfo:
+        asyncio.run(
+            video_model.submit_video_task(
+                "一只小猫在雨夜的街头奔跑",
+                mode="t2v",
+                ratio="16:9",
+                duration=10,
+                resolution="720p",
+            ),
+        )
+    error = excinfo.value
+    assert "413" not in str(error)
+    assert error.retryable is True
