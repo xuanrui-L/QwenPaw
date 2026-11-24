@@ -1439,6 +1439,20 @@ async def submit_video_task(
                 # retry, and each submit attempt costs a provider round trip.
                 retryable=False,
             )
+        if e.response.status_code == 413:
+            # The gateway rejected the request body itself, not the task.
+            # Resending the identical oversized payload cannot succeed, and
+            # the usual cause is inlined Base64 references that are too large
+            # or too numerous. Name the real reason instead of leaking a bare
+            # "413: " with an empty upstream body, which tells the user
+            # nothing about whether a retry can help.
+            raise ModelError(
+                "视频任务提交被网关拒绝：请求体超过大小限制（HTTP 413）。"
+                "常见原因是内联参考图过大或多张叠加；请压缩或减少参考图后"
+                "重试，原样重试无效。",
+                model_name=model_name,
+                retryable=False,
+            )
         # Keep a long enough response body: error codes such as content
         # moderation appear after ~200 characters, and truncating too short
         # prevents callers from recognising the error type (end-to-end Run
@@ -1457,9 +1471,28 @@ async def submit_video_task(
     except ModelError:
         raise
     except Exception as e:
-        logger.error(f"Video task submission failed: {e}")
+        # str(e) is empty for several transport-level failures (e.g. a
+        # connection reset wrapped with no message), which used to surface as
+        # a bare "Video task submission failed:" with nothing after the colon.
+        # Fall back to repr and always name the exception type.
+        detail = str(e).strip() or repr(e)
+        logger.error(
+            f"Video task submission failed ({type(e).__name__}): {detail}",
+        )
+        # A transport error carries no HTTP status to read. When the request
+        # inlines Base64 references, the usual cause is the gateway refusing an
+        # oversized body by closing the connection mid-upload (equivalent to
+        # 413), which lands here rather than as an HTTPStatusError. Say so,
+        # because resending the same references cannot help.
+        hint = ""
+        if isinstance(e, httpx.TransportError) and media:
+            hint = (
+                " 请求可能在上传内联参考图时被网关拒绝（请求体过大，等价"
+                " 413）或服务端中途断开连接；请压缩或减少参考图后重试，"
+                "原样重试通常无效。"
+            )
         raise ModelError(
-            f"Video task submission failed: {str(e)}",
+            f"Video task submission failed ({type(e).__name__}): {detail}.{hint}",
             model_name=model_name,
         )
 

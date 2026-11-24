@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 
+import httpx
 import pytest
 
 from models import config as model_config
@@ -1005,3 +1006,92 @@ def test_vidu_direct_check_status(monkeypatch) -> None:
     assert (
         captured["url"] == "https://api.vidu.com/ent/v2/tasks/task-3/creations"
     )
+
+
+# ── submit failure surfacing ─────────────────────────────────────────
+
+
+class _RaisingAsyncClient:
+    """Answers every submit POST by raising a caller-supplied exception."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        raise self._exc
+
+
+def _submit_with_reference():
+    """The r2v call from test_kling_bailian_r2v_payload, known to reach the
+    submit POST with a non-empty media list."""
+    return video_model.submit_video_task(
+        "<<<image_1>>>中的角色向前走",
+        reference_image_url="/generated/anchor.png",
+        reference_image_url_list=["/generated/motion.mp4"],
+        ratio="16:9",
+        duration=10,
+        resolution="1080p",
+    )
+
+
+def test_video_submit_maps_a_gateway_413_to_a_body_too_large_reason(
+    monkeypatch,
+) -> None:
+    """A 413 must name the real cause instead of leaking a bare status.
+
+    nginx answers an oversized request body with 413 and an empty text body,
+    so the with-status branch would otherwise render "status 413: " with no
+    reason and no guidance on whether a retry can help.
+    """
+    captured: dict = {}
+    _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
+    request = httpx.Request("POST", "https://bailian.example/video-synthesis")
+    response = httpx.Response(413, request=request, text="")
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _RaisingAsyncClient(
+            httpx.HTTPStatusError("413", request=request, response=response),
+        ),
+    )
+    with pytest.raises(ModelError) as excinfo:
+        asyncio.run(_submit_with_reference())
+    error = excinfo.value
+    assert "请求体超过大小限制" in str(error)
+    assert "413" in str(error)
+    # Resending the identical oversized body cannot succeed.
+    assert error.retryable is False
+
+
+def test_video_submit_never_surfaces_an_empty_failure_reason(
+    monkeypatch,
+) -> None:
+    """A transport error with an empty str(e) must not become a bare colon.
+
+    A gateway that refuses an oversized upload closes the connection mid-body,
+    so httpx raises a RemoteProtocolError carrying no response, no status, and
+    (as measured) an empty str(). The generic branch used to render that as
+    "Video task submission failed:" with nothing after it. The user still needs
+    a non-empty, actionable reason plus the body-size hint when references were
+    inlined.
+    """
+    captured: dict = {}
+    _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _RaisingAsyncClient(httpx.RemoteProtocolError("")),
+    )
+    with pytest.raises(ModelError) as excinfo:
+        asyncio.run(_submit_with_reference())
+    message = str(excinfo.value)
+    assert not message.endswith("failed:")
+    assert "RemoteProtocolError" in message
+    # References were inlined, so the oversized-body hint is attached.
+    assert "413" in message
