@@ -1419,6 +1419,7 @@
     "keptCount": "已保留 {{count}} 项内容",
     "undoneCount": "已撤销 {{count}} 项内容，Agent 将按反馈重做",
     "undoneCountSimple": "已撤销 {{count}} 项内容",
+    "followupDeferred": "决定已保存，但后续动作（重做/发布）未能立即启动，系统会在恢复后自动重试；若长时间无变化，请重试或检查项目是否被占用。",
     "reviewOrViewChanges": "审阅 / 查看修改",
     "firstTimeDesc": "首次说明：Agent 对项目的每处修改都会在这里待你审阅：「保留」采纳修改，「撤销」回退到修改前；也可逐条处理。",
     "review": "审阅",

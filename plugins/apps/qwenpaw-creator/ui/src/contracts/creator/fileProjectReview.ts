@@ -51,6 +51,11 @@ export interface FileProjectReviewRecord {
   operations: FileProjectReviewOperation[];
   created_at: string;
   updated_at: string;
+  // Set by the decision endpoint when the decision committed durably but the
+  // asynchronous follow-up (publishing accepted assets, or waking the Agent to
+  // regenerate after UNDO_AND_REGENERATE) could not be triggered inline and is
+  // deferred to startup recovery / driver convergence. Absent on GET responses.
+  followupDeferred?: boolean;
 }
 
 export type FileProjectReviewDecision = "ACCEPT" | "REJECT";
