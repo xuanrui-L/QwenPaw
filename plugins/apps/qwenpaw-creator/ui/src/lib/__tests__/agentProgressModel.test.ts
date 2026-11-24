@@ -157,6 +157,65 @@ describe("creation overview reconciles admitted work and durable task progress",
     expect(storyboard.statusLabel).toContain("更新");
     expect(storyboard.statusLabel).not.toContain("timeline:");
   });
+  it("drops a stale script node from the overview once media production is approved", () => {
+    // The user already confirmed the script (stage=media), so "stale" now only
+    // means upstream creative inputs drifted; it does not block dispatch and the
+    // blueprint panel keeps the sync chip. The overview must not alarm 需要关注.
+    const project = structuredClone(projectDocument);
+    project.settings.production_stage = "media";
+    const result = model(
+      [
+        node({
+          id: "script:timeline:main",
+          kind: "script",
+          status: "stale",
+          timelineId: "timeline:main",
+          locator: {},
+        }),
+        // A stale non-script node is a real signal and must stay in attention.
+        node({
+          id: "storyboard:shot-1",
+          kind: "storyboard",
+          status: "stale",
+          timelineId: "timeline:main",
+          locator: {},
+        }),
+      ],
+      [],
+      [],
+      project,
+    );
+    expect(items(result).map((item) => item.node?.kind)).toEqual([
+      "storyboard",
+    ]);
+    expect(items(result)[0].phase).toBe("attention");
+    expect(result.counts.attention).toBe(1);
+  });
+  it("keeps a stale script node in attention while the script stage still owns approval", () => {
+    // Before approval the confirm button lives in the script stage, so the stale
+    // script is a real gate the overview must keep surfacing.
+    const project = structuredClone(projectDocument);
+    project.settings.production_stage = "script";
+    const result = model(
+      [
+        node({
+          id: "script:timeline:main",
+          kind: "script",
+          status: "stale",
+          timelineId: "timeline:main",
+          locator: {},
+        }),
+      ],
+      [],
+      [],
+      project,
+    );
+    expect(items(result)).toHaveLength(1);
+    expect(items(result)[0]).toMatchObject({
+      phase: "attention",
+      status: "stale",
+    });
+  });
   it("retains an active child behind an independently refreshed terminal run when its visual variant cannot be matched", () => {
     const result = model(
       [node(), node({ id: "visual:cat:wounded" })],
