@@ -6,8 +6,8 @@ Every review operation carries a ``ui_locator`` so the AgentDock review panel
 can (a) jump the user to the place the change lives and (b) render the right
 kind of diff/preview.  Text edits point at a Plan/Element field (matched in
 the DOM by ``data-creator-path`` == the JSON pointer); generated media points
-at the place it was produced: a storyboard/video Element workbench or a
-character asset detail page.
+at the place it was produced: a storyboard/video Element workbench or an
+Assets page card (character art, cast lineups).
 
 The mapping is intentionally derived from the *committed* Project document so a
 locator always reflects real, current entities (slot owners, artifact kinds and
@@ -52,6 +52,11 @@ def _owner_locator(owner_ref: str) -> dict[str, str]:
     if owner_ref.startswith("element:"):
         return {"page": "element", "elementId": owner_ref.split(":", 1)[1]}
     if owner_ref.startswith("asset:"):
+        return {"page": "assets", "assetId": owner_ref.split(":", 1)[1]}
+    # Cast lineups render as cards on the Assets page, keyed by the lineup id.
+    # The owner_ref prefix is not part of that id, so strip exactly one level:
+    # "lineup:lineup:duo" -> "lineup:duo".
+    if owner_ref.startswith("lineup:"):
         return {"page": "assets", "assetId": owner_ref.split(":", 1)[1]}
     return {"page": "plan"}
 

@@ -34,6 +34,13 @@ def _project() -> dict:
                     "owner_ref": "asset:char-7",
                     "file_id": "file-img",
                 },
+                "ver-lineup": {
+                    "version_id": "ver-lineup",
+                    "slot_id": "lineup:lineup:duo:image",
+                    "kind": "cast_lineup_image",
+                    "owner_ref": "lineup:lineup:duo",
+                    "file_id": "file-img",
+                },
             },
             "artifact_slots_by_id": {
                 "element:el-1:storyboard": {
@@ -85,6 +92,20 @@ def test_character_image_points_to_asset_detail() -> None:
     assert locator["assetId"] == "char-7"
     assert locator["mediaType"] == "image"
     assert locator["artifactKind"] == "visual_asset_image"
+
+
+def test_lineup_image_points_to_asset_card() -> None:
+    locator = derive_ui_locator(
+        "/assets/artifact_versions_by_id/ver-lineup",
+        _project(),
+    )
+    assert locator == {
+        "page": "assets",
+        "assetId": "lineup:duo",
+        "mediaType": "image",
+        "artifactKind": "cast_lineup_image",
+        "artifactVersionId": "ver-lineup",
+    }
 
 
 def test_element_text_pointer_carries_pointer_as_field() -> None:
