@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
+
 import pytest
 from api import file_session_routes
 from api.file_session_routes import stream_events
@@ -37,6 +39,57 @@ from services.runtime_files import JsonlCorruptionError
 from runtime_files.test_storage_primitives import EventRecord
 
 
+def _append_agent_event(services, event_type, payload):
+    return services.sessions.append_event(
+        "project-1",
+        "session-1",
+        event_type=event_type,
+        actor="agent",
+        payload=payload,
+    )
+
+
+async def _event_stream(services, *, disconnect_after=4):
+    class Connection:
+        polls = 0
+
+        async def is_disconnected(self):
+            self.polls += 1
+            return self.polls > disconnect_after
+
+    response = await stream_events(
+        "project-1",
+        Connection(),
+        after=0,
+        last_event_id=None,
+        services=services,
+    )
+    return response.body_iterator
+
+
+def _parse_sse(chunk):
+    fields = dict(
+        line.split(": ", 1) for line in chunk.splitlines() if ": " in line
+    )
+    return (
+        int(fields.get("id", "0")),
+        fields.get("event", ""),
+        fields.get("data", ""),
+    )
+
+
+async def _replay(services, *, disconnect_after=4):
+    replay = []
+    async for chunk in await _event_stream(
+        services,
+        disconnect_after=disconnect_after,
+    ):
+        event = _parse_sse(chunk)
+        if event[0] or event[1]:
+            replay.append(event)
+    return replay
+
+
 def test_live_streaming_delta_past_the_replay_boundary_is_delivered(
     tmp_path,
 ) -> None:
@@ -52,16 +105,7 @@ def test_live_streaming_delta_past_the_replay_boundary_is_delivered(
     """
 
     _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
-    store = services.sessions
-
-    def append(event_type, payload):
-        return store.append_event(
-            "project-1",
-            "session-1",
-            event_type=event_type,
-            actor="agent",
-            payload=payload,
-        )
+    append = partial(_append_agent_event, services)
 
     # Pre-replay: a lifecycle event + an old delta that the filter is
     # allowed to drop. Boundary is the tail at connect time (=2).
@@ -76,33 +120,10 @@ def test_live_streaming_delta_past_the_replay_boundary_is_delivered(
         },
     )
 
-    class Connection:
-        polls = 0
-
-        async def is_disconnected(self):
-            self.polls += 1
-            # Keep the SSE loop open past the initial replay so the
-            # live append below has a chance to be picked up; the
-            # body exits as soon as the test's iteration stops.
-            return self.polls > 40
-
-    async def scenario() -> list[tuple[int, str]]:
-        response = await stream_events(
-            "project-1",
-            Connection(),
-            after=0,
-            last_event_id=None,
-            services=services,
-        )
-
-        seen: list[tuple[int, str]] = []
-        iterator = response.body_iterator.__aiter__()
-        # Drain the replay (lifecycle event) before firing the live append
-        # so the reader has definitely crossed the boundary.
-        first = await iterator.__anext__()
-        seq, kind = _parse_sse_id_type(first)
-        seen.append((seq, kind))
-
+    async def scenario():
+        iterator = await _event_stream(services, disconnect_after=40)
+        seen = [_parse_sse(await anext(iterator))[:2]]
+        # Cross the original replay boundary before publishing the live delta.
         append(
             "agent.message_delta",
             {
@@ -112,37 +133,18 @@ def test_live_streaming_delta_past_the_replay_boundary_is_delivered(
                 "delta": "live",
             },
         )
-        try:
-            while True:
-                chunk = await iterator.__anext__()
-                seq, kind = _parse_sse_id_type(chunk)
+        async for chunk in iterator:
+            seq, kind, _ = _parse_sse(chunk)
+            if seq or kind:
                 seen.append((seq, kind))
-                if kind.startswith("agent.message_delta"):
-                    break
-        except StopAsyncIteration:
-            pass
+            if kind == "agent.message_delta":
+                break
         return seen
 
-    events = asyncio.run(scenario())
-    # The historical delta at seq 2 stayed filtered (replay), but the live
-    # delta at seq 3 must reach the client even though it is the same
-    # event type the filter is trained to drop.
-    kinds = [kind for _, kind in events]
-    assert (
-        "agent.message_delta" in kinds
-    ), f"live streaming delta was filtered out of the SSE body: {events}"
-    assert kinds[0] == "agent.run.started"
-
-
-def _parse_sse_id_type(chunk: str) -> tuple[int, str]:
-    seq = 0
-    kind = ""
-    for line in chunk.splitlines():
-        if line.startswith("id: "):
-            seq = int(line.removeprefix("id: "))
-        elif line.startswith("event: "):
-            kind = line.removeprefix("event: ")
-    return seq, kind
+    assert asyncio.run(scenario()) == [
+        (1, "agent.run.started"),
+        (3, "agent.message_delta"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -162,16 +164,7 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
     """Both replay filters retain partial replies from live and failed workers."""
 
     _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
-    store = services.sessions
-
-    def append(event_type, payload):
-        return store.append_event(
-            "project-1",
-            "session-1",
-            event_type=event_type,
-            actor="agent",
-            payload=payload,
-        )
+    append = partial(_append_agent_event, services)
 
     append(
         "agent.run.started",
@@ -256,32 +249,7 @@ def test_replay_preserves_specialist_text_without_a_completed_message(
             fail_read,
         )
 
-    class Connection:
-        polls = 0
-
-        async def is_disconnected(self):
-            self.polls += 1
-            return self.polls > 4
-
-    async def scenario() -> list[tuple[int, str, str]]:
-        response = await stream_events(
-            "project-1",
-            Connection(),
-            after=0,
-            last_event_id=None,
-            services=services,
-        )
-        seen: list[tuple[int, str, str]] = []
-        async for chunk in response.body_iterator:
-            seq, kind = _parse_sse_id_type(chunk)
-            data = ""
-            for line in chunk.splitlines():
-                if line.startswith("data: "):
-                    data = line.removeprefix("data: ")
-            seen.append((seq, kind, data))
-        return seen
-
-    events = asyncio.run(scenario())
+    events = asyncio.run(_replay(services))
     seqs = [seq for seq, _, _ in events]
     assert 1 in seqs  # run.started, always kept
     # The active run's delta is delivered (fix). Without the change,
@@ -386,16 +354,7 @@ def test_lifecycle_event_embedding_an_event_record_survives_the_filter(
     """
 
     _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
-    store = services.sessions
-
-    def append(event_type, payload):
-        return store.append_event(
-            "project-1",
-            "session-1",
-            event_type=event_type,
-            actor="agent",
-            payload=payload,
-        )
+    append = partial(_append_agent_event, services)
 
     append("agent.run.started", {"runId": "run-1"})
     append(
@@ -428,29 +387,8 @@ def test_lifecycle_event_embedding_an_event_record_survives_the_filter(
         lambda *_args, **_kwargs: set(),
     )
 
-    class Connection:
-        polls = 0
-
-        async def is_disconnected(self):
-            self.polls += 1
-            return self.polls > 4
-
-    async def scenario() -> list[tuple[int, str]]:
-        response = await stream_events(
-            "project-1",
-            Connection(),
-            after=0,
-            last_event_id=None,
-            services=services,
-        )
-        seen: list[tuple[int, str]] = []
-        async for chunk in response.body_iterator:
-            seq, kind = _parse_sse_id_type(chunk)
-            seen.append((seq, kind))
-        return seen
-
-    events = asyncio.run(scenario())
-    kinds = [kind for _, kind in events]
+    events = asyncio.run(_replay(services))
+    kinds = [kind for _, kind, _ in events]
     assert "subagent.tool_completed" in kinds, (
         f"a tool_completed embedding an event record was dropped as "
         f"replay noise: {events}"
@@ -533,7 +471,6 @@ def test_sse_replay_drops_historical_deltas_and_keeps_lifecycle(tmp_path):
     deltas inside it are discarded by the client by design. The endpoint must
     stop shipping the noise without ever losing a lifecycle event."""
     _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
-    store = services.sessions
     for event_type, payload in (
         ("agent.run.started", {"runId": "run-1"}),
         ("agent.message_delta", {"runId": "run-1", "delta": "x"}),
@@ -541,46 +478,14 @@ def test_sse_replay_drops_historical_deltas_and_keeps_lifecycle(tmp_path):
         ("message.completed", {"runId": "run-1", "text": "xy"}),
         ("agent.tool_completed", {"runId": "run-1", "toolCallId": "c-1"}),
     ):
-        store.append_event(
-            "project-1",
-            "session-1",
-            event_type=event_type,
-            actor="agent",
-            payload=payload,
-        )
+        _append_agent_event(services, event_type, payload)
 
-    class Connection:
-        polls = 0
-
-        async def is_disconnected(self):
-            self.polls += 1
-            return self.polls > 2
-
-    async def scenario():
-        response = await stream_events(
-            "project-1",
-            Connection(),
-            after=0,
-            last_event_id=None,
-            services=services,
-        )
-        types, seqs = [], []
-        async for chunk in response.body_iterator:
-            for line in chunk.splitlines():
-                if line.startswith("event: "):
-                    types.append(line[len("event: ") :])
-                elif line.startswith("id: "):
-                    seqs.append(int(line[len("id: ") :]))
-        return types, seqs
-
-    types, seqs = asyncio.run(scenario())
-    assert types == [
-        "agent.run.started",
-        "message.completed",
-        "agent.tool_completed",
+    replay = asyncio.run(_replay(services, disconnect_after=2))
+    assert [(seq, kind) for seq, kind, _ in replay] == [
+        (1, "agent.run.started"),
+        (4, "message.completed"),
+        (5, "agent.tool_completed"),
     ]
-    # Gaps are expected and safe: the client cursor compares with `>`.
-    assert seqs == [1, 4, 5]
 
 
 def _spy_full_reads(monkeypatch) -> list[str]:
@@ -598,13 +503,17 @@ def _spy_full_reads(monkeypatch) -> list[str]:
 
 
 @pytest.mark.unit
-def test_list_recent_messages_reads_only_the_tail_window(
+@pytest.mark.parametrize(
+    ("cursor", "first"),
+    [(None, 26), (26, 21)],
+    ids=["tail", "older-page"],
+)
+def test_recent_messages_page_from_cursor_without_reading_whole_stream(
     tmp_path,
     monkeypatch,
+    cursor,
+    first,
 ):
-    # Opening a conversation asks for the newest handful. This used to parse
-    # every message the session ever wrote and slice in Python, which on a long
-    # session cost hundreds of MB per page.
     _, _, store, _ = _runtime(tmp_path)
     for index in range(30):
         _append(store, "user", f"message {index}")
@@ -615,9 +524,10 @@ def test_list_recent_messages_reads_only_the_tail_window(
         SESSION_ID,
         limit=5,
         conversation_id=CONVERSATION_ID,
+        **({"before_seq": cursor} if cursor is not None else {}),
     )
 
-    assert [item.message_seq for item in page] == [26, 27, 28, 29, 30]
+    assert [item.message_seq for item in page] == list(range(first, first + 5))
     assert not reads
 
 
@@ -699,23 +609,6 @@ def test_last_message_seq_tracks_the_head_without_reading_the_stream(
     assert not reads
     _append(store, "user", "third")
     assert store.last_message_seq(PROJECT_ID, SESSION_ID) == 3
-
-
-@pytest.mark.unit
-def test_list_recent_messages_pages_backwards_from_a_cursor(tmp_path):
-    _, _, store, _ = _runtime(tmp_path)
-    for index in range(30):
-        _append(store, "user", f"message {index}")
-
-    older = store.list_recent_messages(
-        PROJECT_ID,
-        SESSION_ID,
-        limit=5,
-        conversation_id=CONVERSATION_ID,
-        before_seq=26,
-    )
-
-    assert [item.message_seq for item in older] == [21, 22, 23, 24, 25]
 
 
 @pytest.mark.unit
@@ -899,6 +792,7 @@ def test_recovery_restores_a_boundary_beyond_one_replay_page(
 def test_jsonl_read_record_at_targets_one_line(tmp_path):
     path = tmp_path / "events.jsonl"
     store = DurableJsonlStore(path, EventRecord)
+    assert store.read_record_at(1) is None  # no journal file yet
     for value in range(5):
         store.append(EventRecord(worker=0, value=value))
 
@@ -910,39 +804,32 @@ def test_jsonl_read_record_at_targets_one_line(tmp_path):
 
 
 @pytest.mark.unit
-def test_jsonl_read_record_at_treats_a_torn_crash_tail_as_absent(tmp_path):
-    path = tmp_path / "events.jsonl"
-    store = DurableJsonlStore(path, EventRecord)
-    store.append(EventRecord(worker=0, value=1))
-    with path.open("ab") as handle:
-        handle.write(b'{"seq":2,"record":{"worker":0')
-
-    assert store.read_record_at(1).value == 1
-    assert store.read_record_at(2) is None
-
-
-@pytest.mark.unit
-def test_jsonl_read_record_at_reads_an_absent_stream_as_empty(tmp_path):
-    store = DurableJsonlStore(tmp_path / "events.jsonl", EventRecord)
-
-    assert store.read_record_at(1) is None
-
-
-@pytest.mark.unit
-def test_jsonl_read_record_at_reports_a_seq_disagreeing_with_its_line(
-    tmp_path,
+@pytest.mark.parametrize(
+    ("suffix", "bad_seq"),
+    [
+        (b'{"seq":2,"record":{"worker":0', False),
+        (
+            b'{"seq":9,"written_at":"2026-10-29T00:00:00+00:00","record":{"worker":0,"value":2}}\n',
+            True,
+        ),
+    ],
+    ids=["torn-tail", "wrong-sequence"],
+)
+def test_jsonl_read_record_at_checks_the_record_boundary(
+    tmp_path, suffix, bad_seq
 ):
     path = tmp_path / "events.jsonl"
     store = DurableJsonlStore(path, EventRecord)
     store.append(EventRecord(worker=0, value=1))
     with path.open("ab") as handle:
-        handle.write(
-            b'{"seq":9,"written_at":"2026-10-29T00:00:00+00:00",'
-            b'"record":{"worker":0,"value":2}}\n',
-        )
+        handle.write(suffix)
 
-    with pytest.raises(JsonlCorruptionError, match="line 2 has seq 9"):
-        store.read_record_at(2)
+    assert store.read_record_at(1).value == 1
+    if bad_seq:
+        with pytest.raises(JsonlCorruptionError, match="line 2 has seq 9"):
+            store.read_record_at(2)
+    else:
+        assert store.read_record_at(2) is None
 
 
 @pytest.mark.unit
@@ -963,14 +850,7 @@ def test_forward_cursor_positions_at_the_cursor_without_reading_the_head(
     for value in range(1, 2001):
         writer.append(EventRecord(worker=1, value=value))
     store = DurableJsonlStore(path, EventRecord)
-    full_reads: list[int] = []
-    original = store._read_bytes_unlocked  # pylint: disable=protected-access
-
-    def counted() -> bytes:
-        full_reads.append(1)
-        return original()
-
-    monkeypatch.setattr(store, "_read_bytes_unlocked", counted)
+    full_reads = _spy_full_reads(monkeypatch)
     reader = store.forward_reader(1900)
     assert reader.offset > 0
     page = reader.read(limit=50)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import math
 import wave
 from array import array
@@ -16,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from domain.errors import ConflictError
@@ -184,6 +186,19 @@ def test_design_enrollment_persists_voice_and_recovers_audition(
 ):
     # pylint: disable=too-many-statements
     services = _services_with_character(tmp_path, monkeypatch)
+    prompt = "低哑男声，语速缓慢"
+
+    def enroll():
+        return asyncio.run(
+            execute_file_voice_enrollment_command(
+                services,
+                project_id="p-voice",
+                target_ref="asset:hero",
+                arguments={"voicePrompt": prompt},
+                idempotency_key="voice-key-1",
+            )
+        )
+
     calls = {"design": 0, "synthesize": 0}
     expected_syntheses = 2 if failure_stage == "tts" else 1
     attach_sample = audio_execution._attach_voice_sample
@@ -205,7 +220,7 @@ def test_design_enrollment_persists_voice_and_recovers_audition(
 
     async def fake_design_voice(*, voice_prompt, preview_text, preferred_name):
         calls["design"] += 1
-        assert voice_prompt == "低哑男声，语速缓慢"
+        assert voice_prompt == prompt
         assert len(preview_text) >= tts_model.VOICE_PREVIEW_MIN_CHARS
         assert preferred_name == "旅人"
         return tts_model.VoiceEnrollment(
@@ -242,50 +257,21 @@ def test_design_enrollment_persists_voice_and_recovers_audition(
     monkeypatch.setattr(tts_model, "synthesize", synthesize)
     if failure_stage == "commit":
         with pytest.raises(RuntimeError, match="publication failure"):
-            asyncio.run(
-                execute_file_voice_enrollment_command(
-                    services,
-                    project_id="p-voice",
-                    target_ref="asset:hero",
-                    arguments={"voicePrompt": "低哑男声，语速缓慢"},
-                    idempotency_key="voice-key-1",
-                ),
-            )
+            enroll()
         failure_stage = None
-    result = asyncio.run(
-        execute_file_voice_enrollment_command(
-            services,
-            project_id="p-voice",
-            target_ref="asset:hero",
-            arguments={"voicePrompt": "低哑男声，语速缓慢"},
-            idempotency_key="voice-key-1",
-        ),
-    )
+    result = enroll()
     assert result.voice_id == "voice-designed-1"
     assert result.origin == "design"
 
     snapshot = services.projects.read("p-voice")
     voice = snapshot.project.visual.entities.items["hero"].voice
     assert voice is not None
-    assert voice.voice_prompt == "低哑男声，语速缓慢"
+    assert voice.voice_prompt == prompt
     assert bool(voice.sample_source_version_id) is (failure_stage is None)
     assert voice.enrollment_key == "voice-key-1"
     failure_stage = None
 
-    # Idempotent replay: same key returns the same binding, no provider call.
-    async def boom(**_kwargs):  # pragma: no cover - must not be reached
-        raise AssertionError("replay must not re-enroll")
-
-    monkeypatch.setattr(tts_model, "design_voice", boom)
-    replay = asyncio.run(
-        execute_file_voice_enrollment_command(
-            services,
-            project_id="p-voice",
-            target_ref="asset:hero",
-            arguments={"voicePrompt": "低哑男声，语速缓慢"},
-            idempotency_key="voice-key-1",
-        ),
-    )
+    replay = enroll()
     assert replay.replayed is True
     assert replay.voice_id == "voice-designed-1"
     assert replay.origin == "design"
@@ -376,65 +362,48 @@ def test_later_voice_request_wins_regardless_of_provider_completion_order(
     asyncio.run(scenario())
 
 
-def _identity(**kwargs):
+@pytest.fixture
+def tts_defaults(monkeypatch):
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
+    monkeypatch.setenv("TTS_VOICE", "Cherry")
+
+
+def _identity(*, voice="", voice_id=None):
     return audio_execution._requested_tts_identity(
-        voice=kwargs.get("voice", ""),
-        voice_id=kwargs.get("voice_id"),
-        voice_model=kwargs.get("voice_model", ""),
+        voice=voice,
+        voice_id=voice_id,
+        voice_model="",
     )
 
 
 def test_reuse_key_matches_the_voice_the_runner_actually_speaks(
     monkeypatch,
+    tts_defaults,
 ) -> None:
-    """A deployment left on a default voice this model does not publish falls
-    back to one of its own. The key has to follow the same substitution, or the
-    asset is stored under one name and looked up under another."""
-
     spoken: dict = {}
 
-    def fake_ws(*, model, voice, text, api_key, speech_rate=1.0):
+    def fake_ws(*, model, voice, **_kwargs):
         spoken.update(model=model, voice=voice)
         return b"MP3xxxx", "audio/mpeg"
 
-    monkeypatch.setenv("TTS_API_KEY", "sk-test")
-    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
-    monkeypatch.setenv("TTS_VOICE", "Cherry")
     monkeypatch.setattr(tts_model, "_synthesize_over_websocket", fake_ws)
-
     asyncio.run(tts_model.synthesize("同一句旁白"))
-
     assert spoken["voice"] != "Cherry"
     assert _identity() == (spoken["model"], spoken["voice"])
 
 
-def test_reuse_key_never_names_a_voice_the_model_cannot_speak(
+def test_reuse_key_names_only_voices_the_model_can_speak(
     monkeypatch,
+    tts_defaults,
 ) -> None:
-    """Every model that publishes voices gets checked, not only the one that
-    exposed the bug: the configured default is shared across the table, and a
-    key naming an unspeakable voice can never match a stored asset."""
-
-    monkeypatch.setenv("TTS_API_KEY", "sk-test")
-    monkeypatch.setenv("TTS_VOICE", "Cherry")
     for capability in supported_models():
-        if not capability.has_system_voices:
-            # Nothing can be stored under this row: plain synthesis is
-            # refused until a character voice is created.
-            continue
-        monkeypatch.setenv("TTS_MODEL_NAME", capability.model)
-        _, voice = _identity()
-        assert voice in capability.system_voices, capability.model
+        if capability.has_system_voices:
+            monkeypatch.setenv("TTS_MODEL_NAME", capability.model)
+            assert _identity()[1] in capability.system_voices, capability.model
 
 
-def test_a_made_up_voice_is_keyed_as_requested(monkeypatch) -> None:
-    """The fail-fast path stays honest: a name the caller typed is never
-    quietly rewritten in the key, even though the call will be refused."""
-
-    monkeypatch.setenv("TTS_API_KEY", "sk-test")
-    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
-    monkeypatch.setenv("TTS_VOICE", "Cherry")
-
+def test_a_made_up_voice_is_keyed_as_requested(tts_defaults) -> None:
     assert _identity(voice="NotAVoice") == (
         "qwen-audio-3.1-tts-flash",
         "NotAVoice",
@@ -443,35 +412,19 @@ def test_a_made_up_voice_is_keyed_as_requested(monkeypatch) -> None:
         asyncio.run(tts_model.synthesize("旁白", voice="NotAVoice"))
 
 
-def test_a_created_voice_keeps_its_own_identity(monkeypatch) -> None:
-    """A cloned voice is identified by its id and the model it was created
-    against, which is the rule this function had before the fallback existed.
-    """
-
-    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
-    monkeypatch.setenv("TTS_VOICE", "Cherry")
-
-    model, voice = _identity(voice_id="vc-abc")
-    assert voice == "vc-abc"
-    assert model == capability_for("qwen-audio-3.1-tts-flash").clone_model()
+def test_a_created_voice_keeps_its_own_identity(tts_defaults) -> None:
+    assert _identity(voice_id="vc-abc") == (
+        capability_for("qwen-audio-3.1-tts-flash").clone_model(),
+        "vc-abc",
+    )
 
 
-def test_no_system_voices_identity_is_honest(monkeypatch) -> None:
-    """A model with no published list has no name to substitute, so the
-    passthrough path returns the configured name — empty when nothing is set.
-
-    ``test_reuse_key_never_names_a_voice_the_model_cannot_speak`` skips this
-    row because plain synthesis is refused without a created character voice,
-    but ``_requested_tts_identity`` has no such guard: the function must not
-    crash and must produce a key that matches nothing (empty voice).
-    """
-
+def test_model_without_system_voices_keeps_an_empty_voice(
+    monkeypatch, tts_defaults
+) -> None:
     monkeypatch.setenv("TTS_MODEL_NAME", "cosyvoice-v3.5-plus")
     monkeypatch.setenv("TTS_VOICE", "")
-
-    model, voice = _identity()
-    assert model == "cosyvoice-v3.5-plus"
-    assert voice == ""
+    assert _identity() == ("cosyvoice-v3.5-plus", "")
 
 
 def _project_with_voiced_character() -> Project:
@@ -536,95 +489,44 @@ def _stub_sample_resolution(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_voice_rides_with_its_characters_reference(monkeypatch) -> None:
-    _gate(monkeypatch, supported=True)
+@pytest.mark.parametrize(
+    ("supported", "enrolled", "versions", "present"),
+    [
+        (True, True, ("artifact:storyboard", "artifact:rusty-image"), True),
+        (False, True, ("artifact:rusty-image",), False),
+        (True, True, ("artifact:unrelated",), False),
+        (True, False, ("artifact:rusty-image",), False),
+    ],
+    ids=["aligned", "unsupported-model", "unreferenced-character", "no-voice"],
+)
+def test_voice_rides_only_with_its_eligible_character(
+    monkeypatch,
+    supported,
+    enrolled,
+    versions,
+    present,
+) -> None:
+    _gate(monkeypatch, supported=supported)
     _stub_sample_resolution(monkeypatch)
     project = _project_with_voiced_character()
-    creation = SimpleNamespace(character_refs=["char:rusty"])
+    if not enrolled:
+        project.visual.entities.items["char:rusty"].voice = None
 
     voice_urls, entries = r2v_execution._resolve_reference_voices(
         project=project,
         project_root=Path("/tmp"),
-        creation=creation,
-        version_ids=("artifact:storyboard", "artifact:rusty-image"),
+        creation=SimpleNamespace(character_refs=["char:rusty"]),
+        version_ids=versions,
     )
-
-    assert voice_urls == (
-        "",
-        "file:///samples/source:rusty-sample.mp3",
-    )
-    assert entries == [{"ref": "source:rusty-sample"}]
-
-
-@pytest.mark.unit
-def test_non_qualifying_contexts_resolve_nothing(monkeypatch) -> None:
-    _stub_sample_resolution(monkeypatch)
-
-    # Unsupported model family: nothing resolves even for a voiced ref.
-    _gate(monkeypatch, supported=False)
-    project = _project_with_voiced_character()
-    creation = SimpleNamespace(character_refs=["char:rusty"])
-    voice_urls, entries = r2v_execution._resolve_reference_voices(
-        project=project,
-        project_root=Path("/tmp"),
-        creation=creation,
-        version_ids=("artifact:rusty-image",),
-    )
-    assert not voice_urls
-    assert not entries
-
-    # The character's image is not part of this submission's references.
-    _gate(monkeypatch, supported=True)
-    voice_urls, entries = r2v_execution._resolve_reference_voices(
-        project=project,
-        project_root=Path("/tmp"),
-        creation=creation,
-        version_ids=("artifact:unrelated",),
-    )
-    assert not voice_urls
-    assert not entries
-
-    # A character without an enrolled voice never resolves a sample.
-    project.visual.entities.items["char:rusty"].voice = None
-    voice_urls, entries = r2v_execution._resolve_reference_voices(
-        project=project,
-        project_root=Path("/tmp"),
-        creation=creation,
-        version_ids=("artifact:rusty-image",),
-    )
-    assert not voice_urls
-    assert not entries
+    if present:
+        assert voice_urls == ("", "file:///samples/source:rusty-sample.mp3")
+        assert entries == [{"ref": "source:rusty-sample"}]
+    else:
+        assert not voice_urls
+        assert not entries
 
 
-class _FakeResponse:
-    status_code = 200
-    # A real httpx response always carries both, and the submit path reads them
-    # to decide whether a failure is worth another paid attempt.
-    text = ""
-    headers: dict = {}
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return {"output": {"task_id": "task-voice-1"}}
-
-
-class _FakeAsyncClient:
-    def __init__(self, captured: dict):
-        self._captured = captured
-
-    async def __aenter__(self) -> "_FakeAsyncClient":
-        return self
-
-    async def __aexit__(self, *exc) -> bool:
-        return False
-
-    async def post(self, url, headers=None, json=None):
-        self._captured["url"] = url
-        self._captured["headers"] = headers
-        self._captured["body"] = json
-        return _FakeResponse()
+_HTTP_CLIENT = httpx.AsyncClient
 
 
 def _bind(
@@ -666,47 +568,52 @@ def _bind(
         yield url
 
     monkeypatch.setattr(video_model, "wan_voice_excerpt", fake_excerpt)
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"output": {"task_id": "task-voice-1"}}
+        )
+
+    transport = httpx.MockTransport(reply)
     monkeypatch.setattr(
         video_model.httpx,
         "AsyncClient",
-        lambda timeout: _FakeAsyncClient(captured),
+        lambda **kwargs: _HTTP_CLIENT(transport=transport, **kwargs),
     )
 
 
 # ── capability table ─────────────────────────────────────────────────────────
 
 
-def test_reference_voice_support_matches_official_contracts() -> None:
-    assert video_reference_voice_support("wan2.7-r2v") == (
-        REFERENCE_VOICE_PER_MEDIA,
-        5,
-    )
-    assert video_reference_voice_support("wan2.7-r2v-2026-06-12") == (
-        REFERENCE_VOICE_PER_MEDIA,
-        5,
-    )
-    assert video_reference_voice_support("wan3.0-video") == (
-        REFERENCE_VOICE_STANDALONE,
-        5,
-    )
-    assert video_reference_voice_support(
-        "doubao-seedance-2-5-260628",
-        "seedance2",
-    ) == (REFERENCE_VOICE_STANDALONE, 10)
-    assert video_reference_voice_support(
-        "doubao-seedance-2-0-260128",
-        "seedance2",
-    ) == (REFERENCE_VOICE_STANDALONE, 3)
-    # Families whose contracts document no audio input.
-    assert video_reference_voice_support("wan2.6-r2v") is None
-    assert video_reference_voice_support("happyhorse-1.1-r2v") is None
-    assert (
-        video_reference_voice_support(
-            "kling/kling-v3-omni-video-generation",
-        )
-        is None
-    )
-    assert video_reference_voice_support("") is None
+@pytest.mark.parametrize(
+    ("model", "backend", "expected"),
+    [
+        ("wan2.7-r2v", "", (REFERENCE_VOICE_PER_MEDIA, 5)),
+        ("wan2.7-r2v-2026-06-12", "", (REFERENCE_VOICE_PER_MEDIA, 5)),
+        ("wan3.0-video", "", (REFERENCE_VOICE_STANDALONE, 5)),
+        (
+            "doubao-seedance-2-5-260628",
+            "seedance2",
+            (REFERENCE_VOICE_STANDALONE, 10),
+        ),
+        (
+            "doubao-seedance-2-0-260128",
+            "seedance2",
+            (REFERENCE_VOICE_STANDALONE, 3),
+        ),
+        ("wan2.6-r2v", "", None),
+        ("happyhorse-1.1-r2v", "", None),
+        ("kling/kling-v3-omni-video-generation", "", None),
+        ("", "", None),
+    ],
+)
+def test_reference_voice_support_matches_the_provider_contract(
+    model, backend, expected
+):
+    args = (backend,) if backend else ()
+    assert video_reference_voice_support(model, *args) == expected
 
 
 # ── request-body shapes ──────────────────────────────────────────────────────

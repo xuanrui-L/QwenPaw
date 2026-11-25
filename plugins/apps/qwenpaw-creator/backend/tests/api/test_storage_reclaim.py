@@ -76,6 +76,15 @@ def _seed_legacy_project(root: Path, project_id: str, *, count: int) -> Path:
     return transactions
 
 
+def _reclaim(api_request, app, payload):
+    return api_request(
+        app,
+        "POST",
+        f"/storage/projects/{PROJECT_A}/reclaim-history",
+        json=payload,
+    )
+
+
 def test_reclaim_history_refuses_an_unconfirmed_press(
     api_request,
     app,
@@ -83,17 +92,15 @@ def test_reclaim_history_refuses_an_unconfirmed_press(
 ):
     transactions = _seed_legacy_project(api_runtime_root, PROJECT_A, count=60)
 
-    missing = api_request(
+    missing = _reclaim(
+        api_request,
         app,
-        "POST",
-        f"/storage/projects/{PROJECT_A}/reclaim-history",
-        json={},
+        {},
     )
-    denied = api_request(
+    denied = _reclaim(
+        api_request,
         app,
-        "POST",
-        f"/storage/projects/{PROJECT_A}/reclaim-history",
-        json={"confirm": False},
+        {"confirm": False},
     )
 
     assert missing.status_code == 400
@@ -110,11 +117,10 @@ def test_reclaim_history_sweeps_only_the_requested_project(
     first = _seed_legacy_project(api_runtime_root, PROJECT_A, count=60)
     second = _seed_legacy_project(api_runtime_root, PROJECT_B, count=60)
 
-    response = api_request(
+    response = _reclaim(
+        api_request,
         app,
-        "POST",
-        f"/storage/projects/{PROJECT_A}/reclaim-history",
-        json={"confirm": True},
+        {"confirm": True},
     )
 
     assert response.status_code == 200
@@ -151,11 +157,10 @@ def test_reclaim_history_refuses_a_project_that_kept_its_history(
         now=datetime.now(timezone.utc),
     )
 
-    response = api_request(
+    response = _reclaim(
+        api_request,
         app,
-        "POST",
-        f"/storage/projects/{PROJECT_A}/reclaim-history",
-        json={"confirm": True},
+        {"confirm": True},
     )
 
     assert response.status_code == 409
@@ -220,11 +225,10 @@ def test_confirming_writes_a_receipt_the_sweeps_then_honour(
     monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "100")
     transactions = _seed_legacy_project(api_runtime_root, PROJECT_A, count=60)
 
-    response = api_request(
+    response = _reclaim(
+        api_request,
         app,
-        "POST",
-        f"/storage/projects/{PROJECT_A}/reclaim-history",
-        json={"confirm": True},
+        {"confirm": True},
     )
 
     assert response.status_code == 200
@@ -424,6 +428,30 @@ def test_interrupted_confirmed_transaction_cleanup_can_be_retried(
     assert len(list(transactions.iterdir())) == 50
 
 
+def _settled_scratch(
+    root: Path, store: ProjectExecutionStore, task_id="task-1"
+):
+    scratch = _scratch(root, task_id)
+    store.create_task(
+        _task(TaskStatus.QUEUED).model_copy(update={"task_id": task_id}),
+    )
+    _moved(
+        store,
+        task_id,
+        frm=TaskStatus.QUEUED,
+        to=TaskStatus.RUNNING,
+        updated_at=T0 - timedelta(days=2),
+    )
+    _moved(
+        store,
+        task_id,
+        frm=TaskStatus.RUNNING,
+        to=TaskStatus.SUCCEEDED,
+        updated_at=T0 - timedelta(days=1),
+    )
+    return scratch
+
+
 @_needs_pinned_release
 def test_sweep_releases_pre_baseline_scratch_by_default(
     tmp_path: Path,
@@ -434,23 +462,8 @@ def test_sweep_releases_pre_baseline_scratch_by_default(
     its baseline; a gate that only opened on a click could not reach them, so
     the default released them and the click became an opt-out.
     """
-    scratch = _scratch(tmp_path)
     store = ProjectExecutionStore(tmp_path)
-    store.create_task(_task(TaskStatus.QUEUED))
-    _moved(
-        store,
-        "task-1",
-        frm=TaskStatus.QUEUED,
-        to=TaskStatus.RUNNING,
-        updated_at=T0 - timedelta(days=2),
-    )
-    _moved(
-        store,
-        "task-1",
-        frm=TaskStatus.RUNNING,
-        to=TaskStatus.SUCCEEDED,
-        updated_at=T0 - timedelta(days=1),
-    )
+    scratch = _settled_scratch(tmp_path, store)
 
     swept = release_orphaned_scratch(_services(tmp_path), now=T0)
 
@@ -491,23 +504,8 @@ def test_keeping_history_spares_the_pre_baseline_scratch(
     quarantined Task was never in scope to begin with.
     """
 
-    scratch = _scratch(tmp_path)
     store = ProjectExecutionStore(tmp_path)
-    store.create_task(_task(TaskStatus.QUEUED))
-    _moved(
-        store,
-        "task-1",
-        frm=TaskStatus.QUEUED,
-        to=TaskStatus.RUNNING,
-        updated_at=T0 - timedelta(days=2),
-    )
-    _moved(
-        store,
-        "task-1",
-        frm=TaskStatus.RUNNING,
-        to=TaskStatus.SUCCEEDED,
-        updated_at=T0 - timedelta(days=1),
-    )
+    scratch = _settled_scratch(tmp_path, store)
     task_scratch.remember_scratch_baseline(tmp_path / PROJECT_ID, now=T0)
     task_scratch.keep_project_history(tmp_path / PROJECT_ID, now=T0)
 
@@ -611,28 +609,9 @@ def test_the_scratch_sweep_stops_when_the_pass_budget_runs_out(
 
     from services.media_files.task_scratch import SweepBudget
 
-    first = _scratch(tmp_path)
-    second = _scratch(tmp_path, "task-2")
     store = ProjectExecutionStore(tmp_path)
-    store.create_task(_task(TaskStatus.QUEUED))
-    store.create_task(
-        _task(TaskStatus.QUEUED).model_copy(update={"task_id": "task-2"}),
-    )
-    for task_id in ("task-1", "task-2"):
-        _moved(
-            store,
-            task_id,
-            frm=TaskStatus.QUEUED,
-            to=TaskStatus.RUNNING,
-            updated_at=T0 - timedelta(days=2),
-        )
-        _moved(
-            store,
-            task_id,
-            frm=TaskStatus.RUNNING,
-            to=TaskStatus.SUCCEEDED,
-            updated_at=T0 - timedelta(days=1),
-        )
+    first = _settled_scratch(tmp_path, store)
+    second = _settled_scratch(tmp_path, store, "task-2")
 
     swept = release_orphaned_scratch(
         _services(tmp_path),
@@ -677,23 +656,8 @@ def test_an_oversized_projects_scratch_waits_for_a_person(
     from services.media_files.task_scratch import confirm_project_reclaim
 
     monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "10")
-    scratch = _scratch(tmp_path)
     store = ProjectExecutionStore(tmp_path)
-    store.create_task(_task(TaskStatus.QUEUED))
-    _moved(
-        store,
-        "task-1",
-        frm=TaskStatus.QUEUED,
-        to=TaskStatus.RUNNING,
-        updated_at=T0 - timedelta(days=2),
-    )
-    _moved(
-        store,
-        "task-1",
-        frm=TaskStatus.RUNNING,
-        to=TaskStatus.SUCCEEDED,
-        updated_at=T0 - timedelta(days=1),
-    )
+    scratch = _settled_scratch(tmp_path, store)
 
     withheld = release_orphaned_scratch(_services(tmp_path), now=T0)
 
