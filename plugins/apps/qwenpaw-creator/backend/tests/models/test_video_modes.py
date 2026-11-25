@@ -54,6 +54,8 @@ from utils.exceptions import ModelError
                 "视频1、视频2",
                 "`Image 1`、`Video 1`",
                 "各自类型的出现顺序分别计数",
+                "图片最多 5 张",
+                "视频最多 5 个",
                 "图片与视频合计最多 5 个",
                 "不得使用 Wan 2.6 的 `character1`",
             ),

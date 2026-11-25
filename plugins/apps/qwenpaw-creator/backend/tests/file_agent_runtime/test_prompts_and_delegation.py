@@ -17,6 +17,7 @@ from services.file_agent_runtime.subagents import (
     delegate_tool_manifest,
     specialist_system_prompt,
 )
+from services.project_files.models import Project
 
 pytestmark = pytest.mark.unit
 
@@ -124,11 +125,14 @@ def test_runtime_prompts_scope_workspace_schema_by_role() -> None:
     assert _WORKSPACE_SCHEMA not in source
 
 
-def _specialist_prompt(role: SpecialistRole) -> str:
+def _specialist_prompt(
+    role: SpecialistRole, *, project: Project | None = None
+) -> str:
     return specialist_system_prompt(
         role,
         project_id=_PROJECT_ID,
         workspace_schema=_WORKSPACE_SCHEMA,
+        project=project,
     )
 
 
@@ -194,23 +198,48 @@ def test_storyboard_keeps_the_users_stage_specific_medium() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "backend", "duration"),
+    ("model", "backend", "rules"),
     [
-        ("happyhorse-1.1-r2v", "happyhorse", "3–15"),
-        ("doubao-seedance-2-5-260628", "seedance2", "4–30"),
-        ("wan3.0-video", "wan", "2–30"),
+        (
+            "happyhorse-1.1-r2v",
+            "happyhorse",
+            (
+                "3–15 秒整数",
+                "3 秒短段合法",
+                "30 秒单段不合法",
+                "HappyHorse：只能使用 `[Image 1]`、`[Image 2]`",
+                "storyboard 固定为第一张，因此是 `[Image 1]`",
+                "不支持参考视频",
+            ),
+        ),
+        (
+            "doubao-seedance-2-5-260628",
+            "seedance2",
+            ("4–30 秒整数", "30 秒长段", "不套用 8–10 秒默认值"),
+        ),
+        ("wan3.0-video", "wan", ("Wan3.0", "2–30 秒整数")),
+        (
+            "veo-3.1-generate-preview",
+            "veo",
+            ("只支持 4、6 或 8 秒", "r2v 或 1080p/4k 时必须为 8 秒"),
+        ),
+        ("VIDUQ2-PRO", "vidu", ("1–10 秒整数",)),
     ],
+    ids=["happyhorse", "seedance-2.5", "wan-3.0", "veo", "vidu-q2"],
 )
-def test_video_model_guidance_uses_the_configured_duration(
+def test_creator_prompt_includes_configured_video_model_rules(
     monkeypatch,
     model,
     backend,
-    duration,
+    rules,
 ) -> None:
     monkeypatch.setattr(model_config, "get_video_model_name", lambda: model)
     monkeypatch.setattr(model_config, "get_video_backend", lambda: backend)
-    prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
-    assert duration in prompt
+    prompt = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
+    )
+    for rule in rules:
+        assert rule in prompt
 
 
 @pytest.mark.parametrize(
@@ -268,13 +297,40 @@ def _tts(monkeypatch, *, model: str, configured: bool = True) -> None:
 
 
 @pytest.mark.parametrize("configured", [False, True])
-def test_only_configured_editing_can_use_tts(monkeypatch, configured) -> None:
+def test_configured_tts_guidance_preserves_native_dialogue(
+    monkeypatch, configured
+) -> None:
     _tts(monkeypatch, model="qwen3-tts-flash", configured=configured)
-    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
+    project = Project.new(
+        project_id=_PROJECT_ID, name="Drama", scenario="short_drama"
+    )
+    editing = _specialist_prompt(
+        SpecialistRole.AI_EDITING_DIRECTOR, project=project
+    )
     source = _specialist_prompt(SpecialistRole.SOURCE_INTELLIGENCE)
-
-    assert ("tts_generation" in editing) is configured
+    creator = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
+    )
     assert "tts_generation" not in source
+
+    creator_tts = creator.partition("\n# 旁白与配音能力\n")[2]
+    creator_tts = creator_tts.partition("\n# ")[0]
+    for rule in (
+        "台词与旁白优先由视频模型原生生成",
+        "只有两种例外才允许 TTS 合成",
+        "用户提供了自己的音色音频文件",
+        "需要外部驱动音频才能开口的 s2v 数字人",
+    ):
+        assert (rule in creator_tts) is configured, rule
+    for rule in (
+        "tts_generation",
+        "R2V/T2V/I2V 区间的台词与旁白由视频模型原生生成",
+        "不要为同一区间再合成一份 TTS 音频",
+        "不再叠加一份 TTS 台词",
+        "自己的音色音频文件",
+        "画面不会自发声",
+    ):
+        assert (rule in editing) is configured, rule
 
 
 @pytest.mark.parametrize(
@@ -290,6 +346,12 @@ def test_editing_guidance_reflects_voice_enrollment_needs(
     editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
     assert ("Cherry" in editing) is system_voice_available
     assert ("create_character_voice" in editing) is not system_voice_available
+    requires_bound_voice = "必须传已绑定音色的 characterRef" in editing
+    assert requires_bound_voice is not system_voice_available
+    creator = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
+    )
+    assert ("sampleText 不可用" in creator) is not system_voice_available
 
 
 @pytest.mark.parametrize(
