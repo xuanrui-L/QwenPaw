@@ -151,7 +151,7 @@ def test_retired_specialists_have_no_active_prompt(role) -> None:
 @pytest.mark.parametrize(
     ("model", "rules"),
     [
-        ("qwen-image-3.0", ("总数必须不超过 3", "400 拒绝")),
+        ("qwen-image-3.0", ("总数必须不超过 3，", "400 拒绝")),
         ("gpt-image-2", ("单次最多 16 张输入参考图",)),
     ],
 )
@@ -210,37 +210,37 @@ def test_storyboard_keeps_the_users_stage_specific_medium() -> None:
             "happyhorse-1.1-r2v",
             "happyhorse",
             (
-                "3–15 秒整数",
-                "3 秒短段合法",
-                "30 秒单段不合法",
+                "生成时长必须为 3–15 秒整数。",
+                "。3 秒短段合法；30 秒单段不合法，",
                 "HappyHorse：只能使用 `[Image 1]`、`[Image 2]`",
                 "storyboard 固定为第一张，因此是 `[Image 1]`",
                 "不支持参考视频",
-                "分辨率仅支持 720P/1080P",
+                "分辨率仅支持 720P/1080P；",
             ),
         ),
         (
             "doubao-seedance-2-5-260628",
             "seedance2",
-            ("4–30 秒整数", "30 秒长段", "不套用 8–10 秒默认值"),
+            ("支持 4–30 秒整数", "或 30 秒长段", "不套用 8–10 秒默认值"),
         ),
         (
             "wan2.7-r2v",
             "wan",
             (
                 "中文 Prompt 用“图1、图2",
+                "“视频1、视频2",
                 "图片最多 5 张",
                 "视频最多 5 个",
                 "图片与视频合计最多 5 个",
             ),
         ),
-        ("wan3.0-video", "wan", ("Wan3.0", "2–30 秒整数")),
+        ("wan3.0-video", "wan", ("Wan3.0", "支持 2–30 秒整数。")),
         (
             "veo-3.1-generate-preview",
             "veo",
-            ("只支持 4、6 或 8 秒", "r2v 或 1080p/4k 时必须为 8 秒"),
+            ("只支持 4、6 或 8 秒；", "r2v 或 1080p/4k 时必须为 8 秒。"),
         ),
-        ("VIDUQ2-PRO", "vidu", ("1–10 秒整数",)),
+        ("VIDUQ2-PRO", "vidu", ("支持 1–10 秒整数。",)),
     ],
     ids=["happyhorse", "seedance-2.5", "wan-2.7", "wan-3.0", "veo", "vidu-q2"],
 )
@@ -268,7 +268,7 @@ def test_creator_prompt_includes_configured_video_model_rules(
             "<<<{}>>>",
             "图片最多 7 张",
         ),
-        ("kling-3.0-omni", "Kling", "@{}", "720p/1080p/4k"),
+        ("kling-3.0-omni", "Kling", "@{}", "分辨率仅支持 720p/1080p/4k。"),
     ],
     ids=["bailian", "direct"],
 )
