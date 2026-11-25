@@ -133,6 +133,7 @@ def _inline_transport_config(
 def test_asset_version_refs_are_uploaded_and_attached_as_native_media(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    patch_attributes,
 ) -> None:
     services = CreatorFileServices.create(tmp_path.resolve())
     services.projects.create(
@@ -159,25 +160,12 @@ def test_asset_version_refs_are_uploaded_and_attached_as_native_media(
         observed_paths.append((path, kwargs))
         return "oss://dashscope/input.mp4"
 
-    monkeypatch.setattr(
+    patch_attributes(
         native_media.model_config,
-        "get_vlm_api_key",
-        lambda: "test-vlm-key",
-    )
-    monkeypatch.setattr(
-        native_media.model_config,
-        "get_vlm_model_name",
-        lambda: "qwen3.7-plus",
-    )
-    monkeypatch.setattr(
-        native_media.model_config,
-        "get_vlm_base_url",
-        lambda: "https://dashscope.aliyuncs.com/api/v1",
-    )
-    monkeypatch.setattr(
-        native_media.model_config,
-        "get_vlm_protocol",
-        lambda: "DashScope（百炼）",
+        get_vlm_api_key=lambda: "test-vlm-key",
+        get_vlm_model_name=lambda: "qwen3.7-plus",
+        get_vlm_base_url=lambda: "https://dashscope.aliyuncs.com/api/v1",
+        get_vlm_protocol=lambda: "DashScope（百炼）",
     )
     monkeypatch.setattr(
         native_media,
@@ -261,6 +249,7 @@ def test_non_dashscope_provider_inlines_local_media_without_upload_key(
 def test_dashscope_provider_still_uploads_and_requires_the_vlm_key(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    patch_attributes,
 ) -> None:
     """Making the key conditional must not weaken the DashScope path."""
 
@@ -277,20 +266,11 @@ def test_dashscope_provider_still_uploads_and_requires_the_vlm_key(
         "upload_local_file_to_dashscope_temp",
         forbidden_upload,
     )
-    monkeypatch.setattr(
+    patch_attributes(
         native_media.model_config,
-        "get_vlm_base_url",
-        lambda: DASHSCOPE_BASE_URL,
-    )
-    monkeypatch.setattr(
-        native_media.model_config,
-        "get_vlm_api_key",
-        lambda: "",
-    )
-    monkeypatch.setattr(
-        native_media.model_config,
-        "get_vlm_model_name",
-        lambda: "qwen3.7-plus",
+        get_vlm_base_url=lambda: DASHSCOPE_BASE_URL,
+        get_vlm_api_key=lambda: "",
+        get_vlm_model_name=lambda: "qwen3.7-plus",
     )
 
     with pytest.raises(ValidationError, match="VLM API key"):
@@ -368,6 +348,7 @@ def test_url_backed_version_uses_public_source_without_local_cache(
 def test_short_video_target_ref_is_delivered_as_frame_sequence(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    patch_attributes,
 ) -> None:
     """Clips below the native-video minimum become ordered frame parts."""
 
@@ -407,30 +388,20 @@ def test_short_video_target_ref_is_delivered_as_frame_sequence(
             frames.append((stamp_ms, frame_path))
         return frames
 
-    monkeypatch.setattr(
+    patch_attributes(
         native_media.model_config,
-        "get_vlm_api_key",
-        lambda: "test-vlm-key",
-    )
-    monkeypatch.setattr(
-        native_media.model_config,
-        "get_vlm_model_name",
-        lambda: "qwen3.7-plus",
+        get_vlm_api_key=lambda: "test-vlm-key",
+        get_vlm_model_name=lambda: "qwen3.7-plus",
     )
     monkeypatch.setattr(
         native_media,
         UPLOAD_HOOK,
         fake_upload,
     )
-    monkeypatch.setattr(
+    patch_attributes(
         native_media,
-        "probe_media",
-        lambda _path: SimpleNamespace(duration_seconds=1.28),
-    )
-    monkeypatch.setattr(
-        native_media,
-        "_extract_video_frames_sync",
-        fake_extract,
+        probe_media=lambda _path: SimpleNamespace(duration_seconds=1.28),
+        _extract_video_frames_sync=fake_extract,
     )
     request = CreatorMessageRecord(
         message_id="message-short",
@@ -476,6 +447,7 @@ def test_short_video_target_ref_is_delivered_as_frame_sequence(
 def test_target_refs_scope_media_to_the_delegated_asset(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    patch_attributes,
 ) -> None:
     """Per-target delegations must not re-observe sibling uploads."""
 
@@ -511,15 +483,10 @@ def test_target_refs_scope_media_to_the_delegated_asset(
         uploaded_bytes.append(path.read_bytes())
         return f"oss://dashscope/{path.name}"
 
-    monkeypatch.setattr(
+    patch_attributes(
         native_media.model_config,
-        "get_vlm_api_key",
-        lambda: "test-vlm-key",
-    )
-    monkeypatch.setattr(
-        native_media.model_config,
-        "get_vlm_model_name",
-        lambda: "qwen3.7-plus",
+        get_vlm_api_key=lambda: "test-vlm-key",
+        get_vlm_model_name=lambda: "qwen3.7-plus",
     )
     monkeypatch.setattr(
         native_media,
@@ -558,6 +525,7 @@ def test_target_refs_scope_media_to_the_delegated_asset(
 def test_document_page_refs_become_native_image_parts(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    patch_attributes,
 ) -> None:
     from services.source_analysis.service import (
         document_page_path,
@@ -581,15 +549,10 @@ def test_document_page_refs_become_native_image_parts(
         uploads.append(path.name)
         return f"oss://dashscope/{path.name}"
 
-    monkeypatch.setattr(
+    patch_attributes(
         native_media.model_config,
-        "get_vlm_api_key",
-        lambda: "test-vlm-key",
-    )
-    monkeypatch.setattr(
-        native_media.model_config,
-        "get_vlm_model_name",
-        lambda: "qwen3.7-plus",
+        get_vlm_api_key=lambda: "test-vlm-key",
+        get_vlm_model_name=lambda: "qwen3.7-plus",
     )
     monkeypatch.setattr(
         native_media,

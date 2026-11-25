@@ -399,7 +399,7 @@ def test_mapping_labels_every_reference_in_payload_order(monkeypatch) -> None:
 
 
 def test_submit_path_renders_the_block_into_each_provider_dialect(
-    monkeypatch,
+    patch_attributes,
 ) -> None:
     """Canonical in the block; submit renders the provider's own form."""
     from models import config as model_config
@@ -411,15 +411,10 @@ def test_submit_path_renders_the_block_into_each_provider_dialect(
         ("doubao-seedance-2.0", "seedance2", "图片1"),
         ("kling-v2", "kling", "@image_1"),
     ):
-        monkeypatch.setattr(
+        patch_attributes(
             model_config,
-            "get_video_model_name",
-            lambda name=model_name: name,
-        )
-        monkeypatch.setattr(
-            model_config,
-            "get_video_backend",
-            lambda key=backend: key,
+            get_video_model_name=lambda name=model_name: name,
+            get_video_backend=lambda key=backend: key,
         )
         block = _append_reference_role_mapping(
             "镜头描述。",
@@ -433,20 +428,15 @@ def test_submit_path_renders_the_block_into_each_provider_dialect(
 
 
 def test_structured_reference_models_get_no_invented_numbering(
-    monkeypatch,
+    patch_attributes,
 ) -> None:
     """Inventing an inline index would misdescribe a structured payload."""
     from models import config as model_config
 
-    monkeypatch.setattr(
+    patch_attributes(
         model_config,
-        "get_video_model_name",
-        lambda: "some-structured-model",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_backend",
-        lambda: "unknown-backend",
+        get_video_model_name=lambda: "some-structured-model",
+        get_video_backend=lambda: "unknown-backend",
     )
 
     prompt = _append_reference_role_mapping(

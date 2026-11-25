@@ -1,12 +1,8 @@
+import { cloneProject } from "@/test/projectSnapshotFixtures";
 import { fireEvent, render } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import BlueprintRoughCutStrip from "@/components/blueprint/BlueprintRoughCutStrip";
-import { projectDocument } from "@/test/creatorFixtures";
 import type { ProjectDocument } from "@/contracts/creator";
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
 
 function renderStrip(project: ProjectDocument) {
   return render(

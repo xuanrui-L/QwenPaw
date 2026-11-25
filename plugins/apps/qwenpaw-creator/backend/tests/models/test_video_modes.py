@@ -742,19 +742,14 @@ def test_kling_and_vidu_names_do_not_select_a_channel(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_happyhorse_models_route_to_wan_backend(monkeypatch) -> None:
+def test_happyhorse_models_route_to_wan_backend(patch_attributes) -> None:
     token = model_config.set_request_tool_configs({})
     try:
         for model in ("happyhorse-1.1-r2v", "HappyHorse-1.0-R2V"):
-            monkeypatch.setattr(
+            patch_attributes(
                 model_config,
-                "get_video_model_name",
-                lambda value=model: value,
-            )
-            monkeypatch.setattr(
-                model_config,
-                "get_video_base_url",
-                lambda: "https://dashscope.aliyuncs.com/api/v1",
+                get_video_model_name=lambda value=model: value,
+                get_video_base_url=lambda: "https://dashscope.aliyuncs.com/api/v1",
             )
             assert model_config.get_video_backend() == "wan"
     finally:
@@ -1045,21 +1040,17 @@ def test_seedance_local_reference_video_is_rejected(
 
 def test_token_plan_wan_reference_inlines_base64(
     monkeypatch,
+    patch_attributes,
     tmp_path,
 ) -> None:
     """A Token Plan key has no upload route, so a local wan reference image
     inlines as a Base64 data URL (HappyHorse/Wan media[].url accepts it)."""
     image = tmp_path / "ref.png"
     image.write_bytes(_png_bytes())
-    monkeypatch.setattr(
+    patch_attributes(
         model_config,
-        "get_video_model_name",
-        lambda: "happyhorse-1.1-i2v",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_base_url",
-        lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
+        get_video_model_name=lambda: "happyhorse-1.1-i2v",
+        get_video_base_url=lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
     )
 
     async def refuse_upload(*args, **kwargs):
@@ -1080,21 +1071,16 @@ def test_token_plan_wan_reference_inlines_base64(
 
 
 def test_token_plan_wan_reference_video_needs_public_url(
-    monkeypatch,
+    patch_attributes,
     tmp_path,
 ) -> None:
     """A local reference video/audio has no Base64 channel on Token Plan."""
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"mp4")
-    monkeypatch.setattr(
+    patch_attributes(
         model_config,
-        "get_video_model_name",
-        lambda: "happyhorse-1.1-i2v",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_base_url",
-        lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
+        get_video_model_name=lambda: "happyhorse-1.1-i2v",
+        get_video_base_url=lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
     )
 
     with pytest.raises(ModelError, match="公网"):
@@ -1105,6 +1091,7 @@ def test_token_plan_wan_reference_video_needs_public_url(
 
 def test_token_plan_wan_oversized_reference_downscales(
     monkeypatch,
+    patch_attributes,
     tmp_path,
 ) -> None:
     """An oversized local reference shrinks instead of failing the request.
@@ -1114,15 +1101,10 @@ def test_token_plan_wan_oversized_reference_downscales(
     provider could have served. The payload becomes JPEG, so the data URL
     must say jpeg rather than keep the source PNG suffix.
     """
-    monkeypatch.setattr(
+    patch_attributes(
         model_config,
-        "get_video_model_name",
-        lambda: "happyhorse-1.1-i2v",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_base_url",
-        lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
+        get_video_model_name=lambda: "happyhorse-1.1-i2v",
+        get_video_base_url=lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
     )
     monkeypatch.setattr(
         video_model,
@@ -1156,6 +1138,7 @@ def test_token_plan_wan_oversized_reference_downscales(
 
 def test_token_plan_wan_unshrinkable_reference_fails_fast(
     monkeypatch,
+    patch_attributes,
     tmp_path,
 ) -> None:
     """A reference that cannot fit must not be marked retryable.
@@ -1165,15 +1148,10 @@ def test_token_plan_wan_unshrinkable_reference_fails_fast(
     a request that cannot succeed and surface a transport-flavoured message
     instead of the guidance the user can act on.
     """
-    monkeypatch.setattr(
+    patch_attributes(
         model_config,
-        "get_video_model_name",
-        lambda: "happyhorse-1.1-i2v",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_base_url",
-        lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
+        get_video_model_name=lambda: "happyhorse-1.1-i2v",
+        get_video_base_url=lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
     )
     # Below the payload size, so the downscale path runs; the bytes are not
     # an image, so no ladder rung can rescue them.
@@ -1196,6 +1174,7 @@ def test_token_plan_wan_unshrinkable_reference_fails_fast(
 
 def test_wan_reference_media_uses_dashscope_temp_upload(
     monkeypatch,
+    patch_attributes,
     tmp_path,
 ) -> None:
     image = tmp_path / "ref.png"
@@ -1208,15 +1187,10 @@ def test_wan_reference_media_uses_dashscope_temp_upload(
     monkeypatch.setattr(model_config, "get_video_api_key", lambda: "video-key")
     # The transport is chosen from the endpoint, so pin the section to Bailian:
     # this case is about the model-bound temporary upload staying available.
-    monkeypatch.setattr(
+    patch_attributes(
         model_config,
-        "get_video_protocol",
-        lambda: "DashScope（百炼）",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_base_url",
-        lambda: "https://dashscope.aliyuncs.com/api/v1",
+        get_video_protocol=lambda: "DashScope（百炼）",
+        get_video_base_url=lambda: "https://dashscope.aliyuncs.com/api/v1",
     )
 
     observed = {}

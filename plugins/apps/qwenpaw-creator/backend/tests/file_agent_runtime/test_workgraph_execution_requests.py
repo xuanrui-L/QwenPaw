@@ -5,6 +5,7 @@ Explicit WorkGraph admission uses real durable approvals; providers are mocked.
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import dataclasses
 import json
 from types import SimpleNamespace
@@ -44,6 +45,42 @@ from services.runtime_files.models import (
     MessageClassification,
     ReviewBoundary,
 )
+
+
+def _request_execution(call_id, **overrides):
+    arguments = {
+        "projectId": "probe-project",
+        "targetRefs": ["asset:hero"],
+        "kinds": ["visual"],
+    }
+    arguments.update(overrides)
+    return AgentModelTurn(
+        tool_calls=(
+            AgentToolCall(
+                call_id=call_id,
+                name="request_workgraph_execution",
+                arguments=arguments,
+            ),
+        ),
+    )
+
+
+def _runtime(services, model, *, poll_interval_seconds=0.01):
+    return FileCreatorAgentRuntime(
+        services,
+        model_client=CallbackAgentChatClient(model),
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
+@asynccontextmanager
+async def _running(runtime):
+    try:
+        await runtime.start()
+        runtime.notify("probe-project")
+        yield
+    finally:
+        await runtime.stop()
 
 
 async def wait_for(predicate, seconds=12):
@@ -187,19 +224,7 @@ def test_failed_receipt_reaches_agent_and_cannot_be_narrated_as_submitted(
         nonlocal turns
         turns += 1
         if turns == 1:
-            return AgentModelTurn(
-                tool_calls=(
-                    AgentToolCall(
-                        call_id="blocked-request",
-                        name="request_workgraph_execution",
-                        arguments={
-                            "projectId": "probe-project",
-                            "targetRefs": ["asset:hero"],
-                            "kinds": ["visual"],
-                        },
-                    ),
-                ),
-            )
+            return _request_execution("blocked-request")
         result = json.loads(messages[-1]["content"])
         assert result["status"] == "PARTIAL"
         assert result["items"][1]["error"] == failure
@@ -208,20 +233,12 @@ def test_failed_receipt_reaches_agent_and_cannot_be_narrated_as_submitted(
         return AgentModelTurn(content="状态图正在提交制作，序章已合成，互动包可以下载。")
 
     services = create(tmp_path)
-    runtime = FileCreatorAgentRuntime(
-        services,
-        model_client=CallbackAgentChatClient(model),
-        poll_interval_seconds=0.01,
-    )
+    runtime = _runtime(services, model)
 
     async def scenario():
-        try:
-            await runtime.start()
-            runtime.notify("probe-project")
+        async with _running(runtime):
             await wait_for(lambda: turns == 2)
             await runtime.wait_until_idle("probe-project")
-        finally:
-            await runtime.stop()
 
     asyncio.run(scenario())
     records = services.sessions.list_messages("probe-project", "probe-session")
@@ -273,32 +290,14 @@ def _assert_approval_and_idempotent_admission(
             nonlocal turns
             turns += 1
             if turns <= 2 or (cancel_first and turns == 4):
-                return AgentModelTurn(
-                    tool_calls=(
-                        AgentToolCall(
-                            call_id=f"probe-call-{turns}",
-                            name="request_workgraph_execution",
-                            arguments={
-                                "projectId": "probe-project",
-                                "targetRefs": ["asset:hero"],
-                                "kinds": ["visual"],
-                            },
-                        ),
-                    ),
-                )
+                return _request_execution(f"probe-call-{turns}")
             return AgentModelTurn(content="Complete.")
 
-        runtime = FileCreatorAgentRuntime(
-            services,
-            model_client=CallbackAgentChatClient(model),
-            poll_interval_seconds=0.01,
-        )
+        runtime = _runtime(services, model)
         calls = []
 
         fake_dispatch(runtime, calls)
-        try:
-            await runtime.start()
-            runtime.notify("probe-project")
+        async with _running(runtime):
             await wait_for(
                 lambda: len(
                     runtime.executions.list_execution_authorizations(
@@ -385,8 +384,6 @@ def _assert_approval_and_idempotent_admission(
                 await wait_for(lambda: turns >= 5)
                 await runtime.wait_until_idle("probe-project")
                 assert len(calls) == 1
-        finally:
-            await runtime.stop()
 
     asyncio.run(scenario())
 
@@ -401,30 +398,12 @@ def test_review_opened_during_authorization_keeps_its_wait_reason(
         services = create(tmp_path)
 
         async def model(_messages, _tools):
-            return AgentModelTurn(
-                tool_calls=(
-                    AgentToolCall(
-                        call_id="pending-approval",
-                        name="request_workgraph_execution",
-                        arguments={
-                            "projectId": "probe-project",
-                            "targetRefs": ["asset:hero"],
-                            "kinds": ["visual"],
-                        },
-                    ),
-                ),
-            )
+            return _request_execution("pending-approval")
 
-        runtime = FileCreatorAgentRuntime(
-            services,
-            model_client=CallbackAgentChatClient(model),
-            poll_interval_seconds=0.01,
-        )
+        runtime = _runtime(services, model)
         calls = []
         fake_dispatch(runtime, calls)
-        try:
-            await runtime.start()
-            runtime.notify("probe-project")
+        async with _running(runtime):
             await wait_for(
                 lambda: runtime.executions.list_execution_authorizations(
                     "probe-project",
@@ -466,8 +445,6 @@ def test_review_opened_during_authorization_keeps_its_wait_reason(
             )
             assert not calls
             assert services.reviews.active("probe-project") is not None
-        finally:
-            await runtime.stop()
 
     asyncio.run(scenario())
 
@@ -486,25 +463,9 @@ def test_authorized_provider_outlives_feedback_but_not_hard_stop(
         started = asyncio.Event()
 
         async def model(_messages, _tools):
-            return AgentModelTurn(
-                tool_calls=(
-                    AgentToolCall(
-                        call_id="media-before-feedback",
-                        name="request_workgraph_execution",
-                        arguments={
-                            "projectId": "probe-project",
-                            "targetRefs": ["asset:hero"],
-                            "kinds": ["visual"],
-                        },
-                    ),
-                ),
-            )
+            return _request_execution("media-before-feedback")
 
-        runtime = FileCreatorAgentRuntime(
-            services,
-            model_client=CallbackAgentChatClient(model),
-            poll_interval_seconds=0.01,
-        )
+        runtime = _runtime(services, model)
         calls = []
         fake_dispatch(runtime, calls, release=release, started=started)
         try:
@@ -604,31 +565,17 @@ def test_prompt_sync_gated_request_surfaces_diagnostic_fields(
             nonlocal turns
             turns += 1
             if turns == 1:
-                return AgentModelTurn(
-                    tool_calls=(
-                        AgentToolCall(
-                            call_id="gated-call",
-                            name="request_workgraph_execution",
-                            arguments={
-                                "projectId": "probe-project",
-                                "targetRefs": ["element:e1"],
-                                "kinds": ["storyboard"],
-                            },
-                        ),
-                    ),
+                return _request_execution(
+                    "gated-call",
+                    targetRefs=["element:e1"],
+                    kinds=["storyboard"],
                 )
             return AgentModelTurn(content="Complete.")
 
-        runtime = FileCreatorAgentRuntime(
-            services,
-            model_client=CallbackAgentChatClient(model),
-            poll_interval_seconds=0.01,
-        )
+        runtime = _runtime(services, model)
         calls = []
         fake_dispatch(runtime, calls)
-        try:
-            await runtime.start()
-            runtime.notify("probe-project")
+        async with _running(runtime):
             await wait_for(
                 lambda: any(
                     message.role == "tool"
@@ -639,8 +586,6 @@ def test_prompt_sync_gated_request_surfaces_diagnostic_fields(
                 ),
             )
             await runtime.wait_until_idle("probe-project")
-        finally:
-            await runtime.stop()
 
         results = [
             json.loads(message.content_parts[0].text)
@@ -748,31 +693,13 @@ def test_post_approval_prompt_sync_gate_surfaces_diagnostic_fields(
             nonlocal turns
             turns += 1
             if turns == 1:
-                return AgentModelTurn(
-                    tool_calls=(
-                        AgentToolCall(
-                            call_id="post-approval-gate",
-                            name="request_workgraph_execution",
-                            arguments={
-                                "projectId": "probe-project",
-                                "targetRefs": ["asset:hero"],
-                                "kinds": ["visual"],
-                            },
-                        ),
-                    ),
-                )
+                return _request_execution("post-approval-gate")
             return AgentModelTurn(content="Complete.")
 
-        runtime = FileCreatorAgentRuntime(
-            services,
-            model_client=CallbackAgentChatClient(model),
-            poll_interval_seconds=0.01,
-        )
+        runtime = _runtime(services, model)
         calls = []
         fake_dispatch(runtime, calls)
-        try:
-            await runtime.start()
-            runtime.notify("probe-project")
+        async with _running(runtime):
             await wait_for(
                 lambda: runtime.executions.list_execution_authorizations(
                     "probe-project",
@@ -794,8 +721,6 @@ def test_post_approval_prompt_sync_gate_surfaces_diagnostic_fields(
                 ),
             )
             await runtime.wait_until_idle("probe-project")
-        finally:
-            await runtime.stop()
 
         results = [
             json.loads(message.content_parts[0].text)
@@ -854,26 +779,10 @@ def test_agent_workgraph_request_cannot_bypass_manual_hold(
             nonlocal turns
             turns += 1
             if turns == 1:
-                return AgentModelTurn(
-                    tool_calls=(
-                        AgentToolCall(
-                            call_id="held-work",
-                            name="request_workgraph_execution",
-                            arguments={
-                                "projectId": "probe-project",
-                                "targetRefs": ["asset:hero"],
-                                "kinds": ["visual"],
-                            },
-                        ),
-                    ),
-                )
+                return _request_execution("held-work")
             return AgentModelTurn(content="Paused for manual inspection.")
 
-        runtime = FileCreatorAgentRuntime(
-            services,
-            model_client=CallbackAgentChatClient(model),
-            poll_interval_seconds=0.01,
-        )
+        runtime = _runtime(services, model)
         _, _, graph, _, _ = await dm.ready_request_context(
             services,
             runtime.executions,
@@ -908,9 +817,7 @@ def test_agent_workgraph_request_cannot_bypass_manual_hold(
                 pytest.fail("late manual hold was bypassed")
 
         monkeypatch.setattr(runtime.work_scheduler, "dispatch_node", dispatch)
-        try:
-            await runtime.start()
-            runtime.notify("probe-project")
+        async with _running(runtime):
             if timing == "during_dispatch":
                 await wait_for(
                     lambda: runtime.executions.list_execution_authorizations(
@@ -943,8 +850,6 @@ def test_agent_workgraph_request_cannot_bypass_manual_hold(
                 assert not runtime.executions.list_execution_authorizations(
                     "probe-project",
                 )
-        finally:
-            await runtime.stop()
 
     asyncio.run(scenario())
 
@@ -1066,26 +971,12 @@ def test_saved_prompt_authorization_rebinding(
             nonlocal turns
             turns += 1
             if turns == 1:
-                return AgentModelTurn(
-                    tool_calls=(
-                        AgentToolCall(
-                            call_id="saved-prompt",
-                            name="request_workgraph_execution",
-                            arguments={
-                                "projectId": "probe-project",
-                                "targetRefs": [target],
-                                "kinds": [kind],
-                            },
-                        ),
-                    ),
+                return _request_execution(
+                    "saved-prompt", targetRefs=[target], kinds=[kind]
                 )
             return AgentModelTurn(content="Complete.")
 
-        runtime = FileCreatorAgentRuntime(
-            services,
-            model_client=CallbackAgentChatClient(model),
-            poll_interval_seconds=0.01,
-        )
+        runtime = _runtime(services, model)
         calls = []
         fake_dispatch(runtime, calls)
         approved = asyncio.Event()

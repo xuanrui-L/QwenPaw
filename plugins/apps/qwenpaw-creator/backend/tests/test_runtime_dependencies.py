@@ -201,18 +201,14 @@ def test_dev_app_imports_in_a_cold_interpreter(tmp_path: Path) -> None:
 def test_cancelled_standalone_startup_recovers_the_same_root_on_retry(
     tmp_path,
     monkeypatch,
+    patch_attributes,
 ):
     started = threading.Event()
     release = threading.Event()
-    monkeypatch.setattr(
+    patch_attributes(
         dev_main,
-        "require_creator_data_root",
-        lambda: tmp_path,
-    )
-    monkeypatch.setattr(
-        dev_main,
-        "ensure_creator_runtime_dependencies",
-        lambda: {},
+        require_creator_data_root=lambda: tmp_path,
+        ensure_creator_runtime_dependencies=lambda: {},
     )
     other_root = tmp_path / "unrelated"
     other = creator_file_services(other_root)
@@ -264,6 +260,7 @@ def test_cancelled_standalone_startup_recovers_the_same_root_on_retry(
 def test_cancelled_host_startup_joins_task_recovery_before_teardown(
     tmp_path,
     monkeypatch,
+    patch_attributes,
     recovery,
 ):
     entered, release = threading.Event(), threading.Event()
@@ -280,21 +277,16 @@ def test_cancelled_host_startup_joins_task_recovery_before_teardown(
     async def stop():
         order.append("media stopped")
 
-    monkeypatch.setattr(
+    patch_attributes(
         main,
-        "configure_creator_runtime_environment",
-        lambda: None,
+        configure_creator_runtime_environment=lambda: None,
+        require_creator_data_root=lambda: tmp_path,
+        ensure_creator_runtime_dependencies=lambda: {},
+        ensure_vendor_libs=lambda: None,
+        start_file_media_execution_services=start,
+        start_creator_agent_runtime=start,
+        shutdown_file_media_execution_services=stop,
     )
-    monkeypatch.setattr(main, "require_creator_data_root", lambda: tmp_path)
-    monkeypatch.setattr(
-        main,
-        "ensure_creator_runtime_dependencies",
-        lambda: {},
-    )
-    monkeypatch.setattr(main, "ensure_vendor_libs", lambda: None)
-    monkeypatch.setattr(main, "start_file_media_execution_services", start)
-    monkeypatch.setattr(main, "start_creator_agent_runtime", start)
-    monkeypatch.setattr(main, "shutdown_file_media_execution_services", stop)
     monkeypatch.setattr(main, recovery, recover)
 
     async def cancel_startup():

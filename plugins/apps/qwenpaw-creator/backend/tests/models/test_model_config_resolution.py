@@ -284,18 +284,14 @@ def test_wan_video_urls_accept_api_root_or_full_endpoint(monkeypatch) -> None:
 )
 def test_bailian_video_models_accept_legacy_and_workspace_api_roots(
     monkeypatch,
+    patch_attributes,
     model_name,
 ) -> None:
-    monkeypatch.setattr(config, "get_video_backend", lambda: "wan")
-    monkeypatch.setattr(
+    patch_attributes(
         config,
-        "get_video_model_name",
-        lambda: model_name,
-    )
-    monkeypatch.setattr(
-        config,
-        "get_video_base_url",
-        lambda: "https://dashscope.aliyuncs.com/api/v1",
+        get_video_backend=lambda: "wan",
+        get_video_model_name=lambda: model_name,
+        get_video_base_url=lambda: "https://dashscope.aliyuncs.com/api/v1",
     )
     assert config.get_video_submit_url() == (
         "https://dashscope.aliyuncs.com/api/v1/"
@@ -617,6 +613,7 @@ def test_persisted_grounding_disabled_wins_over_enabled_environment(
 def test_runtime_reads_decrypt_persisted_search_provider_keys(
     tmp_path,
     monkeypatch,
+    patch_attributes,
 ):
     """Encrypted-at-rest search keys must decrypt on the runtime read path."""
     config_path = tmp_path / "model_config.json"
@@ -632,16 +629,11 @@ def test_runtime_reads_decrypt_persisted_search_provider_keys(
         "WEB_GROUNDING_SERPER_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(config, "_SECRET_STORE_AVAILABLE", True)
-    monkeypatch.setattr(
+    patch_attributes(
         config,
-        "_secret_is_encrypted",
-        lambda value: value.startswith("ENC:"),
-    )
-    monkeypatch.setattr(
-        config,
-        "_secret_decrypt",
-        lambda value: f"decrypted-{value.removeprefix('ENC:')}",
+        _SECRET_STORE_AVAILABLE=True,
+        _secret_is_encrypted=lambda value: value.startswith("ENC:"),
+        _secret_decrypt=lambda value: f"decrypted-{value.removeprefix('ENC:')}",
     )
     config._clear_user_config_cache()
 
@@ -757,6 +749,7 @@ def test_grounding_runtime_policy_does_not_read_environment(monkeypatch):
 def test_grounding_protocol_follows_the_borrowed_credential(
     tmp_path,
     monkeypatch,
+    patch_attributes,
 ):
     """The verifier's wire format belongs to the key it spends.
 
@@ -776,15 +769,10 @@ def test_grounding_protocol_follows_the_borrowed_credential(
         "WEB_GROUNDING_VLM_PROTOCOL",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(
+    patch_attributes(
         config,
-        "get_text_protocol",
-        lambda: "Aliyun Token Plan",
-    )
-    monkeypatch.setattr(
-        config,
-        "get_vlm_protocol",
-        lambda: "DashScope Qwen-VL",
+        get_text_protocol=lambda: "Aliyun Token Plan",
+        get_vlm_protocol=lambda: "DashScope Qwen-VL",
     )
     config._clear_user_config_cache()
 

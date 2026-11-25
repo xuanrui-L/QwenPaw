@@ -12,7 +12,6 @@ from services.media_files.task_scratch import (
     project_storage_profile,
     read_scratch_baseline,
     release_orphaned_scratch,
-    remember_scratch_baseline,
 )
 from services.runtime_files.execution_store import ProjectExecutionStore
 from .test_task_scratch import (
@@ -23,8 +22,8 @@ from .test_task_scratch import (
     _moved,
     _needs_pinned_release,
     _scratch,
+    _scratch_on_both_sides_of_baseline,
     _services,
-    _stamp,
     _task,
     _tree_bytes,
 )
@@ -120,35 +119,9 @@ def test_scratch_brought_in_by_an_import_stays_protected(
 def test_legacy_scratch_respects_the_baseline(
     tmp_path: Path,
 ) -> None:
-    legacy = _scratch(tmp_path, "task-legacy")
-    transactions = tmp_path / PROJECT_ID / "runtime" / "transactions"
-    old_tx = transactions / "tx-legacy"
-    old_tx.mkdir(parents=True)
-    (old_tx / "journal.json").write_text("{}", encoding="utf-8")
-    _stamp(old_tx, T0 - timedelta(days=1))
-    remember_scratch_baseline(tmp_path / PROJECT_ID, now=T0)
-
-    fresh = _scratch(tmp_path, "task-fresh")
-    new_tx = transactions / "tx-fresh"
-    new_tx.mkdir(parents=True)
-    (new_tx / "journal.json").write_bytes(b"{}\n")
-    _stamp(new_tx, T0 + timedelta(hours=2))
-
-    store = ProjectExecutionStore(tmp_path)
-    for name, moment in (
-        ("task-legacy", T0 - timedelta(days=1)),
-        ("task-fresh", T0),
-    ):
-        store.create_task(
-            _task(TaskStatus.QUEUED).model_copy(update={"task_id": name}),
-        )
-        _moved(
-            store,
-            name,
-            frm=TaskStatus.QUEUED,
-            to=TaskStatus.FAILED,
-            updated_at=moment,
-        )
+    legacy, fresh, old_tx, new_tx = _scratch_on_both_sides_of_baseline(
+        tmp_path
+    )
 
     entry = project_storage_profile(
         _services(tmp_path),

@@ -549,20 +549,6 @@ def test_missing_visual_prompt_is_a_model_required_gap(base_state) -> None:
     assert visual not in graph.ready_media_nodes()
 
 
-def _element_with_landed_storyboard(
-    project: Project,
-    **creation_kwargs,
-) -> None:
-    _add_element(project, _element("elem:one", **creation_kwargs))
-    _select_slot(
-        project,
-        slot_id="element:elem:one:storyboard",
-        kind="r2v_storyboard_image",
-        owner_ref="element:elem:one",
-        version_id="art:sb",
-    )
-
-
 def test_pending_lineup_only_gates_storyboards_that_reference_it() -> None:
     """The graph and executor both scope readiness to actual shot inputs."""
 
