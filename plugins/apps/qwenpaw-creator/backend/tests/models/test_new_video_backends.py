@@ -1092,50 +1092,58 @@ def test_video_submit_never_surfaces_an_empty_failure_reason(
 ) -> None:
     """A transport error with an empty str(e) must not become a bare colon.
 
-    A connection drop mid-request makes httpx raise a RemoteProtocolError
-    carrying no response, no status, and (as measured) an empty str(). The
-    generic branch used to render that as "Video task submission failed:"
+    A send-phase failure makes httpx raise a WriteError ("Failed to send
+    data") carrying no response, no status, and (as measured) an empty str().
+    The generic branch used to render that as "Video task submission failed:"
     with nothing after it; the user still needs a non-empty, actionable reason.
 
-    The default wan backend uploads references and passes them as oss:// URLs,
-    so the request body stays small: a drop is a transient blip, not an
-    oversized body, and must stay retryable with no compress-the-reference
-    hint. The inlined-Base64 case that does justify the hint is covered by
-    test_video_submit_marks_an_inlined_reference_disconnect_non_retryable.
+    WriteError fires while the request body is still going out, so it never
+    reached the provider: this is a small-image transmission interruption, a
+    transient blip that must stay retryable and must not be blamed on body
+    size. The delivered-but-unknown case (a response-phase drop) is covered by
+    test_video_submit_reports_a_response_phase_drop_as_unknown_not_oversize.
     """
     captured: dict = {}
     _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
     monkeypatch.setattr(
         video_model.httpx,
         "AsyncClient",
-        lambda timeout: _RaisingAsyncClient(httpx.RemoteProtocolError("")),
+        lambda timeout: _RaisingAsyncClient(httpx.WriteError("")),
     )
     with pytest.raises(ModelError) as excinfo:
         asyncio.run(_submit_with_reference())
     message = str(excinfo.value)
     assert not message.endswith("failed:")
-    assert "RemoteProtocolError" in message
-    # oss:// URL references keep the body small, so the drop is not blamed on
-    # body size: no hint, and the transient failure stays retryable.
+    assert "WriteError" in message
+    # The body never fully reached the provider, so the drop is not blamed on
+    # body size: no 413 hint, and the transient failure stays retryable.
     assert "413" not in message
     assert excinfo.value.retryable is True
 
 
-def test_video_submit_marks_an_inlined_reference_disconnect_non_retryable(
+@pytest.mark.parametrize(
+    "response_drop",
+    [httpx.RemoteProtocolError(""), httpx.ReadError("")],
+)
+def test_video_submit_reports_a_response_phase_drop_as_unknown_not_oversize(
     monkeypatch,
+    response_drop,
 ) -> None:
-    """An inlined Base64 reference dropped mid-upload is an oversized body.
+    """A drop after the body went out is an unknown outcome, never a 413.
 
-    An inline backend (kling, veo, minimax, ...) puts the reference bytes in
-    the request body as a data: URL. A gateway that refuses an oversized body
-    closes the connection mid-upload, surfacing as a RemoteProtocolError
-    rather than an HTTP 413. Resending the identical bytes cannot succeed, so
-    the error carries the compress-the-reference hint and is marked
-    non-retryable to stop the driver from inviting a futile, billed retry.
+    RemoteProtocolError ("peer closed connection without sending complete
+    message body") and ReadError ("Failed to receive data") fire while reading
+    the response, i.e. after the request body was fully sent. The provider
+    bills on acceptance, so the task may already be running and paid for even
+    though we saw no task_id. Reporting that as an oversized body would be
+    wrong twice over: it invites the user to compress a reference that was
+    fine, and it hides the real risk that a blind auto-resend mints a second,
+    second-billed task.
 
-    _force_inlined_references reproduces the inline body shape while the wan
-    backend keeps the r2v capability check green, so the transport-error
-    branch sees a data: URL exactly as a real inline backend would send it.
+    The branch must stay non-retryable (so the driver will not auto-resend)
+    but say the outcome is unknown and may be billed -- with no 413/oversize
+    wording at all. _force_inlined_references proves this holds even for the
+    inline body shape that the old code wrongly equated with oversize.
     """
     captured: dict = {}
     _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
@@ -1143,13 +1151,18 @@ def test_video_submit_marks_an_inlined_reference_disconnect_non_retryable(
     monkeypatch.setattr(
         video_model.httpx,
         "AsyncClient",
-        lambda timeout: _RaisingAsyncClient(httpx.RemoteProtocolError("")),
+        lambda timeout: _RaisingAsyncClient(response_drop),
     )
     with pytest.raises(ModelError) as excinfo:
         asyncio.run(_submit_with_reference())
     message = str(excinfo.value)
-    assert "413" in message
+    # Unknown outcome, so no auto-resend -- but never blamed on body size.
     assert excinfo.value.retryable is False
+    assert "413" not in message
+    assert "请求体超过大小限制" not in message
+    assert "压缩" not in message
+    # It must tell the user the task may already be accepted/billed.
+    assert "不会自动重发" in message
 
 
 def test_video_submit_keeps_a_pre_send_connect_error_retryable(
@@ -1157,16 +1170,18 @@ def test_video_submit_keeps_a_pre_send_connect_error_retryable(
 ) -> None:
     """A connection failure before the body is sent is not a body-size problem.
 
-    ConnectError happens while establishing the connection, before any
-    reference bytes are uploaded, so even an inlined Base64 reference cannot
-    have caused it. It must stay retryable and carry no compress-the-reference
-    hint, otherwise a transient network blip is misreported as an oversized
-    body and a retry that could have succeeded is blocked.
+    ConnectError ("Failed to establish a connection") fires while dialing,
+    before any reference bytes are uploaded, so the request never reached the
+    provider and cannot have been accepted/billed. Even an inlined Base64
+    reference cannot have caused it. It must stay retryable and carry no
+    compress-the-reference hint, otherwise a transient network blip is
+    misreported as an oversized body and a retry that could have succeeded is
+    blocked.
 
-    The references are forced inline so this pins the mid-upload branch
-    against a pre-send failure: the same oversized body shape as the
-    non-retryable case, but a ConnectError instead of a mid-upload drop, so
-    it must stay retryable with no hint.
+    The references are forced inline so this pins the send-phase branch
+    against the inline body shape the old code wrongly equated with oversize:
+    a ConnectError, unlike a response-phase drop, must stay retryable with no
+    hint.
     """
     captured: dict = {}
     _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
@@ -1183,14 +1198,18 @@ def test_video_submit_keeps_a_pre_send_connect_error_retryable(
     assert error.retryable is True
 
 
-def test_video_submit_keeps_a_reference_free_transport_error_retryable(
+def test_video_submit_classifies_a_response_phase_drop_by_type_not_media(
     monkeypatch,
 ) -> None:
-    """Without inlined references a transport error is not blamed on body size.
+    """A response-phase drop is unknown/non-retryable even with no media.
 
-    A connection-level failure on a text-to-video submit carries no media, so
-    it may be a transient blip: it must stay retryable and carry no
-    oversized-body hint. This pins the other side of ``retryable=not hint``.
+    Classification is by how far the request got, never by what the body
+    held. A text-to-video submit carries no inlined reference at all, yet a
+    RemoteProtocolError still means the body was fully sent and the response
+    was cut off: the outcome is unknown and may be billed, exactly as for the
+    inline case. This pins the other side of the inline test -- the
+    non-retryable verdict comes from the exception type, not from media, and
+    it still carries no oversized-body hint.
     """
     captured: dict = {}
     _bind(
@@ -1217,4 +1236,4 @@ def test_video_submit_keeps_a_reference_free_transport_error_retryable(
         )
     error = excinfo.value
     assert "413" not in str(error)
-    assert error.retryable is True
+    assert error.retryable is False
