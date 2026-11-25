@@ -10,6 +10,7 @@ import pytest
 
 from domain.errors import ValidationError
 from services.media_files import interaction_execution
+from services.media_files.html_document import extract_html_document
 from services.media_files.interaction_execution import (
     execute_file_interaction_command,
 )
@@ -134,15 +135,21 @@ def _mock_chat(monkeypatch, replies: list[str]):
     return calls
 
 
+def _interaction_call(
+    services, key, *, target_ref=f"element:{ELEMENT_ID}", arguments=None
+):
+    return execute_file_interaction_command(
+        services,
+        project_id=PROJECT_ID,
+        target_ref=target_ref,
+        arguments={} if arguments is None else arguments,
+        idempotency_key=key,
+    )
+
+
 def _execute(services, key: str = "dag-interaction-1"):
     return asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={},
-            idempotency_key=key,
-        ),
+        _interaction_call(services, key),
     )
 
 
@@ -314,12 +321,8 @@ def test_bad_inputs_are_rejected_fail_closed(tmp_path, monkeypatch):
     del calls[:]
     with pytest.raises(ValidationError, match="element 不存在"):
         asyncio.run(
-            execute_file_interaction_command(
-                services,
-                project_id=PROJECT_ID,
-                target_ref="element:el:ghost",
-                arguments={},
-                idempotency_key="dag-interaction-x",
+            _interaction_call(
+                services, "dag-interaction-x", target_ref="element:el:ghost"
             ),
         )
     assert not calls
@@ -344,13 +347,13 @@ def _decide_all(services, decision="ACCEPT"):
 
 
 def test_motion_is_reviewable_and_guidance_regenerates(tmp_path, monkeypatch):
-    from services.runtime_files.execution_store import ProjectExecutionStore
-    from services.file_agent_runtime.work_graph import (
-        derive_work_graph,
-        WorkNodeStatus,
-    )
     from api.interactive_bundle_routes import _assemble
     from domain.errors import ConflictError
+    from services.file_agent_runtime.work_graph import (
+        WorkNodeStatus,
+        derive_work_graph,
+    )
+    from services.runtime_files.execution_store import ProjectExecutionStore
 
     services = _services(tmp_path)
     calls = _mock_chat(monkeypatch, [GOOD_HTML])
@@ -371,12 +374,8 @@ def test_motion_is_reviewable_and_guidance_regenerates(tmp_path, monkeypatch):
         _assemble(PROJECT_ID, services)
     _decide_all(services)
     revised = asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={"guidance": "横屏，蓝色大按钮"},
-            idempotency_key="revise-1",
+        _interaction_call(
+            services, "revise-1", arguments={"guidance": "横屏，蓝色大按钮"}
         ),
     )
     assert (
@@ -401,12 +400,12 @@ def test_motion_is_reviewable_and_guidance_regenerates(tmp_path, monkeypatch):
 
 def test_inflight_input_change_discards_stale_result(tmp_path, monkeypatch):
     from domain.errors import ConflictError
-    from services.runtime_files.models import ChangeOrigin
-    from services.runtime_files.execution_store import ProjectExecutionStore
     from services.file_agent_runtime.work_graph import (
-        derive_work_graph,
         WorkNodeStatus,
+        derive_work_graph,
     )
+    from services.runtime_files.execution_store import ProjectExecutionStore
+    from services.runtime_files.models import ChangeOrigin
 
     services = _services(tmp_path)
 
@@ -424,13 +423,7 @@ def test_inflight_input_change_discards_stale_result(tmp_path, monkeypatch):
             chat,
         )
         task = asyncio.create_task(
-            execute_file_interaction_command(
-                services,
-                project_id=PROJECT_ID,
-                target_ref=f"element:{ELEMENT_ID}",
-                arguments={},
-                idempotency_key="inflight",
-            ),
+            _interaction_call(services, "inflight"),
         )
         await entered.wait()
         execution = ProjectExecutionStore(services.root)
@@ -554,10 +547,11 @@ def test_manual_http_dispatch_checks_versions_and_creates_review(
 ):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
-    from api.work_graph_routes import router
+
     from api.dependencies import project_file_services
-    from services.runtime_files.models import ChangeOrigin
+    from api.work_graph_routes import router
     from domain.errors import ConflictError
+    from services.runtime_files.models import ChangeOrigin
 
     services = _services(tmp_path)
     base = services.projects.read(PROJECT_ID)
@@ -608,11 +602,11 @@ def test_manual_http_dispatch_checks_versions_and_creates_review(
 
 
 def test_restart_parks_interrupted_text_task_without_rebilling(tmp_path):
-    from services.runtime_files.execution_store import ProjectExecutionStore
-    from services.runtime_files.execution_models import TaskRecord
     from services.media_files.interaction_execution import (
         recover_interrupted_interaction_tasks,
     )
+    from services.runtime_files.execution_models import TaskRecord
+    from services.runtime_files.execution_store import ProjectExecutionStore
 
     services = _services(tmp_path)
     store = ProjectExecutionStore(services.root)
@@ -656,12 +650,13 @@ def test_mainline_interaction_approval_review_and_idle_snapshot_stability(
         CallbackAgentChatClient,
         FileCreatorAgentRuntime,
     )
-    from services.file_agent_runtime import driver as dm, work_scheduler as sm
-    from services.runtime_files.execution_models import (
-        ExecutionAuthorizationStatus,
-    )
+    from services.file_agent_runtime import driver as dm
+    from services.file_agent_runtime import work_scheduler as sm
     from services.file_agent_runtime.workgraph_execution import (
         ready_request_context,
+    )
+    from services.runtime_files.execution_models import (
+        ExecutionAuthorizationStatus,
     )
 
     monkeypatch.setattr(
@@ -803,26 +798,21 @@ def test_repeated_live_edits_keep_one_frozen_baseline_and_publish_to_live(
     tmp_path,
     monkeypatch,
 ):
-    from services.project_files.agent_tools import (
-        AgentProjectTools,
-        AgentProjectToolContext,
-    )
-    from services.runtime_files.models import ChangeOrigin
+    from datetime import datetime, timedelta
+
     from services.file_agent_runtime.work_graph import derive_work_graph
     from services.project_files import auto_snapshot
-    from datetime import datetime, timedelta
+    from services.project_files.agent_tools import (
+        AgentProjectToolContext,
+        AgentProjectTools,
+    )
+    from services.runtime_files.models import ChangeOrigin
 
     services = _services(tmp_path)
     calls = _mock_chat(monkeypatch, [GOOD_HTML])
 
     async def scenario():
-        await execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={},
-            idempotency_key="history-first",
-        )
+        await _interaction_call(services, "history-first")
         _decide_all(services)
         agent = AgentProjectTools(
             services.projects,
@@ -892,20 +882,12 @@ def test_repeated_live_edits_keep_one_frozen_baseline_and_publish_to_live(
         assert frozen[history[0]] == first_frozen
         frozen_element = next(iter(first_frozen["elements_by_id"]))
         with pytest.raises(ValidationError):
-            await execute_file_interaction_command(
+            await _interaction_call(
                 services,
-                project_id=PROJECT_ID,
+                "frozen-forbidden",
                 target_ref=f"element:{frozen_element}",
-                arguments={},
-                idempotency_key="frozen-forbidden",
             )
-        await execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={},
-            idempotency_key="history-final",
-        )
+        await _interaction_call(services, "history-final")
         _decide_all(services)
         after = services.projects.read(PROJECT_ID)
         assert {
@@ -978,12 +960,8 @@ def test_project_interface_discards_model_commentary(tmp_path, monkeypatch):
         [f"这是完整的页面。\n```html\n{html}\n```\n### 分支选择与状态回看\n优化建议。"],
     )
     asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key="wrapped-page",
+        _interaction_call(
+            services, "wrapped-page", target_ref=f"project:{PROJECT_ID}"
         ),
     )
     saved = services.projects.read(PROJECT_ID).project
@@ -1011,16 +989,12 @@ def test_incomplete_html_retries_or_persists_failure(
 
     def execute():
         return asyncio.run(
-            execute_file_interaction_command(
+            _interaction_call(
                 services,
-                project_id=PROJECT_ID,
-                target_ref=(
-                    f"project:{PROJECT_ID}"
-                    if project_interface
-                    else f"element:{ELEMENT_ID}"
-                ),
-                arguments={},
-                idempotency_key="incomplete-html",
+                "incomplete-html",
+                target_ref=f"project:{PROJECT_ID}"
+                if project_interface
+                else f"element:{ELEMENT_ID}",
             ),
         )
 
@@ -1074,21 +1048,11 @@ def test_parallel_page_review_does_not_discard_finished_choice(
             chat,
         )
         choice = asyncio.create_task(
-            execute_file_interaction_command(
-                services,
-                project_id=PROJECT_ID,
-                target_ref=f"element:{ELEMENT_ID}",
-                arguments={},
-                idempotency_key="parallel-choice",
-            ),
+            _interaction_call(services, "parallel-choice"),
         )
         await entered.wait()
-        await execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key="parallel-page",
+        await _interaction_call(
+            services, "parallel-page", target_ref=f"project:{PROJECT_ID}"
         )
         page_review = services.reviews.all_pending(PROJECT_ID)[0]
         release.set()
@@ -1144,12 +1108,11 @@ def test_project_interface_review_revision_and_stability(
 
     def execute(key, guidance=""):
         return asyncio.run(
-            execute_file_interaction_command(
+            _interaction_call(
                 services,
-                project_id=PROJECT_ID,
+                key,
                 target_ref=f"project:{PROJECT_ID}",
                 arguments={"guidance": guidance},
-                idempotency_key=key,
             ),
         )
 
@@ -1282,12 +1245,8 @@ def test_structured_controls_repair_label_and_revise_only_page(
     html = _presentation_html().replace(">开始</button>", ">沿海出发</button>")
     calls = _mock_chat(monkeypatch, [_presentation_html(), html])
     asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key="structured-page",
+        _interaction_call(
+            services, "structured-page", target_ref=f"project:{PROJECT_ID}"
         ),
     )
     assert len(calls) == 2
@@ -1351,6 +1310,7 @@ def test_option_appearance_is_a_scoped_generation_input(tmp_path, monkeypatch):
 )
 def test_presentation_design_rejects_unknown_screen_actions(screens):
     from pydantic import ValidationError as SchemaError
+
     from services.project_files.models import InteractivePresentation
 
     with pytest.raises(SchemaError):
@@ -1382,12 +1342,11 @@ def test_explicit_regeneration_is_reviewed_and_deduped(tmp_path, monkeypatch):
 
     def execute(key, regenerate=False):
         return asyncio.run(
-            execute_file_interaction_command(
+            _interaction_call(
                 services,
-                project_id=PROJECT_ID,
+                key,
                 target_ref=f"project:{PROJECT_ID}",
                 arguments={"regenerate": regenerate},
-                idempotency_key=key,
             ),
         )
 
@@ -1439,12 +1398,11 @@ def test_changed_page_prompt_cannot_publish_identical_old_interface(
 
     def execute(key):
         return asyncio.run(
-            execute_file_interaction_command(
+            _interaction_call(
                 services,
-                project_id=PROJECT_ID,
+                key,
                 target_ref=f"project:{PROJECT_ID}",
                 arguments={"regenerate": True},
-                idempotency_key=key,
             ),
         )
 
@@ -1485,7 +1443,8 @@ def test_http_manual_regeneration_uses_new_slot_without_changing_prompt(
 ):
     import httpx
     from fastapi import FastAPI
-    from api.dependencies import project_file_services, creator_error_handler
+
+    from api.dependencies import creator_error_handler, project_file_services
     from api.work_graph_routes import router
     from domain.errors import CreatorError
 
@@ -1503,12 +1462,8 @@ def test_http_manual_regeneration_uses_new_slot_without_changing_prompt(
     )
 
     async def scenario():
-        await execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key="seed-page",
+        await _interaction_call(
+            services, "seed-page", target_ref=f"project:{PROJECT_ID}"
         )
         _decide_all(services)
         before = services.projects.read(PROJECT_ID).project
@@ -1549,6 +1504,7 @@ def test_page_copy_contract_retries_and_loads_design_skill(
     monkeypatch,
     bad_copy,
 ):
+    from services import external_skills
     from services.media_files.presentation_authoring import (
         interface_design_skill,
     )
@@ -1562,16 +1518,19 @@ def test_page_copy_contract_retries_and_loads_design_skill(
     }[bad_copy]
     calls = _mock_chat(monkeypatch, [bad, good])
     asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key=f"copy-{bad_copy}",
+        _interaction_call(
+            services, f"copy-{bad_copy}", target_ref=f"project:{PROJECT_ID}"
         ),
     )
     assert len(calls) == 2
-    assert interface_design_skill() in calls[0]["system"]
+    viewed = external_skills.view_skill(
+        skill_name="interactive-interface-design"
+    )
+    assert viewed["ok"] is True
+    body = external_skills.parse_skill_md(viewed["content"])["body"]
+    assert "data-node-label" in body and "title_policy" in body
+    assert body == interface_design_skill()
+    assert body in calls[0]["system"]
     assert (
         services.projects.read(
             PROJECT_ID,
@@ -1595,6 +1554,8 @@ def test_title_policy_keeps_user_names_and_recognizes_legacy_auto_names(
     expected,
 ):
     import json
+
+    from services import external_skills
     from services.media_files.presentation_authoring import (
         presentation_prompt,
         presentation_title_policy,
@@ -1645,6 +1606,7 @@ def test_task_finalization_does_not_block_review_coroutines(
     failed,
 ):
     import threading
+
     from services.runtime_files.execution_store import ProjectExecutionStore
 
     services = _services(tmp_path)
@@ -1679,13 +1641,7 @@ def test_task_finalization_does_not_block_review_coroutines(
             "chat_completion",
             chat,
         )
-        call = execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={},
-            idempotency_key="review-contention",
-        )
+        call = _interaction_call(services, "review-contention")
         if failed:
             with pytest.raises(ModelError, match="provider timeout"):
                 await call
@@ -1722,13 +1678,7 @@ def test_concurrent_identical_generation_admits_only_one_provider_call(
     async def scenario():
         return await asyncio.gather(
             *[
-                execute_file_interaction_command(
-                    services,
-                    project_id=PROJECT_ID,
-                    target_ref=f"element:{ELEMENT_ID}",
-                    arguments={},
-                    idempotency_key="concurrent-identical",
-                )
+                _interaction_call(services, "concurrent-identical")
                 for _ in range(2)
             ],
             return_exceptions=True,
@@ -1737,3 +1687,54 @@ def test_concurrent_identical_generation_admits_only_one_provider_call(
     results = asyncio.run(scenario())
     assert len(calls) == 1
     assert any(not isinstance(result, Exception) for result in results)
+
+
+DOCUMENT = """<!DOCTYPE html>
+<html lang="zh-CN"><head><style>
+p::after { content: "</html>"; }
+</style></head><body>
+<!-- A literal </html> in a comment is not a document boundary. -->
+<p title="</html>">正文里的 ``` 和优化建议都应该保留。</p>
+</body></html>"""
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        DOCUMENT,
+        f"\ufeff \n{DOCUMENT}\n",
+        f"```html\n{DOCUMENT}\n```",
+        f"这是完整的互动页面。\n```html\n{DOCUMENT}\n```\n### 优化建议\n说明文字。",
+        f"下面是页面：\n{DOCUMENT}\n页面说明。",
+        f"前言\r\n~~~html\r\n{DOCUMENT}\r\n~~~\r\n后记",
+    ],
+)
+def test_extract_preserves_document_and_excludes_only_surrounding_text(reply):
+    assert extract_html_document(reply) == DOCUMENT
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "这里只返回了说明文字。",
+        DOCUMENT.removesuffix("</html>"),
+        DOCUMENT + "\n" + DOCUMENT,
+        "<html><html><body>Ambiguous</body></html></html>",
+        "</html><html>",
+        "<p>A fragment is not a complete generated document.</p>",
+        "<![invalid declaration]>" + DOCUMENT,
+    ],
+)
+def test_incomplete_or_ambiguous_reply_is_not_silently_repaired(reply):
+    with pytest.raises(ValueError, match="HTML"):
+        extract_html_document(reply)
+
+
+def test_case_insensitive_document_without_doctype_is_preserved():
+    html = '<HTML data-note="a > b"><HEAD></HEAD><BODY>页面</BODY></HTML >'
+    assert extract_html_document(f"前言\n{html}\n后记") == html
+
+
+def test_doctype_and_document_comments_are_preserved():
+    html = DOCUMENT.replace("\n<html", "\n<!-- authored page -->\n<html")
+    assert extract_html_document(f"说明\n```html\n{html}\n```\n后记") == html

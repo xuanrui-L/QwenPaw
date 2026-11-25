@@ -52,7 +52,9 @@ def _install_render_fakes(monkeypatch, commands: list[list[str]]) -> None:
         return _Completed()
 
     monkeypatch.setattr(overlay_tools, "_render_pet_os_png", render_png)
-    monkeypatch.setattr(overlay_tools.media_gate, "run", run)
+    monkeypatch.setattr(
+        getattr(overlay_tools, "media_gate", subprocess), "run", run
+    )
 
 
 def _loc(**overrides) -> dict:
@@ -533,7 +535,7 @@ def test_measure_loudness_parses_the_loudnorm_json_tail(
     _Measured.stderr = stderr
 
     monkeypatch.setattr(
-        local_execution_mod.media_gate,
+        getattr(local_execution_mod, "media_gate", subprocess),
         "run",
         lambda *args, **kwargs: _Measured(),
     )

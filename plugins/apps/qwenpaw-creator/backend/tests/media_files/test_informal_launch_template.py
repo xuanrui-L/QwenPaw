@@ -303,6 +303,7 @@ def test_compose_repairs_only_official_template_encoding(
 def test_official_caption_never_silently_falls_back(
     tmp_path,
     monkeypatch,
+    patch_attributes,
     failure,
 ):
     overlay = caption(recipe="hero")
@@ -344,30 +345,20 @@ def test_official_caption_never_silently_falls_back(
         "_probe_video_size",
         lambda *a: (1280, 720),
     )
-    monkeypatch.setattr(
+    patch_attributes(
         local_execution,
-        "probe_motion_document",
-        lambda *a, **kw: MotionDocumentProbe(
+        probe_motion_document=lambda *a, **kw: MotionDocumentProbe(
             ok=failure != "probe",
             error="probe rejected",
             edge_contact=0,
             text_occlusion=0,
         ),
-    )
-    monkeypatch.setattr(
-        local_execution,
-        "prepare_motion_layer",
-        lambda **kw: SimpleNamespace(
+        prepare_motion_layer=lambda **kw: SimpleNamespace(
             layer=None if failure == "capture" else object(),
             error="capture rejected",
         ),
-    )
-    monkeypatch.setattr(
-        local_execution,
-        "composite_motion_layers",
-        lambda **kw: SimpleNamespace(
-            success=False,
-            error="composite rejected",
+        composite_motion_layers=lambda **kw: SimpleNamespace(
+            success=False, error="composite rejected"
         ),
     )
 
@@ -376,15 +367,10 @@ def test_official_caption_never_silently_falls_back(
             "Official captions must not enter generic fallback",
         )
 
-    monkeypatch.setattr(
+    patch_attributes(
         local_execution,
-        "render_caption_template",
-        no_fallback,
-    )
-    monkeypatch.setattr(
-        local_execution,
-        "render_interview_summary_overlay",
-        no_fallback,
+        render_caption_template=no_fallback,
+        render_interview_summary_overlay=no_fallback,
     )
     with pytest.raises(ValidationError, match="未替换为基础字幕"):
         FfmpegLocalMediaRunner(executable="ffmpeg")._apply_overlay(
@@ -530,7 +516,7 @@ async def test_new_caption_design_uses_and_commits_actual_cut_timing(
 
 def test_cut_alignment_keeps_authored_timing_and_declines_ambiguous_cuts(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
 ):
     project = launch_with_selected_video()
     timeline = project.timelines.items["timeline:main"]
@@ -538,15 +524,10 @@ def test_cut_alignment_keeps_authored_timing_and_declines_ambiguous_cuts(
         "video"
     ].creation.narrative = "镜头1（0–3秒）亮相\n镜头2（3–30秒）展示"
     overlay = timeline.elements_by_id["caption"]
-    monkeypatch.setattr(
+    patch_attributes(
         informal_launch_timing,
-        "verified_indexed_path",
-        lambda *_: tmp_path / "video.mp4",
-    )
-    monkeypatch.setattr(
-        informal_launch_timing,
-        "detect_hard_cuts",
-        lambda *_: [4.2, 12],
+        verified_indexed_path=lambda *_: tmp_path / "video.mp4",
+        detect_hard_cuts=lambda *_: [4.2, 12],
     )
     spans, report = informal_launch_timing.align_launch_caption_spans(
         project,
@@ -607,21 +588,16 @@ def test_only_selected_launch_bgm_replaces_native_audio():
 @pytest.mark.parametrize("replace_native", [False, True])
 def test_template_music_replacement_omits_native_audio_from_mix(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
     replace_native,
 ):
     output = tmp_path / "output.mp4"
     output.write_bytes(b"premix")
     calls = []
-    monkeypatch.setattr(
+    patch_attributes(
         FfmpegLocalMediaRunner,
-        "_probe_has_audio",
-        lambda *_: True,
-    )
-    monkeypatch.setattr(
-        FfmpegLocalMediaRunner,
-        "_run",
-        lambda self, args, **kwargs: calls.append(args),
+        _probe_has_audio=lambda *_: True,
+        _run=lambda self, args, **kwargs: calls.append(args),
     )
     spec = local_execution.LocalMediaExecutionSpec(
         command=local_execution.CreatorCommandType.COMPOSE_FINAL_VIDEO,
@@ -751,20 +727,18 @@ def test_caption_frames_follow_trimmed_edit_timing_and_selected_version():
 async def test_pending_caption_design_preserves_newer_edits(
     tmp_path,
     monkeypatch,
+    patch_attributes,
     change,
 ):
     project = launch_with_selected_video()
     services = CreatorFileServices.create(tmp_path)
     services.projects.create(project)
-    monkeypatch.setattr(
+    patch_attributes(
         motion_design,
-        "materialize_keyframe",
-        lambda *_args, **_kwargs: SimpleNamespace(path=tmp_path / "frame.jpg"),
-    )
-    monkeypatch.setattr(
-        motion_design,
-        "verified_indexed_path",
-        lambda *_: tmp_path / "video.mp4",
+        materialize_keyframe=lambda *_args, **_kwargs: SimpleNamespace(
+            path=tmp_path / "frame.jpg"
+        ),
+        verified_indexed_path=lambda *_: tmp_path / "video.mp4",
     )
     newer = None
 

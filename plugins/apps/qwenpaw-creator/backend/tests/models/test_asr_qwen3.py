@@ -122,22 +122,18 @@ def test_transcribe_dispatches_qwen_audio_to_multimodal(monkeypatch) -> None:
 @respx.mock
 def test_qwen_audio_asr_uses_format_params_and_text_output(
     monkeypatch,
+    patch_attributes,
 ) -> None:
     """qwen-audio-3.0-asr-flash rejects result_format=message (400), so it
     posts format/sample_rate and reads the cumulative output.text."""
-    monkeypatch.setattr(config, "get_asr_api_key", lambda: "asr-key")
-    monkeypatch.setattr(
+    patch_attributes(
         config,
-        "get_asr_model_name",
-        lambda: "qwen-audio-3.0-asr-flash",
-    )
-    monkeypatch.setattr(config, "get_asr_provider", lambda: "fun-asr")
-    monkeypatch.setattr(config, "get_asr_language", lambda: "")
-    monkeypatch.setattr(config, "get_asr_timeout_seconds", lambda: 30)
-    monkeypatch.setattr(
-        config,
-        "get_asr_base_url",
-        lambda: "https://asr.example/api/v1/services/audio/asr/transcription",
+        get_asr_api_key=lambda: "asr-key",
+        get_asr_model_name=lambda: "qwen-audio-3.0-asr-flash",
+        get_asr_provider=lambda: "fun-asr",
+        get_asr_language=lambda: "",
+        get_asr_timeout_seconds=lambda: 30,
+        get_asr_base_url=lambda: "https://asr.example/api/v1/services/audio/asr/transcription",
     )
     monkeypatch.setattr(asr_model, "_probe_duration_ms", lambda _s: 10_000)
 
@@ -204,6 +200,7 @@ def test_qwen3_single_chunk_spreads_estimated_timestamps(monkeypatch) -> None:
 @respx.mock
 def test_qwen3_chunking_applies_cumulative_offsets(
     monkeypatch,
+    patch_attributes,
     tmp_path,
 ) -> None:
     _bind_qwen3(monkeypatch)
@@ -215,16 +212,11 @@ def test_qwen3_chunking_applies_cumulative_offsets(
     ]
     for chunk, _plan in chunks:
         chunk.write_bytes(b"audio")
-    monkeypatch.setattr(
+    patch_attributes(
         asr_model,
-        "_local_media_path",
-        lambda *_args: tmp_path / "source.mp3",
-    )
-    monkeypatch.setattr(asr_model, "_probe_duration_ms", lambda _s: 540_000)
-    monkeypatch.setattr(
-        asr_model,
-        "_prepare_qwen3_chunks",
-        lambda *_args: chunks,
+        _local_media_path=lambda *_args: tmp_path / "source.mp3",
+        _probe_duration_ms=lambda _s: 540000,
+        _prepare_qwen3_chunks=lambda *_args: chunks,
     )
 
     async def fake_upload(
@@ -522,7 +514,7 @@ def test_whisper_posts_extracted_audio_and_normalizes_chunk_offsets(
     )
 
 
-def test_asr_upload_token_plan_refuses_local_audio(
+def test_asr_token_plan_refuses_local_audio(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -548,9 +540,12 @@ def test_asr_upload_token_plan_refuses_local_audio(
         "upload_reference_file_for_provider",
         refuse_upload,
     )
+    local_audio = getattr(asr_model, "_upload_asr_reference", None)
+    if local_audio is None:
+        local_audio = asr_model._asr_audio_url
     with pytest.raises(ValueError, match="公网"):
         asyncio.run(
-            asr_model._upload_asr_reference(
+            local_audio(
                 clip,
                 api_key="sk-sp-test",
                 model="qwen-audio-3.0-asr-flash",

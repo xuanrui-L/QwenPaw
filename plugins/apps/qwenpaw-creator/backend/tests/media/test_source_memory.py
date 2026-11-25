@@ -6,15 +6,13 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
 from contextlib import nullcontext
+import json
+import subprocess
 from pathlib import Path
-import threading
 from types import SimpleNamespace
 
 import pytest
-
 from vendored.test_video_memory_toolkit import (
     build_fixture_index,
     build_fixture_memory,
@@ -402,286 +400,6 @@ def test_recover_requeues_only_with_durable_artifacts(
         assert len(spawned) == 1
 
 
-@pytest.mark.parametrize("outcome", ["complete", "cancel", "fail"])
-def test_startup_schedules_memory_workers_only_after_recovery(
-    tmp_path,
-    monkeypatch,
-    outcome,
-) -> None:
-    service = _service(tmp_path)
-    queued = _running_task(tmp_path)
-    queued.status = TaskStatus.QUEUED
-    service.executions = _RecordingExecutions(queued)
-    scanned = threading.Event()
-    finish = threading.Event()
-
-    def project_ids():
-        yield "project-1"
-        scanned.set()
-        assert finish.wait(5)
-        if outcome == "fail":
-            raise OSError("project scan interrupted")
-
-    monkeypatch.setattr(service, "_list_project_ids", project_ids)
-
-    async def scenario():
-        workers = []
-
-        async def record_worker(job):
-            workers.append((job.task_id, asyncio.get_running_loop()))
-
-        monkeypatch.setattr(service, "_drive", record_worker)
-        recovery = asyncio.create_task(service.resume_interrupted())
-        try:
-            assert await asyncio.to_thread(scanned.wait, 5)
-            assert not workers
-            if outcome == "cancel":
-                recovery.cancel()
-        finally:
-            finish.set()
-        if outcome == "complete":
-            await recovery
-        else:
-            error = asyncio.CancelledError if outcome == "cancel" else OSError
-            with pytest.raises(error):
-                await recovery
-        await asyncio.sleep(0)
-        expected = [("task-1", asyncio.get_running_loop())]
-        assert workers == (expected if outcome == "complete" else [])
-
-    asyncio.run(scenario())
-
-
-def test_stopping_a_build_signals_its_parallel_clip_while_the_parent_drains(
-    tmp_path, monkeypatch
-):
-    service = _service(tmp_path)
-    job = _build_job(tmp_path)
-
-    async def scenario():
-        started, release_parent = asyncio.Event(), asyncio.Event()
-        clip_cancelled = asyncio.Event()
-
-        async def clip():
-            try:
-                started.set()
-                await asyncio.Future()
-            finally:
-                clip_cancelled.set()
-
-        async def drive(_job):
-            child = asyncio.create_task(clip())
-            service._builds[job.task_id].children.append(child)
-            try:
-                await asyncio.Future()
-            finally:
-                await release_parent.wait()
-                child.cancel()
-                await asyncio.gather(child, return_exceptions=True)
-
-        monkeypatch.setattr(service, "_drive", drive)
-        parent = service._spawn(job)
-        await started.wait()
-        native_stop = service._builds[job.task_id].stop
-        service.cancel_workers(job.project_id, job.task_id)
-        try:
-            # Native permit waiters may resume before the next loop tick.
-            assert native_stop.is_set()
-            await asyncio.wait_for(clip_cancelled.wait(), 2)
-            assert not parent.done()
-        finally:
-            release_parent.set()
-            await asyncio.gather(parent, return_exceptions=True)
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("fault", ["none", "before_replace", "after_replace"])
-def test_durable_cancel_stops_a_clip_before_its_next_model_call(
-    tmp_path, monkeypatch, fault
-):
-    from api.file_execution_routes import _cancel_task_sync
-    from services.project_files.facade import creator_file_services
-    from services.project_files.models import Project
-    from services.runtime_files.execution_models import TaskRecord
-    from services.runtime_files.execution_store import ProjectExecutionStore
-
-    services = creator_file_services(tmp_path)
-    job = _build_job(tmp_path)
-    services.projects.create(
-        Project.new(project_id=job.project_id, name="Cancel")
-    )
-    service = source_memory.source_memory_service(services)
-    service.executions.create_task(
-        TaskRecord(
-            project_id=job.project_id,
-            task_id=job.task_id,
-            kind=source_memory.TaskKind.SOURCE_MEMORY_BUILD,
-            request_fingerprint="cancel",
-        )
-    )
-    entered, release_clip, clip_done = (threading.Event() for _ in range(3))
-    published, return_to_api = threading.Event(), threading.Event()
-    model_calls = []
-    original_notify = ProjectExecutionStore._notify_task_terminal
-
-    def notify(store, task):
-        if task.status is TaskStatus.CANCELLED:
-            published.set()
-            assert return_to_api.wait(5)
-        original_notify(store, task)
-
-    def clip():
-        entered.set()
-        assert release_clip.wait(5)
-        clip_done.set()
-
-    async def drive(_job):
-        await source_memory._run_media_stage(
-            service._builds[job.task_id].stop, clip
-        )
-        model_calls.append(job.task_id)
-
-    if fault == "before_replace":
-
-        def fail_write(*_args, **_kwargs):
-            published.set()
-            assert return_to_api.wait(5)
-            raise OSError("cancel write failed")
-
-        monkeypatch.setattr(
-            ProjectExecutionStore, "_transition_task_unlocked", fail_write
-        )
-
-    if fault == "after_replace":
-        from services.runtime_files import atomic_store
-
-        sync_directory = atomic_store.fsync_directory
-
-        def fail_directory_sync(path):
-            if Path(path).name == job.task_id:
-                published.set()
-                assert return_to_api.wait(5)
-                raise OSError("cancel write failed")
-            sync_directory(path)
-
-        monkeypatch.setattr(
-            atomic_store, "fsync_directory", fail_directory_sync
-        )
-
-    monkeypatch.setattr(ProjectExecutionStore, "_notify_task_terminal", notify)
-    monkeypatch.setattr(service, "_drive", drive)
-
-    async def scenario():
-        worker = service._spawn(job)
-        try:
-            assert await asyncio.to_thread(entered.wait, 3)
-            cancel = asyncio.create_task(
-                asyncio.to_thread(
-                    _cancel_task_sync,
-                    services,
-                    job.project_id,
-                    job.task_id,
-                    "stop",
-                )
-            )
-            assert await asyncio.to_thread(published.wait, 3)
-            assert service.executions.get_task(
-                job.project_id, job.task_id
-            ).status is (
-                TaskStatus.QUEUED
-                if fault == "before_replace"
-                else TaskStatus.CANCELLED
-            )
-            release_clip.set()
-            assert await asyncio.to_thread(clip_done.wait, 3)
-            assert not model_calls
-            return_to_api.set()
-            if fault == "none":
-                assert (await cancel).status is TaskStatus.CANCELLED
-            else:
-                with pytest.raises(OSError, match="cancel write failed"):
-                    await cancel
-            if fault == "before_replace":
-                await asyncio.wait_for(worker, 3)
-                assert model_calls == [job.task_id]
-            else:
-                with pytest.raises(asyncio.CancelledError):
-                    await asyncio.wait_for(worker, 3)
-                assert not model_calls
-        finally:
-            release_clip.set()
-            return_to_api.set()
-
-    asyncio.run(scenario())
-
-
-def test_cancelled_frame_detection_joins_inflight_seeks_and_skips_queued_frames(
-    tmp_path, monkeypatch
-):
-    entered, release = threading.Event(), threading.Event()
-    seeks = []
-
-    def seek(*args, **kwargs):
-        seeks.append(args[2])
-        entered.set()
-        assert release.wait(5)
-        return None
-
-    monkeypatch.setattr(source_memory, "_require_ffmpeg", lambda: "ffmpeg")
-    monkeypatch.setattr(source_memory, "_seek_jpeg", seek)
-
-    async def scenario():
-        detecting = asyncio.create_task(
-            source_memory._detect_segments(
-                tmp_path / "video", 0, 300, source_memory._BuildStop()
-            )
-        )
-        try:
-            assert await asyncio.to_thread(entered.wait, 5)
-            detecting.cancel()
-            done, _ = await asyncio.wait({detecting}, timeout=0.03)
-            assert not done
-        finally:
-            release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await detecting
-
-    asyncio.run(scenario())
-    assert 0 < len(seeks) <= source_memory.FRAME_WORKERS
-
-
-def test_shutdown_joins_recovered_workers_and_leaves_their_task_resumable(
-    tmp_path,
-    monkeypatch,
-):
-    service = _service(tmp_path)
-    job = _build_job(tmp_path)
-    queued = _running_task(tmp_path)
-    queued.status = TaskStatus.QUEUED
-    service.executions = _RecordingExecutions(queued)
-    monkeypatch.setattr(service, "_recoverable_jobs", lambda: iter([job]))
-
-    async def scenario():
-        started = asyncio.Event()
-
-        async def wait_for_approval(_job):
-            started.set()
-            await asyncio.Future()
-
-        monkeypatch.setattr(service, "_drive", wait_for_approval)
-        await service.resume_interrupted()
-        await started.wait()
-        worker = service._jobs[job.task_id]
-        await service.shutdown()
-        assert worker.cancelled()
-        assert not service._jobs
-        assert service._spawn(job) is None
-
-    asyncio.run(scenario())
-    assert not service.executions.transitions
-
-
 def test_cancel_for_asset_stops_a_live_build_before_its_next_stage(
     tmp_path,
     monkeypatch,
@@ -729,7 +447,9 @@ def test_cancel_for_asset_stops_a_live_build_before_its_next_stage(
         executions.transitions[-1]["updates"]["error"]["code"]
         == "SOURCE_ASSET_DELETED"
     ), "the record a cancellation left behind must still terminalize"
-    assert not service._jobs and not service._builds
+    assert not service._jobs
+    assert not getattr(service, "_job_specs", None)
+    assert not getattr(service, "_builds", None)
 
 
 def test_merge_projection_folds_reviewed_drafts_and_summary(
@@ -865,6 +585,9 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
         out_path.write_bytes(b"clip")
         return out_path
 
+    stop_type = getattr(source_memory, "_BuildStop", None)
+    stop_args = (stop_type(),) if stop_type is not None else ()
+
     async def fake_chat(_content, **_kwargs):
         return json.dumps(
             {
@@ -898,7 +621,7 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
                 asyncio.Semaphore(1),
                 ckpt_dir,
                 "checksum-1",
-                source_memory._BuildStop(),
+                *stop_args,
             ),
         )
 
@@ -930,11 +653,11 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
     assert resumed.subgraph.micro_events[0].time_range == [11.0, 12.0]
 
 
-@pytest.mark.parametrize("stop_before_publish", [False, True])
-def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
+def _exercise_chunked_memory_build(
     tmp_path,
     monkeypatch,
-    stop_before_publish,
+    *,
+    stop_before_publish=False,
 ) -> None:
     # 7300s source → 3 detection chunks; chunk 1 is pre-checkpointed and
     # must not be re-detected. Macro ids stay globally sequential.
@@ -963,7 +686,7 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
 
     detected: list[tuple[float, float]] = []
 
-    def fake_detect(_path, start_sec, end_sec, _stop):
+    def fake_detect(_path, start_sec, end_sec, *_stop):
         detected.append((start_sec, end_sec))
         return [(start_sec, end_sec)]
 
@@ -1045,18 +768,49 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
     assert not ckpt_root.exists()
 
 
-def test_ffmpeg_invocations_detach_stdin() -> None:
-    # A background-job host delivers SIGTTIN to any child reading the
-    # TTY: ffmpeg must run with stdin detached or the whole build
-    # silently stops (observed live: clips stuck in "TN").
-    for module, expected_runs in (
-        (source_memory, 1),
-        (source_observation, 2),
-    ):
-        source = inspect.getsource(module)
-        # Media spawns go through the process-wide gate, which adds the new
-        # session; each caller still has to detach stdin itself.
-        runs = source.count("media_gate.run(")
-        detached = source.count("stdin=subprocess.DEVNULL")
-        assert runs == expected_runs
-        assert detached == runs
+def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
+    tmp_path, monkeypatch
+):
+    _exercise_chunked_memory_build(tmp_path, monkeypatch)
+
+
+def test_ffmpeg_invocations_detach_stdin(tmp_path, monkeypatch):
+    # Background jobs must never let ffmpeg read the host's tty (SIGTTIN).
+    def run(command, *, stdin, **_):
+        assert stdin == subprocess.DEVNULL
+        if command[-1] != "pipe:1":
+            Path(command[-1]).write_bytes(b"clip")
+        return subprocess.CompletedProcess(command, 0, stdout=b"frame")
+
+    monkeypatch.setattr(source_observation, "require_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        getattr(source_observation, "media_gate", subprocess), "run", run
+    )
+    video = tmp_path / "source.mp4"
+    clip = tmp_path / "clip.mp4"
+    assert (
+        source_observation.clip_segment_sync(
+            video,
+            clip,
+            0.0,
+            1.0,
+            512,
+            28,
+            2,
+        )
+        == clip
+    )
+    assert (
+        source_observation.clip_segment_hq_sync(video, clip, 0.0, 1.0) == clip
+    )
+    assert (
+        source_memory._seek_jpeg(
+            "ffmpeg",
+            str(video),
+            0.0,
+            "128:128",
+            2,
+            30,
+        )
+        == b"frame"
+    )

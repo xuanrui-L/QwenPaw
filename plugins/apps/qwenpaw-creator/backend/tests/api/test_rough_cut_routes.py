@@ -1,26 +1,37 @@
 # -*- coding: utf-8 -*-
-"""Rough-cut HTTP surface: fail-closed 409 and a real 480p mp4 draft.
-
-Covers the wiring the unit tests cannot: the route must exist, resolve
-indexed files through the AssetFileStore boundary, map RoughCutError to
-409 and stream ``video/mp4`` — all at zero provider cost.
-"""
+"""Rough-cut composition, media routes, and timeline overlay detection."""
 from __future__ import annotations
 
 import shutil
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
 
 from api.dependencies import creator_error_handler, project_file_services
+from api.file_execution_routes import (
+    _timeline_has_text_overlays_without_motion,
+)
 from api.router import router
 from domain.errors import CreatorError
+from services.media_files.rough_cut import (
+    RoughCutClip,
+    RoughCutError,
+    render_rough_cut,
+)
 from services.project_files.assets import AssetFileStore
 from services.project_files.commit import ProjectCommitBoundary
 from services.project_files.facade import CreatorFileServices
-from services.project_files.models import Project
+from services.project_files.models import (
+    ElementLocation,
+    OverlayCreation,
+    Project,
+    Timeline,
+    TimelineElement,
+    TimelineSpan,
+)
 
 requires_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None,
@@ -41,26 +52,6 @@ def _app(tmp_path):
     app.include_router(router)
     app.dependency_overrides[project_file_services] = lambda: services
     return app, services, snapshot
-
-
-def _make_still_bytes(tmp_path) -> bytes:
-    target = tmp_path / "storyboard-src.png"
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=red:s=320x240:d=0.1",
-            "-frames:v",
-            "1",
-            str(target),
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return target.read_bytes()
 
 
 def _commit_storyboard_element(services, snapshot, png_bytes: bytes) -> None:
@@ -132,46 +123,247 @@ def _commit_storyboard_element(services, snapshot, png_bytes: bytes) -> None:
 
 
 @pytest.mark.usefixtures("api_runtime_root")
-def test_rough_cut_unknown_timeline_is_404(tmp_path, run_scenario):
-    app, _services, _snapshot = _app(tmp_path)
-
-    async def scenario(client):
-        response = await client.get(
-            f"/projects/{PROJECT_ID}/timelines/timeline:nope/rough-cut",
-        )
-        assert response.status_code == 404
-
-    run_scenario(app, scenario)
-
-
-@pytest.mark.usefixtures("api_runtime_root")
-def test_rough_cut_without_material_fails_closed_409(tmp_path, run_scenario):
-    app, _services, _snapshot = _app(tmp_path)
-
-    async def scenario(client):
-        response = await client.get(
-            f"/projects/{PROJECT_ID}/timelines/{TIMELINE_ID}/rough-cut",
-        )
-        assert response.status_code == 409
+@pytest.mark.parametrize(
+    ("timeline", "status"),
+    [("timeline:nope", 404), (TIMELINE_ID, 409)],
+    ids=["missing-timeline", "missing-material"],
+)
+def test_rough_cut_requires_a_timeline_with_material(
+    tmp_path,
+    api_request,
+    timeline,
+    status,
+):
+    app, _, _ = _app(tmp_path)
+    response = api_request(
+        app,
+        "GET",
+        f"/projects/{PROJECT_ID}/timelines/{timeline}/rough-cut",
+    )
+    assert response.status_code == status
+    if status == 409:
         assert "粗剪素材" in response.json()["message"]
-
-    run_scenario(app, scenario)
 
 
 @requires_ffmpeg
 @pytest.mark.usefixtures("api_runtime_root")
-def test_rough_cut_with_storyboard_returns_mp4(tmp_path, run_scenario):
+def test_rough_cut_with_storyboard_returns_mp4(tmp_path, api_request):
     app, services, snapshot = _app(tmp_path)
-    _commit_storyboard_element(services, snapshot, _make_still_bytes(tmp_path))
+    image = tmp_path / "storyboard-src.png"
+    _make_still(image)
+    _commit_storyboard_element(services, snapshot, image.read_bytes())
 
-    async def scenario(client):
-        response = await client.get(
-            f"/projects/{PROJECT_ID}/timelines/{TIMELINE_ID}/rough-cut",
-        )
-        assert response.status_code == 200, response.text
-        assert response.headers["content-type"] == "video/mp4"
-        payload = response.content
-        assert len(payload) > 1000
-        assert b"ftyp" in payload[:64]
+    response = api_request(
+        app,
+        "GET",
+        f"/projects/{PROJECT_ID}/timelines/{TIMELINE_ID}/rough-cut",
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "video/mp4"
+    assert len(response.content) > 1000
+    assert b"ftyp" in response.content[:64]
 
-    run_scenario(app, scenario)
+
+def _services_and_project(tmp_path):
+    services = CreatorFileServices.create(tmp_path.resolve())
+    snapshot = services.projects.create(
+        Project.new(project_id="proj-1", name="Test"),
+    )
+    return services, snapshot
+
+
+def _overlay(element_id, *, enabled=True, **creation) -> TimelineElement:
+    creation.setdefault("text", "测试文案")
+    return TimelineElement(
+        element_id=element_id,
+        enabled=enabled,
+        span=TimelineSpan(start_tick=0, duration_tick=100),
+        location=ElementLocation(),
+        creation=OverlayCreation(**creation),
+    )
+
+
+def _with_timeline(services, snapshot, timeline):
+    updated = snapshot.project.model_dump(mode="json")
+    tid = timeline.timeline_id
+    updated["timelines"]["items"][tid] = timeline.model_dump(mode="json")
+    if tid not in updated["timelines"]["order"]:
+        updated["timelines"]["order"].append(tid)
+    updated["generation"] = snapshot.generation + 1
+    return services.projects.replace(
+        "proj-1",
+        Project.model_validate(updated),
+        expected_etag=snapshot.etag,
+    )
+
+
+def _flag(services) -> bool:
+    return _timeline_has_text_overlays_without_motion(
+        services,
+        "proj-1",
+        "tl-1",
+    )
+
+
+_MOTION = {
+    "html": "<!doctype html><html><body>styled</body></html>",
+    "fps": 24,
+    "loop": True,
+}
+
+
+def test_no_text_overlays_returns_false(tmp_path) -> None:
+    services, _ = _services_and_project(tmp_path)
+    assert _flag(services) is False
+
+
+@pytest.mark.parametrize(
+    ("overlays", "expected"),
+    [
+        pytest.param(
+            {"overlay-1": {"motion": _MOTION}, "overlay-2": {}},
+            True,
+            id="mixed-motion-and-no-motion",
+        ),
+        pytest.param(
+            {"overlay-1": {"enabled": False}},
+            False,
+            id="disabled-overlay-ignored",
+        ),
+        # Text-free decoration overlays never need a caption motion design.
+        pytest.param(
+            {"overlay-1": {"text": "", "prompt": "decoration"}},
+            False,
+            id="text-free-decoration-overlay-ignored",
+        ),
+    ],
+)
+def test_text_overlay_motion_flag(tmp_path, overlays, expected) -> None:
+    services, snapshot = _services_and_project(tmp_path)
+    timeline = Timeline(
+        timeline_id="tl-1",
+        elements_by_id={
+            element_id: _overlay(element_id, **kwargs)
+            for element_id, kwargs in overlays.items()
+        },
+    )
+    _with_timeline(services, snapshot, timeline)
+
+    assert _flag(services) is expected
+
+
+def _make_video(path: Path, seconds: float) -> None:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=blue:s=320x240:d={seconds}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _make_still(path: Path) -> None:
+    from PIL import Image
+
+    Image.new("RGB", (320, 240), "red").save(path)
+
+
+def _duration_seconds(path_bytes: bytes, workdir: Path) -> float:
+    probe_target = workdir / "probe.mp4"
+    probe_target.write_bytes(path_bytes)
+    completed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nw=1:nk=1",
+            str(probe_target),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return float(completed.stdout.decode().strip())
+
+
+def test_empty_clip_list_fails_closed() -> None:
+    with pytest.raises(RoughCutError, match="没有可用的粗剪素材"):
+        render_rough_cut([])
+
+
+@requires_ffmpeg
+def test_rough_cut_concats_video_and_storyboard_still(tmp_path) -> None:
+    video = tmp_path / "shot.mp4"
+    still = tmp_path / "storyboard.png"
+    _make_video(video, seconds=1.0)
+    _make_still(still)
+
+    payload = render_rough_cut(
+        [
+            RoughCutClip(
+                element_id="el:1",
+                kind="video",
+                path=video,
+                duration_seconds=1.0,
+            ),
+            RoughCutClip(
+                element_id="el:2",
+                kind="still",
+                path=still,
+                duration_seconds=2.0,
+            ),
+        ],
+    )
+
+    assert payload[:8] != b""
+    duration = _duration_seconds(payload, tmp_path)
+    # 1s video + 2s held still, allow container rounding.
+    assert 2.5 <= duration <= 3.6
+
+
+@requires_ffmpeg
+def test_planned_gaps_and_missing_outputs_keep_full_preview_duration(tmp_path):
+    from services.media_files.rough_cut import collect_rough_cut_clips
+    from services.project_files.models import (
+        Project,
+        T2VCreation,
+        TimelineElement,
+        TimelineSpan,
+    )
+
+    project = Project.new(project_id="preview-spans", name="Draft")
+    timeline = project.timelines.items["timeline:main"]
+    timeline.elements_by_id["one"] = TimelineElement(
+        element_id="one",
+        label="Opening",
+        span=TimelineSpan(start_tick=1000, duration_tick=1000),
+        creation=T2VCreation(video_prompt="A cat"),
+    )
+    timeline.elements_by_id["two"] = TimelineElement(
+        element_id="two",
+        label="Ending",
+        span=TimelineSpan(start_tick=3000, duration_tick=1000),
+        creation=T2VCreation(video_prompt="A dog"),
+    )
+    clips = collect_rough_cut_clips(
+        project,
+        timeline,
+        resolve_file=lambda _: tmp_path / "unused",
+    )
+    assert [clip.element_id for clip in clips] == ["gap", "one", "gap", "two"]
+    assert sum(clip.duration_seconds for clip in clips) == 4
+    assert abs(_duration_seconds(render_rough_cut(clips), tmp_path) - 4) < 0.05

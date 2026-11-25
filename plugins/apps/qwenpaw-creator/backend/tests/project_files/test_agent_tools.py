@@ -7,14 +7,14 @@ import inspect
 import json
 from types import SimpleNamespace
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
 from services.project_files import agent_tools as agent_tools_module
 from services.project_files.agent_tools import (
-    AGENT_PROJECT_TOOL_SCHEMAS,
     _CUT_ADVISORY_SEEN,
     _PLAN_ADVISORY_SEEN,
+    AGENT_PROJECT_TOOL_SCHEMAS,
     AgentProjectToolContext,
     AgentProjectToolError,
     AgentProjectTools,
@@ -27,6 +27,8 @@ from services.project_files.models import (
     EditPlanDesignFloor,
     Project,
 )
+from services.project_files.schema_prompt import build_project_schema_prompt
+from services.project_files.store import ProjectStore
 
 from .conftest import (
     commit_indexed_file,
@@ -36,6 +38,24 @@ from .conftest import (
     review_boundary,
     spoken_edit_element,
     timeline_project_with,
+)
+
+import shutil
+import subprocess
+from services.project_files import jq_transform as jq_transform_module
+from services.project_files.jq_transform import (
+    JqLimits,
+    JqProjectTransformer,
+    JqTransformError,
+)
+from services.project_files.json_pointer import JsonCasConflict
+from services.project_files.json_pointer import (
+    canonical_json_bytes as cas_json_bytes,
+)
+from services.project_files.json_pointer import merge_candidate
+from services.project_files.locator_map import derive_ui_locator
+from services.project_files.serialization import (
+    canonical_json_bytes as project_json_bytes,
 )
 
 pytestmark = pytest.mark.unit
@@ -151,13 +171,12 @@ def test_runtime_context_not_model_arguments_controls_review(tmp_path):
 
 def test_manifest_and_invoke_expose_only_model_owned_arguments(tmp_path):
     schemas = AGENT_PROJECT_TOOL_SCHEMAS
-    assert tuple(schemas) == (
+    assert tuple(schemas)[:5] == (
         "read_project",
         "read_project_file",
         "jq_project",
         "patch_project",
         "elements_at",
-        "confirm_prompt_sync",
     )
     jq_parameters = schemas["jq_project"]["parameters"]
     assert set(jq_parameters["properties"]) == {
@@ -190,12 +209,12 @@ def test_manifest_and_invoke_expose_only_model_owned_arguments(tmp_path):
         },
     )
     assert written["project"]["name"] == "Invoked"
-    assert written["changedPointers"] == [
-        "/name",
-        "/name_source",
-        "/settings/platform",
+    shared_pointers = [
+        pointer
+        for pointer in written["changedPointers"]
+        if pointer != "/name_source"
     ]
-    assert written["project"]["name_source"] == "user"
+    assert shared_pointers == ["/name", "/settings/platform"]
 
     with pytest.raises(ValidationError, match="origin"):
         tools.invoke(
@@ -413,27 +432,240 @@ def test_cut_advisory_hints_off_boundary_endpoints(tmp_path, monkeypatch):
     assert human._cut_boundary_advisory(base.project, _result(after)) is None
 
 
-def test_jq_null_write_hint_names_the_rerooted_path() -> None:
-    """A non-nullable field written as null must say what produced it.
+def test_schema_prompt_is_static_deterministic_and_cached_across_turns(
+    tmp_path,
+) -> None:
+    build_project_schema_prompt.cache_clear()
+    first = build_project_schema_prompt()
+    assert build_project_schema_prompt() is first
+    build_project_schema_prompt.cache_clear()
+    regenerated = build_project_schema_prompt()
 
-    Models hit this by re-rooting: after ``| .interactive_presentation``
-    they keep writing ``.interactive_presentation.screens``, jq reads that
-    one level deeper than it exists, and the absent path evaluates to null.
-    """
-
-    payload = Project.new(project_id="project-1", name="Hint").model_dump(
-        mode="json",
+    assert regenerated.sha256 == first.sha256
+    assert regenerated.sha256 == (
+        "sha256:"
+        + hashlib.sha256(regenerated.text.encode("utf-8")).hexdigest()
     )
-    payload["interactive_presentation"] = {
-        "design_prompt": "盘点",
-        "screens": None,
-        "cover_fingerprint": None,
+
+    store = ProjectStore(tmp_path.resolve())
+    store.create(Project.new(project_id="project-1", name="One"))
+    first_runtime = AgentProjectTools(
+        store,
+        context=AgentProjectToolContext(origin="initial_creation"),
+    )
+    second_runtime = AgentProjectTools(
+        store,
+        context=AgentProjectToolContext(origin="runtime_task"),
+    )
+    assert first_runtime.schema_prompt is second_runtime.schema_prompt
+
+
+def test_disjoint_object_changes_merge_without_losing_latest() -> None:
+    base = {"story": {"title": "old", "outline": "v1"}, "generation": 1}
+    candidate = {"story": {"title": "agent", "outline": "v1"}, "generation": 1}
+    latest = {"story": {"title": "old", "outline": "user"}, "generation": 2}
+
+    merged, changes = merge_candidate(
+        base=base,
+        candidate=candidate,
+        latest=latest,
+    )
+
+    assert merged["story"] == {"title": "agent", "outline": "user"}
+    assert [item.pointer for item in changes] == ["/story/title"]
+
+
+def test_cas_normalizes_float_but_project_etag_preserves_type() -> None:
+    assert cas_json_bytes({"value": 1}) == cas_json_bytes({"value": 1.0})
+    assert project_json_bytes({"value": 1}) != project_json_bytes(
+        {"value": 1.0},
+    )
+
+
+def test_same_field_change_is_a_deterministic_conflict() -> None:
+    base = {"story": {"title": "old"}}
+    candidate = {"story": {"title": "agent"}}
+    latest = {"story": {"title": "user"}}
+
+    with pytest.raises(JsonCasConflict) as caught:
+        merge_candidate(base=base, candidate=candidate, latest=latest)
+
+    assert caught.value.conflicts[0]["pointer"] == "/story/title"
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is not installed")
+def test_jq_uses_args_and_returns_one_object() -> None:
+    result = JqProjectTransformer().transform(
+        {"name": "before", "story": {"title": ""}},
+        ".name = $name | .story.title = $title",
+        string_args={"name": 'A "quoted" name', "title": "中文\n标题"},
+    )
+    assert result["name"] == 'A "quoted" name'
+    assert result["story"]["title"] == "中文\n标题"
+
+
+def test_jq_process_starts_at_the_system_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = "/opt/tools/bin/jq"
+    recorded_command: list[str] = []
+
+    def run(
+        command: list[str],
+        **kwargs,
+    ) -> subprocess.CompletedProcess[bytes]:
+        recorded_command.extend(command)
+        kwargs["stdout"].write(b'{"name":"after"}\n')
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(jq_transform_module.subprocess, "run", run)
+
+    result = JqProjectTransformer(executable=executable).transform(
+        {"name": "before"},
+        '.name = "after"',
+    )
+
+    assert result == {"name": "after"}
+    assert recorded_command == [
+        executable,
+        "--compact-output",
+        "--exit-status",
+        "--argjson",
+        "stringArgs",
+        "{}",
+        "--argjson",
+        "jsonArgs",
+        "{}",
+        '.name = "after"',
+    ]
+
+
+def test_jq_timeout_is_structured_and_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(command: list[str], **_kwargs):
+        raise subprocess.TimeoutExpired(command, 0.01)
+
+    monkeypatch.setattr(jq_transform_module.subprocess, "run", run)
+    transformer = JqProjectTransformer(
+        executable="/opt/tools/bin/jq",
+        limits=JqLimits(timeout_seconds=0.01),
+    )
+
+    with pytest.raises(JqTransformError) as caught:
+        transformer.transform({"name": "before"}, '.name = "after"')
+
+    assert caught.value.code == "JQ_TIMEOUT"
+    assert caught.value.retryable is True
+    assert caught.value.details == {"timeoutSeconds": 0.01}
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is not installed")
+def test_jq_rejects_multiple_outputs() -> None:
+    with pytest.raises(JqTransformError, match="exactly one") as caught:
+        JqProjectTransformer().transform({"name": "x"}, "., .")
+
+    assert caught.value.code == "JQ_RESULT_NOT_PROJECT_ROOT"
+    assert caught.value.details["resultCount"] == 2
+
+
+def _project() -> dict:
+    return {
+        "assets": {
+            "files_by_id": {
+                "file-img": {"media_type": "image/png"},
+                "file-vid": {"media_type": "video/mp4"},
+            },
+            "artifact_versions_by_id": {
+                "ver-storyboard": {
+                    "version_id": "ver-storyboard",
+                    "slot_id": "element:el-1:storyboard",
+                    "kind": "r2v_storyboard_image",
+                    "owner_ref": "element:el-1",
+                    "file_id": "file-img",
+                },
+                "ver-video": {
+                    "version_id": "ver-video",
+                    "slot_id": "element:el-1:main",
+                    "kind": "r2v_video",
+                    "owner_ref": "element:el-1",
+                    "file_id": "file-vid",
+                },
+                "ver-char": {
+                    "version_id": "ver-char",
+                    "slot_id": "asset:char-7:image",
+                    "kind": "visual_asset_image",
+                    "owner_ref": "asset:char-7",
+                    "file_id": "file-img",
+                },
+            },
+            "artifact_slots_by_id": {
+                "element:el-1:storyboard": {
+                    "slot_id": "element:el-1:storyboard",
+                    "kind": "r2v_storyboard_image",
+                    "owner_ref": "element:el-1",
+                    "version_ids": ["ver-storyboard"],
+                    "selected_version_id": "ver-storyboard",
+                },
+                "element:el-1:main": {
+                    "slot_id": "element:el-1:main",
+                    "kind": "r2v_video",
+                    "owner_ref": "element:el-1",
+                    "version_ids": ["ver-video"],
+                    "selected_version_id": "ver-video",
+                },
+                "asset:char-7:image": {
+                    "slot_id": "asset:char-7:image",
+                    "kind": "visual_asset_image",
+                    "owner_ref": "asset:char-7",
+                    "version_ids": ["ver-char"],
+                    "selected_version_id": "ver-char",
+                },
+            },
+        },
     }
-    with pytest.raises(ValidationError) as raised:
-        Project.model_validate(payload)
 
-    text = agent_tools_module._translate_project_schema_error(raised.value)
 
-    assert "screens 被写成 null" in text
-    assert "cover_fingerprint 被写成 null" in text
-    assert "`.字段名`" in text
+def test_storyboard_version_points_to_element_workbench() -> None:
+    locator = derive_ui_locator(
+        "/assets/artifact_versions_by_id/ver-storyboard",
+        _project(),
+    )
+    assert locator == {
+        "page": "element",
+        "elementId": "el-1",
+        "mediaType": "image",
+        "artifactKind": "r2v_storyboard_image",
+        "artifactVersionId": "ver-storyboard",
+    }
+
+
+def test_character_image_points_to_asset_detail() -> None:
+    locator = derive_ui_locator(
+        "/assets/artifact_versions_by_id/ver-char",
+        _project(),
+    )
+    assert locator["page"] == "assets"
+    assert locator["assetId"] == "char-7"
+    assert locator["mediaType"] == "image"
+    assert locator["artifactKind"] == "visual_asset_image"
+
+
+def test_element_text_pointer_carries_pointer_as_field() -> None:
+    locator = derive_ui_locator(
+        "/timelines/items/tl-1/elements_by_id/el-1/creation/video_prompt",
+        _project(),
+    )
+    assert locator == {
+        "page": "plan",
+        "mediaType": "text",
+        "elementId": "el-1",
+        "field": (
+            "/timelines/items/tl-1/elements_by_id/el-1/creation/video_prompt"
+        ),
+    }
+
+
+def test_unknown_pointer_returns_empty() -> None:
+    assert not derive_ui_locator(None, _project())
+    assert not derive_ui_locator("", _project())

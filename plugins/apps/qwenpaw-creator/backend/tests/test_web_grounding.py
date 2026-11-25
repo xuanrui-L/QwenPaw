@@ -1314,139 +1314,65 @@ def test_search_visual_refs_by_image_presigns_local_media_when_oss_ready(
     assert result["image_transport"] == "creator_oss"
 
 
-def test_ground_prompt_context_prefers_serper_lens_for_reference_image_jobs(
-    monkeypatch,
+@pytest.mark.parametrize(
+    "lens_ready", [True, False], ids=["lens", "text-fallback"]
+)
+def test_reference_image_grounding_prefers_lens_with_text_fallback(
+    patch_attributes,
+    lens_ready,
 ):
-    lens_calls = []
-    text_visual_calls = []
-
-    async def fake_search_visual_refs_by_image(
-        image_ref,
-        *,
-        query="",
-        max_sources=6,
-        timeout=8.0,
-    ):
-        lens_calls.append({"image_ref": image_ref, "query": query})
-        return {
-            "query": query,
-            "image_reference": image_ref,
-            "issues": [],
-            "visual_sources": [
-                {
-                    "url": "https://img.test/lens-match.jpg",
-                    "title": "Lens match",
-                    "provider": "serper_lens",
-                    "query": query,
-                },
-            ],
+    image_ref = (
+        "https://public.test/haaland-ref.jpg"
+        if lens_ready
+        else "/tmp/haaland-local.jpg"
+    )
+    sources = [
+        {
+            "url": "https://img.test/lens-match.jpg",
+            "title": "Lens match",
             "provider": "serper_lens",
-            "providers": ["serper_lens"],
-            "providers_attempted": ["serper_lens"],
         }
-
-    monkeypatch.setattr(web_grounding, "search_web", _search_web_stub())
-    monkeypatch.setattr(
-        web_grounding,
-        "search_visual_refs_by_image",
-        fake_search_visual_refs_by_image,
-    )
-    monkeypatch.setattr(
-        web_grounding,
-        "search_visual_refs",
-        _visual_refs_stub(calls=text_visual_calls, providers_attempted=[]),
-    )
-    monkeypatch.setattr(
-        web_grounding,
-        "stage_visual_grounding_sources",
-        _stage_passthrough,
-    )
-
-    result = asyncio.run(
-        web_grounding.ground_prompt_context(
-            "哈兰德官方写真参考",
-            queries=["Erling Haaland current appearance"],
-            context={
-                "entities": [
-                    {
-                        "text": "Erling Haaland",
-                        "type": "person",
-                        "reference_image": "https://public.test/haaland-ref.jpg",
-                    },
-                ],
-            },
-            force=True,
-            include_visuals=True,
-            verify_visuals=False,
-            max_sources=4,
-        ),
-    )
-
-    assert lens_calls
-    assert lens_calls[0]["image_ref"] == "https://public.test/haaland-ref.jpg"
-    assert [
-        source
-        for source in result["visual_sources"]
-        if source.get("provider") == "serper_lens"
     ]
-    # The lens-backed job must not fall through to text-query search.
-    assert HAALAND_IDENTITY_QUERY not in [
-        query for query, _ in text_visual_calls
-    ]
-    assert "serper_lens" in result["visual_providers"]
+    issues = (
+        []
+        if lens_ready
+        else ["serper_lens:local_image_requires_creator_media_oss"]
+    )
+    lens_calls, text_calls = [], []
 
-
-def test_ground_prompt_context_falls_back_to_text_search_when_lens_degrades(
-    monkeypatch,
-):
-    text_visual_calls = []
-
-    async def degraded_search_visual_refs_by_image(
-        image_ref,
-        *,
-        query="",
-        max_sources=6,
-        timeout=8.0,
-    ):
+    async def lens(reference, *, query="", **_kwargs):
+        lens_calls.append(reference)
         return {
             "query": query,
-            "image_reference": image_ref,
-            "issues": [
-                "serper_lens:local_image_requires_creator_media_oss: configure creator_media_oss",
-            ],
-            "visual_sources": [],
-            "provider": "",
-            "providers": [],
-            "providers_attempted": [],
+            "image_reference": reference,
+            "issues": issues,
+            "visual_sources": sources if lens_ready else [],
+            "provider": "serper_lens" if lens_ready else "",
+            "providers": ["serper_lens"] if lens_ready else [],
+            "providers_attempted": ["serper_lens"] if lens_ready else [],
         }
 
-    monkeypatch.setattr(web_grounding, "search_web", _search_web_stub())
-    monkeypatch.setattr(
-        web_grounding,
-        "search_visual_refs_by_image",
-        degraded_search_visual_refs_by_image,
+    text_search = _visual_refs_stub(
+        calls=text_calls,
+        sources=[]
+        if lens_ready
+        else [
+            {
+                "url": "https://img.test/text-match.jpg",
+                "title": "Text match",
+                "provider": "tavily",
+            },
+        ],
+        provider="tavily",
+        providers_attempted=[] if lens_ready else ["tavily"],
     )
-    monkeypatch.setattr(
+    patch_attributes(
         web_grounding,
-        "search_visual_refs",
-        _visual_refs_stub(
-            sources=[
-                {
-                    "url": "https://img.test/text-match.jpg",
-                    "title": "Text match",
-                    "provider": "tavily",
-                },
-            ],
-            provider="tavily",
-            calls=text_visual_calls,
-        ),
+        search_web=_search_web_stub(),
+        search_visual_refs_by_image=lens,
+        search_visual_refs=text_search,
+        stage_visual_grounding_sources=_stage_passthrough,
     )
-    monkeypatch.setattr(
-        web_grounding,
-        "stage_visual_grounding_sources",
-        _stage_passthrough,
-    )
-
     result = asyncio.run(
         web_grounding.ground_prompt_context(
             "哈兰德官方写真参考",
@@ -1456,9 +1382,9 @@ def test_ground_prompt_context_falls_back_to_text_search_when_lens_degrades(
                     {
                         "text": "Erling Haaland",
                         "type": "person",
-                        "reference_image": "/tmp/haaland-local.jpg",
-                    },
-                ],
+                        "reference_image": image_ref,
+                    }
+                ]
             },
             force=True,
             include_visuals=True,
@@ -1467,19 +1393,23 @@ def test_ground_prompt_context_falls_back_to_text_search_when_lens_degrades(
         ),
     )
 
-    assert text_visual_calls
+    assert lens_calls[0] == image_ref
+    provider = "serper_lens" if lens_ready else "tavily"
     assert any(
-        issue.startswith("serper_lens:local_image_requires_creator_media_oss")
-        for issue in result["issues"]
-    )
-    assert any(
-        source.get("provider") == "tavily"
+        source.get("provider") == provider
         for source in result["visual_sources"]
     )
+    if lens_ready:
+        assert HAALAND_IDENTITY_QUERY not in [query for query, _ in text_calls]
+        assert "serper_lens" in result["visual_providers"]
+    else:
+        assert text_calls
+        assert any(issue.startswith(issues[0]) for issue in result["issues"])
 
 
 def test_visual_verification_names_the_protocol_of_the_credential_it_borrows(
     monkeypatch,
+    patch_attributes,
 ):
     """Overriding the key without its protocol misdecides two things at once.
 
@@ -1495,25 +1425,12 @@ def test_visual_verification_names_the_protocol_of_the_credential_it_borrows(
         seen.update(kwargs)
         raise RuntimeError("captured the overrides")
 
-    monkeypatch.setattr(
+    patch_attributes(
         verification.model_config,
-        "get_web_grounding_model_api_key",
-        lambda: "sk-token-plan",
-    )
-    monkeypatch.setattr(
-        verification.model_config,
-        "get_web_grounding_model_base_url",
-        lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-    )
-    monkeypatch.setattr(
-        verification.model_config,
-        "get_web_grounding_model_name",
-        lambda: "qwen3-vl-plus",
-    )
-    monkeypatch.setattr(
-        verification.model_config,
-        "get_web_grounding_model_protocol",
-        lambda: "Aliyun Token Plan",
+        get_web_grounding_model_api_key=lambda: "sk-token-plan",
+        get_web_grounding_model_base_url=lambda: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        get_web_grounding_model_name=lambda: "qwen3-vl-plus",
+        get_web_grounding_model_protocol=lambda: "Aliyun Token Plan",
     )
     monkeypatch.setattr(verification.vlm_model, "chat_completion", record_vlm)
     _patch_media_part(monkeypatch)

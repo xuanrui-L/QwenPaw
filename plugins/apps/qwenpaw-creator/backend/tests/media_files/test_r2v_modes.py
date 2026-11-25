@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-from domain.errors import ValidationError
+from domain.errors import StorageIntegrityError, ValidationError
 from models import config as model_config
 from services.media_files.image_execution import FileImageExecutionService
 from services.media_files.r2v_execution import (
@@ -20,7 +20,10 @@ from services.media_files.r2v_execution import (
     VideoReferenceBudgetError,
     _assert_r2v_reference_budget,
     _resolve_reference_versions,
+    _stage_materialized_video,
 )
+from services.media_files.secure_video_stream import MaterializedVideo
+from services.project_files.assets import AssetFileStore
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     ElementLocation,
@@ -35,13 +38,14 @@ from services.project_files.models import (
 # pylint: disable=no-name-in-module
 from utils.paths import unique_task_work_path
 
-# pylint: enable=no-name-in-module
-
 from .conftest import (
     accept_pending_reviews,
     make_r2v_element,
     r2v_project_services,
 )
+
+# pylint: enable=no-name-in-module
+
 
 pytestmark = pytest.mark.unit
 
@@ -291,20 +295,23 @@ def _run_video(
             poll_interval_seconds=0.01,
             poll_lease_seconds=0.1,
         )
-        dispatched = await worker.dispatch(
-            project_id=PROJECT_ID,
-            target_ref=f"element:{element_id}",
-            arguments=arguments,
-            idempotency_key=idempotency_key,
-            s2v=s2v,
-        )
-        task = await worker.wait_for_task(
-            PROJECT_ID,
-            dispatched.task_id,
-            timeout_seconds=5,
-        )
-        await worker.shutdown()
-        return task
+        try:
+            dispatched = await worker.dispatch(
+                project_id=PROJECT_ID,
+                target_ref=f"element:{element_id}",
+                arguments=arguments,
+                idempotency_key=idempotency_key,
+                s2v=s2v,
+            )
+            # The provider is immediate, but the durable publish and
+            # journal writes can take several seconds on Windows runners.
+            return await worker.wait_for_task(
+                PROJECT_ID,
+                dispatched.task_id,
+                timeout_seconds=30,
+            )
+        finally:
+            await worker.shutdown()
 
     return asyncio.run(scenario())
 
@@ -703,3 +710,30 @@ def test_s2v_preflight_face_detect_gate(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(s2v_model, "detect_face", passing_detect)
     run_preflight()
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_video_staging_preserves_binary_bytes(tmp_path, changed):
+    content = b"\x00\x00\x00\x18ftypisom\r\n\x1a" + bytes(range(256)) * 8
+    source = tmp_path / "generated.mp4"
+    source.write_bytes(content + (b"changed" if changed else b""))
+    video = MaterializedVideo(
+        path=source,
+        sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        media_type="video/mp4",
+        container="mp4",
+        source_kind="local",
+    )
+    store = AssetFileStore(tmp_path)
+    if changed:
+        with pytest.raises(StorageIntegrityError, match="scratch changed"):
+            _stage_materialized_video(store, video, staging_id="binary-test")
+    else:
+        staged = _stage_materialized_video(
+            store,
+            video,
+            staging_id="binary-test",
+        )
+        assert staged.sha256 == video.sha256
+        assert staged.size_bytes == len(content)

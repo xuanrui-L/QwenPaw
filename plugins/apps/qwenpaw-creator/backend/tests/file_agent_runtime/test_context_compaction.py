@@ -23,6 +23,16 @@ from services.file_agent_runtime.model_context import (
     plan_history_compaction,
 )
 
+from test_driver import PROJECT_ID
+
+import asyncio
+from services.file_agent_runtime.model_client import (
+    AgentScopeAgentChatClient,
+    records_to_agentscope_messages,
+)
+from services.file_agent_runtime import model_client
+from test_model_client import _configure_text_model, _tools
+
 pytestmark = pytest.mark.unit
 
 
@@ -159,9 +169,7 @@ def test_token_budget_is_accounted_incrementally_too() -> None:
     """A token cap alone must still drive archiving, without re-walking."""
 
     history = [_human_turn(1, "目标")]
-    history += [
-        _tool_turn(seq, "密度很高的中文内容" * 200) for seq in range(2, 22)
-    ]
+    history += [_tool_turn(seq, "密度很高的中文内容" * 200) for seq in range(2, 22)]
     full_tokens = estimate_input_tokens(history)
     cap = full_tokens // 4
 
@@ -387,3 +395,152 @@ def test_only_the_budget_is_measured_not_the_whole_history(
         )
         <= model_context.HISTORY_BYTES
     )
+
+
+def _echo_payload() -> dict:
+    """A Project snapshot echo big the way a long-running project makes them."""
+
+    return {
+        "project": {
+            "project_id": PROJECT_ID,
+            "generation": 11,
+            "description": "x" * 200_000,
+            "timelines": {
+                "items": {
+                    "timeline:main": {
+                        "timeline_id": "timeline:main",
+                        "elements_by_id": {},
+                    },
+                    "snapshot:timeline:main:1": {
+                        "timeline_id": "snapshot:timeline:main:1",
+                        "name": "自动快照",
+                        "elements_by_id": {"a": "b" * 4000},
+                    },
+                },
+                "order": ["timeline:main", "snapshot:timeline:main:1"],
+            },
+        },
+        "generation": 11,
+        "etag": "etag-11",
+        "changedPointers": ["/description"],
+    }
+
+
+def test_durable_project_echo_is_the_bounded_view(monkeypatch) -> None:
+    # The echo used to be appended byte for byte, so the conversation kept
+    # every intermediate state of the Project forever: 96% of a 284 MB
+    # messages.jsonl, paid again on every page read. The durable record is now
+    # the same projection the model context already builds, so the identifiers
+    # survive and the frozen bodies are indexed instead of copied.
+    from services.file_agent_runtime.driver import (
+        _durable_project_echo,
+        tool_echo_receipt_enabled,
+    )
+
+    monkeypatch.delenv("CREATOR_TOOL_ECHO_RECEIPT", raising=False)
+    assert tool_echo_receipt_enabled()
+
+    payload = _echo_payload()
+    stored = _durable_project_echo(payload)
+
+    assert len(json.dumps(stored)) * 10 < len(json.dumps(payload))
+    # Bound, and said out loud: a reader can ask for the rest by pointer.
+    assert len(stored["project"]["description"]) < len(
+        payload["project"]["description"],
+    )
+    assert stored["projectView"]["partial"] is True
+    assert "/description" in stored["projectView"]["omittedPointers"]
+
+
+def test_durable_project_echo_keeps_the_identifiers_a_receipt_carries(
+    monkeypatch,
+) -> None:
+    from services.file_agent_runtime.driver import (
+        _durable_project_echo,
+        _project_snapshot_from_text,
+    )
+
+    monkeypatch.delenv("CREATOR_TOOL_ECHO_RECEIPT", raising=False)
+    stored = _durable_project_echo(_echo_payload())
+
+    assert stored["generation"] == 11
+    assert stored["etag"] == "etag-11"
+    assert stored["project"]["generation"] == 11
+    # Still recognizable as a Project snapshot, so a later echo can still
+    # collapse this record to a change receipt when the context is rebuilt.
+    assert _project_snapshot_from_text(json.dumps(stored)) is not None
+    # Frozen history is indexed, not materialized.
+    view = stored["projectView"]
+    assert [item["timelineId"] for item in view["historyTimelines"]] == [
+        "snapshot:timeline:main:1",
+    ]
+    assert (
+        "snapshot:timeline:main:1"
+        not in stored["project"]["timelines"]["items"]
+    )
+    assert "b" * 1000 not in json.dumps(stored, ensure_ascii=False)
+
+
+def test_durable_project_echo_can_be_kept_byte_for_byte(monkeypatch) -> None:
+    # What is persisted changed, so one env var has to restore the old record
+    # exactly -- no projection, no rewrite, no new code path.
+    from services.file_agent_runtime.driver import _durable_project_echo
+
+    monkeypatch.setenv("CREATOR_TOOL_ECHO_RECEIPT", "0")
+    payload = _echo_payload()
+
+    assert _durable_project_echo(payload) is payload
+
+
+@pytest.mark.parametrize(
+    ("name", "override", "expected"),
+    [
+        ("qwen3.8-max", None, 4096),
+        ("qwen3-vl-plus", "8192", 8192),
+        ("qwen3.8-max", "invalid", 4096),
+        ("qwen3.8-max", "0", 4096),
+        ("other-compatible-model", None, None),
+    ],
+)
+def test_reasoning_budget_reaches_sdk_request_without_limiting_tool_output(
+    monkeypatch,
+    name,
+    override,
+    expected,
+):
+    _configure_text_model(monkeypatch)
+    monkeypatch.setattr(
+        model_client.model_config,
+        "get_text_model_name",
+        lambda: name,
+    )
+    if override is None:
+        monkeypatch.delenv("CREATOR_AGENT_THINKING_BUDGET", raising=False)
+    else:
+        monkeypatch.setenv("CREATOR_AGENT_THINKING_BUDGET", override)
+    configured = AgentScopeAgentChatClient()._configured_model()
+    captured = {}
+
+    async def capture(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("request captured before transport")
+
+    monkeypatch.setattr(configured.client.chat.completions, "create", capture)
+    with pytest.raises(RuntimeError, match="request captured"):
+        asyncio.run(
+            configured._call_api(
+                model_name=name,
+                messages=records_to_agentscope_messages(
+                    [
+                        {
+                            "role": "user",
+                            "content": "Plan a short branching story",
+                        },
+                    ],
+                ),
+                tools=_tools(),
+            ),
+        )
+    assert captured["extra_body"].get("thinking_budget") == expected
+    assert "max_tokens" not in captured
+    assert captured["tools"][0]["function"]["name"] == "read_project"

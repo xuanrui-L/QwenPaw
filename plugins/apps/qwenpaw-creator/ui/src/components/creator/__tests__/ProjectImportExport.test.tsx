@@ -8,9 +8,7 @@ import {
 import { message } from "antd";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectImporter } from "../ProjectImportExport";
-import ProjectExportActions, {
-  filenameFromDisposition,
-} from "../ProjectExportActions";
+import ProjectExportActions from "../ProjectExportActions";
 import { projectDocument } from "@/test/creatorFixtures";
 
 class ImportRequest {
@@ -173,18 +171,4 @@ describe("project archive import", () => {
       }
     },
   );
-});
-
-describe("filenameFromDisposition", () => {
-  it("prefers the RFC 5987 UTF-8 name, falls back to the plain one", () => {
-    expect(
-      filenameFromDisposition(
-        "attachment; filename=\"雾.zip\"; filename*=UTF-8''%E9%9B%BE%E5%B1%B1.zip",
-      ),
-    ).toBe("雾山.zip");
-    expect(filenameFromDisposition('attachment; filename="plain.zip"')).toBe(
-      "plain.zip",
-    );
-    expect(filenameFromDisposition(null)).toBeNull();
-  });
 });

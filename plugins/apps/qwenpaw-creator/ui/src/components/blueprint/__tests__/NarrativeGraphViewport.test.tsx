@@ -1,3 +1,25 @@
+import {
+  cloneProject,
+  seedProject,
+  singleProject,
+} from "@/test/projectSnapshotFixtures";
+import { filenameFromDisposition } from "@/components/creator/ProjectExportActions";
+import { waitFor } from "@testing-library/react";
+import { ProjectComposer } from "@/components/creator/ProjectComposer";
+import { configuredModelConfig } from "@/test/agentFixtures";
+import { installMockFetch } from "@/test/mockFetch";
+import { useModelConfigStore } from "@/store/modelConfigStore";
+import { act } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import BlueprintPage from "@/pages/BlueprintPage";
+import { NavigationRuntime } from "@/routing/navigation";
+import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
+import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { useWorkGraphStore } from "@/store/workGraphStore";
+import { useCreatorSessionStore } from "@/store/creatorSessionStore";
+import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
+import type { ProjectDocument } from "@/contracts/creator";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import BlueprintStructureArea from "../BlueprintStructureArea";
@@ -7,6 +29,17 @@ import {
   readStoryPositions,
   storyMapStorageKey,
 } from "../useNarrativeGraphViewport";
+import type { NarrativeEdgeDocument } from "@/contracts/creator";
+import {
+  applySavedPositions,
+  freeNodePosition,
+  GRAPH_NODE_HEIGHT,
+  GRAPH_NODE_WIDTH,
+  layoutStoryNodes,
+  nodesOverlap,
+  routeStoryEdges,
+  type GraphPoint,
+} from "../narrativeGraphLayout";
 
 function props() {
   const project = structuredClone(projectDocument);
@@ -271,5 +304,455 @@ describe("story map viewport", () => {
     );
     expect(document.querySelector('[data-graph-expanded="true"]')).toBeNull();
     expect(input.onSelectTimeline).toHaveBeenCalledWith("timeline:main");
+  });
+});
+
+const edge = (
+  source: string,
+  target: string,
+  i = 0,
+): NarrativeEdgeDocument => ({
+  edge_id: `${source}-${target}-${i}`,
+  source_timeline_id: source,
+  target_timeline_id: target,
+  label: `选择 ${i}`,
+  prompt: "下一步？",
+});
+
+// Same 37-node / 62-link branching and merging density as the reported project.
+const adjacency = [
+  [1, 2],
+  [3, 4],
+  [3, 4],
+  [5, 6],
+  [5, 6],
+  [7, 8],
+  [7, 8],
+  [9, 10],
+  [9, 10],
+  [11, 12],
+  [13, 14],
+  [15, 16],
+  [17, 18],
+  [19, 20],
+  [21, 22],
+  [23, 24],
+  [23, 24],
+  [23, 24],
+  [23, 24],
+  [23, 26],
+  [23, 26],
+  [23, 24, 25],
+  [23, 24, 25],
+  [27, 34, 32],
+  [30, 29, 31],
+  [28, 29, 32],
+  [28, 33, 35],
+  [],
+  [],
+  [],
+  [],
+  [36],
+  [36],
+  [],
+  [],
+  [],
+  [],
+];
+const ids = adjacency.map((_, i) => `n${i}`);
+const edges = adjacency.flatMap((targets, source) =>
+  targets.map((target, i) => edge(`n${source}`, `n${target}`, i)),
+);
+
+function expectNoOverlap(positions: Map<string, GraphPoint>) {
+  const points = [...positions.values()];
+  points.forEach((a, i) =>
+    points
+      .slice(i + 1)
+      .forEach((b) => expect(nodesOverlap(a, b, 0)).toBe(false)),
+  );
+}
+
+function expectRoutesClear(
+  links: NarrativeEdgeDocument[],
+  positions: Map<string, GraphPoint>,
+) {
+  const routes = routeStoryEdges(links, positions);
+  expect(routes).toHaveLength(links.length);
+  for (const route of routes) {
+    expect(route.path).not.toMatch(/NaN|Infinity/);
+    for (const sample of route.samples) {
+      for (const p of positions.values()) {
+        expect(
+          sample.x > p.x + 0.001 &&
+            sample.x < p.x + GRAPH_NODE_WIDTH - 0.001 &&
+            sample.y > p.y + 0.001 &&
+            sample.y < p.y + GRAPH_NODE_HEIGHT - 0.001,
+          `${route.edge.edge_id} curve passes through a card`,
+        ).toBe(false);
+      }
+    }
+    for (let i = 1; i < route.points.length; i++) {
+      const a = route.points[i - 1],
+        b = route.points[i];
+      expect(a.x === b.x || a.y === b.y).toBe(true);
+      for (const p of positions.values()) {
+        const through =
+          a.x === b.x
+            ? a.x > p.x &&
+              a.x < p.x + GRAPH_NODE_WIDTH &&
+              Math.max(a.y, b.y) > p.y &&
+              Math.min(a.y, b.y) < p.y + GRAPH_NODE_HEIGHT
+            : a.y > p.y &&
+              a.y < p.y + GRAPH_NODE_HEIGHT &&
+              Math.max(a.x, b.x) > p.x &&
+              Math.min(a.x, b.x) < p.x + GRAPH_NODE_WIDTH;
+        expect(through, `${route.edge.edge_id} passes through a card`).toBe(
+          false,
+        );
+      }
+    }
+  }
+  return routes;
+}
+
+describe("story map layout", () => {
+  it("uses a smooth cubic connection with a visible choice label between unobstructed nodes", () => {
+    const positions = new Map([
+      ["a", { x: 48, y: 300 }],
+      ["b", { x: 480, y: 120 }],
+    ]);
+    const [route] = expectRoutesClear([edge("a", "b")], positions);
+    expect(route.path).toContain(" C ");
+    expect(route.label.x).toBeGreaterThan(48 + GRAPH_NODE_WIDTH);
+    expect(route.label.x).toBeLessThan(480);
+    expect(route.labelWidth).toBeGreaterThan(0);
+  });
+  it("keeps all 37 nodes separate and routes all 62 choices outside cards", () => {
+    expect(ids).toHaveLength(37);
+    expect(edges).toHaveLength(62);
+    const positions = layoutStoryNodes(ids, edges);
+    expectNoOverlap(positions);
+    const routes = expectRoutesClear(edges, positions);
+    // Dense merge paths have separate source ports, destination ports and lanes.
+    const intoMerge = routes.filter((r) => r.edge.target_timeline_id === "n23");
+    expect(new Set(intoMerge.map((r) => r.target.y)).size).toBe(
+      intoMerge.length,
+    );
+    expect(new Set(intoMerge.map((r) => r.points[2].x)).size).toBe(
+      intoMerge.length,
+    );
+    expect(
+      layoutStoryNodes(
+        ids,
+        edges.map((e) => ({ ...e, label: "修改文案" })),
+      ),
+    ).toEqual(positions);
+  });
+
+  it("reduces a crossed diamond and centres its single root", () => {
+    const positions = layoutStoryNodes(
+      ["root", "a", "b", "c", "d"],
+      [edge("root", "a"), edge("root", "b"), edge("a", "d"), edge("b", "c")],
+    );
+    expect(Math.sign(positions.get("a")!.y - positions.get("b")!.y)).toBe(
+      Math.sign(positions.get("d")!.y - positions.get("c")!.y),
+    );
+    expect(positions.get("root")!.y).toBe(
+      (positions.get("a")!.y + positions.get("b")!.y) / 2,
+    );
+  });
+
+  it("handles loops, disconnected nodes and missing endpoints without runaway columns", () => {
+    const links = [
+      edge("a", "b"),
+      edge("b", "a"),
+      edge("b", "b"),
+      edge("missing", "a"),
+    ];
+    const positions = layoutStoryNodes(["a", "b", "isolated"], links);
+    expectNoOverlap(positions);
+    expect(Math.max(...[...positions.values()].map((p) => p.x))).toBeLessThan(
+      1200,
+    );
+    expectRoutesClear(links.slice(0, 3), positions);
+    expect(routeStoryEdges(links, positions)).toHaveLength(3);
+  });
+
+  it("routes a skipped layer and a backwards dragged branch around intervening nodes", () => {
+    const positions = new Map([
+      ["a", { x: 48, y: 200 }],
+      ["obstacle", { x: 450, y: 200 }],
+      ["b", { x: 900, y: 200 }],
+    ]);
+    expectRoutesClear([edge("a", "b"), edge("b", "a")], positions);
+  });
+
+  it("preserves browser positions and places arriving nodes without collisions", () => {
+    const automatic = layoutStoryNodes(ids, edges);
+    const saved = Object.fromEntries(automatic);
+    saved.n15 = freeNodePosition(
+      { x: saved.n15.x + 80, y: saved.n15.y - 40 },
+      [...automatic].filter(([id]) => id !== "n15").map(([, p]) => p),
+    );
+    const updated = layoutStoryNodes(
+      [...ids, "new"],
+      [...edges, edge("n14", "new")],
+    );
+    const applied = applySavedPositions(updated, saved);
+    for (const id of ids) expect(applied.get(id)).toEqual(saved[id]);
+    expectNoOverlap(applied);
+    expectRoutesClear(edges, applied);
+    const dropped = freeNodePosition(
+      applied.get("n16")!,
+      [...applied].filter(([id]) => id !== "n15").map(([, p]) => p),
+    );
+    expect(nodesOverlap(dropped, applied.get("n16")!)).toBe(false);
+  });
+});
+
+function renderPage(entry = "/project/p1") {
+  return render(
+    <MemoryRouter initialEntries={[entry]}>
+      <NavigationRuntime />
+      <Routes>
+        <Route path="/project/:id" element={<BlueprintPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+describe("Interactive projects on the Blueprint page", () => {
+  beforeEach(() => {
+    useCreatorSessionStore.getState().reset();
+    useCreatorTaskViewStore.getState().reset();
+    useFileProjectReviewStore.getState().reset();
+    useProjectSnapshotStore.getState().reset();
+    useCreatorInteractionStore.getState().reset();
+    useWorkGraphStore.getState().reset();
+  });
+
+  it("branching projects keep the structure graph and the bundle export entry", () => {
+    const project = cloneProject();
+    project.narrative_edges = [
+      {
+        edge_id: "edge:a",
+        source_timeline_id: "timeline:main",
+        target_timeline_id: "timeline:ep2",
+        label: "选择A · 星夜归途",
+        prompt: "此刻，你决定——",
+      },
+    ];
+    seedProject(project);
+    const { container } = renderPage();
+
+    expect(
+      container.querySelector('[data-blueprint-shape="branching"]'),
+    ).toBeInTheDocument();
+    expect(container.querySelector("[data-export-bundle]")).toBeInTheDocument();
+    const title = screen.getByText("视频脚本");
+    const entry = screen.getByRole("button", { name: "交互设计" });
+    expect(entry.parentElement).toBe(title.parentElement);
+    fireEvent.click(entry);
+    expect(
+      screen.getByRole("region", { name: "交互设计工作台" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "返回蓝图" }));
+    expect(
+      container.querySelector("[data-interaction-design-panel]"),
+    ).not.toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "下载 / 导出" }),
+    ).toBeInTheDocument();
+  });
+
+  it("presents an explicit interactive request before the first Agent patch or story node", () => {
+    const project = singleProject();
+    project.settings.content_type = null;
+    project.description =
+      "我想做一个互动式视频，要求和剧本如下：\n\n《七日夺嫡》";
+    project.visual.entities = { order: [], items: {} };
+    project.assets.artifact_slots_by_id = {};
+    Object.assign(project.timelines.items["timeline:main"], {
+      title: "",
+      synopsis: "",
+      description: "",
+      elements_by_id: {},
+    });
+    seedProject(project);
+    const { container } = renderPage();
+
+    expect(
+      container.querySelector(
+        '[data-blueprint-shape="branching"] [data-graph-toolbar]',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("分支连接尚未建立")).toBeInTheDocument();
+    expect(
+      container.querySelector('[data-workspace-empty="interactive"]'),
+    ).toBeInTheDocument();
+    expect(container.querySelectorAll("[data-blueprint-node]")).toHaveLength(0);
+    expect(container.querySelector("[data-export-bundle]")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "交互设计" }));
+    expect(
+      screen.getByRole("region", { name: "交互设计工作台" }),
+    ).toBeVisible();
+    expect(screen.getByRole("tab", { name: "首页" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "剧情地图" })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "生成作品页面" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps unconnected interactive drafts as story nodes and adds paths when a later snapshot supplies edges", () => {
+    const project = cloneProject();
+    project.settings.content_type = "interactive_branching_drama";
+    project.description = "皇帝暴毙于御书房，七日封城。";
+    seedProject(project);
+    const { container } = renderPage();
+
+    expect(
+      container.querySelector('[data-blueprint-shape="branching"]'),
+    ).toBeInTheDocument();
+    expect(
+      container.querySelector('[data-blueprint-shape="linear"]'),
+    ).not.toBeInTheDocument();
+    expect(container.querySelectorAll("[data-blueprint-node]")).toHaveLength(2);
+    expect(screen.queryByText("结局")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-export-bundle]")).toBeDisabled();
+    fireEvent.click(
+      container.querySelector(
+        '[data-blueprint-node="timeline:ep2"]',
+      ) as HTMLElement,
+    );
+    expect(useCreatorInteractionStore.getState().selectedRef).toBe(
+      "timeline:timeline:ep2",
+    );
+
+    const connected = structuredClone(project);
+    connected.narrative_edges = [
+      {
+        edge_id: "edge:a",
+        source_timeline_id: "timeline:main",
+        target_timeline_id: "timeline:ep2",
+        label: "公开保留",
+        prompt: "血诏怎么办？",
+      },
+    ];
+    act(() => seedProject(connected));
+    expect(screen.queryByText("分支连接尚未建立")).not.toBeInTheDocument();
+    expect(container.querySelectorAll("[data-graph-edge]")).toHaveLength(1);
+    fireEvent.click(
+      container.querySelector(
+        '[data-blueprint-node="timeline:main"]',
+      ) as HTMLElement,
+    );
+    expect(
+      container.querySelector('[data-graph-edge-label="edge:a"]'),
+    ).toHaveTextContent("公开保留");
+    expect(screen.getAllByText("结局")).toHaveLength(1);
+    expect(
+      container.querySelector('[data-blueprint-shape="linear"]'),
+    ).not.toBeInTheDocument();
+  });
+});
+
+function installComposerMockFetch(
+  routes: Parameters<typeof installMockFetch>[0],
+) {
+  return installMockFetch([
+    {
+      match: "/models/config",
+      response: { json: configuredModelConfig },
+    },
+    ...routes,
+  ]);
+}
+
+/** The project-created payload returned by POST /projects. */
+const created = (
+  projectId: string,
+  creatorSessionId: string,
+  conversationId: string,
+) => ({
+  projectId,
+  creatorSessionId,
+  conversationId,
+  projectSnapshotId: `snapshot-${projectId}`,
+  header: {},
+});
+
+function renderComposer(onClose = vi.fn()) {
+  render(
+    <MemoryRouter>
+      <ProjectComposer open onClose={onClose} />
+    </MemoryRouter>,
+  );
+  return onClose;
+}
+
+const fill = (placeholder: RegExp | string, value: string) =>
+  fireEvent.change(screen.getByPlaceholderText(placeholder), {
+    target: { value },
+  });
+
+describe("Interactive intent at project creation", () => {
+  // The model-config snapshot is a module-level singleton; a previous test's
+  // fetch must not leak into the next render's synchronous assertions.
+  beforeEach(() => {
+    useModelConfigStore.setState({ config: null });
+  });
+
+  it.each([
+    [
+      "我想做一个互动式视频，要求和剧本如下：\n\n《七日夺嫡》",
+      "interactive_branching_drama",
+    ],
+    ["制作一个非常有趣的互动短剧", "interactive_branching_drama"],
+    [
+      "Create an interactive film with two endings",
+      "interactive_branching_drama",
+    ],
+    ["制作一个线性短剧，不要互动式视频", null],
+    ["Create a non-interactive video", null],
+    ["制作一部短剧，人物之间需要自然的互动", null],
+    ["制作线性剧集\n\n剧本对白：我想做互动式视频。", null],
+  ])(
+    "persists the narrative format at creation for %s",
+    async (brief, contentType) => {
+      const { calls } = installComposerMockFetch([
+        {
+          match: "/projects",
+          response: { json: created("p-format", "s-format", "c-format") },
+        },
+      ]);
+      renderComposer();
+      fill(/^例：霸道总裁短剧/, brief!);
+      fireEvent.click(screen.getByRole("button", { name: /启动 Agent/ }));
+      await waitFor(() =>
+        expect(
+          calls.find((call) => call.url.endsWith("/projects"))?.body,
+        ).toMatchObject({
+          scenario: "short_drama",
+          contentType,
+          ...(contentType ? { nameSource: "auto" } : {}),
+          initialGoal: brief,
+        }),
+      );
+    },
+  );
+});
+
+describe("filenameFromDisposition", () => {
+  it("prefers the RFC 5987 UTF-8 name, falls back to the plain one", () => {
+    expect(
+      filenameFromDisposition(
+        "attachment; filename=\"雾.zip\"; filename*=UTF-8''%E9%9B%BE%E5%B1%B1.zip",
+      ),
+    ).toBe("雾山.zip");
+    expect(filenameFromDisposition('attachment; filename="plain.zip"')).toBe(
+      "plain.zip",
+    );
+    expect(filenameFromDisposition(null)).toBeNull();
   });
 });
