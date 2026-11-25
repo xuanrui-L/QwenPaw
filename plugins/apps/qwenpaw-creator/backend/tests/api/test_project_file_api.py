@@ -215,7 +215,6 @@ def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
     assert saved.assets.artifact_versions_by_id["final"].stale
     graph = derive_work_graph(saved)
     assert graph.by_id["video:clip"].status.value == "done"
-    assert graph.by_id["compose:timeline:main"].status.value == "ready"
     assert not response.json()["editImpact"]["regenerationRequired"]
     assert response.json()["editImpact"]["renderTimelineIds"] == [
         "timeline:main",

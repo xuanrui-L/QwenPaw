@@ -328,7 +328,14 @@ def test_same_inputs_are_never_redispatched(tmp_path, monkeypatch):
     async def scenario():
         await scheduler.tick(PROJECT_ID)
         await _drain()
-        record = _failed_record(dispatch, error="provider down")
+        record = _failed_record(
+            dispatch,
+            # A settled failure, not an unknown one: an unrecognised wording is
+            # retried on purpose (see _is_transient_dispatch_error), which is
+            # what keeps a gateway timeout from walling a project forever.
+            error="Image generation failed: check creator_image_model "
+            "configuration.",
+        )
         monkeypatch.setattr(
             scheduler.executions,
             "list_tasks",
@@ -1059,7 +1066,13 @@ def test_transient_hard_cap_emits_steer_once(tmp_path, monkeypatch):
 def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     state = {"index": 0}
 
-    def fake_derive(_project, tasks=(), *, media_models=None):
+    def fake_derive(
+        _project,
+        tasks=(),
+        *,
+        media_models=None,
+        pending_reviews=(),
+    ):
         del tasks
         index = min(state["index"], len(graphs) - 1)
         state["index"] += 1
@@ -1076,6 +1089,19 @@ def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     ],
 )
 def test_done_edge_emits_milestone_once_across_ticks(
+    tmp_path,
+    monkeypatch,
+    node_kind,
+    node_id,
+    label,
+    milestone,
+):
+    _check_done_edge_milestone(
+        tmp_path, monkeypatch, node_kind, node_id, label, milestone
+    )
+
+
+def _check_done_edge_milestone(
     tmp_path,
     monkeypatch,
     node_kind,

@@ -828,11 +828,12 @@ def test_copy_member_counts_written_bytes_not_declared_ones(tmp_path):
     assert not refused.exists()
 
 
-@pytest.mark.parametrize("interrupted", [False, True])
-def test_windows_uri_rewrite_preserves_archived_transaction(
+def _assert_windows_archive_recovery(
     tmp_path,
     monkeypatch,
     interrupted,
+    *,
+    invalid_path_error=False,
 ):
     from services.project_files.commit import ProjectCommitBoundary
     from services.project_files.recovery import (
@@ -842,10 +843,7 @@ def test_windows_uri_rewrite_preserves_archived_transaction(
     project = Project.new(project_id="project-archive", name="Archive")
     uri = "assets/source-intelligence/source:camera/index.json"
     windows_uri = "assets/source-intelligence/source_camera/index.json"
-    original = ProjectStore(
-        tmp_path / "original",
-        asset_uri_rewrites={uri: windows_uri},
-    )
+    original = ProjectStore(tmp_path / "original")
     project.assets.files_by_id["sidecar"] = IndexedFile(
         file_id="sidecar",
         kind="source_intelligence",
@@ -855,6 +853,17 @@ def test_windows_uri_rewrite_preserves_archived_transaction(
         media_type="application/json",
         created_at=project.created_at,
     )
+    reported_path = tmp_path / "expanded"
+    native_lstat = Path.lstat
+
+    def windows_lstat(path):
+        if "source:camera" in path.parts:
+            if invalid_path_error and path.is_relative_to(reported_path):
+                raise OSError("Windows cannot represent this asset path")
+            raise FileNotFoundError(path)
+        return native_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", windows_lstat)
     base = original.create(project)
     project_root = original.project_root(project.project_id)
     source = project_root / windows_uri
@@ -898,14 +907,6 @@ def test_windows_uri_rewrite_preserves_archived_transaction(
             )
             archive.write(path, member)
 
-    native_lstat = Path.lstat
-
-    def windows_lstat(path):
-        if "source:camera" in path.parts:
-            raise OSError("Windows cannot represent this asset path")
-        return native_lstat(path)
-
-    monkeypatch.setattr(Path, "lstat", windows_lstat)
     destination = tmp_path / "expanded"
     monkeypatch.setattr(
         project_archive,
@@ -933,3 +934,10 @@ def test_windows_uri_rewrite_preserves_archived_transaction(
     )
     assert journal["state"] == "RUNTIME_FINALIZED"
     assert journal["final_etag"] == archived_etag
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_windows_uri_rewrite_preserves_archived_transaction(
+    tmp_path, monkeypatch, interrupted
+):
+    _assert_windows_archive_recovery(tmp_path, monkeypatch, interrupted)

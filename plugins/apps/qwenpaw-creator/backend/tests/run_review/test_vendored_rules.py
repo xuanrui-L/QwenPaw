@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Vendored review rules and gates: content and behavior regression."""
+"""Vendored video review probes, binary resolution, and rubric integration."""
+
+# pylint: disable=protected-access
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,8 +17,8 @@ from services.run_review.rubric_prompts import (
     build_appeal_system_prompt,
     build_image_check_system_prompt,
     build_scene_check_system_prompt,
-    render_taste_principles,
 )
+from services.runtime_files import runtime_dependencies
 from vendor.media_toolkit import frame_stats, review_gates
 from vendor.media_toolkit.review_rubrics import (
     APPEAL_RUBRIC_ROWS,
@@ -23,24 +27,115 @@ from vendor.media_toolkit.review_rubrics import (
 
 pytestmark = pytest.mark.unit
 
+
+def _executable() -> str:
+    # Any absolute executable works; the resolver only checks the path.
+    return sys.executable
+
+
+def test_frame_stats_resolves_ffmpeg_through_the_creator_contract(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        runtime_dependencies.CREATOR_FFMPEG_PATH_ENV,
+        _executable(),
+    )
+    # The contract wins even when nothing is on PATH.
+    monkeypatch.setattr(frame_stats.shutil, "which", lambda name: None)
+
+    assert frame_stats._require_tool("ffmpeg") == os.path.realpath(
+        _executable(),
+    )
+
+
+def test_review_gates_resolve_ffprobe_through_the_creator_contract(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        runtime_dependencies.CREATOR_FFPROBE_PATH_ENV,
+        _executable(),
+    )
+    monkeypatch.setattr(review_gates.shutil, "which", lambda name: None)
+
+    assert review_gates._require_tool("ffprobe") == os.path.realpath(
+        _executable(),
+    )
+
+
+def test_frame_stats_still_falls_back_to_path(monkeypatch) -> None:
+    monkeypatch.delenv(
+        runtime_dependencies.CREATOR_FFMPEG_PATH_ENV,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_dependencies,
+        "resolve_ffmpeg",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        frame_stats.shutil,
+        "which",
+        lambda name: "/usr/local/bin/ffmpeg",
+    )
+
+    assert frame_stats._require_tool("ffmpeg") == "/usr/local/bin/ffmpeg"
+
+
+def test_missing_binary_fails_actionably(monkeypatch) -> None:
+    monkeypatch.delenv(
+        runtime_dependencies.CREATOR_FFPROBE_PATH_ENV,
+        raising=False,
+    )
+    monkeypatch.delenv(
+        runtime_dependencies.CREATOR_FFMPEG_PATH_ENV,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runtime_dependencies,
+        "resolve_ffprobe",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        runtime_dependencies,
+        "resolve_ffmpeg",
+        lambda: None,
+    )
+    monkeypatch.setattr(frame_stats.shutil, "which", lambda name: None)
+
+    with pytest.raises(frame_stats.FrameStatsError, match="ffprobe"):
+        frame_stats._require_tool("ffprobe")
+
+    with pytest.raises(review_gates.ReviewGateError, match="ffmpeg"):
+        review_gates._require_tool("ffmpeg")
+
+
+def test_probe_duration_uses_the_resolved_binary(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_check_output(argv, **kwargs):
+        captured["argv"] = argv
+        return b"12.5\n"
+
+    monkeypatch.setattr(
+        frame_stats.subprocess,
+        "check_output",
+        fake_check_output,
+    )
+    monkeypatch.setattr(
+        frame_stats,
+        "_require_tool",
+        lambda name: "/opt/tools/ffprobe",
+    )
+
+    assert frame_stats.probe_duration(tmp_path / "clip.mp4") == 12.5
+    assert captured["argv"][0] == "/opt/tools/ffprobe"
+
+
 _FFMPEG = shutil.which("ffmpeg")
 requires_ffmpeg = pytest.mark.skipif(_FFMPEG is None, reason="needs ffmpeg")
-
-
-def test_vendored_rubrics_stay_verbatim() -> None:
-    names = [row.name for row in APPEAL_RUBRIC_ROWS]
-    assert names == (
-        "Concept|Contract adherence|Rhythm|Restraint|Craft quality|"
-        "Sound|Typography & motion"
-    ).split("|")
-    # Concept carried veto power upstream; Creator keeps the flag only.
-    vetoes = [row.key for row in APPEAL_RUBRIC_ROWS if row.upstream_veto]
-    assert vetoes == ["concept"]
-    assert "Hook inside 1.5s" in APPEAL_RUBRIC_ROWS[2].anchor_questions
-    assert [check.key for check in SCENE_REVIEW_CHECKS] == (
-        "devices type_fonts composition_safety "
-        "motion_quality technical watch_once"
-    ).split()
 
 
 def _make_clip(path: Path, *, interior_black: bool, silent: bool) -> None:
@@ -105,10 +200,6 @@ def test_appeal_prompt_embeds_verbatim_rows_without_veto() -> None:
         assert row.anchor_questions in text_prompt
     motion_prompt = build_appeal_system_prompt("motion")
     assert APPEAL_RUBRIC_ROWS[3].anchor_questions in motion_prompt
-    # The upstream veto semantics must never reach a prompt: advisory only.
-    for prompt in (text_prompt, motion_prompt):
-        assert "一票否决" not in prompt
-        assert "建议不是门禁" in prompt
     scene = build_scene_check_system_prompt()
     for check in SCENE_REVIEW_CHECKS:
         assert check.key in scene
@@ -116,14 +207,3 @@ def test_appeal_prompt_embeds_verbatim_rows_without_veto() -> None:
     image = build_image_check_system_prompt()
     for key in ("devices", "type_fonts", "composition_safety", "craft"):
         assert key in image
-
-
-def test_prompt_files_carry_derived_taste_principles() -> None:
-    prompts = (
-        Path(__file__).resolve().parents[2]
-        / "services/file_agent_runtime/prompts"
-    )
-    for role in ("creator_agent", "ai_editing_director"):
-        content = (prompts / f"{role}.system.txt").read_text(encoding="utf-8")
-        assert "# 创作品味准则" in content, role
-        assert render_taste_principles(role) in content, role

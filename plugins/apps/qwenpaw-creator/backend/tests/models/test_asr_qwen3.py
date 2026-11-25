@@ -54,8 +54,8 @@ def _bind_single_chunk(
         lambda _s: duration_ms,
     )
 
-    async def fake_file_url(_media_url, key, model):
-        assert (key, model) == ("asr-key", "qwen3-asr-flash")
+    async def fake_file_url(_media_url, _key, _model):
+        assert (_key, _model) == ("asr-key", "qwen3-asr-flash")
         return "oss://dashscope-instant/audio.mp3"
 
     monkeypatch.setattr(asr_model, "_fun_asr_file_url", fake_file_url)
@@ -141,7 +141,7 @@ def test_qwen_audio_asr_uses_format_params_and_text_output(
     )
     monkeypatch.setattr(asr_model, "_probe_duration_ms", lambda _s: 10_000)
 
-    async def fake_file_url(_media_url, key, model):
+    async def fake_file_url(_media_url, _key, _model):
         return "https://cdn.test/a.mp3"
 
     monkeypatch.setattr(asr_model, "_fun_asr_file_url", fake_file_url)
@@ -227,13 +227,21 @@ def test_qwen3_chunking_applies_cumulative_offsets(
         lambda *_args: chunks,
     )
 
-    async def fake_upload(path, *, api_key, model_name, media_type):
+    async def fake_upload(
+        path,
+        *,
+        api_key,
+        model_name,
+        media_type,
+        **_provider,
+    ):
         assert (api_key, model_name) == ("asr-key", "qwen3-asr-flash")
         assert media_type == "audio/mpeg"
         return f"oss://dashscope-instant/{path.name}"
 
     monkeypatch.setattr(
-        "models.media_transport.upload_local_file_to_dashscope_temp",
+        asr_model,
+        "upload_reference_file_for_provider",
         fake_upload,
     )
     respx.post(ENDPOINT).mock(
@@ -514,7 +522,7 @@ def test_whisper_posts_extracted_audio_and_normalizes_chunk_offsets(
     )
 
 
-def test_asr_audio_url_token_plan_refuses_local_audio(
+def test_asr_token_plan_refuses_local_audio(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -523,7 +531,7 @@ def test_asr_audio_url_token_plan_refuses_local_audio(
     serves no /api/v1/uploads, and the plan's multimodal-generation ASR
     answers a Base64 data URL with an empty 400 while transcribing the same
     clip from a public HTTP(S) URL (200). Refuse with guidance instead of
-    sending a payload the gateway rejects."""
+    letting the shared transport decision pick one the gateway rejects."""
     clip = tmp_path / "audio.wav"
     clip.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
     monkeypatch.setattr(
@@ -533,15 +541,19 @@ def test_asr_audio_url_token_plan_refuses_local_audio(
     )
 
     async def refuse_upload(*args, **kwargs):
-        raise AssertionError("Token Plan audio reached the upload API")
+        raise AssertionError("Token Plan audio reached a upload transport")
 
     monkeypatch.setattr(
-        "models.media_transport.upload_local_file_to_dashscope_temp",
+        asr_model,
+        "upload_reference_file_for_provider",
         refuse_upload,
     )
+    local_audio = getattr(asr_model, "_upload_asr_reference", None)
+    if local_audio is None:
+        local_audio = asr_model._asr_audio_url
     with pytest.raises(ValueError, match="公网"):
         asyncio.run(
-            asr_model._asr_audio_url(
+            local_audio(
                 clip,
                 api_key="sk-sp-test",
                 model="qwen-audio-3.0-asr-flash",
@@ -556,11 +568,10 @@ def test_qwen_audio_keeps_segmented_and_gateway_responses():
         prefer_cumulative=True,
     ) == ["First.", "Last."]
     assert asr_model._qwen3_sentences(
-        {"text": "Full."},
-        prefer_cumulative=True,
+        {"text": "Full."}, prefer_cumulative=True
     ) == ["Full."]
     mixed = {"output": {"text": "Full.", "sentence": {"text": "Last."}}}
     assert asr_model._qwen3_sentences(mixed) == ["Last."]
     assert asr_model._qwen3_sentences(mixed, prefer_cumulative=True) == [
-        "Full.",
+        "Full."
     ]

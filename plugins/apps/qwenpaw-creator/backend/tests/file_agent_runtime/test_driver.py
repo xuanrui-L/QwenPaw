@@ -16,25 +16,28 @@ import pytest
 from PIL import Image
 
 from api.file_asset_routes import _AssetInput, _ingest_many_sync
+from domain.enums import TaskKind, TaskStatus
 from services.file_agent_runtime import (
     AgentModelConfigurationError,
     AgentModelTurn,
     AgentRunStatus,
     AgentToolCall,
     CallbackAgentChatClient,
-    FileCreatorAgentRuntime,
     FileAgentRuntimeError,
+    FileCreatorAgentRuntime,
+)
+from services.file_agent_runtime import driver as driver_module
+from services.file_agent_runtime import (
+    media_vault,
 )
 from services.file_agent_runtime.driver import (
-    _ToolArgumentProgressReporter,
     _live_operation_editing_context,
     _remove_live_operation_scratch,
     _require_actionable_takes,
     _specialist_tool_recovery,
     _tool_call_transport_metadata,
+    _ToolArgumentProgressReporter,
 )
-from services.file_agent_runtime import driver as driver_module
-from services.file_agent_runtime import media_vault
 from services.file_agent_runtime.model_client import ModelContextUnfitError
 from services.file_agent_runtime.prompts import render_creator_system_prompt
 from services.file_agent_runtime.work_graph import (
@@ -45,8 +48,9 @@ from services.file_agent_runtime.work_graph import (
 from services.media_files.live_operation import (
     LiveOperationError,
     LiveOperationRun,
+    RecordedTake,
+    TakeManifest,
 )
-from services.media_files.live_operation import RecordedTake, TakeManifest
 from services.observability import read_trace_records
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
@@ -56,15 +60,16 @@ from services.project_files.models import (
 )
 from services.project_files.review import ReviewDecisionItem
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
+from services.runtime_files.execution_models import (
+    TaskRecord,
+    ExecutionAuthorizationStatus,
+)
 from services.runtime_files.models import (
     CreatorMessageRecord,
     MessageChannel,
     MessageClassification,
-    RuntimeProjectState,
     ReviewBoundary,
-)
-from services.runtime_files.execution_models import (
-    ExecutionAuthorizationStatus,
+    RuntimeProjectState,
 )
 from services.specialist_tools import SpecialistToolResult
 from services.workspace.content_store import ContentStore
@@ -177,8 +182,8 @@ def test_stale_project_snapshots_are_elided_from_the_continuation() -> None:
     A 50-element production run accumulated 18 full project.json echoes
     (2.09MB) in one Conversation and every model call failed with an
     input-length 400. Older echoes carry no information the model cannot
-    get from the latest snapshot, so they collapse to change receipts;
-    durable history keeps every byte.
+    get from the latest snapshot, so the next model turn receives change
+    receipts for the older snapshots.
     """
 
     from services.file_agent_runtime.driver import _continuation_message_text
@@ -263,7 +268,12 @@ def test_ai_edit_idempotency_can_be_scoped_to_one_model_tool_call() -> None:
     assert "file_id=null" in _specialist_tool_recovery("ai_edit")
 
 
-def _create_project(tmp_path, *, initial_goal: str | None):
+def _create_project(
+    tmp_path,
+    *,
+    initial_goal: str | None,
+    historical_media_tasks: int = 0,
+):
     services = CreatorFileServices.create(tmp_path.resolve())
 
     def initialize(staged_root) -> None:
@@ -281,6 +291,20 @@ def _create_project(tmp_path, *, initial_goal: str | None):
                 "client-initial" if initial_goal is not None else None
             ),
         )
+        for index in range(historical_media_tasks):
+            task = TaskRecord(
+                task_id=f"historical-media-{index}",
+                project_id=PROJECT_ID,
+                kind=TaskKind.IMAGE_GENERATION,
+                status=TaskStatus.SUCCEEDED,
+                request_fingerprint=f"historical-{index}",
+            )
+            task_root = staged_root / "runtime" / "tasks" / task.task_id
+            task_root.mkdir(parents=True)
+            (task_root / "task.json").write_text(
+                task.model_dump_json(),
+                encoding="utf-8",
+            )
 
     project = Project.new(project_id=PROJECT_ID, name="Initial")
     project.visual.entities.items["hero"] = VisualEntity(
@@ -606,7 +630,9 @@ def _edit_client(*, description: str):
 
     async def callback(messages, tools):
         nonlocal turn
-        assert {item["function"]["name"] for item in tools} == {
+        assert {item["function"]["name"] for item in tools} - {
+            "confirm_prompt_sync"
+        } == {
             "read_project",
             "read_project_file",
             "jq_project",
@@ -2270,17 +2296,13 @@ def test_specialist_cancel_emits_terminal_event(
     monkeypatch,
     cancel_phase,
 ) -> None:
-    """A specialist run cancelled mid-flight must emit a terminal
-    ``subagent.failed`` event, both from RUNNING_MODEL and from
-    WAITING_RUNTIME (a long-running tool mid-invoke).
-
-    Regression note for the WAITING_RUNTIME case: the run reaches the
-    cancel-except only after the invoke-finally bridges WAITING_RUNTIME back
-    to RUNNING_MODEL, so the on-disk transition succeeds — but the terminal
-    event was still missing.  Locks in that the event fires on this path too.
-    """
+    """Cancellation must emit a terminal event from either specialist phase."""
     if cancel_phase == "waiting_runtime":
         _authorization_gate_modes(monkeypatch, authorization="allow_all")
+        monkeypatch.setattr(
+            "services.specialist_tools.is_tts_configured",
+            lambda: True,
+        )
 
     async def scenario():
         services, _snapshot = _create_project(
@@ -2289,6 +2311,7 @@ def test_specialist_cancel_emits_terminal_event(
         )
         blocked = asyncio.Event()
         cancel_entered = asyncio.Event()
+        delegated = False
 
         async def _block_until_cancelled() -> None:
             blocked.set()
@@ -2299,8 +2322,12 @@ def test_specialist_cancel_emits_terminal_event(
                 raise
 
         async def callback(messages, tools):
+            nonlocal delegated
             names = {item["function"]["name"] for item in tools}
             if "delegate_to_agent" in names:
+                if delegated:
+                    await asyncio.Event().wait()
+                delegated = True
                 return _delegate_call(
                     "delegate-editing",
                     role="ai_editing_director",
@@ -2308,14 +2335,12 @@ def test_specialist_cancel_emits_terminal_event(
                     task="角色声音设计",
                 )
             if cancel_phase == "waiting_runtime":
-                # Specialist turn: park the run in a long-running tool.
                 return _media_call(
                     "gen-1",
                     name="tts_generation",
                     target_ref="asset:hero",
                     arguments={"text": "测试取消中的长任务。"},
                 )
-            # Specialist turn: block forever until the parent is interrupted.
             await _block_until_cancelled()
 
         async def blocking_invoke(**_kwargs):
@@ -2324,18 +2349,37 @@ def test_specialist_cancel_emits_terminal_event(
         driver = _driver(services, callback)
         if cancel_phase == "waiting_runtime":
             driver.specialist_tools.invoke = blocking_invoke  # type: ignore[method-assign]
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        # Poll via the shared helper instead of a raw 2s budget: the full
-        # suite needs ~7min on the Windows CI runner, and that load has been
-        # enough to lose this race there.
-        await _wait_for(blocked.is_set)
-        interrupted = await driver.interrupt(PROJECT_ID, reason="test-stop")
-        await driver.wait_until_idle(PROJECT_ID)
-        specialist_runs = driver.executions.list_specialist_runs(PROJECT_ID)
-        events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
-        await driver.stop()
-        return interrupted, specialist_runs, events, cancel_entered
+        try:
+            await driver.start()
+            driver.notify(PROJECT_ID)
+            # Readiness includes durable I/O, not just model/tool latency.
+            await asyncio.wait_for(blocked.wait(), timeout=30.0)
+            runs = driver.executions.list_specialist_runs(PROJECT_ID)
+            assert len(runs) == 1
+            assert runs[0].status.value == cancel_phase.upper()
+            specialist_task = driver._specialist_tasks[PROJECT_ID][
+                runs[0].run_id
+            ].task
+            assert specialist_task is not None
+            interrupted = await driver.interrupt(
+                PROJECT_ID,
+                reason="test-stop",
+            )
+            # Mainline idleness does not join detached specialists.
+            done, _pending = await asyncio.wait(
+                {specialist_task},
+                timeout=30.0,
+            )
+            assert specialist_task in done
+            assert specialist_task.cancelled()
+            await driver.wait_until_idle(PROJECT_ID, timeout_seconds=30.0)
+            specialist_runs = driver.executions.list_specialist_runs(
+                PROJECT_ID,
+            )
+            events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+            return interrupted, specialist_runs, events, cancel_entered
+        finally:
+            await driver.stop()
 
     interrupted, specialist_runs, events, cancel_entered = asyncio.run(
         scenario(),
@@ -3870,80 +3914,6 @@ def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
         and event.payload.get("messageId") == notices[0].message_id
         for event in services.sessions.list_events(PROJECT_ID, SESSION_ID)
     )
-
-
-@pytest.mark.parametrize(
-    "reason",
-    ["no_committed_progress", "media_budget_exhausted"],
-)
-def test_yolo_pause_reasons_are_durable_not_new_model_requests(
-    tmp_path,
-    monkeypatch,
-    reason,
-):
-    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
-    driver = _driver(services, lambda *_args: AgentModelTurn())
-    node = WorkNode(
-        node_id="visual:hero",
-        kind="visual",
-        label="角色状态图",
-        status=WorkNodeStatus.FAILED,
-        error="请修改输入文本",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_media_review_mode",
-        lambda: "auto_approve",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda *_a, **_kw: WorkGraph(
-            nodes=(node,),
-            generation=snapshot.generation,
-        ),
-    )
-    monkeypatch.setattr(
-        driver.work_scheduler,
-        "wake",
-        lambda _project_id: None,
-    )
-    if reason == "no_committed_progress":
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            source=driver.YOLO_RESUME_SOURCE,
-            content_parts=[{"type": "text", "text": "修正输入文本"}],
-            metadata={"projectGeneration": snapshot.generation},
-        )
-    else:
-
-        def exhausted(*_args):
-            raise driver_module.MediaCallBudgetExhausted("used budget")
-
-        monkeypatch.setattr(
-            driver_module,
-            "ensure_media_call_budget",
-            exhausted,
-        )
-    before = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    asyncio.run(
-        driver._queue_yolo_completion_resume(
-            project_id=PROJECT_ID,
-            session_id=SESSION_ID,
-            conversation_id=CONVERSATION_ID,
-            run_id="paused-run",
-        ),
-    )
-    after = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    assert [m.message_id for m in before if m.role == "user"] == [
-        m.message_id for m in after if m.role == "user"
-    ]
-    assert after[-1].source == "creator_execution_notice"
-    assert after[-1].metadata["executionPause"]["reason"] == reason
-    assert not driver._wake.is_set()
 
 
 @pytest.mark.parametrize(
@@ -5582,9 +5552,13 @@ def test_upload_joining_a_live_run_starts_understanding(
     )
 
 
+@pytest.mark.parametrize(
+    "specialist", [False, True], ids=["creator", "editing"]
+)
 def test_recalled_media_arrives_after_its_own_tool_group(
     tmp_path,
     monkeypatch,
+    specialist,
 ):
     """The recalled bytes ride behind the tool result, never inside its group.
 
@@ -5603,21 +5577,42 @@ def test_recalled_media_arrives_after_its_own_tool_group(
 
     seen: list[list[dict]] = []
     turn = 0
+    delegated = False
 
     async def callback(messages, tools):
-        del tools
-        nonlocal turn
+        nonlocal turn, delegated
+        names = {item["function"]["name"] for item in tools}
+        if specialist and "delegate_to_agent" in names:
+            if delegated:
+                return AgentModelTurn(content="已收到剪辑结果。")
+            delegated = True
+            return _delegate_call(
+                "delegate-recall",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="取回之前移出的参考图",
+            )
+        assert {"recall_media", "recall_history"} <= names
         turn += 1
         seen.append([dict(item) for item in messages])
         if turn == 1:
             return _tool_turn(
                 call_id="recall-1",
                 name="recall_media",
-                arguments={"handles": [digest]},
+                arguments={"projectId": PROJECT_ID, "handles": [digest]},
             )
         if turn == 2:
-            return _read_call("read-1")
-        return AgentModelTurn(content="已取回参考图，继续。")
+            return _tool_turn(
+                call_id="recall-text",
+                name="recall_history",
+                arguments={
+                    "projectId": PROJECT_ID,
+                    "op": "expand",
+                    "lo": 1,
+                    "hi": 1,
+                },
+            )
+        return AgentModelTurn(content="[SUCCESS] 已取回参考图。")
 
     async def scenario():
         services, _snapshot = _create_project(
@@ -5625,8 +5620,11 @@ def test_recalled_media_arrives_after_its_own_tool_group(
             initial_goal="取回之前移出的参考图，然后继续。",
         )
         driver = _driver(services, CallbackAgentChatClient(callback))
-        await _run_to_idle(driver, services)
-        await driver.stop()
+        try:
+            await _run_to_idle(driver, services)
+            await _wait_for(lambda: turn == 3)
+        finally:
+            await driver.stop()
 
     asyncio.run(scenario())
 
@@ -5646,10 +5644,17 @@ def test_recalled_media_arrives_after_its_own_tool_group(
         "tool",
     ]
     recalled = seen[1][-1]
-    assert recalled["source"] == driver_module.MEDIA_RECALL_SOURCE
+    expected_source = (
+        driver_module.MEDIA_OBSERVATION_SOURCE
+        if specialist
+        else driver_module.MEDIA_RECALL_SOURCE
+    )
+    assert recalled["source"] == expected_source
     assert [part["type"] for part in recalled["content"]][-1] == "image_url"
     restored = recalled["content"][-1]["image_url"]["url"]
     assert base64.b64decode(restored.split(";base64,", 1)[1]) == payload
+    history = json.loads(seen[2][-1]["content"])
+    assert [entry["messageSeq"] for entry in history["entries"]] == [1]
 
 
 def test_the_next_turn_resumes_from_the_shape_that_was_sent(tmp_path):

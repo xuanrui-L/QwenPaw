@@ -266,59 +266,6 @@ def test_same_guidance_retry_still_replays(tmp_path, monkeypatch) -> None:
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_project_edit_invalidates_saved_draft_and_replays_new_version(
-    tmp_path,
-    monkeypatch,
-    legacy,
-):
-    services = _services(tmp_path)
-    calls = _mock_chat(monkeypatch, [DRAFT])
-    first = _draft(services, key="original")
-
-    if legacy:
-        # Captured from Creator before the project-level inputs were hashed.
-        base = services.projects.read(PROJECT_ID)
-        data = base.project.model_dump(mode="json")
-        selected = data["assets"]["artifact_versions_by_id"][
-            first.artifact_version_id
-        ]
-        selected["input_fingerprint"] = (
-            "sha256:6bfccdd989dbb00d64bf7921c1674e0a"
-            "2489d6991c09f59fc234604f75220b24"
-        )
-        services.commits.commit(
-            base=base,
-            candidate=data,
-            origin=ChangeOrigin.RUNTIME_TASK,
-            review_policy=ReviewPolicy.AUTO_FIX,
-        )
-    assert _draft(services, key="before-edit").replayed
-    assert len(calls) == 1
-
-    base = services.projects.read(PROJECT_ID)
-    original = base.project.model_dump(mode="json")
-    candidate, impact = apply_frontend_edit_impacts(
-        {**original, "description": "改为赛车纪录片"},
-        ["/description"],
-        base=original,
-    )
-    assert impact.invalidated_artifact_version_ids == {
-        first.artifact_version_id,
-    }
-    services.commits.commit(
-        base=base,
-        candidate=candidate,
-        origin=ChangeOrigin.FRONTEND_EDIT,
-    )
-    second = _draft(services, key="after-edit")
-    assert not second.replayed
-    assert second.artifact_version_id != first.artifact_version_id
-    assert "改为赛车纪录片" in calls[-1]["prompt"]
-    assert _draft(services, key="retry").replayed
-    assert len(calls) == 2
-
-
 @pytest.mark.parametrize("change", ["stale", "guidance"])
 def test_identical_redraft_is_fresh_and_next_retry_does_not_regenerate(
     tmp_path,

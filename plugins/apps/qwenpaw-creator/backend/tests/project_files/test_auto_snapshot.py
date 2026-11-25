@@ -154,13 +154,20 @@ class TestAutoSnapshotTimelines:
         sid = f"snapshot:{TL}:1"
         base = _minimal_project(elements={ELEM: _element(ELEM)})
         snapshot = copy.deepcopy(base["timelines"]["items"][TL])
+        snapped_element = f"{sid}:{ELEM}"
         snapshot["timeline_id"] = sid
         snapshot["description"] = "自动快照：修改前的时间轴副本"
+        snapshot["elements_by_id"] = {
+            snapped_element: _element(snapped_element)
+        }
+        snapshot["order"] = [snapped_element]
         base["timelines"]["items"][sid] = snapshot
         base["timelines"]["order"].append(sid)
 
         candidate = copy.deepcopy(base)
-        _elems(candidate, sid)[ELEM]["label"] = "Edited inside snapshot"
+        _elems(candidate, sid)[snapped_element][
+            "label"
+        ] = "Edited inside snapshot"
 
         auto_snapshot_timelines(base, candidate)
 
@@ -171,6 +178,9 @@ class TestAutoSnapshotTimelines:
         ]
         assert nested == []
         assert len(candidate["timelines"]["items"]) == 2
+        assert _elems(candidate, sid)[snapped_element]["label"] == (
+            "Edited inside snapshot"
+        )
 
     def test_element_change_creates_snapshot(self):
         base = _minimal_project(elements={ELEM: _element(ELEM)})

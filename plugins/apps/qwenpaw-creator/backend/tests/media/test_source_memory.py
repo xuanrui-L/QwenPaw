@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
+from contextlib import nullcontext
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from vendored.test_video_memory_toolkit import (
     build_fixture_index,
     build_fixture_memory,
@@ -110,6 +110,7 @@ def _service(tmp_path: Path) -> SourceMemoryService:
         root=tmp_path,
         projects=SimpleNamespace(
             project_root=lambda project_id: tmp_path / "projects" / project_id,
+            lifecycle_lock=lambda _project_id: nullcontext(),
         ),
     )
     return SourceMemoryService(services)
@@ -446,7 +447,9 @@ def test_cancel_for_asset_stops_a_live_build_before_its_next_stage(
         executions.transitions[-1]["updates"]["error"]["code"]
         == "SOURCE_ASSET_DELETED"
     ), "the record a cancellation left behind must still terminalize"
-    assert not service._jobs and not service._job_specs
+    assert not service._jobs
+    assert not getattr(service, "_job_specs", None)
+    assert not getattr(service, "_builds", None)
 
 
 def test_merge_projection_folds_reviewed_drafts_and_summary(
@@ -582,6 +585,9 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
         out_path.write_bytes(b"clip")
         return out_path
 
+    stop_type = getattr(source_memory, "_BuildStop", None)
+    stop_args = (stop_type(),) if stop_type is not None else ()
+
     async def fake_chat(_content, **_kwargs):
         return json.dumps(
             {
@@ -615,6 +621,7 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
                 asyncio.Semaphore(1),
                 ckpt_dir,
                 "checksum-1",
+                *stop_args,
             ),
         )
 
@@ -646,9 +653,11 @@ def test_extract_subgraph_checkpoints_then_resumes_without_reclip(
     assert resumed.subgraph.micro_events[0].time_range == [11.0, 12.0]
 
 
-def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
+def _exercise_chunked_memory_build(
     tmp_path,
     monkeypatch,
+    *,
+    stop_before_publish=False,
 ) -> None:
     # 7300s source → 3 detection chunks; chunk 1 is pre-checkpointed and
     # must not be re-detected. Macro ids stay globally sequential.
@@ -677,7 +686,7 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
 
     detected: list[tuple[float, float]] = []
 
-    def fake_detect(_path, start_sec, end_sec):
+    def fake_detect(_path, start_sec, end_sec, *_stop):
         detected.append((start_sec, end_sec))
         return [(start_sec, end_sec)]
 
@@ -727,7 +736,31 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
         lambda: False,
     )
 
-    asyncio.run(service._execute(job))
+    if stop_before_publish:
+        # Project stop signals workers before its detached task cleanup runs.
+        write = Path.write_text
+
+        def stop_after_staging(path, *args, **kwargs):
+            result = write(path, *args, **kwargs)
+            if (
+                path.name
+                == Path(source_memory.META_FILENAME).with_suffix(".tmp").name
+            ):
+                service._builds[job.task_id].stop.set()
+            return result
+
+        monkeypatch.setattr(Path, "write_text", stop_after_staging)
+
+    async def run_build():
+        await service._spawn(job)
+
+    if stop_before_publish:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(run_build())
+        assert load_memory_ref(project_root, "intel-1", "checksum-1") is None
+        return
+
+    asyncio.run(run_build())
 
     assert detected == [(3600.0, 7200.0), (7200.0, 7300.0)]
     ref = load_memory_ref(project_root, "intel-1", "checksum-1")
@@ -735,16 +768,49 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
     assert not ckpt_root.exists()
 
 
-def test_ffmpeg_invocations_detach_stdin() -> None:
-    # A background-job host delivers SIGTTIN to any child reading the
-    # TTY: ffmpeg must run with stdin detached or the whole build
-    # silently stops (observed live: clips stuck in "TN").
-    for module, expected_runs in (
-        (source_memory, 1),
-        (source_observation, 2),
-    ):
-        source = inspect.getsource(module)
-        runs = source.count("subprocess.run(")
-        detached = source.count("stdin=subprocess.DEVNULL")
-        assert runs == expected_runs
-        assert detached == runs
+def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
+    tmp_path, monkeypatch
+):
+    _exercise_chunked_memory_build(tmp_path, monkeypatch)
+
+
+def test_ffmpeg_invocations_detach_stdin(tmp_path, monkeypatch):
+    # Background jobs must never let ffmpeg read the host's tty (SIGTTIN).
+    def run(command, *, stdin, **_):
+        assert stdin == subprocess.DEVNULL
+        if command[-1] != "pipe:1":
+            Path(command[-1]).write_bytes(b"clip")
+        return subprocess.CompletedProcess(command, 0, stdout=b"frame")
+
+    monkeypatch.setattr(source_observation, "require_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        getattr(source_observation, "media_gate", subprocess), "run", run
+    )
+    video = tmp_path / "source.mp4"
+    clip = tmp_path / "clip.mp4"
+    assert (
+        source_observation.clip_segment_sync(
+            video,
+            clip,
+            0.0,
+            1.0,
+            512,
+            28,
+            2,
+        )
+        == clip
+    )
+    assert (
+        source_observation.clip_segment_hq_sync(video, clip, 0.0, 1.0) == clip
+    )
+    assert (
+        source_memory._seek_jpeg(
+            "ffmpeg",
+            str(video),
+            0.0,
+            "128:128",
+            2,
+            30,
+        )
+        == b"frame"
+    )

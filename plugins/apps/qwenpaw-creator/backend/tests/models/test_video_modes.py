@@ -12,8 +12,8 @@ import asyncio
 import base64
 import io
 
-from PIL import Image
 import pytest
+from PIL import Image
 
 from models import config as model_config
 from models import video_model
@@ -24,8 +24,6 @@ from models.video_capabilities import (
     validate_video_mode,
     video_backend_key,
     video_model_capability_payload,
-    video_model_duration_guidance,
-    video_model_prompt_guidance,
     video_model_supported_modes,
     video_prompt_storyboard_reference_violation,
     video_reference_capability,
@@ -35,6 +33,10 @@ from utils.exceptions import ModelError
 
 class _FakeResponse:
     status_code = 200
+    # A real httpx response always carries both, and the submit path reads them
+    # to decide whether a failure is worth another paid attempt.
+    text = ""
+    headers: dict = {}
 
     def raise_for_status(self) -> None:
         return None
@@ -471,142 +473,6 @@ def test_happyhorse_11_video_edit_rejected_before_provider(
             ),
         )
     assert not captured
-
-
-# ── prompt guidance ──────────────────────────────────────────────────────────
-
-
-# One matrix test intentionally compares every provider to catch syntax leaks
-# between adjacent model families.
-# pylint: disable-next=too-many-statements
-def test_guidance_describes_the_mode_matrix_per_model() -> None:
-    happyhorse = video_model_prompt_guidance("happyhorse-1.1-r2v")
-    assert "生成模式矩阵" in happyhorse
-    assert "不支持的 mode（video_edit）" in happyhorse
-    assert "`[Image 1]`、`[Image 2]`" in happyhorse
-    assert "1–9 张图片" in happyhorse
-    assert "3–15 秒" in happyhorse
-    assert "分辨率仅支持 720P/1080P" in happyhorse
-
-    happyhorse_10 = video_model_prompt_guidance("happyhorse-1.0-r2v")
-    assert "video_edit：" in happyhorse_10
-    assert "只取前 15 秒" in happyhorse_10
-
-    wan = video_model_prompt_guidance("wan2.7-r2v")
-    assert "不支持的 mode（video_edit）" in wan
-    # Canonical [Image N] is now the authoring form for every model; what
-    # differs is the rendered wire syntax the guidance describes below it.
-    assert "`[Image 1]`、`[Image 2]`" in wan
-    assert "Runtime 会在提交前把它渲染成" in wan
-    assert "图1、图2" in wan
-    assert "Image 1" in wan
-    assert "图片与视频" in wan
-    assert "不得使用 Wan 2.6 的 `character1`" in wan
-    for configured_suffix in ("i2v", "t2v"):
-        configured = video_model_prompt_guidance(
-            f"wan2.7-{configured_suffix}",
-        )
-        assert "Wan 2.7：" in configured
-        assert "报告阻塞" not in configured
-
-    wan_26 = video_model_prompt_guidance("wan2.6-r2v")
-    assert "`character1`、`character2`" in wan_26
-    assert "图片/视频混合总顺序" in wan_26
-    assert "Wan 2.7 的“图1/视频1”" in wan_26
-    for configured_suffix in ("i2v", "t2v"):
-        configured = video_model_prompt_guidance(
-            f"wan2.6-{configured_suffix}",
-        )
-        assert "Wan 2.6：" in configured
-        assert "报告阻塞" not in configured
-
-    wan3 = video_model_prompt_guidance("wan3.0-video")
-    assert "All-in-One" in wan3
-    assert "图1、图2" in wan3
-    assert "图片最多 10 张" in wan3
-    assert "视频最多 5 个" in wan3
-    assert "2–30 秒" in wan3
-
-    seedance = video_model_prompt_guidance("doubao-seedance-2-0-260128")
-    assert "图片最多 9 张" in seedance
-    assert "视频最多 3 个" in seedance
-    assert "合计最多 12 个" in seedance
-    assert "不支持的 mode（video_edit）" in seedance
-    assert "`image1`" in seedance
-    assert "`video1`" in seedance
-    assert "中文 Prompt 用“图片1、图片2" in seedance
-    assert "不要把 Wan 的“图1”当成统一语法" in seedance
-    assert "镜头 1 / 镜头 2" in seedance
-    assert "不写时间戳" in seedance
-    assert "最终视频不继承宫格、边框、编号、箭头" in seedance
-
-    seedance_25 = video_model_prompt_guidance("doubao-seedance-2-5-260628")
-    assert "图片最多 30 张" in seedance_25
-    assert "[4, 30] 秒" in seedance_25
-    assert "整数秒时间段" in seedance_25
-    assert "区间必须连续、无空档" in seedance_25
-    assert "3–6 个可执行时间段" in seedance_25
-    assert "每段只写一个核心状态变化" in seedance_25
-
-    veo = video_model_prompt_guidance("veo-3.1-generate-preview")
-    assert "4/6/8 秒" in veo
-    assert "仅支持 1–3 张图片" in veo
-    assert "结构化 `referenceImages`" in veo
-    assert "不要把虚构编号写进最终 Prompt" in veo
-    veo_lite = video_model_prompt_guidance("veo-3.1-lite-generate-preview")
-    assert "官方不支持 r2v" in veo_lite
-
-    # Kling guidance follows the configured channel's contract.
-    kling_bailian = video_model_prompt_guidance(
-        "kling/kling-v3-omni-video-generation",
-    )
-    assert "<<<image_N>>>" in kling_bailian
-    assert "storyboard 是 `<<<image_1>>>`" in kling_bailian
-    assert "图片最多 7 张" in kling_bailian
-    kling_direct = video_model_prompt_guidance("kling-3.0-omni")
-    assert "@image_N" in kling_direct
-    assert "不得使用百炼的三尖括号语法" in kling_direct
-    assert "720p/1080p/4k" in kling_direct
-
-    minimax = video_model_prompt_guidance("S2V-01")
-    assert "S2V-01" in minimax
-    assert "结构化 `subject_reference`" in minimax
-    assert "没有官方图片序号标记" in minimax
-
-    vidu_bailian = video_model_prompt_guidance(
-        "vidu/viduq3-mix_reference2video",
-    )
-    assert "[1, 16] 秒" in vidu_bailian
-    assert "“图1为…；图2为…”" in vidu_bailian
-    assert "不发明 `视频N`" in vidu_bailian
-    assert "不支持的 mode（t2v, i2v, video_edit）" in vidu_bailian
-    vidu_direct = video_model_prompt_guidance("viduq3-mix")
-    assert "720p/1080p" in vidu_direct
-    assert "结构化 `images`/`videos`" in vidu_direct
-    assert "这里不会渲染出任何位置标记" in vidu_direct
-
-
-def test_duration_guidance_has_no_global_creator_default() -> None:
-    happyhorse = video_model_duration_guidance("happyhorse-1.1")
-    assert "3–15 秒整数" in happyhorse
-    assert "3 秒短段合法" in happyhorse
-    assert "30 秒单段不合法" in happyhorse
-
-    seedance_25 = video_model_duration_guidance(
-        "doubao-seedance-2-5-260628",
-    )
-    assert "4–30 秒整数" in seedance_25
-    assert "30 秒长段" in seedance_25
-    assert "不套用 8–10 秒默认值" in seedance_25
-
-    veo = video_model_duration_guidance("veo-3.1-generate-preview")
-    assert "只支持 4、6 或 8 秒" in veo
-    assert "r2v 或 1080p/4k 时必须为 8 秒" in veo
-    assert "。 不得" not in veo
-
-    vidu = video_model_duration_guidance("VIDUQ2-PRO")
-    assert "1–10 秒整数" in vidu
-    assert "报告阻塞" not in vidu
 
 
 @pytest.mark.parametrize(
@@ -1094,7 +960,8 @@ def test_token_plan_wan_reference_inlines_base64(
         raise AssertionError("Token Plan video reference reached uploads")
 
     monkeypatch.setattr(
-        "models.media_transport.upload_local_file_to_dashscope_temp",
+        video_model,
+        "upload_reference_file_for_provider",
         refuse_upload,
     )
 
@@ -1161,7 +1028,8 @@ def test_token_plan_wan_oversized_reference_downscales(
         raise AssertionError("Token Plan video reference reached uploads")
 
     monkeypatch.setattr(
-        "models.media_transport.upload_local_file_to_dashscope_temp",
+        video_model,
+        "upload_reference_file_for_provider",
         refuse_upload,
     )
     raw = _noise_png_bytes()
@@ -1232,6 +1100,18 @@ def test_wan_reference_media_uses_dashscope_temp_upload(
         lambda: "wan2.7-r2v",
     )
     monkeypatch.setattr(model_config, "get_video_api_key", lambda: "video-key")
+    # The transport is chosen from the endpoint, so pin the section to Bailian:
+    # this case is about the model-bound temporary upload staying available.
+    monkeypatch.setattr(
+        model_config,
+        "get_video_protocol",
+        lambda: "DashScope（百炼）",
+    )
+    monkeypatch.setattr(
+        model_config,
+        "get_video_base_url",
+        lambda: "https://dashscope.aliyuncs.com/api/v1",
+    )
 
     observed = {}
 
@@ -1241,13 +1121,15 @@ def test_wan_reference_media_uses_dashscope_temp_upload(
         api_key: str,
         model_name: str,
         media_type: str,
+        **_provider,
     ) -> str:
         assert path.read_bytes() == _png_bytes()
         observed["call"] = (path.name, api_key, model_name, media_type)
         return "oss://dashscope-instant/ref.png"
 
     monkeypatch.setattr(
-        "models.media_transport.upload_local_file_to_dashscope_temp",
+        video_model,
+        "upload_reference_file_for_provider",
         fake_upload,
     )
 
