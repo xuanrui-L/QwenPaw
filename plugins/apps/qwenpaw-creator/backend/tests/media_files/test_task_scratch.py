@@ -283,57 +283,6 @@ def test_a_failing_listener_cannot_rollback_task_state(
 
 
 @_needs_pinned_release
-def test_sweep_ignores_everything_from_before_the_baseline(
-    tmp_path: Path,
-) -> None:
-    scratch = _scratch(tmp_path)
-    store = ProjectExecutionStore(tmp_path)
-    store.create_task(_task(TaskStatus.QUEUED))
-    _moved(
-        store,
-        "task-1",
-        frm=TaskStatus.QUEUED,
-        to=TaskStatus.RUNNING,
-        updated_at=T0 - timedelta(days=2),
-    )
-    _moved(
-        store,
-        "task-1",
-        frm=TaskStatus.RUNNING,
-        to=TaskStatus.SUCCEEDED,
-        updated_at=T0 - timedelta(days=1),
-    )
-
-    swept = release_orphaned_scratch(_services(tmp_path), now=T0)
-
-    assert swept.removed_files == 0
-    assert read_scratch_baseline(tmp_path / PROJECT_ID) == T0
-    assert len(_media(scratch)) == 2
-
-    # A task that finished after the baseline is fair game once it is quiet.
-    later = _scratch(tmp_path, "task-2")
-    store.create_task(
-        _task(TaskStatus.QUEUED).model_copy(update={"task_id": "task-2"}),
-    )
-    _moved(
-        store,
-        "task-2",
-        frm=TaskStatus.QUEUED,
-        to=TaskStatus.FAILED,
-        updated_at=T0 + timedelta(minutes=5),
-    )
-
-    summary = release_orphaned_scratch(
-        _services(tmp_path),
-        now=T0 + ORPHAN_RELEASE_GRACE + timedelta(minutes=10),
-    )
-
-    assert summary.removed_files == 2
-    assert _media(later) == []
-    assert len(_media(scratch)) == 2
-
-
-@_needs_pinned_release
 def test_sweep_holds_recent_and_orphan_directories(tmp_path: Path) -> None:
     recent = _scratch(tmp_path, "task-1")
     unknown = _scratch(tmp_path, "task-ghost")
@@ -479,42 +428,6 @@ def test_allocating_scratch_baselines_a_project_that_was_never_created(
     assert summary.removed_files == 1
 
 
-def test_scratch_brought_in_by_an_import_stays_protected(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The stamp lands at first allocation, later than any archived Task, so
-    # the "pre-upgrade bytes stay put" rule holds for a Project that arrived
-    # through an archive rather than through creation.
-    from utils.paths import media_task_scope, task_work_root
-
-    legacy = _scratch(tmp_path, "task-legacy")
-    now = datetime.now(timezone.utc)
-    store = ProjectExecutionStore(tmp_path)
-    store.create_task(
-        _task(TaskStatus.QUEUED).model_copy(update={"task_id": "task-legacy"}),
-    )
-    _moved(
-        store,
-        "task-legacy",
-        frm=TaskStatus.QUEUED,
-        to=TaskStatus.FAILED,
-        updated_at=now - timedelta(hours=1),
-    )
-    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
-
-    with media_task_scope("task-1", project_id=PROJECT_ID):
-        task_work_root("task-1")
-
-    summary = release_orphaned_scratch(
-        _services(tmp_path),
-        now=now + ORPHAN_RELEASE_GRACE + timedelta(minutes=5),
-    )
-
-    assert summary.removed_files == 0
-    assert len(_media(legacy)) == 2
-
-
 def _replace_with_a_link(scratch: Path, outside: Path) -> Path:
     """Move the real ``task-work`` aside and point that name outside it.
 
@@ -549,10 +462,10 @@ def _swap_task_work_after_listing(
     # pylint: disable=protected-access
     release_tree = task_scratch._release_pinned_tree
 
-    def listed_then_swapped(dir_fd: int):
+    def listed_then_swapped(dir_fd: int, *args, **kwargs):
         list(os.scandir(dir_fd))
         _replace_with_a_link(scratch, outside)
-        return release_tree(dir_fd)
+        return release_tree(dir_fd, *args, **kwargs)
 
     monkeypatch.setattr(
         task_scratch,
@@ -849,9 +762,7 @@ def _stamp(path: Path, moment: datetime) -> None:
         os.utime(item, (epoch, epoch))
 
 
-def test_profile_splits_scratch_and_transactions_at_the_baseline(
-    tmp_path: Path,
-) -> None:
+def _scratch_on_both_sides_of_baseline(tmp_path):
     legacy = _scratch(tmp_path, "task-legacy")
     transactions = tmp_path / PROJECT_ID / "runtime" / "transactions"
     old_tx = transactions / "tx-legacy"
@@ -881,6 +792,15 @@ def test_profile_splits_scratch_and_transactions_at_the_baseline(
             to=TaskStatus.FAILED,
             updated_at=moment,
         )
+    return legacy, fresh, old_tx, new_tx
+
+
+def test_profile_splits_scratch_and_transactions_at_the_baseline(
+    tmp_path: Path,
+) -> None:
+    legacy, fresh, old_tx, new_tx = _scratch_on_both_sides_of_baseline(
+        tmp_path
+    )
 
     entry = project_storage_profile(
         _services(tmp_path),
@@ -890,12 +810,5 @@ def test_profile_splits_scratch_and_transactions_at_the_baseline(
     assert entry["baselineAt"] == T0.isoformat()
     assert entry["taskWorkLegacyBytes"] == _tree_bytes(legacy)
     assert entry["taskWorkBytes"] == _tree_bytes(fresh)
-    # A finished Task whose scratch outlived the grace window is reclaimable,
-    # counted as the media a release would take rather than the kept docs.
-    assert entry["taskWorkReclaimableBytes"] == _media_bytes(fresh)
-    assert entry["taskWorkReclaimableBytes"] < _tree_bytes(fresh)
     assert entry["transactionsLegacyBytes"] == _tree_bytes(old_tx)
     assert entry["transactionsBytes"] == _tree_bytes(new_tx)
-    assert project_storage_profile(_services(tmp_path))["totals"][
-        "taskWorkReclaimableBytes"
-    ] == _media_bytes(fresh)

@@ -1,3 +1,4 @@
+import { seedProject } from "@/test/projectSnapshotFixtures";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import {
   act,
@@ -21,127 +22,15 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import {
-  configuredModelConfig,
+  elementReview,
+  changedPointer,
+  commonRoutes,
+  sessionState,
   makeReviewOperation,
-  makeReviewRecord,
   seedCreatorSession,
 } from "@/test/agentFixtures";
-import { projectDocument, status } from "@/test/creatorFixtures";
+import { status } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
-
-const cloneProject = () => structuredClone(projectDocument);
-
-function seedProject() {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project: cloneProject(),
-    generation: 3,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-  });
-}
-
-const sessionState = {
-  id: "s1",
-  projectId: "p1",
-  status: "IDLE",
-  lastMessageSeq: 0,
-  lastConsumedMessageSeq: 0,
-  lastEventSeq: 0,
-} as const;
-
-function commonRoutes(review?: FileProjectReviewRecord, projectId = "p1") {
-  return [
-    {
-      match: `/projects/${projectId}/runtime/reviews/active`,
-      response: review
-        ? { json: [review], headers: { ETag: `"${review.decision_token}"` } }
-        : { status: 204 },
-    },
-    {
-      match: `/projects/${projectId}/project`,
-      response: {
-        json: {
-          projectId,
-          generation: 3,
-          etag: '"sha256:g3"',
-          syncStatus: "healthy",
-          project: { ...cloneProject(), project_id: projectId },
-        },
-        headers: { ETag: '"sha256:g3"' },
-      },
-    },
-    ...["conversations/c1/messages", "specialist-runs", "tasks"].map((p) => ({
-      match: `/projects/${projectId}/${p}`,
-      response: { json: { items: [] } },
-    })),
-    {
-      match: `/projects/${projectId}/conversations`,
-      response: {
-        json: {
-          items: [
-            {
-              conversationId: "c1",
-              title: "默认对话",
-              isDefault: true,
-              createdAt: "now",
-            },
-          ],
-        },
-      },
-    },
-    {
-      match: `/projects/${projectId}/session`,
-      response: {
-        json: {
-          session: { ...sessionState, projectId },
-          agentStatusBar: status,
-        },
-      },
-    },
-    {
-      match: `/projects/${projectId}/work-graph`,
-      response: {
-        json: {
-          projectId,
-          counts: {},
-          nodes: [],
-          generation: 0,
-          mediaCalls: 0,
-          mediaCallBudget: 0,
-        },
-      },
-    },
-    { match: "/models/config", response: { json: configuredModelConfig } },
-  ];
-}
-
-const changedPointer =
-  "/timelines/items/timeline:main/elements_by_id/r2v-window/creation/video_prompt";
-
-function elementReview() {
-  return makeReviewRecord({
-    review_id: "review-element-1",
-    interrupted_run_id: "run-element-1",
-    baseline_generation: 3,
-    candidate_generation: 4,
-    decision_token: "review-token-1",
-    operations: [
-      makeReviewOperation({
-        json_pointer: changedPointer,
-        target_ref: "element:r2v-window",
-        ui_locator: {
-          page: "plan",
-          mediaType: "text",
-          elementId: "r2v-window",
-          field: changedPointer,
-        },
-      }),
-    ],
-  });
-}
 
 /** Mounts ProjectLayout with a stub workspace for all locator destinations. */
 function renderShell(testId: string) {

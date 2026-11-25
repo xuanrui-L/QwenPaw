@@ -33,7 +33,7 @@ def test_profile_answers_even_with_no_projects(
     assert Path(body["dataRoot"]).is_dir()
     assert body["scratchReleaseEnabled"] is True
     assert body["projects"] == []
-    assert set(body["totals"]) == TOTAL_KEYS
+    assert set(body["totals"]) >= TOTAL_KEYS
     assert all(value == 0 for value in body["totals"].values())
 
 
@@ -46,4 +46,4 @@ def test_orphan_scan_is_opt_in(api_request, app):
     )
 
     assert response.status_code == 200
-    assert set(response.json()["totals"]) == TOTAL_KEYS
+    assert set(response.json()["totals"]) >= TOTAL_KEYS

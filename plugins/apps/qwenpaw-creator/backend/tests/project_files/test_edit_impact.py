@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+"""Effects of project edits on generated media."""
+
 from __future__ import annotations
 
 import re
@@ -82,6 +84,7 @@ def _project() -> dict:
                 },
                 "timeline:timeline:main:render": {
                     "slot_id": "timeline:timeline:main:render",
+                    "kind": "final_video",
                     "owner_ref": "timeline:timeline:main",
                     "selected_version_id": "final-v1",
                 },

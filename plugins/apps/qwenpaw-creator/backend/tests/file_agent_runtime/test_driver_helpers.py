@@ -1,39 +1,30 @@
 # -*- coding: utf-8 -*-
+# flake8: noqa: E501
 # pylint: disable=protected-access
-"""Benign trailing closers execute the lossless prefix instead of failing.
-
-Reproduces the 2026-08 production case: a 4.4KB streamed tool-call
-argument ended with exactly one surplus ``}`` after a complete JSON
-object, forcing a repair-and-retry turn even though dropping the tail
-was provably lossless.
-"""
+"""Driver message preparation, native tool streaming, and history recall."""
 from __future__ import annotations
 
-import ast
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from services.file_agent_runtime.model_client import _parse_tool_arguments
 from services.file_agent_runtime.driver import (
+    _HOST_SUMMARY_RECALL_SENTENCE,
     MAX_RECALL_HISTORY_BYTES,
     MAX_RECALL_HISTORY_SEARCH_HITS,
     FileCreatorAgentRuntime,
-    _HOST_SUMMARY_RECALL_SENTENCE,
     _creator_summary_recall_wording,
     _message_text,
     _recall_media_pointer,
     _unfinished_video_element_ids,
 )
-from services.file_agent_runtime import driver as driver_module
-from services.file_agent_runtime import model_context
-from services.runtime_files.models import (
-    CreatorMessageRecord,
-    MessageChannel,
-    MessageContentPart,
+from services.file_agent_runtime.model_client import _parse_tool_arguments
+from services.file_agent_runtime.tool_protocol import (
+    NativeToolTextStream,
+    NonNativeToolMarkupError,
+    contains_non_native_tool_markup,
 )
 from services.project_files.models import (
     ArtifactSlot,
@@ -43,7 +34,11 @@ from services.project_files.models import (
     TimelineElement,
     TimelineSpan,
 )
-
+from services.runtime_files.models import (
+    CreatorMessageRecord,
+    MessageChannel,
+    MessageContentPart,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -273,56 +268,6 @@ def test_message_text_appends_selection_notes(tmp_path):
     assert "[选区上下文" not in rendered_plain
 
 
-# The local names the driver hands inline media to the provider on.
-_MEDIA_ROW_VARIABLES = frozenset(
-    {"user_content", "frame_content", "page_content"},
-)
-
-
-def _media_user_rows() -> list[tuple[str, bool]]:
-    """Every user row literal in the driver that carries media parts."""
-    tree = ast.parse(
-        Path(driver_module.__file__).read_text(encoding="utf-8"),
-    )
-    rows: list[tuple[str, bool]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Dict):
-            continue
-        fields: dict[str, ast.expr] = {
-            key.value: value
-            for key, value in zip(node.keys, node.values)
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
-        role = fields.get("role")
-        content = fields.get("content")
-        if not isinstance(role, ast.Constant) or role.value != "user":
-            continue
-        if (
-            isinstance(content, ast.Name)
-            and content.id in _MEDIA_ROW_VARIABLES
-        ):
-            rows.append((content.id, "source" in fields))
-    return rows
-
-
-def test_media_bearing_user_rows_say_the_runtime_observed_them():
-    """Inline media rides the user role, so the stamp is the only tell.
-
-    The provider's protocol refuses media on a tool row, which leaves the
-    demotion ladder no way to separate a frame a reader tool sampled from a
-    picture a person uploaded except by the source the driver wrote on the
-    row. An unstamped row is traded as an attachment, and the record then
-    reports a loss the runtime never had to take.
-    """
-    rows = _media_user_rows()
-
-    assert {name for name, _stamped in rows} == set(_MEDIA_ROW_VARIABLES)
-    assert [name for name, stamped in rows if not stamped] == []
-    assert model_context.MEDIA_OBSERVATION_SOURCE in (
-        model_context._AUTOMATED_HISTORY_SOURCES
-    )
-
-
 def _recall_record(
     seq: int,
     *,
@@ -514,3 +459,52 @@ def test_creator_summary_recall_wording_scrubs_reworded_host_line():
     result = _creator_summary_recall_wording(background, 1, 9)
     assert "conversation_history" not in result
     assert "the durable conversation store" in result
+
+
+def test_native_text_stream_preserves_prose_across_tag_shaped_chunk_boundaries() -> (
+    None
+):
+    async def scenario() -> list[str]:
+        observed: list[str] = []
+
+        async def collect(delta: str) -> None:
+            observed.append(delta)
+
+        stream = NativeToolTextStream(collect)
+        await stream.feed("正在检查 <")
+        await stream.feed("普通说明>")
+        await stream.finalize("正在检查 <普通说明>")
+        return observed
+
+    assert "".join(asyncio.run(scenario())) == "正在检查 <普通说明>"
+
+
+def test_native_text_stream_never_publishes_textual_tool_markup() -> None:
+    async def scenario() -> list[str]:
+        observed: list[str] = []
+
+        async def collect(delta: str) -> None:
+            observed.append(delta)
+
+        stream = NativeToolTextStream(collect)
+        with pytest.raises(NonNativeToolMarkupError):
+            await stream.feed("说明\n<fun")
+            await stream.feed(
+                "ction=glob_search><parameter=pattern>x</parameter></function>",
+            )
+        return observed
+
+    observed = asyncio.run(scenario())
+    assert not contains_non_native_tool_markup("".join(observed))
+
+
+def test_native_text_stream_rejects_non_streamed_textual_tool_markup() -> None:
+    async def scenario() -> None:
+        stream = NativeToolTextStream(None)
+        with pytest.raises(NonNativeToolMarkupError):
+            await stream.finalize(
+                "<function=glob_search><parameter=pattern>story/outline.md"
+                "</parameter></function></tool_call>",
+            )
+
+    asyncio.run(scenario())

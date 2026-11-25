@@ -429,6 +429,7 @@ def test_transient_download_failures_are_retried(
 def test_provider_download_auth_is_resolved_only_for_materialization(
     tmp_path,
     monkeypatch,
+    patch_attributes,
 ) -> None:
     """Veo x-goog-api-key and SGLang bearer resolve at request time only."""
 
@@ -443,15 +444,10 @@ def test_provider_download_auth_is_resolved_only_for_materialization(
             "download_auth": "x-goog-api-key",
         },
     )
-    monkeypatch.setattr(
+    patch_attributes(
         model_config,
-        "get_video_api_key",
-        lambda: "new-secret",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_backend",
-        lambda: "veo",
+        get_video_api_key=lambda: "new-secret",
+        get_video_backend=lambda: "veo",
     )
 
     async def stub(output, **kwargs):
@@ -485,20 +481,11 @@ def test_provider_download_auth_is_resolved_only_for_materialization(
             "download_auth": "authorization-bearer",
         },
     )
-    monkeypatch.setattr(
+    patch_attributes(
         model_config,
-        "get_video_api_key",
-        lambda: "sk-local",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_backend",
-        lambda: "minimax_sglang",
-    )
-    monkeypatch.setattr(
-        model_config,
-        "get_video_base_url",
-        lambda: "http://localhost:30010",
+        get_video_api_key=lambda: "sk-local",
+        get_video_backend=lambda: "minimax_sglang",
+        get_video_base_url=lambda: "http://localhost:30010",
     )
     captured.clear()
     result = _run_materialize(

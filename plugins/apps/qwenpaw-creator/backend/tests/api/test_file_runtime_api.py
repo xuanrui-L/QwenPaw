@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 
+from api import file_session_routes
 from api.dependencies import creator_error_handler, project_file_services
 from api.file_execution_routes import router as execution_router
 from api.file_session_routes import router as session_router, stream_events
@@ -100,9 +102,21 @@ def test_file_session_message_is_idempotent_and_visible(
 )
 def test_event_stream_replays_pages_and_handles_file_changes(
     tmp_path,
-    caplog,
+    monkeypatch,
     change,
 ):
+    # Uses a lifecycle type, not a streaming delta: the replay filter drops
+    # historical deltas on purpose, and this test is about cursor progress
+    # and fail-closed behaviour when the durable file changes underneath it.
+    # The plugin logger does not propagate to the root logger, so caplog
+    # can never see it; record the warning at its call site instead.
+    notices: list[str] = []
+
+    # pylint: disable-next=unused-argument
+    def record_warning(message, *args, **kwargs):
+        notices.append(message % args if args else str(message))
+
+    monkeypatch.setattr(file_session_routes.logger, "warning", record_warning)
     _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
     store = services.sessions
 
@@ -110,7 +124,7 @@ def test_event_stream_replays_pages_and_handles_file_changes(
         store.append_event(
             "project-1",
             "session-1",
-            event_type="agent.message_delta",
+            event_type="workspace.head_changed",
             actor="agent",
             payload={"value": value},
         )
@@ -157,7 +171,7 @@ def test_event_stream_replays_pages_and_handles_file_changes(
         range(4, 207 if change == "append" else 204),
     )
     if change != "append":
-        assert "Event replay stopped" in caplog.text
+        assert any("Event replay stopped" in line for line in notices)
 
 
 def test_interrupt_is_persisted_before_process_local_cancellation(
@@ -489,6 +503,33 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
     assert calls == [("project-1", "timeline:timeline:main")]
 
 
+def test_empty_timeline_render_is_rejected_before_dispatch(
+    tmp_path,
+    monkeypatch,
+    run_scenario,
+) -> None:
+    app, services, _snapshot, _bootstrap = _app(tmp_path)
+    dispatch = AsyncMock()
+    monkeypatch.setattr(
+        "services.media_files.local_execution.execute_file_local_media_command",
+        dispatch,
+    )
+
+    async def scenario(client):
+        return await client.post(
+            "/projects/project-1/timelines/timeline%3Amain/render",
+            headers={"Idempotency-Key": "empty-timeline"},
+        )
+
+    response = run_scenario(app, scenario)
+    assert response.status_code == 409, response.text
+    payload = response.json()
+    assert payload["code"] == "CONFLICT"
+    assert "没有可执行的 R2V/Edit Element" in payload["message"]
+    dispatch.assert_not_awaited()
+    assert not ProjectExecutionStore(services.root).list_tasks("project-1")
+
+
 def test_file_execution_authorization_can_be_polled_and_approved(
     tmp_path,
     run_scenario,
@@ -768,7 +809,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
             services,
             executions,
             "project-1",
-            check_media_budget=False,
         )
         node = next(
             n
@@ -916,7 +956,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
             services,
             executions,
             "project-1",
-            check_media_budget=False,
         )
         if change not in {"unchanged", "review"}:
             assert blocked[node.node_id] == "EDIT_IN_PROGRESS"
@@ -944,7 +983,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
                     services,
                     executions,
                     "project-1",
-                    check_media_budget=False,
                     **confirmation,
                 )
                 matches = confirmation == {

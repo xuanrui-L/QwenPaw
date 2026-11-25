@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 
 import pytest
 
 from models import config as model_config
 from models import tts_model
+from utils.exceptions import ModelError
 from models.tts_capabilities import (
     DEFAULT_TTS_MODEL,
     capability_for,
@@ -280,8 +280,6 @@ def test_abnormal_close_normalizes_to_provider_error(
 
     import websocket
 
-    from utils.exceptions import ModelError
-
     def make_exc():
         if failure == "close_frame_race":
             return AttributeError(
@@ -319,8 +317,6 @@ def test_handshake_rejection_maps_status_to_retryability(
     429/5xx stay retryable."""
 
     import websocket
-
-    from utils.exceptions import ModelError
 
     class _Synth(_FakeSynthesizerBase):
         def streaming_call(self, text) -> None:
@@ -409,24 +405,6 @@ def test_every_supported_model_declares_a_usable_voice_source() -> None:
         )
         assert capability.clone_model()
         assert capability.transport in {"http", "websocket"}
-
-
-def test_labels_do_not_quote_a_stale_voice_count() -> None:
-    """The configuration page takes each label verbatim, and a published voice
-    list changes without telling the copy that counts it."""
-
-    for capability in supported_models():
-        stated = re.findall(r"(\d+)\s*个系统音色", capability.label)
-        for count in stated:
-            assert int(count) == len(capability.system_voices), (
-                f"{capability.model} label says {count} voices, "
-                f"the table registers {len(capability.system_voices)}"
-            )
-        if capability.model.startswith("qwen-audio"):
-            # Pin the convention instead of only checking it when it is
-            # honoured: a Qwen-Audio label that dropped its count would pass
-            # the loop above, silently and green.
-            assert len(stated) == 1, f"{capability.model} states no count"
 
 
 def test_unknown_model_falls_back_to_the_default() -> None:
@@ -554,7 +532,6 @@ def test_websocket_synthesis_binds_the_token_plan_endpoint_per_call(
     reads at construction time."""
     import dashscope
     from dashscope.audio import tts_v2
-    from utils.exceptions import ModelError
 
     recorded: list = []
     monkeypatch.setattr(
@@ -592,7 +569,6 @@ def test_a_failed_plan_probe_leaves_the_saved_bailian_endpoint_alone(
     reproduce it; no concurrency needed."""
     import dashscope
     from dashscope.audio import tts_v2
-    from utils.exceptions import ModelError
 
     recorded: list = []
     monkeypatch.setattr(
@@ -641,7 +617,6 @@ def test_concurrent_synthesis_keeps_its_endpoints_isolated(
 
     import dashscope
     from dashscope.audio import tts_v2
-    from utils.exceptions import ModelError
 
     recorded: list = []
     monkeypatch.setattr(

@@ -14,6 +14,14 @@ import pytest
 
 from services.runtime_files import runtime_dependencies as dependencies
 
+import asyncio
+import json
+import threading
+import dev_main
+import main
+from services.project_files import facade
+from services.project_files.facade import creator_file_services
+
 
 @pytest.fixture(autouse=True)
 def clear_binary_environment() -> Iterator[None]:
@@ -188,3 +196,132 @@ def test_dev_app_imports_in_a_cold_interpreter(tmp_path: Path) -> None:
         timeout=30,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_cancelled_standalone_startup_recovers_the_same_root_on_retry(
+    tmp_path,
+    monkeypatch,
+    patch_attributes,
+):
+    started = threading.Event()
+    release = threading.Event()
+    patch_attributes(
+        dev_main,
+        require_creator_data_root=lambda: tmp_path,
+        ensure_creator_runtime_dependencies=lambda: {},
+    )
+    other_root = tmp_path / "unrelated"
+    other = creator_file_services(other_root)
+
+    def wait_in_recovery(_services):
+        started.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(
+        dev_main,
+        "recover_interrupted_source_analysis",
+        wait_in_recovery,
+    )
+
+    async def start():
+        async with dev_main.lifespan(dev_main.app):
+            pytest.fail("cancelled startup accepted traffic")
+
+    async def cancel_startup():
+        task = asyncio.create_task(start())
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(cancel_startup())
+        tombstone = tmp_path / ".deleted-on-retry"
+        tombstone.mkdir()
+        creator_file_services(tmp_path)
+        assert not tombstone.exists()
+        assert creator_file_services(other_root) is other
+    finally:
+        dev_main.clear_creator_file_service_registry()
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        "recover_interrupted_source_observations",
+        "recover_interrupted_source_video_reads",
+    ],
+)
+def test_cancelled_host_startup_joins_task_recovery_before_teardown(
+    tmp_path,
+    monkeypatch,
+    patch_attributes,
+    recovery,
+):
+    entered, release = threading.Event(), threading.Event()
+    order = []
+
+    def recover(_services):
+        entered.set()
+        assert release.wait(5)
+        order.append("recovery finished")
+
+    async def start(_services):
+        pass
+
+    async def stop():
+        order.append("media stopped")
+
+    patch_attributes(
+        main,
+        configure_creator_runtime_environment=lambda: None,
+        require_creator_data_root=lambda: tmp_path,
+        ensure_creator_runtime_dependencies=lambda: {},
+        ensure_vendor_libs=lambda: None,
+        start_file_media_execution_services=start,
+        start_creator_agent_runtime=start,
+        shutdown_file_media_execution_services=stop,
+    )
+    monkeypatch.setattr(main, recovery, recover)
+
+    async def cancel_startup():
+        task = asyncio.create_task(main._startup())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=0.03)
+            assert not done
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(cancel_startup())
+    assert order == ["recovery finished", "media stopped"]
+
+
+@pytest.mark.unit
+def test_stale_runtime_owner_system_error_does_not_abort_startup(
+    tmp_path,
+    monkeypatch,
+):
+    marker = tmp_path / "runtime-owner.json"
+    marker.write_text(
+        json.dumps({"pid": os.getpid() + 1}),
+        encoding="utf-8",
+    )
+
+    def raise_system_error(_pid, _signal):
+        raise SystemError("wrapped os.kill failure")
+
+    monkeypatch.setattr(facade.os, "kill", raise_system_error)
+
+    # pylint: disable-next=protected-access
+    assert facade._warn_on_second_backend(tmp_path) is False
+    updated = json.loads(marker.read_text(encoding="utf-8"))
+    assert updated["pid"] == os.getpid()

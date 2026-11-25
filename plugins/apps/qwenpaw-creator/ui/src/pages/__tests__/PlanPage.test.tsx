@@ -1,3 +1,11 @@
+import {
+  checkAutomaticComposeRefusal,
+  composeGraph,
+  pollRoutes,
+  seedWithoutFinal,
+  cloneProject,
+  seedProject as seedProjectSnapshot,
+} from "@/test/projectSnapshotFixtures";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { act } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -10,33 +18,11 @@ import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
-import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument, TaskView } from "@/contracts/creator";
 
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
-
-function seedProject(project = cloneProject()) {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project,
-    generation: project.generation,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-    lastGoodAt: "2026-07-20T00:02:00Z",
-  });
-}
-
-function seedWithoutFinal(project = cloneProject()) {
-  delete project.assets.artifact_slots_by_id["timeline:timeline:main:render"];
-  delete project.assets.artifact_versions_by_id["final-v1"];
-  seedProject(project);
-  return project;
-}
+const seedProject = (project?: ProjectDocument) =>
+  seedProjectSnapshot(project, "2026-07-20T00:02:00Z");
 
 function composeTask(
   progress: number,
@@ -57,24 +43,6 @@ function composeTask(
     resultRefs: [],
     createdAt: "2026-07-20T00:00:00Z",
   } satisfies TaskView;
-}
-
-function pollRoutes(tasks: TaskView[] = []) {
-  return [
-    { match: "/specialist-runs", response: { json: { items: [] } } },
-    { match: "/tasks", response: { json: { items: tasks } } },
-    {
-      match: "/projects/p1/project",
-      response: {
-        status: 304,
-        headers: {
-          ETag: '"sha256:g3"',
-          "X-Project-Generation": "3",
-          "X-Project-Sync-Status": "healthy",
-        },
-      },
-    },
-  ];
 }
 
 function renderPage(entry = "/project/p1/plan") {
@@ -343,65 +311,13 @@ describe("PlanPage Timeline/Element frontend", () => {
     },
   );
 
-  it("honors a hold installed during dispatch and still permits an explicit render", async () => {
-    vi.useFakeTimers();
-    try {
-      seedWithoutFinal();
-      const graph = {
-        projectId: "p1",
-        generation: 3,
-        counts: {},
-        nodes: [],
-        mediaCalls: 0,
-        mediaCallBudget: 20,
-      };
-      const hold = { revision: 1, nodeIds: ["compose:timeline:main"] };
-      useWorkGraphStore.setState({ projectId: "p1", graph });
-      const { calls } = installMockFetch([
-        {
-          match: "/render?automatic=true",
-          method: "POST",
-          response: {
-            ok: false,
-            status: 409,
-            json: {
-              message: "held",
-              details: { code: "MANUAL_REGENERATION_HOLD" },
-            },
-          },
-        },
-        {
-          match: "/work-graph",
-          response: { json: { ...graph, manualHold: hold } },
-        },
-        {
-          match: "/render",
-          method: "POST",
-          response: { json: { taskId: "manual-task" } },
-        },
-        ...pollRoutes(),
-      ]);
-      renderPage();
-      await act(() => vi.advanceTimersByTimeAsync(1600));
-      expect(useWorkGraphStore.getState().graph?.manualHold).toEqual(hold);
-      await act(() => vi.advanceTimersByTimeAsync(3200));
-      expect(calls.filter((call) => call.url.includes("/render"))).toHaveLength(
-        1,
-      );
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "合成成片" }));
-      });
-      expect(
-        calls.filter(
-          (call) => call.method === "POST" && call.url.endsWith("/render"),
-        ),
-      ).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  it("refreshes the graph after a manual hold and still allows explicit render", () =>
+    checkAutomaticComposeRefusal(renderPage, "MANUAL_REGENERATION_HOLD", {
+      ...composeGraph("ready"),
+      manualHold: { revision: 1, nodeIds: ["compose:timeline:main"] },
+    }));
 
-  it.each(["first", "stale"])(
+  it.each(["first", "delegated superseded"])(
     "auto-composes a %s cut only after its own hold clears",
     async (cut) => {
       vi.useFakeTimers();
@@ -412,14 +328,7 @@ describe("PlanPage Timeline/Element frontend", () => {
           project.assets.artifact_versions_by_id["final-v1"].stale = true;
           seedProject(project);
         }
-        const graph = {
-          projectId: "p1",
-          generation: 3,
-          counts: {},
-          nodes: [],
-          mediaCalls: 0,
-          mediaCallBudget: 20,
-        };
+        const graph = composeGraph("ready");
         const { calls } = installMockFetch([
           {
             match: "/timelines/timeline%3Amain/render",

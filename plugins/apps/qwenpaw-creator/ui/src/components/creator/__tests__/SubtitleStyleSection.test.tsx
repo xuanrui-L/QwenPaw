@@ -1,20 +1,29 @@
+import type {
+  SubtitleAnimationPolicy,
+  SubtitleStyle,
+} from "@/contracts/creator";
+import SubtitleAnimationControls from "../SubtitleAnimationControls";
+import SubtitleStyleControls from "../SubtitleStyleControls";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-
 import type {
   MotionGraphicDocument,
   ProjectSettingsDocument,
-  SubtitleStyleUpdateRequest,
 } from "@/contracts/creator";
 import SubtitleStyleSection, {
   captionDocumentOwnedByStyle,
   subtitleAnimationFromDocument,
-  subtitleStyleFromSettings,
   type SubtitleStyleDraft,
 } from "../SubtitleStyleSection";
-import { subtitleStyleBaseFrom } from "../subtitleStyleDraft";
+import {
+  subtitleStyleBaseFrom,
+  diffSubtitleStyleDraft,
+  subtitleStyleDraftDirtyCount,
+  subtitleStyleDraftRequests,
+  subtitleStyleFromSettings,
+} from "../subtitleStyleDraft";
 
 function settings(
   overrides: Partial<ProjectSettingsDocument> = {},
@@ -98,11 +107,6 @@ describe("SubtitleStyleSection", () => {
     expect(screen.getByText("当前生效：综艺花字")).toBeInTheDocument();
   });
 
-  it("says smart recommend while the project never picked a pack", () => {
-    renderSection();
-    expect(screen.getByText("当前生效：智能推荐")).toBeInTheDocument();
-  });
-
   it("keeps a pack pick local instead of rewriting every caption at once", async () => {
     const user = userEvent.setup();
     const view = renderSection();
@@ -184,17 +188,6 @@ describe("SubtitleStyleSection", () => {
 
     await user.click(screen.getByText("弹入"));
     expect(screen.getByText("弹入")).toHaveAttribute("aria-pressed", "true");
-    // The pack default hint is gone as soon as a motion is stated.
-    expect(
-      screen.queryByText("未选择时跟随风格包默认动效"),
-    ).not.toBeInTheDocument();
-  });
-
-  it("tells the user the motion picker only reaches this caption", () => {
-    renderSection({ elementScoped: true, showMotion: true });
-    expect(
-      screen.getByText("动效只改这条字幕；风格包与样式作用于全项目字幕"),
-    ).toBeInTheDocument();
   });
 
   it("offers no button of its own to write the picks", () => {
@@ -221,15 +214,9 @@ describe("SubtitleStyleSection", () => {
     expect(view.draft().animation).toBeNull();
   });
 
-  it("trades the motion picker for an explanation when the design owns the look", () => {
+  it("hides the motion picker when the authored design owns the look", () => {
     renderSection({ motionOwned: false, showMotion: true });
 
-    expect(
-      screen.getByText(
-        "这条字幕的外观由其动效设计决定，风格包不会重写它；入场/出场/循环请在动效设计里调整",
-      ),
-    ).toBeInTheDocument();
-    // A picker whose choice the route would refuse is worse than no picker.
     expect(screen.queryByText("弹入")).not.toBeInTheDocument();
   });
 
@@ -246,64 +233,6 @@ describe("SubtitleStyleSection", () => {
     renderSection();
     expect(screen.queryByText("字幕动效")).not.toBeInTheDocument();
     expect(screen.queryByText("弹入")).not.toBeInTheDocument();
-  });
-
-  it("keeps the motion sentences out of the bar too", () => {
-    // Sentences about a control the bar no longer offers would leave the user
-    // looking for a picker that was never there.
-    renderSection({ motionOwned: false, elementScoped: true });
-    expect(
-      screen.queryByText(
-        "这条字幕的外观由其动效设计决定，风格包不会重写它；入场/出场/循环请在动效设计里调整",
-      ),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("动效只改这条字幕；风格包与样式作用于全项目字幕"),
-    ).not.toBeInTheDocument();
-  });
-
-  it("still offers the style controls the motion switch does not cover", () => {
-    renderSection();
-    expect(
-      screen.getByRole("button", { name: /综艺花字/ }),
-    ).toBeInTheDocument();
-    expect(screen.getByLabelText("#FFE066")).toBeInTheDocument();
-  });
-
-  it("still sends a project-wide pack with no element ids", () => {
-    // The confirm handler builds the requests from the same draft the bar
-    // writes, and the route rejects a pack addressed at single captions.
-    const requests: SubtitleStyleUpdateRequest[] = [
-      { subtitleTemplate: "variety_pop" },
-    ];
-    expect(requests[0]).not.toHaveProperty("elementIds");
-  });
-});
-
-describe("subtitleStyleFromSettings", () => {
-  it("maps the persisted snake_case overrides onto the control shape", () => {
-    expect(
-      subtitleStyleFromSettings(
-        settings({
-          subtitle_style: {
-            color: null,
-            font_scale: 0.85,
-            stroke_scale: null,
-            background_opacity: 0.3,
-          },
-        }),
-      ),
-    ).toEqual({
-      color: null,
-      fontFamily: null,
-      fontScale: 0.85,
-      strokeScale: null,
-      backgroundOpacity: 0.3,
-    });
-  });
-
-  it("reports null for a project that never overrode anything", () => {
-    expect(subtitleStyleFromSettings(settings())).toBeNull();
   });
 });
 
@@ -391,5 +320,477 @@ describe("subtitleAnimationFromDocument", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+const base = (
+  settingsOverrides: Partial<ProjectSettingsDocument> = {},
+  animation = null,
+) => subtitleStyleBaseFrom(settings(settingsOverrides), animation);
+
+describe("subtitleStyleBaseFrom", () => {
+  it("starts from what the project actually plays", () => {
+    expect(
+      base({
+        subtitle_template: "variety_pop",
+        subtitle_style: {
+          color: "#FFE066",
+          font_scale: null,
+          stroke_scale: 0,
+          background_opacity: 0.3,
+        },
+      }),
+    ).toEqual({
+      packId: "variety_pop",
+      style: {
+        color: "#FFE066",
+        fontFamily: null,
+        fontScale: null,
+        strokeScale: 0,
+        backgroundOpacity: 0.3,
+      },
+      animation: null,
+    });
+  });
+
+  it("reads an untouched project as no overrides at all", () => {
+    const live = base();
+    expect(live.packId).toBeNull();
+    expect(subtitleStyleFromSettings(settings())).toBeNull();
+  });
+});
+
+describe("diffSubtitleStyleDraft", () => {
+  it("sees nothing pending while the draft equals the live style", () => {
+    const live = base({ subtitle_template: "variety_pop" });
+    expect(diffSubtitleStyleDraft({ ...live }, live)).toEqual({
+      pack: false,
+      style: false,
+      animation: false,
+    });
+    expect(subtitleStyleDraftDirtyCount({ ...live }, live)).toBe(0);
+  });
+
+  it("counts each group once, however many pills it moved", () => {
+    const live = base();
+    const draft = {
+      packId: "cinematic",
+      style: { color: "#FFE066", fontScale: 1.25, strokeScale: null },
+      animation: { entrance: "pop" as const, loop: true },
+    };
+    expect(subtitleStyleDraftDirtyCount(draft, live)).toBe(3);
+  });
+
+  it("treats an all-default override object as no override", () => {
+    const live = base({ subtitle_style: { color: "#FFE066" } });
+    expect(diffSubtitleStyleDraft({ ...live, style: null }, live).style).toBe(
+      true,
+    );
+    const clean = base();
+    expect(
+      diffSubtitleStyleDraft(
+        {
+          ...clean,
+          style: {
+            color: null,
+            fontScale: null,
+            strokeScale: null,
+            backgroundOpacity: null,
+          },
+        },
+        clean,
+      ).style,
+    ).toBe(false);
+  });
+
+  it("sees a plate-opacity pick as a style change, 跟随风格 as none", () => {
+    // 0 is a stated wish (drop the block), so it has to be pending; leaving
+    // the field out means "the pack's own alpha" and never is.
+    const live = base({ subtitle_template: "clean_talk" });
+    expect(
+      diffSubtitleStyleDraft({ ...live, style: { backgroundOpacity: 0 } }, live)
+        .style,
+    ).toBe(true);
+    expect(diffSubtitleStyleDraft({ ...live, style: {} }, live).style).toBe(
+      false,
+    );
+    expect(
+      subtitleStyleDraftRequests(
+        { ...live, style: { backgroundOpacity: 0.5 } },
+        live,
+      ),
+    ).toEqual([{ subtitleStyle: { backgroundOpacity: 0.5 } }]);
+  });
+
+  it("counts going back to smart recommend as a change", () => {
+    const live = base({ subtitle_template: "cinematic" });
+    expect(diffSubtitleStyleDraft({ ...live, packId: null }, live).pack).toBe(
+      true,
+    );
+  });
+
+  it("never reads an unset motion field as a change", () => {
+    // "Follow the style pack" has no token to send, so a draft that leaves a
+    // field out cannot be pending on it.
+    const live = base({}, { entrance: "pop", exit: "none", loop: false });
+    expect(
+      diffSubtitleStyleDraft({ ...live, animation: { loop: false } }, live)
+        .animation,
+    ).toBe(false);
+    expect(
+      diffSubtitleStyleDraft({ ...live, animation: { loop: true } }, live)
+        .animation,
+    ).toBe(true);
+  });
+
+  it("goes clean once a partial motion pick has landed", () => {
+    // The renderer stamps every field it resolved, so the live triple after a
+    // successful pick is fuller than the override that was sent; comparing
+    // them field by field would keep the confirm button alive forever.
+    const before = base({ subtitle_template: "variety_pop" }, null);
+    const draft = { ...before, animation: { loop: true } };
+    expect(diffSubtitleStyleDraft(draft, before).animation).toBe(true);
+
+    const after = base(
+      { subtitle_template: "variety_pop" },
+      { entrance: "pop", exit: "none", loop: true },
+    );
+    expect(diffSubtitleStyleDraft(draft, after).animation).toBe(false);
+    expect(subtitleStyleDraftRequests(draft, after, ["cap-1"])).toEqual([]);
+  });
+});
+
+describe("subtitleStyleDraftRequests", () => {
+  it("sends nothing for a draft that only repeats the live style", () => {
+    const live = base({ subtitle_template: "cinematic" });
+    expect(subtitleStyleDraftRequests({ ...live }, live, ["cap-1"])).toEqual(
+      [],
+    );
+  });
+
+  it("keeps a pack pick project-wide, with no element ids", () => {
+    const live = base();
+    expect(
+      subtitleStyleDraftRequests({ ...live, packId: "variety_pop" }, live, [
+        "cap-1",
+      ]),
+    ).toEqual([{ subtitleTemplate: "variety_pop" }]);
+  });
+
+  it("clears the pack with an explicit null", () => {
+    const live = base({ subtitle_template: "variety_pop" });
+    expect(subtitleStyleDraftRequests({ ...live, packId: null }, live)).toEqual(
+      [{ subtitleTemplate: null }],
+    );
+  });
+
+  it("merges pack and overrides into one project-wide call", () => {
+    const live = base();
+    expect(
+      subtitleStyleDraftRequests(
+        { ...live, packId: "cinematic", style: { color: "#FFE066" } },
+        live,
+        ["cap-1"],
+      ),
+    ).toEqual([
+      {
+        subtitleTemplate: "cinematic",
+        subtitleStyle: { color: "#FFE066" },
+      },
+    ]);
+  });
+
+  it("addresses only the open caption with a motion pick", () => {
+    const live = base();
+    expect(
+      subtitleStyleDraftRequests(
+        { ...live, animation: { entrance: "pop" } },
+        live,
+        ["cap-1"],
+      ),
+    ).toEqual([{ animation: { entrance: "pop" }, elementIds: ["cap-1"] }]);
+    // Outside a detail view the same pick reaches every subtitle.
+    expect(
+      subtitleStyleDraftRequests(
+        { ...live, animation: { entrance: "pop" } },
+        live,
+      ),
+    ).toEqual([{ animation: { entrance: "pop" } }]);
+  });
+
+  it("splits a mixed draft into two calls, pack first", () => {
+    // The route rejects a pack addressed at single captions, and the motion
+    // override only makes sense after the pack redrew the documents.
+    const live = base();
+    expect(
+      subtitleStyleDraftRequests(
+        { ...live, packId: "variety_pop", animation: { entrance: "slide" } },
+        live,
+        ["cap-1"],
+      ),
+    ).toEqual([
+      { subtitleTemplate: "variety_pop" },
+      { animation: { entrance: "slide" }, elementIds: ["cap-1"] },
+    ]);
+  });
+});
+
+function AnimationHarness({
+  initial = null,
+  allowClear = false,
+  onEmit,
+}: {
+  initial?: SubtitleAnimationPolicy | null;
+  allowClear?: boolean;
+  onEmit?: (animation: SubtitleAnimationPolicy | null) => void;
+}) {
+  const [value, setValue] = useState<SubtitleAnimationPolicy | null>(initial);
+  return (
+    <SubtitleAnimationControls
+      value={value}
+      allowClear={allowClear}
+      onChange={(next) => {
+        setValue(next);
+        onEmit?.(next);
+      }}
+    />
+  );
+}
+
+describe("SubtitleAnimationControls", () => {
+  it("emits one picked entrance without inventing the other choices", async () => {
+    const user = userEvent.setup();
+    const emitted: (SubtitleAnimationPolicy | null)[] = [];
+    render(
+      <AnimationHarness onEmit={(animation) => emitted.push(animation)} />,
+    );
+
+    await user.click(screen.getByText("弹入"));
+
+    expect(emitted.at(-1)).toEqual({ entrance: "pop" });
+    expect(screen.getByText("弹入")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("accumulates the triple across picks", async () => {
+    const user = userEvent.setup();
+    const emitted: (SubtitleAnimationPolicy | null)[] = [];
+    render(
+      <AnimationHarness onEmit={(animation) => emitted.push(animation)} />,
+    );
+
+    await user.click(screen.getByText("滑入"));
+    await user.click(screen.getByText("缩小"));
+    await user.click(screen.getByText("开"));
+
+    expect(emitted.at(-1)).toEqual({
+      entrance: "slide",
+      exit: "shrink",
+      loop: true,
+    });
+  });
+
+  it("reflects what the caption document already plays", () => {
+    render(
+      <AnimationHarness
+        initial={{ entrance: "type_on", exit: "none", loop: false }}
+      />,
+    );
+    expect(screen.getByText("逐字浮现")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(
+      screen.queryByText("未选择时跟随风格包默认动效"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("takes a pick back on a second click when clearing is allowed", async () => {
+    const user = userEvent.setup();
+    const emitted: (SubtitleAnimationPolicy | null)[] = [];
+    render(
+      <AnimationHarness
+        allowClear
+        onEmit={(animation) => emitted.push(animation)}
+      />,
+    );
+
+    await user.click(screen.getByText("弹入"));
+    expect(emitted.at(-1)).toEqual({ entrance: "pop" });
+
+    await user.click(screen.getByText("弹入"));
+    expect(emitted.at(-1)).toBeNull();
+    expect(screen.getByText("弹入")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("未选择时跟随风格包默认动效")).toBeInTheDocument();
+  });
+
+  it("keeps the other picks when one field is taken back", async () => {
+    const user = userEvent.setup();
+    const emitted: (SubtitleAnimationPolicy | null)[] = [];
+    render(
+      <AnimationHarness
+        allowClear
+        onEmit={(animation) => emitted.push(animation)}
+      />,
+    );
+
+    await user.click(screen.getByText("滑入"));
+    await user.click(screen.getByText("缩小"));
+    await user.click(screen.getByText("缩小"));
+
+    expect(emitted.at(-1)).toEqual({ entrance: "slide", exit: null });
+  });
+
+  it("offers 恢复默认 once a pick exists and it clears the policy", async () => {
+    const user = userEvent.setup();
+    const emitted: (SubtitleAnimationPolicy | null)[] = [];
+    render(
+      <AnimationHarness
+        allowClear
+        initial={{ entrance: "pop", loop: true }}
+        onEmit={(animation) => emitted.push(animation)}
+      />,
+    );
+
+    const reset = screen.getByRole("button", { name: "恢复默认" });
+    await user.click(reset);
+
+    expect(emitted.at(-1)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "恢复默认" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("弹入")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("keeps picks sticky where clearing is not offered", async () => {
+    const user = userEvent.setup();
+    render(<AnimationHarness />);
+
+    await user.click(screen.getByText("弹入"));
+    await user.click(screen.getByText("弹入"));
+
+    expect(screen.getByText("弹入")).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.queryByRole("button", { name: "恢复默认" }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+function StyleHarness({
+  onEmit,
+}: {
+  onEmit?: (style: SubtitleStyle | null) => void;
+}) {
+  const [value, setValue] = useState<SubtitleStyle | null>(null);
+  return (
+    <SubtitleStyleControls
+      value={value}
+      onChange={(next) => {
+        setValue(next);
+        onEmit?.(next);
+      }}
+    />
+  );
+}
+
+describe("SubtitleStyleControls", () => {
+  it("starts on every renderer default", () => {
+    render(<StyleHarness />);
+    expect(screen.getByText("默认")).toHaveAttribute("aria-pressed", "true");
+    // 字号与描边各自的标准档
+    const standards = screen.getAllByText("标准");
+    expect(standards).toHaveLength(2);
+    standards.forEach((node) =>
+      expect(node).toHaveAttribute("aria-pressed", "true"),
+    );
+  });
+
+  it("emits the chosen colour, size and outline", async () => {
+    const user = userEvent.setup();
+    const emitted: Array<SubtitleStyle | null> = [];
+    render(<StyleHarness onEmit={(style) => emitted.push(style)} />);
+
+    await user.click(screen.getByLabelText("#FFE066"));
+    await user.click(screen.getByText("大"));
+    await user.click(screen.getByText("无"));
+
+    expect(emitted.at(-1)).toEqual({
+      color: "#FFE066",
+      fontFamily: null,
+      fontScale: 1.25,
+      strokeScale: 0,
+      backgroundOpacity: null,
+    });
+  });
+
+  it("keeps the plate opacity beside the other overrides", async () => {
+    const user = userEvent.setup();
+    const emitted: Array<SubtitleStyle | null> = [];
+    render(<StyleHarness onEmit={(style) => emitted.push(style)} />);
+
+    // The row starts on the pack's own alpha, which stores nothing.
+    expect(screen.getByText("跟随风格")).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    await user.click(screen.getByText("无底板"));
+    expect(emitted.at(-1)).toEqual({
+      color: null,
+      fontFamily: null,
+      fontScale: null,
+      strokeScale: null,
+      backgroundOpacity: 0,
+    });
+
+    await user.click(screen.getByText("50%"));
+    expect(emitted.at(-1)).toMatchObject({ backgroundOpacity: 0.5 });
+
+    // Going back to 跟随风格 clears the only override, so the whole style
+    // object collapses and an untouched project still persists no style.
+    await user.click(screen.getByText("跟随风格"));
+    expect(emitted.at(-1)).toBeNull();
+  });
+
+  it("collapses back to null once every override is cleared", async () => {
+    const user = userEvent.setup();
+    const emitted: Array<SubtitleStyle | null> = [];
+    render(<StyleHarness onEmit={(style) => emitted.push(style)} />);
+
+    await user.click(screen.getByLabelText("#7DD3FC"));
+    expect(emitted.at(-1)).not.toBeNull();
+
+    await user.click(screen.getByText("默认"));
+    expect(emitted.at(-1)).toBeNull();
+  });
+
+  it("offers 恢复默认 only while an override is stated, and it clears all", async () => {
+    const user = userEvent.setup();
+    const emitted: Array<SubtitleStyle | null> = [];
+    render(<StyleHarness onEmit={(style) => emitted.push(style)} />);
+
+    // An untouched style has nothing to reset, so the button stays away — the
+    // same rule the motion picker's 恢复默认 follows.
+    expect(screen.queryByRole("button", { name: "恢复默认" })).toBeNull();
+
+    await user.click(screen.getByLabelText("#FFE066"));
+    await user.click(screen.getByRole("button", { name: "恢复默认" }));
+    expect(emitted.at(-1)).toBeNull();
+    expect(screen.queryByRole("button", { name: "恢复默认" })).toBeNull();
+  });
+
+  it("paints each font pill in its own face, the auto one inheriting", () => {
+    render(<StyleHarness />);
+    expect(
+      screen.getByRole("button", { name: "宋体" }).style.fontFamily,
+    ).toContain("Songti SC");
+    expect(
+      screen.getByRole("button", { name: "黑体" }).style.fontFamily,
+    ).toContain("PingFang SC");
+    expect(
+      screen.getByRole("button", { name: "楷体" }).style.fontFamily,
+    ).toContain("Kaiti SC");
+    expect(
+      screen.getByRole("button", { name: "默认字体" }).style.fontFamily,
+    ).toBe("");
   });
 });

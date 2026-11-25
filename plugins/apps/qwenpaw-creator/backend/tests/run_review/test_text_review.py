@@ -118,6 +118,28 @@ def _stub_model(monkeypatch, responses: list[str]) -> list[str]:
     return calls
 
 
+def _project_with_element(
+    creation,
+    *,
+    project=None,
+    timeline_id="t",
+    element_id="e",
+    **element_fields,
+):
+    return {
+        **(project or {}),
+        "timelines": {
+            "items": {
+                timeline_id: {
+                    "elements_by_id": {
+                        element_id: {**element_fields, "creation": creation},
+                    },
+                },
+            },
+        },
+    }
+
+
 def _r2v_contract_project(
     *,
     storyboard_prompt: str,
@@ -126,27 +148,17 @@ def _r2v_contract_project(
     character_refs: tuple[str, ...] = (),
     scene_ref: str | None = None,
 ) -> dict:
-    return {
-        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
-        "timelines": {
-            "items": {
-                "t": {
-                    "elements_by_id": {
-                        "e": {
-                            "creation": {
-                                "type": "r2v",
-                                "character_refs": list(character_refs),
-                                "scene_ref": scene_ref,
-                                "narrative": "。".join(dialogues),
-                                "storyboard_prompt": storyboard_prompt,
-                                "video_prompt": video_prompt,
-                            },
-                        },
-                    },
-                },
-            },
+    return _project_with_element(
+        {
+            "type": "r2v",
+            "character_refs": list(character_refs),
+            "scene_ref": scene_ref,
+            "narrative": "。".join(dialogues),
+            "storyboard_prompt": storyboard_prompt,
+            "video_prompt": video_prompt,
         },
-    }
+        project={"settings": {"aspect_ratio": "16:9", "language": "zh-CN"}},
+    )
 
 
 def test_sync_review_lifecycle_rounds_dedup_cap_and_reset(
@@ -273,25 +285,15 @@ def test_script_timeout_keeps_completed_appeal_and_reports_partial(
         "services.run_review.script_review.run_script_check",
         slow_script,
     )
-    project = {
-        **PROJECT_JSON,
-        "timelines": {
-            "items": {
-                "t": {
-                    "elements_by_id": {
-                        "e": {
-                            "creation": {
-                                "type": "r2v",
-                                "narrative": "小猫迈出脚步",
-                                "storyboard_prompt": "画出迈步过程",
-                                "video_prompt": "缓缓迈步",
-                            },
-                        },
-                    },
-                },
-            },
+    project = _project_with_element(
+        {
+            "type": "r2v",
+            "narrative": "小猫迈出脚步",
+            "storyboard_prompt": "画出迈步过程",
+            "video_prompt": "缓缓迈步",
         },
-    }
+        project=PROJECT_JSON,
+    )
     # Exercise parent-pointer expansion and the shared two-call budget.
     result = maybe_sync_review(
         project_id="project-run-review",
@@ -342,22 +344,9 @@ def test_mixed_strategy_and_shots_commit_still_runs_script_check(
         "services.run_review.script_review.run_script_check",
         fake_script_check,
     )
-    project = {
-        **PROJECT_JSON,
-        "timelines": {
-            "items": {
-                "t": {
-                    "elements_by_id": {
-                        "e": {
-                            "creation": {
-                                "narrative": "猫看向窗外",
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    }
+    project = _project_with_element(
+        {"narrative": "猫看向窗外"}, project=PROJECT_JSON
+    )
     result = maybe_sync_review(
         project_id="project-run-review",
         project_root=tmp_path,
@@ -393,22 +382,9 @@ def test_mixed_pointer_groups_review_concurrently(
         return _advisory_payload(weak_concept=False)
 
     monkeypatch.setattr(text_model, "chat_completion", fake_chat_completion)
-    project = {
-        **PROJECT_JSON,
-        "timelines": {
-            "items": {
-                "t": {
-                    "elements_by_id": {
-                        "e": {
-                            "creation": {
-                                "video_prompt": "纸船穿过晨光倒影",
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    }
+    project = _project_with_element(
+        {"video_prompt": "纸船穿过晨光倒影"}, project=PROJECT_JSON
+    )
     result = maybe_sync_review(
         project_id="project-run-review",
         project_root=tmp_path,
@@ -436,17 +412,7 @@ def test_generation_text_blocker_survives_repair_turn_but_not_hard_cap(
         return maybe_sync_review(
             project_id="project-run-review",
             project_root=tmp_path,
-            project_json={
-                "timelines": {
-                    "items": {
-                        "t": {
-                            "elements_by_id": {
-                                "e": {"creation": {"video_prompt": prompt}},
-                            },
-                        },
-                    },
-                },
-            },
+            project_json=_project_with_element({"video_prompt": prompt}),
             changed_pointers=[pointer],
             transaction_id=txn,
             gate_token=f"gate-{txn}",
@@ -462,25 +428,17 @@ def test_generation_text_blocker_survives_repair_turn_but_not_hard_cap(
 
 
 def test_whole_element_create_expands_nested_generation_text() -> None:
-    project = {
-        "timelines": {
-            "items": {
-                "timeline:main": {
-                    "elements_by_id": {
-                        "elem:one": {
-                            "creation": {
-                                "type": "r2v",
-                                "intent": "纸船驶向晨雾",
-                                "narrative": "纸船随涟漪前进",
-                                "storyboard_prompt": "晨雾湖面与白色纸船",
-                                "video_prompt": "纸船缓慢向前漂移",
-                            },
-                        },
-                    },
-                },
-            },
+    project = _project_with_element(
+        {
+            "type": "r2v",
+            "intent": "纸船驶向晨雾",
+            "narrative": "纸船随涟漪前进",
+            "storyboard_prompt": "晨雾湖面与白色纸船",
+            "video_prompt": "纸船缓慢向前漂移",
         },
-    }
+        timeline_id="timeline:main",
+        element_id="elem:one",
+    )
     root = "/timelines/items/timeline:main/elements_by_id/elem:one"
     snapshot_id = "snapshot:timeline:main:1"
     snapshot_root = f"/timelines/items/{snapshot_id}"
@@ -536,28 +494,18 @@ def test_empty_r2v_prompt_is_reported_without_calling_review_model(
         "/timelines/items/timeline:main/elements_by_id/elem:one/"
         "creation/video_prompt"
     )
-    project = {
-        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
-        "timelines": {
-            "items": {
-                "timeline:main": {
-                    "elements_by_id": {
-                        "elem:one": {
-                            "enabled": True,
-                            "creation": {
-                                "type": "r2v",
-                                "narrative": "我们出发。",
-                                "storyboard_prompt": (
-                                    "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
-                                ),
-                                "video_prompt": "",
-                            },
-                        },
-                    },
-                },
-            },
+    project = _project_with_element(
+        {
+            "type": "r2v",
+            "narrative": "我们出发。",
+            "storyboard_prompt": ("16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"),
+            "video_prompt": "",
         },
-    }
+        enabled=True,
+        timeline_id="timeline:main",
+        element_id="elem:one",
+        project={"settings": {"aspect_ratio": "16:9", "language": "zh-CN"}},
+    )
 
     result = maybe_sync_review(
         project_id="project-run-review",
@@ -594,30 +542,18 @@ def test_clean_r2v_prompt_repair_releases_contract_blocker(
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
     _stub_model(monkeypatch, [_advisory_payload(weak_concept=False)])
     base = "/timelines/items/timeline:main/elements_by_id/elem:one"
-    project = {
-        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
-        "timelines": {
-            "items": {
-                "timeline:main": {
-                    "elements_by_id": {
-                        "elem:one": {
-                            "enabled": True,
-                            "creation": {
-                                "type": "r2v",
-                                "narrative": "我们出发。",
-                                "storyboard_prompt": (
-                                    "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
-                                ),
-                                "video_prompt": (
-                                    "[Image 1] 仅提供分镜动作顺序。" "角色坚定地说：‘我们出发。’"
-                                ),
-                            },
-                        },
-                    },
-                },
-            },
+    project = _project_with_element(
+        {
+            "type": "r2v",
+            "narrative": "我们出发。",
+            "storyboard_prompt": ("16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"),
+            "video_prompt": ("[Image 1] 仅提供分镜动作顺序。" "角色坚定地说：‘我们出发。’"),
         },
-    }
+        enabled=True,
+        timeline_id="timeline:main",
+        element_id="elem:one",
+        project={"settings": {"aspect_ratio": "16:9", "language": "zh-CN"}},
+    )
     reports_root = tmp_path / "runtime" / "run-review"
     admission.hold_sync_blocker(
         reports_root,

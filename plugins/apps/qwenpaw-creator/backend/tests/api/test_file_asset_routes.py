@@ -708,185 +708,73 @@ _TEXT_ASSET_PAYLOAD = {
 }
 
 
-def test_delete_asset_cancels_live_run_without_stealing_its_terminal_event(
+@pytest.mark.parametrize(
+    "with_session", [False, True], ids=["no-session", "session"]
+)
+@pytest.mark.parametrize(
+    "owns_run", [False, True], ids=["orphan", "live-worker"]
+)
+def test_delete_asset_settles_or_defers_the_source_run(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     run_scenario,
+    with_session,
+    owns_run,
 ) -> None:
-    # When a live worker owns the run the route must defer to it: the worker
-    # persists CANCELLED and emits subagent.failed{cancelled}, which is what
-    # disarms the "素材理解中" status bar. A pre-emptive durable CAS would
-    # make the worker skip its event and freeze the indicator.
     app, services = _app(tmp_path)
-    runtime = _RecordingRuntime(owns_run=True)
+    runtime = _RecordingRuntime(owns_run=owns_run)
     monkeypatch.setattr(
-        file_asset_routes,
-        "get_creator_agent_runtime",
-        lambda: runtime,
+        file_asset_routes, "get_creator_agent_runtime", lambda: runtime
     )
+    if with_session:
+        session = services.sessions.create_project_runtime("project-1").session
+    run_id = "spec-delete"
 
     async def scenario(client):
         created = await _upload_source(
-            client,
-            _TEXT_ASSET_PAYLOAD,
-            "asset-del-1",
+            client, _TEXT_ASSET_PAYLOAD, "asset-del-1"
         )
         version_id = created.json()["assetVersionId"]
-        run_id = _seed_active_source_run(services, version_id, "spec-live")
-        deleted = await client.delete(
+        _seed_active_source_run(services, version_id, run_id)
+        return await client.delete(
             f"/projects/project-1/assets/{version_id}",
-            headers={"Idempotency-Key": "del-live"},
+            headers={"Idempotency-Key": "del-source"},
         )
-        executions = ProjectExecutionStore(services.root)
-        return deleted, executions.get_specialist_run("project-1", run_id)
 
-    deleted, run = run_scenario(app, scenario)
+    deleted = run_scenario(app, scenario)
     assert deleted.status_code == 204
-    assert runtime.calls == [
-        ("project-1", "spec-live", "source_asset_deleted"),
-    ]
-    assert run.status is SpecialistRunStatus.QUEUED
-
-
-def test_delete_asset_settles_durable_run_when_no_live_owner(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-    run_scenario,
-) -> None:
-    # With no in-process worker (orphan / durable-only media run) the route
-    # still has to converge the durable record so the stale activity stops
-    # being reconstructed as "in progress" on reload.
-    app, services = _app(tmp_path)
-    runtime = _RecordingRuntime(owns_run=False)
-    monkeypatch.setattr(
-        file_asset_routes,
-        "get_creator_agent_runtime",
-        lambda: runtime,
+    assert runtime.calls == [("project-1", run_id, "source_asset_deleted")]
+    run = ProjectExecutionStore(services.root).get_specialist_run(
+        "project-1", run_id
     )
+    if owns_run:
+        assert run.status is SpecialistRunStatus.QUEUED
+    else:
+        assert run.status is SpecialistRunStatus.CANCELLED
+        assert run.metadata.get("cancelReason") == "SOURCE_ASSET_DELETED"
 
-    async def scenario(client):
-        created = await _upload_source(
-            client,
-            _TEXT_ASSET_PAYLOAD,
-            "asset-del-1",
-        )
-        version_id = created.json()["assetVersionId"]
-        run_id = _seed_active_source_run(services, version_id, "spec-orphan")
-        deleted = await client.delete(
-            f"/projects/project-1/assets/{version_id}",
-            headers={"Idempotency-Key": "del-orphan"},
-        )
-        executions = ProjectExecutionStore(services.root)
-        return deleted, executions.get_specialist_run("project-1", run_id)
-
-    deleted, run = run_scenario(app, scenario)
-    assert deleted.status_code == 204
-    assert runtime.calls == [
-        ("project-1", "spec-orphan", "source_asset_deleted"),
-    ]
-    assert run.status is SpecialistRunStatus.CANCELLED
-    assert run.metadata.get("cancelReason") == "SOURCE_ASSET_DELETED"
-
-
-def test_delete_asset_durable_cancel_emits_terminal_sse_event(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-    run_scenario,
-) -> None:
-    # The durable CAS is invisible to the UI: `subagentActivities` is built
-    # only from SSE events, so the route must append the cancelled terminal
-    # event itself, or the status bar keeps showing the specialist's
-    # activity ("素材理解中") even though the record is already CANCELLED.
-    app, services = _app(tmp_path)
-    runtime = _RecordingRuntime(owns_run=False)
-    monkeypatch.setattr(
-        file_asset_routes,
-        "get_creator_agent_runtime",
-        lambda: runtime,
-    )
-    session_id = services.sessions.create_project_runtime(
-        "project-1",
-    ).session.session_id
-
-    async def scenario(client):
-        created = await _upload_source(
-            client,
-            _TEXT_ASSET_PAYLOAD,
-            "asset-del-1",
-        )
-        version_id = created.json()["assetVersionId"]
-        _seed_active_source_run(services, version_id, "spec-event")
-        deleted = await client.delete(
-            f"/projects/project-1/assets/{version_id}",
-            headers={"Idempotency-Key": "del-event"},
-        )
-        events = services.sessions.list_events("project-1", session_id)
-        return deleted, [
-            event for event in events if event.event_type == "subagent.failed"
+    if with_session:
+        failed = [
+            event
+            for event in services.sessions.list_events(
+                "project-1", session.session_id
+            )
+            if event.event_type == "subagent.failed"
         ]
-
-    deleted, failed = run_scenario(app, scenario)
-    assert deleted.status_code == 204
-    assert [event.payload["runId"] for event in failed] == ["spec-event"]
-    event = failed[0]
-    assert event.actor == "file_agent_runtime"
-    assert event.round_id == "agent-round-spec-event"
-    assert event.payload["cancelled"] is True
-    assert event.payload["error"] == "source_asset_deleted"
-    assert event.payload["parentActionId"] == "delegate-call-del"
-    assert event.payload["role"] == SpecialistRole.SOURCE_INTELLIGENCE.value
-
-
-def test_delete_asset_with_live_owner_appends_no_terminal_event(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-    run_scenario,
-) -> None:
-    # A live worker emits its own terminal lifecycle event. The route must
-    # not add a synthetic one after it: that would re-open the very
-    # activity the worker just closed.
-    app, services = _app(tmp_path)
-    runtime = _RecordingRuntime(owns_run=True)
-    monkeypatch.setattr(
-        file_asset_routes,
-        "get_creator_agent_runtime",
-        lambda: runtime,
-    )
-    session_id = services.sessions.create_project_runtime(
-        "project-1",
-    ).session.session_id
-
-    async def scenario(client):
-        created = await _upload_source(
-            client,
-            _TEXT_ASSET_PAYLOAD,
-            "asset-del-1",
-        )
-        version_id = created.json()["assetVersionId"]
-        run_id = _seed_active_source_run(services, version_id, "spec-live")
-        deleted = await client.delete(
-            f"/projects/project-1/assets/{version_id}",
-            headers={"Idempotency-Key": "del-live-event"},
-        )
-        executions = ProjectExecutionStore(services.root)
-        events = services.sessions.list_events("project-1", session_id)
-        return (
-            deleted,
-            executions.get_specialist_run("project-1", run_id),
-            [
-                event
-                for event in events
-                if event.event_type == "subagent.failed"
-            ],
-        )
-
-    deleted, run, failed = run_scenario(app, scenario)
-    assert deleted.status_code == 204
-    assert runtime.calls == [
-        ("project-1", "spec-live", "source_asset_deleted"),
-    ]
-    assert failed == []
-    assert run.status is SpecialistRunStatus.QUEUED
+        if owns_run:
+            assert not failed
+        else:
+            assert [event.payload["runId"] for event in failed] == [run_id]
+            event = failed[0]
+            assert event.actor == "file_agent_runtime"
+            assert event.round_id == f"agent-round-{run_id}"
+            assert event.payload["cancelled"] is True
+            assert event.payload["error"] == "source_asset_deleted"
+            assert event.payload["parentActionId"] == "delegate-call-del"
+            assert (
+                event.payload["role"]
+                == SpecialistRole.SOURCE_INTELLIGENCE.value
+            )
 
 
 def test_delete_asset_settles_run_created_after_the_first_sweep(
@@ -1273,54 +1161,58 @@ async def _post_image(client, *, key: str, name: str, content: bytes):
     )
 
 
-def test_reuploading_identical_bytes_reuses_one_asset(
+@pytest.mark.parametrize("kind", ["image", "text"])
+def test_renamed_reupload_reuses_bytes_and_keeps_the_original_asset(
     tmp_path,
     run_scenario,
+    kind,
 ) -> None:
-    # Idempotency only spans one request identity, so picking the same file
-    # twice used to land as two AssetVersions, two Sources and two copies of
-    # the bytes. Content identity now folds the second upload onto the first.
     app, services = _app(tmp_path)
+    suffix = ".png" if kind == "image" else ".txt"
+    name = "开场" + suffix
+    content = _TEXT_ASSET_PAYLOAD["value"].encode()
+
+    async def upload(client, key, filename):
+        if kind == "image":
+            return await _post_image(
+                client, key=key, name=filename, content=content
+            )
+        return await _upload_source(
+            client,
+            {**_TEXT_ASSET_PAYLOAD, "clientRequestId": key, "name": filename},
+            key,
+        )
 
     async def scenario(client):
-        first = await _post_image(
-            client,
-            key="dup-1",
-            name="frame.png",
-            content=b"duplicate-payload",
-        )
-        again = await _post_image(
-            client,
-            key="dup-2",
-            name="frame-copy.png",
-            content=b"duplicate-payload",
-        )
+        first = await upload(client, "dup-1", name)
+        again = await upload(client, "dup-2", "开场-新名" + suffix)
         return first, again
 
     first, again = run_scenario(app, scenario)
-
-    assert first.status_code == 202
-    assert again.status_code == 202
-    assert first.json()["reused"] is False
-    assert again.json()["reused"] is True
-    assert (
-        again.json()["assetVersionId"] == first.json()["assetVersionId"]
-    ), "identical bytes must name the AssetVersion the Project already has"
-    assert again.json()["assetId"] == first.json()["assetId"]
+    assert first.status_code == again.status_code == 202
+    first, again = first.json(), again.json()
+    assert first["reused"] is False
+    assert again["reused"] is True
+    assert again["assetVersionId"] == first["assetVersionId"]
+    assert again["assetId"] == first["assetId"]
+    item = again["result"]["items"][0]
+    assert item["reused"] is True
+    assert item["reusedName"] == name
 
     project = services.projects.read("project-1").project
-    assert len(project.assets.source_versions_by_id) == 1
-    assert len(project.assets.files_by_id) == 1
     assert (
-        len(project.sources.sources.items) == 1
-    ), "a reused Asset must not add a second Source row"
-    assert project.generation == 1, "a pure duplicate commits nothing"
-    stored = list(
-        (
-            services.projects.project_root("project-1") / "assets" / "sources"
-        ).iterdir(),
+        len(project.assets.files_by_id)
+        == len(project.sources.sources.items)
+        == 1
     )
-    assert len(stored) == 1, "no second copy of the bytes reaches disk"
+    assert project.generation == 1
+    (version,) = project.assets.source_versions_by_id.values()
+    assert version.name == name
+    assert version.checksum == sha256(content).hexdigest()
+    sources = (
+        services.projects.project_root("project-1") / "assets" / "sources"
+    )
+    assert len(list(sources.iterdir())) == 1
 
 
 def test_reusable_source_version_prefers_the_oldest_stored_match() -> None:
@@ -1368,41 +1260,6 @@ def test_reusable_source_version_prefers_the_oldest_stored_match() -> None:
     )
 
 
-def test_reuploading_identical_text_reuses_one_asset(
-    tmp_path,
-    run_scenario,
-) -> None:
-    # Pasted text is content too: the same value under a fresh request
-    # identity must not stack another Asset row.
-    app, services = _app(tmp_path)
-
-    async def scenario(client):
-        first = await _upload_source(
-            client,
-            {**_TEXT_ASSET_PAYLOAD, "clientRequestId": "text-dup-1"},
-            "text-dup-1",
-        )
-        again = await _upload_source(
-            client,
-            {
-                **_TEXT_ASSET_PAYLOAD,
-                "clientRequestId": "text-dup-2",
-                "name": "brief-v2.txt",
-            },
-            "text-dup-2",
-        )
-        return first, again
-
-    first, again = run_scenario(app, scenario)
-
-    assert first.status_code == 202
-    assert again.json()["reused"] is True
-    assert again.json()["assetVersionId"] == first.json()["assetVersionId"]
-    project = services.projects.read("project-1").project
-    assert len(project.assets.source_versions_by_id) == 1
-    assert len(project.sources.sources.items) == 1
-
-
 def test_batch_import_reuses_duplicate_within_batch(
     tmp_path,
     run_scenario,
@@ -1445,47 +1302,6 @@ def test_batch_import_reuses_duplicate_within_batch(
     assert len(project.sources.sources.items) == 2
 
 
-def test_renamed_reupload_reuses_and_keeps_the_stored_name(
-    tmp_path,
-    run_scenario,
-) -> None:
-    # Renaming a file and uploading it again is the same creative material:
-    # the Asset keeps the name it was first stored under rather than silently
-    # rewriting a label the user may have edited.
-    app, services = _app(tmp_path)
-
-    async def scenario(client):
-        first = await _post_image(
-            client,
-            key="rename-1",
-            name="开场.png",
-            content=b"renamed-payload",
-        )
-        again = await _post_image(
-            client,
-            key="rename-2",
-            name="开场-新名.png",
-            content=b"renamed-payload",
-        )
-        return first, again
-
-    first, again = run_scenario(app, scenario)
-
-    assert first.json()["assetVersionId"] == again.json()["assetVersionId"]
-    item = again.json()["result"]["items"][0]
-    assert item["reused"] is True
-    assert item["reusedName"] == "开场.png"
-    version = next(
-        iter(
-            services.projects.read(
-                "project-1",
-            ).project.assets.source_versions_by_id.values(),
-        ),
-    )
-    assert version.name == "开场.png"
-    assert version.checksum == sha256(b"renamed-payload").hexdigest()
-
-
 def test_deleted_asset_uploads_fresh_when_reuploaded(
     tmp_path,
     run_scenario,
@@ -1526,122 +1342,60 @@ def test_deleted_asset_uploads_fresh_when_reuploaded(
     assert len(project.sources.sources.items) == 1
 
 
-class TestMediaKindCompatible:
-    def test_same_kind_is_compatible(self) -> None:
-        assert _media_kind_compatible(stored="image", uploaded="image") is True
-        assert _media_kind_compatible(stored="audio", uploaded="audio") is True
-        assert _media_kind_compatible(stored="video", uploaded="video") is True
-
-    def test_other_accepts_any_concrete_kind(self) -> None:
-        assert _media_kind_compatible(stored="other", uploaded="image") is True
-        assert _media_kind_compatible(stored="other", uploaded="audio") is True
-        assert _media_kind_compatible(stored="other", uploaded="video") is True
-        assert _media_kind_compatible(stored="other", uploaded="text") is True
-
-    def test_different_concrete_kinds_are_incompatible(self) -> None:
-        assert (
-            _media_kind_compatible(stored="image", uploaded="audio") is False
-        )
-        assert (
-            _media_kind_compatible(stored="audio", uploaded="video") is False
-        )
-        assert (
-            _media_kind_compatible(stored="video", uploaded="image") is False
-        )
-
-    def test_concrete_kind_rejects_other(self) -> None:
-        # A stored concrete kind must not be downgraded to the opaque fallback.
-        assert (
-            _media_kind_compatible(stored="image", uploaded="other") is False
-        )
-
-
-def test_reusable_source_version_filters_by_media_kind() -> None:
-    """A WAV upload must not match a version stored as image, even with the
-    same checksum — bytes alone do not turn an image into audio."""
-    files = {"f1": {}, "f2": {}}
-    versions = {
-        "v-image": {
-            "version_id": "v-image",
-            "checksum": "abc",
-            "file_id": "f1",
-            "media_kind": "image",
-            "created_at": "2026-01-01T00:00:00+00:00",
-        },
-        "v-audio": {
-            "version_id": "v-audio",
-            "checksum": "abc",
-            "file_id": "f2",
-            "media_kind": "audio",
-            "created_at": "2026-01-02T00:00:00+00:00",
-        },
-    }
-
-    # No filter: both match.
+@pytest.mark.parametrize(
+    ("stored", "uploaded", "compatible"),
+    [
+        ("image", "image", True),
+        ("audio", "audio", True),
+        ("video", "video", True),
+        ("image", "audio", False),
+        ("audio", "video", False),
+        ("video", "image", False),
+        ("image", "other", False),
+        *(
+            ("other", kind, True)
+            for kind in ("image", "audio", "video", "text")
+        ),
+    ],
+)
+def test_media_kind_compatibility(stored, uploaded, compatible):
     assert (
-        len(
-            _reusable_source_version(
-                files=files,
-                versions=versions,
-                checksum="abc",
-            ),
-        )
-        == 2
-    )
-
-    # Audio filter: only v-audio.
-    audio_matches = _reusable_source_version(
-        files=files,
-        versions=versions,
-        checksum="abc",
-        media_kind="audio",
-    )
-    assert len(audio_matches) == 1
-    assert audio_matches[0]["version_id"] == "v-audio"
-
-    # Image filter: only v-image.
-    image_matches = _reusable_source_version(
-        files=files,
-        versions=versions,
-        checksum="abc",
-        media_kind="image",
-    )
-    assert len(image_matches) == 1
-    assert image_matches[0]["version_id"] == "v-image"
-
-    # Unknown checksum: empty.
-    assert (
-        _reusable_source_version(
-            files=files,
-            versions=versions,
-            checksum="xyz",
-            media_kind="image",
-        )
-        == []
+        _media_kind_compatible(stored=stored, uploaded=uploaded) is compatible
     )
 
 
-def test_reusable_source_version_other_accepts_any() -> None:
-    """A version stored as 'other' (e.g. raw application/octet-stream) is a
-    valid candidate for any concrete kind upload — the stored row is upgraded.
-    """
-    files = {"f-raw": {}}
+@pytest.mark.parametrize(
+    ("media_kind", "checksum", "expected"),
+    [
+        (None, "abc", ["image", "audio", "other"]),
+        ("image", "abc", ["image", "other"]),
+        ("audio", "abc", ["audio", "other"]),
+        ("video", "abc", ["other"]),
+        ("document", "abc", ["other"]),
+        ("text", "abc", ["other"]),
+        ("image", "xyz", []),
+    ],
+)
+def test_reusable_source_versions_match_checksum_and_media_kind(
+    media_kind,
+    checksum,
+    expected,
+):
+    kinds = ["image", "audio", "other"]
     versions = {
-        "v-raw": {
-            "version_id": "v-raw",
+        kind: {
+            "version_id": kind,
             "checksum": "abc",
-            "file_id": "f-raw",
-            "media_kind": "other",
-            "created_at": "2026-01-01T00:00:00+00:00",
-        },
+            "file_id": kind,
+            "media_kind": kind,
+            "created_at": f"2026-01-0{index}T00:00:00+00:00",
+        }
+        for index, kind in enumerate(kinds, start=1)
     }
-
-    for kind in ("image", "audio", "video", "document", "text"):
-        matches = _reusable_source_version(
-            files=files,
-            versions=versions,
-            checksum="abc",
-            media_kind=kind,
-        )
-        assert len(matches) == 1, f"kind={kind} should match 'other'"
-        assert matches[0]["version_id"] == "v-raw"
+    found = _reusable_source_version(
+        files=dict.fromkeys(kinds, {}),
+        versions=versions,
+        checksum=checksum,
+        media_kind=media_kind,
+    )
+    assert [version["version_id"] for version in found] == expected

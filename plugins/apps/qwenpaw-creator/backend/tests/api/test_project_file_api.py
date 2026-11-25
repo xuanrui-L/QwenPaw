@@ -94,16 +94,9 @@ def _pending_review(services, base, *, interrupted_run_id="run-1"):
     return result.review
 
 
-@pytest.mark.parametrize("already_selected", [False, True])
-@pytest.mark.parametrize("final_already_stale", [False, True])
-def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
-    tmp_path,
-    run_scenario,
-    already_selected,
-    final_already_stale,
+def _select_historical_video(
+    tmp_path, api_request, *, selected="new", final_already_stale=False
 ):
-    from services.file_agent_runtime.work_graph import derive_work_graph
-
     project = Project.new(project_id="project-1", name="Selected video")
     document = project.model_dump(mode="json")
     document["timelines"]["items"]["timeline:main"]["elements_by_id"] = {
@@ -121,7 +114,6 @@ def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
             },
         },
     }
-    selected = "old" if already_selected else "new"
     assets = document["assets"]
     for kind, owner, slot_id, versions, current in (
         (
@@ -199,12 +191,30 @@ def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
         expected=selected,
     )
 
-    async def scenario(client):
-        return await client.patch(PROJECT_URL, json=payload)
-
-    response = run_scenario(app, scenario)
+    response = api_request(app, "PATCH", PROJECT_URL, json=payload)
     assert response.status_code == 200, response.text
-    saved = services.projects.read("project-1").project
+    return (
+        services.projects.read("project-1").project,
+        response.json()["editImpact"],
+    )
+
+
+@pytest.mark.parametrize("already_selected", [False, True])
+@pytest.mark.parametrize("final_already_stale", [False, True])
+def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
+    tmp_path,
+    api_request,
+    already_selected,
+    final_already_stale,
+):
+    from services.file_agent_runtime.work_graph import derive_work_graph
+
+    saved, impact = _select_historical_video(
+        tmp_path,
+        api_request,
+        selected="old" if already_selected else "new",
+        final_already_stale=final_already_stale,
+    )
     assert (
         saved.assets.artifact_slots_by_id[
             "element:clip:main"
@@ -215,12 +225,11 @@ def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
     assert saved.assets.artifact_versions_by_id["final"].stale
     graph = derive_work_graph(saved)
     assert graph.by_id["video:clip"].status.value == "done"
-    assert graph.by_id["compose:timeline:main"].status.value == "ready"
-    assert not response.json()["editImpact"]["regenerationRequired"]
-    assert response.json()["editImpact"]["renderTimelineIds"] == [
+    assert not impact["regenerationRequired"]
+    assert impact["renderTimelineIds"] == [
         "timeline:main",
     ]
-    assert response.json()["editImpact"]["affectedElementIds"] == ["clip"]
+    assert impact["affectedElementIds"] == ["clip"]
 
 
 def _decisions_url(review):

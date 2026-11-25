@@ -227,6 +227,7 @@ describe("AgentDock composer render path", () => {
     });
 
     fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
     expect(useAgentDockUiStore.getState().unsentDrafts).toEqual({
       p1: ["Edited instruction"],
     });

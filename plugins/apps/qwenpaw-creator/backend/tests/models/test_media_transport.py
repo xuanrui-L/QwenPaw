@@ -15,8 +15,7 @@ from PIL import Image
 
 from models import config as model_config
 from models import image as image_backend
-from models import media_transport
-from models import vlm_model
+from models import media_transport, video_model, vlm_model
 from models.media_transport import (
     SEEDANCE_REFERENCE_IMAGE_MAX_BYTES,
     _fetch_dashscope_upload_policy,
@@ -239,35 +238,18 @@ def test_reference_media_checks_local_size_before_reading(tmp_path) -> None:
     ],
 )
 def test_creator_oss_readiness_has_explicit_three_states(
-    monkeypatch,
+    patch_attributes,
     values,
     expected_status,
 ) -> None:
     access_id, access_secret, endpoint = values
-    monkeypatch.setattr(
+    patch_attributes(
         media_transport.model_config,
-        "get_oss_access_key_id",
-        lambda: access_id,
-    )
-    monkeypatch.setattr(
-        media_transport.model_config,
-        "get_oss_access_key_secret",
-        lambda: access_secret,
-    )
-    monkeypatch.setattr(
-        media_transport.model_config,
-        "get_oss_endpoint",
-        lambda: endpoint,
-    )
-    monkeypatch.setattr(
-        media_transport.model_config,
-        "get_oss_bucket",
-        lambda default: default,
-    )
-    monkeypatch.setattr(
-        media_transport.model_config,
-        "get_oss_public_base_url",
-        lambda: "",
+        get_oss_access_key_id=lambda: access_id,
+        get_oss_access_key_secret=lambda: access_secret,
+        get_oss_endpoint=lambda: endpoint,
+        get_oss_bucket=lambda default: default,
+        get_oss_public_base_url=lambda: "",
     )
 
     readiness = media_transport.creator_oss_readiness()
@@ -356,16 +338,6 @@ def test_token_plan_media_stays_on_the_inline_budget(tmp_path, monkeypatch):
 
     maas = "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1"
     monkeypatch.setattr(
-        vlm_model.model_config,
-        "get_vlm_base_url",
-        lambda: maas,
-    )
-    monkeypatch.setattr(
-        vlm_model.model_config,
-        "get_vlm_protocol",
-        lambda: "Aliyun Token Plan",
-    )
-    monkeypatch.setattr(
         media_transport,
         "upload_local_file_to_dashscope_temp",
         refuse_upload,
@@ -383,6 +355,8 @@ def test_token_plan_media_stays_on_the_inline_budget(tmp_path, monkeypatch):
             image,
             api_key="sk-token-plan",
             model_name="qwen3-vl-plus",
+            base_url=maas,
+            protocol="Aliyun Token Plan",
         ),
     )
 
@@ -415,13 +389,6 @@ def test_oversized_local_video_is_refused_before_its_bytes_are_read(
         "get_vlm_max_inline_bytes",
         lambda: 1024,
     )
-    # Pin the section to an inline transport: the DashScope branch uploads
-    # instead and never reaches the budget this case is about.
-    monkeypatch.setattr(
-        vlm_model,
-        "uses_dashscope_transport",
-        lambda *_: False,
-    )
     reads: list[str] = []
     real_read_bytes = _Path.read_bytes
 
@@ -438,6 +405,8 @@ def test_oversized_local_video_is_refused_before_its_bytes_are_read(
                 api_key="vlm-key",
                 model_name="qwen-vl-max",
                 media_type="video/mp4",
+                base_url="https://openai-compatible.example/v1",
+                protocol="\u81ea\u5b9a\u4e49",
             ),
         )
 
@@ -485,6 +454,7 @@ def test_preparing_asr_reference_keeps_audio_bytes_out_of_logs(
     monkeypatch,
 ):
     from unittest.mock import Mock
+
     from models import asr_model
 
     audio = tmp_path / "reference.wav"
@@ -502,3 +472,33 @@ def test_preparing_asr_reference_keeps_audio_bytes_out_of_logs(
     )
     assert url.startswith("data:audio/")
     assert url.split(",", 1)[1] not in str(log.mock_calls)
+
+
+@pytest.mark.parametrize("name", ["cat.jpg", "猫咪 photo #1.jpg"])
+def test_wan_upload_receives_native_file_path(
+    tmp_path, monkeypatch, patch_attributes, name
+):
+    photo = tmp_path / name
+    photo.write_bytes(b"photo-reference")
+    patch_attributes(
+        video_model.model_config,
+        get_video_model_name=lambda: "wan3.0-video-prime",
+        get_video_api_key=lambda: "test-key",
+    )
+
+    async def upload(path, **_kwargs):
+        assert path == photo
+        assert path.read_bytes() == b"photo-reference"
+        return "oss://test/cat.jpg"
+
+    monkeypatch.setattr(
+        video_model,
+        "upload_reference_file_for_provider",
+        upload,
+    )
+    assert asyncio.run(
+        video_model._resolve_reference_media_url(photo.as_uri(), "wan"),
+    ) == (
+        "oss://test/cat.jpg",
+        "image",
+    )

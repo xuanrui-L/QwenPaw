@@ -176,7 +176,7 @@ def test_late_manual_hold_closes_running_image_and_allows_explicit_retry(
         response = await routes.dispatch_work_graph_node(
             PROJECT_ID,
             node_id,
-            services,
+            services=services,
         )
         assert response["dispatched"]
         assert provider.calls == initial_calls + 1
@@ -265,9 +265,7 @@ class _CountingProvider:
     model_name = "qwen-image-2.0-pro"
 
     def __init__(
-        self,
-        *,
-        fail_with: str | BaseException | None = None,
+        self, *, fail_with: str | BaseException | None = None
     ) -> None:
         self.calls = 0
         self._fail_with = fail_with

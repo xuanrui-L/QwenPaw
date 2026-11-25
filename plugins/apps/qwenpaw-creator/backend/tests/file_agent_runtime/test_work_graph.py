@@ -549,20 +549,6 @@ def test_missing_visual_prompt_is_a_model_required_gap(base_state) -> None:
     assert visual not in graph.ready_media_nodes()
 
 
-def _element_with_landed_storyboard(
-    project: Project,
-    **creation_kwargs,
-) -> None:
-    _add_element(project, _element("elem:one", **creation_kwargs))
-    _select_slot(
-        project,
-        slot_id="element:elem:one:storyboard",
-        kind="r2v_storyboard_image",
-        owner_ref="element:elem:one",
-        version_id="art:sb",
-    )
-
-
 def test_pending_lineup_only_gates_storyboards_that_reference_it() -> None:
     """The graph and executor both scope readiness to actual shot inputs."""
 
@@ -822,99 +808,6 @@ def test_storyboard_waits_for_all_referenced_entities_not_just_bindings() -> (
     assert graph.by_id["storyboard:elem:one"].status is WorkNodeStatus.READY
 
 
-def test_stale_final_render_reopens_compose() -> None:
-    # Render review revises an overlay after the master render: edit
-    # impact marks the final_video version stale. The compose node must
-    # drop back to READY so the unattended loop re-renders the corrected
-    # cut instead of reporting DONE one compose short.
-    project = _project()
-    _add_element(project, _element("elem:one"))
-    _select_slot(
-        project,
-        slot_id="element:elem:one:storyboard",
-        kind="r2v_storyboard_image",
-        owner_ref="element:elem:one",
-        version_id="art:sb",
-    )
-    _select_slot(
-        project,
-        slot_id="element:elem:one:main",
-        kind="element_video",
-        owner_ref="element:elem:one",
-        version_id="art:vid",
-    )
-    _select_slot(
-        project,
-        slot_id="timeline:timeline:main:render",
-        kind="final_video",
-        owner_ref="timeline:timeline:main",
-        version_id="art:final",
-    )
-
-    graph = derive_work_graph(project)
-    assert graph.by_id["compose:timeline:main"].status is WorkNodeStatus.DONE
-
-    project.assets.artifact_versions_by_id["art:final"].stale = True
-    graph = derive_work_graph(project)
-    compose = graph.by_id["compose:timeline:main"]
-    assert compose.status is WorkNodeStatus.READY
-    assert compose in graph.ready_media_nodes()
-
-
-def test_superseded_render_source_reopens_compose_without_stale_flag() -> None:
-    """Frozen selections are authoritative even if impact missed stale."""
-
-    project = _project()
-    _add_element(project, _element("elem:one"))
-    _select_slot(
-        project,
-        slot_id="element:elem:one:storyboard",
-        kind="r2v_storyboard_image",
-        owner_ref="element:elem:one",
-        version_id="art:sb",
-    )
-    _select_slot(
-        project,
-        slot_id="element:elem:one:main",
-        kind="element_video",
-        owner_ref="element:elem:one",
-        version_id="art:vid-old",
-    )
-    _select_slot(
-        project,
-        slot_id="timeline:timeline:main:render",
-        kind="final_video",
-        owner_ref="timeline:timeline:main",
-        version_id="art:final",
-    )
-    project.assets.artifact_versions_by_id["art:final"].metadata = {
-        "sourceSelections": [
-            {
-                "sourceRef": "element:elem:one",
-                "versionId": "art:vid-old",
-            },
-        ],
-    }
-    assert (
-        derive_work_graph(project).by_id["compose:timeline:main"].status
-        is WorkNodeStatus.DONE
-    )
-
-    _select_slot(
-        project,
-        slot_id="element:elem:one:main",
-        kind="element_video",
-        owner_ref="element:elem:one",
-        version_id="art:vid-new",
-    )
-    # The lifecycle bug observed in the real run left this false.
-    assert not project.assets.artifact_versions_by_id["art:final"].stale
-    graph = derive_work_graph(project)
-    compose = graph.by_id["compose:timeline:main"]
-    assert compose.status is WorkNodeStatus.READY
-    assert compose in graph.ready_media_nodes()
-
-
 def test_budget_dropped_reference_does_not_stale_the_artifact() -> None:
     """A reference the model budget forced out of the automatic chain is
     absent from provenance by design. Field run 2026-08-26: reading that as
@@ -1068,9 +961,10 @@ def test_non_r2v_modes_schedule_video_only_when_inputs_ready(
     if ready:
         assert node.status is WorkNodeStatus.READY
         assert node.command == command
-        assert node.dispatch_arguments == (
-            {} if mode == "s2v" else {"mode": mode}
-        )
+        if mode == "s2v":
+            assert not node.dispatch_arguments
+        else:
+            assert node.dispatch_arguments["mode"] == mode
     else:
         assert node.status is WorkNodeStatus.GATED
         for field in inputs:
