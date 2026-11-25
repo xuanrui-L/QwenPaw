@@ -1450,13 +1450,27 @@ async def submit_video_task(
         logger.error(
             f"Video task submission failed ({type(e).__name__}): {detail}",
         )
-        # A transport error carries no HTTP status to read. When the request
-        # inlines Base64 references, the usual cause is the gateway refusing an
-        # oversized body by closing the connection mid-upload (equivalent to
-        # 413), which lands here rather than as an HTTPStatusError. Say so,
-        # because resending the same references cannot help.
+        # A transport error carries no HTTP status to read. Only an inlined
+        # Base64 reference (a data: URL, which puts the image bytes in the
+        # request body) that the gateway drops mid-upload is circumstantial
+        # evidence of an oversized body -- equivalent to the explicit 413
+        # handled above, so resending the identical references cannot help.
+        # Every other transport failure stays retryable: a public URL or an
+        # uploaded oss:// reference keeps the body small, and a connection
+        # reset before the body is sent (ConnectError) or a transient blip
+        # has nothing to do with reference size. Blaming the body there would
+        # both mislead the user into compressing references and block a retry
+        # that could have succeeded.
+        mid_upload_drop = isinstance(
+            e,
+            (httpx.RemoteProtocolError, httpx.WriteError),
+        )
+        inlined_reference = any(
+            str(item.get("url", "")).startswith("data:") for item in media
+        )
+        oversize_evidence = mid_upload_drop and inlined_reference
         hint = ""
-        if isinstance(e, httpx.TransportError) and media:
+        if oversize_evidence:
             hint = (
                 " 请求可能在上传内联参考图时被网关拒绝（请求体过大，等价"
                 " 413）或服务端中途断开连接；请压缩或减少参考图后重试，"
@@ -1465,11 +1479,9 @@ async def submit_video_task(
         raise ModelError(
             f"Video task submission failed ({type(e).__name__}): {detail}.{hint}",
             model_name=model_name,
-            # When the hint fired we believe the body was too large; resending
-            # the identical references cannot succeed, so mark it permanent to
-            # match the message and stop the driver from inviting a futile
-            # retry that only burns another provider round trip.
-            retryable=not bool(hint),
+            # Only a confirmed oversized-body signal is permanent; every other
+            # transport failure is transient and must stay retryable.
+            retryable=not oversize_evidence,
         )
 
 
