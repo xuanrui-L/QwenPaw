@@ -11,6 +11,17 @@ if str(BACKEND_DIR) not in sys.path:
 
 
 @pytest.fixture
+def patch_attributes(monkeypatch):
+    """Install a group of related test doubles on one object."""
+
+    def patch(target, /, **attributes):
+        for name, value in attributes.items():
+            monkeypatch.setattr(target, name, value)
+
+    return patch
+
+
+@pytest.fixture
 def directory_link():
     """Exercise directory redirects without requiring Windows elevation."""
 

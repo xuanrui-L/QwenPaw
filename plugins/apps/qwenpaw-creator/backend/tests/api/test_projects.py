@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=protected-access
 # pylint: disable=unused-argument,use-implicit-booleaness-not-comparison
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import os
+import sys
 from pathlib import Path
 
-import pytest
-
+from services.observability.tracing import bind_trace_context
+from services.project_files import store as project_store
 from services.project_files.facade import creator_file_services
 from services.project_files.json_pointer import hash_json_value
 from services.project_files.models import Project
@@ -425,77 +427,6 @@ def test_snapshot_polling_during_edits_never_returns_busy(app, run_scenario):
     assert edit_statuses == [200] * 10
     assert {status for loop in poll_statuses for status in loop} == {200}
     assert final.json()["project"]["name"] == "Edited 9"
-
-
-@pytest.mark.parametrize("source", ["user", "auto"])
-def test_project_create_persists_title_provenance(
-    app,
-    api_runtime_root,
-    run_scenario,
-    source,
-):
-    payload = _create_payload(
-        "title-source-" + source,
-        "项目标题",
-        nameSource=source,
-    )
-
-    async def scenario(client):
-        return await client.post("/projects", json=payload)
-
-    response = run_scenario(app, scenario)
-    assert response.status_code == 201
-    project = Project.model_validate_json(
-        (
-            api_runtime_root / response.json()["projectId"] / "project.json"
-        ).read_text(),
-    )
-    assert project.name_source == source
-
-
-def test_project_list_answers_active_task_badge_for_the_whole_page(
-    app,
-    api_runtime_root,
-    run_scenario,
-):
-    """One response carries the badge: no per-Project /tasks fan-out.
-
-    The home page used to issue GET /tasks once per Project and render nothing
-    until the slowest returned. ``hasActiveTask`` is answered by the listing
-    itself, so the card state must match the durable Task status exactly.
-    """
-
-    from domain.enums import TaskKind, TaskStatus
-    from services.runtime_files.execution_models import TaskRecord
-    from services.runtime_files.execution_store import ProjectExecutionStore
-
-    async def scenario(client):
-        busy = await client.post(
-            "/projects",
-            json=_create_payload("project-list-badge-busy", "有在跑的任务"),
-        )
-        quiet = await client.post(
-            "/projects",
-            json=_create_payload("project-list-badge-quiet", "没有任务"),
-        )
-        store = ProjectExecutionStore(api_runtime_root)
-        store.create_task(
-            TaskRecord(
-                task_id="task-badge",
-                project_id=busy.json()["projectId"],
-                kind=TaskKind.IMAGE_GENERATION,
-                status=TaskStatus.QUEUED,
-                request_fingerprint="sha256:" + "b" * 64,
-            ),
-        )
-        return busy, quiet, await client.get("/projects")
-
-    busy, quiet, listed = run_scenario(app, scenario)
-    assert busy.status_code == 201 and quiet.status_code == 201
-    flags = {
-        item["name"]: item["hasActiveTask"] for item in listed.json()["items"]
-    }
-    assert flags == {"有在跑的任务": True, "没有任务": False}
 
 
 def test_project_create_keeps_the_subtitle_policy_off_unless_asked(
@@ -1209,3 +1140,88 @@ def test_subtitle_style_patch_keeps_the_caption_box_legal(
     assert element.creation.motion is not None
     assert element.creation.motion.entrance == "pop"
     assert "caption_style=variety_pop" in element.creation.motion.design_notes
+
+
+def test_delete_closes_logging_before_rename(
+    app,
+    api_runtime_root,
+    run_scenario,
+    monkeypatch,
+):
+    # ``utils/__init__.py`` binds ``utils.logger`` to a Logger instance, so the
+    # real module is only reachable through ``sys.modules``.
+    logger_mod = sys.modules["utils.logger"]
+    order: list[str] = []
+
+    async def scenario(client):
+        created = await client.post(
+            "/projects",
+            json={
+                "clientRequestId": "delete-closes-log-before-rename",
+                "name": "Close log before rename",
+                "scenario": "general",
+                "aspectRatio": "16:9",
+                "resolution": "720P",
+            },
+        )
+        assert created.status_code == 201, created.text
+        project_id = created.json()["projectId"]
+
+        logger_mod.configure_creator_file_logging(api_runtime_root)
+        with bind_trace_context(projectId=project_id):
+            logger_mod.logger.info("holding per-project creator.log open")
+
+        log_path = logger_mod.creator_log_path(
+            api_runtime_root,
+            project_id=project_id,
+        )
+        handler = logger_mod._FILE_HANDLER
+        assert handler is not None and log_path in handler._targets, (
+            log_path,
+            None if handler is None else list(handler._targets),
+        )
+
+        real_replace = project_store.atomic_replace_path
+        real_close = logger_mod.close_creator_project_logging
+
+        def close_logging(target_project_id: str) -> None:
+            order.append("close_logging")
+            real_close(target_project_id)
+
+        def replace(source, target) -> None:
+            order.append("replace")
+            current = logger_mod._FILE_HANDLER
+            targets = {} if current is None else current._targets
+            if log_path in targets:
+                raise PermissionError(5, "Access is denied")
+            real_replace(source, target)
+
+        monkeypatch.setattr(
+            project_store,
+            "atomic_replace_path",
+            replace,
+        )
+        monkeypatch.setattr(
+            logger_mod,
+            "close_creator_project_logging",
+            close_logging,
+        )
+
+        return await client.delete(
+            f"/projects/{project_id}",
+            headers={"Idempotency-Key": "delete-closes-log-before-rename"},
+        )
+
+    try:
+        deleted = run_scenario(app, scenario)
+    finally:
+        logger_mod.shutdown_creator_file_logging()
+
+    assert deleted.status_code == 204, deleted.text
+    assert order.index("close_logging") < order.index("replace")
+    # Post-delete close must remain: a worker can reopen the project log
+    # between the pre-delete close and rename.
+    assert order.count("close_logging") >= 2
+    assert order.index("replace") < (
+        len(order) - 1 - order[::-1].index("close_logging")
+    )

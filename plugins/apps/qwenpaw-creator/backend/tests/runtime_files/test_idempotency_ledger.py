@@ -1,18 +1,94 @@
 # -*- coding: utf-8 -*-
-"""The open-reservation ledger that keeps GC from deleting a live witness."""
+"""Recovery of queued executions and durability of idempotency claims."""
 
 from __future__ import annotations
-
 import json
-from pathlib import Path
 import threading
 import time
-
+from datetime import timedelta
+from pathlib import Path
 import pytest
-
+from domain.enums import SpecialistRole, SpecialistRunStatus, TaskKind
 from services.runtime_files import idempotency_ledger
+from services.runtime_files.execution_models import (
+    SpecialistRunRecord,
+    TaskRecord,
+)
+from services.runtime_files.execution_store import ProjectExecutionStore
+from services.runtime_files.models import ReviewPolicy
+from services.runtime_files.reconciliation import (
+    reconcile_orphaned_queued_runs,
+)
+from .test_execution_store import PROJECT_ID, _store
+
+from services.runtime_files import IdempotencyRecordStore, IdempotencyStatus
+from .test_runtime_primitives import KEY
 
 pytestmark = pytest.mark.unit
+
+
+def _bare_run(store: ProjectExecutionStore, suffix: str) -> str:
+    run_id = f"run-orphan-{suffix}"
+    store.create_run(
+        SpecialistRunRecord(
+            run_id=run_id,
+            role=SpecialistRole.R2V_GENERATION_DIRECTOR,
+            target_refs=[f"element:{suffix}"],
+            project_id=PROJECT_ID,
+            round_id=f"round-{suffix}",
+            input_generation=1,
+            input_etag="sha256:input",
+            caused_by_request_id=f"request-{suffix}",
+            review_policy=ReviewPolicy.AUTO_FIX,
+        ),
+    )
+    return run_id
+
+
+@pytest.mark.parametrize(
+    ("claimed", "age", "cancelled"),
+    [(False, 360, True), (True, 360, False), (False, 30, False)],
+    ids=["orphaned", "claimed", "within-grace"],
+)
+def test_startup_reconciles_only_old_unclaimed_runs(
+    tmp_path: Path,
+    claimed,
+    age,
+    cancelled,
+):
+    store = _store(tmp_path)
+    run_id = _bare_run(store, "storyboard")
+    initial = store.get_run(PROJECT_ID, run_id)
+    if claimed:
+        store.create_task(
+            TaskRecord(
+                task_id="task-claimed",
+                run_id=run_id,
+                kind=TaskKind.IMAGE_GENERATION,
+                request_fingerprint="sha256:claimed",
+                project_id=PROJECT_ID,
+                round_id=initial.round_id,
+                input_generation=initial.input_generation,
+                input_etag=initial.input_etag,
+                caused_by_request_id=initial.caused_by_request_id,
+                review_policy=ReviewPolicy.AUTO_FIX,
+            ),
+        )
+
+    report = reconcile_orphaned_queued_runs(
+        tmp_path,
+        [PROJECT_ID],
+        now=initial.updated_at + timedelta(seconds=age),
+    )
+    run = store.get_run(PROJECT_ID, run_id)
+    if cancelled:
+        assert report.cancelled_run_ids == (run_id,)
+        assert run.status is SpecialistRunStatus.CANCELLED
+        assert run.final_marker == "CANCELLED"
+        assert "ORPHANED_QUEUED_RUN" in (run.final_summary_text or "")
+    else:
+        assert report.cancelled_count == 0
+        assert run.status is SpecialistRunStatus.QUEUED
 
 
 def _record(root: Path, name: str, record_id: str, status: str) -> Path:
@@ -233,3 +309,112 @@ def test_cancelled_rebuild_never_publishes_partial_reservations(tmp_path):
         )
     assert not (root / idempotency_ledger.LEDGER_FILE_NAME).exists()
     assert idempotency_ledger.open_transaction_ids(root) == {"txn-1", "txn-2"}
+
+
+def test_a_reserve_retry_republishes_an_entry_the_first_attempt_never_wrote(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Crash window between record write and mark_open must self-heal.
+
+    Review #243 blocking #2: the original reserve called ``mark_open``
+    only when ``created`` was true. A process that wrote the record as
+    IN_PROGRESS and died before publishing the ledger entry left the
+    retry seeing ``created=False`` while the ledger still missed the
+    id, so GC would delete the finalized transaction the pending
+    record still needed to replay its response. ``mark_open`` is now
+    unconditional; this test pre-seeds the ledger so the rebuild-scan
+    safety net is not the one closing the window, silences mark_open
+    for the first attempt, and asserts the retry republishes the
+    entry on the second attempt.
+    """
+
+    from services.runtime_files import idempotency_ledger
+
+    root = tmp_path / "runtime" / "commands" / "idempotency"
+    # Seed an unrelated reservation so the ledger file exists and the
+    # scan-based fallback cannot mask the crash window we are trying
+    # to reproduce: without the unconditional mark_open, the retry
+    # would see a readable ledger missing this id and return the
+    # seeded set unchanged.
+    idempotency_ledger.mark_open(root, "txn-unrelated")
+
+    request_hash = IdempotencyRecordStore.request_hash({"value": 1})
+    real_mark_open = idempotency_ledger.mark_open
+    suppress = [True]
+
+    def flaky_mark_open(path_root, record_id):
+        if suppress[0]:
+            return
+        return real_mark_open(path_root, record_id)
+
+    monkeypatch.setattr(idempotency_ledger, "mark_open", flaky_mark_open)
+
+    first = IdempotencyRecordStore(root).reserve(
+        **KEY,
+        request_hash=request_hash,
+    )
+    suppress[0] = False
+    assert first.created is True
+    # The crash window: the record is IN_PROGRESS on disk but the
+    # ledger still only names the unrelated seed. Without the fix the
+    # retry below would leave it that way and GC could delete the
+    # witness.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset(
+        {"txn-unrelated"},
+    )
+
+    second = IdempotencyRecordStore(root).reserve(
+        **KEY,
+        request_hash=request_hash,
+    )
+    assert second.created is False
+    # The retry must republish. Without the unconditional mark_open
+    # this assertion fails and the transaction becomes GC-eligible
+    # while the reservation is still IN_PROGRESS.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset(
+        {"txn-unrelated", second.record.record_id},
+    )
+
+
+def test_a_reserve_replay_of_a_settled_record_does_not_reopen_the_ledger(
+    tmp_path,
+) -> None:
+    """Terminal replays must not resurrect a settled txn in the ledger.
+
+    Follow-up on review #243: making mark_open unconditional to close
+    the crash window also fired on reserve() calls that hit an already
+    COMPLETED / FAILED record. project_file_routes replays the cached
+    response for those terminal records without running complete()
+    again, so nothing ever removes the id from the ledger afterwards
+    and the storage-reclaim sweep this PR exists to make reliable
+    silently keeps settled transactions forever. Only an IN_PROGRESS
+    record needs the durable witness, and only IN_PROGRESS republishes
+    the entry.
+    """
+
+    from services.runtime_files import idempotency_ledger
+
+    root = tmp_path / "runtime" / "commands" / "idempotency"
+    request_hash = IdempotencyRecordStore.request_hash({"value": 1})
+    store = IdempotencyRecordStore(root)
+
+    reserved = store.reserve(**KEY, request_hash=request_hash)
+    store.complete(
+        **KEY,
+        request_hash=request_hash,
+        response={"body": {"ok": True}},
+        response_status=200,
+    )
+    # complete() settles the ledger; nothing else should re-add it.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset()
+
+    replay = store.reserve(**KEY, request_hash=request_hash)
+    assert replay.created is False
+    assert replay.record.status is IdempotencyStatus.COMPLETED
+    # Without the status guard the ledger contains the id again and
+    # GC sees the transaction as permanently protected.
+    assert idempotency_ledger.open_transaction_ids(root) == frozenset()
+    # Sanity: the record still refers to the same reservation, so a
+    # future caller can still find its response.
+    assert replay.record.record_id == reserved.record.record_id

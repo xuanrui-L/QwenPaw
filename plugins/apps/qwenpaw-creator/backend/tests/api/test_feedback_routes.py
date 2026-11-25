@@ -167,3 +167,24 @@ def test_bodies_the_platform_would_refuse_are_refused_first(
     monkeypatch.setattr(feedback_routes, "read_trace_records", lambda **_: [])
     with pytest.raises(ValidationError):
         _draft(body)
+
+
+def test_feedback_pointer_resolves_to_the_durable_trace(tmp_path, monkeypatch):
+    import json
+
+    from schemas.observability import ObservabilityConfigData
+    from services.observability import save_observability_config, trace_event
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+    save_observability_config(ObservabilityConfigData(enabled=True))
+    trace_event(
+        "creator.test.feedback",
+        component="test",
+        projectId=PROJECT,
+    )
+
+    draft = _draft({"project_id": PROJECT, "feedback": "慢"})
+    assert draft["trace_file"].startswith("creator-trace-")
+    log = tmp_path / "observability" / "traces" / draft["trace_file"]
+    record = json.loads(log.read_text().splitlines()[draft["trace_line"] - 1])
+    assert record["traceId"] == draft["trace_id"]

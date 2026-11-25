@@ -6,7 +6,13 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AgentDock from "@/components/agent/AgentDock";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
@@ -134,6 +140,26 @@ describe("AgentDock composer render path", () => {
     expect(renderCounter.markdown).toBeGreaterThan(baseline);
   });
 
+  it("keeps an unsent draft across a fold and reopen", async () => {
+    renderDock();
+    const box = composerBox();
+    fireEvent.input(box, {
+      target: { textContent: "Keep this unsent instruction" },
+    });
+    expect(box.textContent).toBe("Keep this unsent instruction");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
+    expect(useAgentDockUiStore.getState().unsentDrafts).toEqual({
+      p1: ["Keep this unsent instruction"],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
+    await waitFor(() => {
+      expect(composerBox().textContent).toBe("Keep this unsent instruction");
+    });
+  });
+
   it("parks the outgoing draft on a Project switch and restores it on return", async () => {
     renderDockWithSwitcher();
     fireEvent.input(composerBox(), {
@@ -152,6 +178,18 @@ describe("AgentDock composer render path", () => {
     await waitFor(() =>
       expect(composerBox().textContent).toBe("Half-typed for p1"),
     );
+  });
+
+  it("does not restore an unsent draft that belongs to another Project", () => {
+    useAgentDockUiStore.setState({
+      unsentDrafts: { "p-other": ["Leaked from another Project"] },
+    });
+    renderDock();
+
+    expect(composerBox().textContent ?? "").toBe("");
+    expect(useAgentDockUiStore.getState().unsentDrafts).toEqual({
+      "p-other": ["Leaked from another Project"],
+    });
   });
 
   it("keeps one draft per Project across A → B → A → B round trips", async () => {
@@ -174,5 +212,29 @@ describe("AgentDock composer render path", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "go-p2" }));
     await waitFor(() => expect(composerBox().textContent).toBe("Draft B"));
+  });
+
+  it("consumes a one-shot injection and prefers the edited draft on reopen", async () => {
+    renderDock();
+    act(() => useAgentDockUiStore.getState().setDraft("Original injection"));
+    await waitFor(() =>
+      expect(composerBox().textContent).toBe("Original injection"),
+    );
+    expect(useAgentDockUiStore.getState().draft).toBe("");
+
+    fireEvent.input(composerBox(), {
+      target: { textContent: "Edited instruction" },
+    });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("[data-agent-dock]")).not.toBeInTheDocument();
+    expect(useAgentDockUiStore.getState().unsentDrafts).toEqual({
+      p1: ["Edited instruction"],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "创作助手" }));
+    await waitFor(() =>
+      expect(composerBox().textContent).toBe("Edited instruction"),
+    );
   });
 });

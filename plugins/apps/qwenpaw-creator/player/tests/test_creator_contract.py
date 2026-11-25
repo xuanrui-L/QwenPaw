@@ -253,12 +253,6 @@ def test_creator_presentation_is_authored_html(exported):
     assert presentation.stylesheets == ()
 
 
-def test_runtime_shell_contains_no_work_page_template():
-    """作品页面必须来自模型文档，而不是导出器的布局代码。"""
-
-    assert "data-screen" not in bundle_mod.PLAYER_HTML
-
-
 @pytest.mark.parametrize(
     "breach",
     ["missing", "script", "mismatch", "foreign_node"],

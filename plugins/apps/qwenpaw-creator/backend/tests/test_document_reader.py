@@ -1,23 +1,38 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=protected-access
 # flake8: noqa: E501
-"""Per-format fixtures for the vendored document reader."""
+"""Document reading and indexing through the source-intelligence flow."""
 
 from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import random
 from pathlib import Path
 
-from PIL import Image
 import pytest
+from PIL import Image
 
+from api.file_asset_routes import _AssetInput, _ingest_many_sync
+from domain.enums import SpecialistRole, SpecialistRunStatus
 from domain.errors import ValidationError
 from services.document_reader import (
     MAX_INDEXED_TEXT_CHARS,
     is_supported_document,
     read_document,
     read_document_text,
+)
+from services.project_files.facade import CreatorFileServices
+from services.project_files.models import Project
+from services.runtime_files.execution_models import SpecialistRunRecord
+from services.source_analysis import (
+    SourceAgentToolContext,
+    SourceMediaAnalysisService,
+)
+from services.source_analysis.service import (
+    document_indexed_text_path,
+    resolve_document_page_ref,
 )
 from vendor.media_toolkit.image_budget import (
     IMAGE_BUDGET_TOKENS,
@@ -333,110 +348,72 @@ def test_pdf_render_grid_alignment_page_range_and_text_cap(
     assert any("capped at 2 of 4 pages" in note for note in capped.notes)
 
 
-def test_pdf_reports_image_only_pages_as_unextractable(tmp_path) -> None:
-    """混合扫描 PDF：图片正文页被逐页报告，空白页不被误报。
+@pytest.mark.parametrize(
+    ("make_pdf", "unextractable", "visible_text", "rasterized_text"),
+    [
+        pytest.param(_make_pdf, (), "Creator Doc Page 1", None, id="text"),
+        pytest.param(
+            _make_text_then_blank_pdf,
+            (),
+            "SCENE ONE",
+            None,
+            id="blank-page",
+        ),
+        pytest.param(
+            _make_mixed_pdf,
+            (2,),
+            "SCENE ONE",
+            "SCENE TWO",
+            id="image-only",
+        ),
+        pytest.param(
+            _make_text_then_vector_pdf,
+            (2,),
+            "SCENE ONE",
+            None,
+            id="outlines",
+        ),
+        pytest.param(
+            _make_text_then_merged_outline_pdf,
+            (2,),
+            "SCENE ONE",
+            None,
+            id="merged-outline",
+        ),
+        pytest.param(
+            _make_header_plus_scan_pdf,
+            (2,),
+            "Page 2",
+            "missing ending",
+            id="scan-with-header",
+        ),
+        pytest.param(
+            _make_tiled_scan_pdf,
+            (2,),
+            "Page 2",
+            "missing ending",
+            id="tiled-scan-with-header",
+        ),
+    ],
+)
+def test_pdf_reports_pages_whose_body_cannot_be_extracted(
+    tmp_path,
+    make_pdf,
+    unextractable,
+    visible_text,
+    rasterized_text,
+) -> None:
+    document = tmp_path / "script.pdf"
+    make_pdf(document)
 
-    用真实 pypdfium2 解析（不是伪造的提取结果）：第 2 页把台词栅格化成
-    图片、没有文字层，渲染器仍报 extraction_complete=True，但
-    unextractable_pages 精确指出第 2 页——直登据此拒绝，不再静默丢正文。
-    """
-    mixed = tmp_path / "mixed.pdf"
-    _make_mixed_pdf(mixed)
-    result = read_document_text(mixed)
-    # 关键：complete 标志本身证明不了内容完整（它只对页数上限敏感）。
+    result = read_document_text(document)
+
+    # Exhausting the page range can still leave part of the script unreadable.
     assert result.extraction_complete is True
-    assert result.unextractable_pages == (2,)
-    assert "SCENE TWO" not in result.indexed_text
-
-    # 全文字层 PDF：没有无法抽取的页。
-    text_pdf = tmp_path / "text.pdf"
-    _make_pdf(text_pdf, pages=2)
-    assert not read_document_text(text_pdf).unextractable_pages
-
-    # 文字页 + 真·空白页：空白页不被误报，正常文档不会被误拒。
-    blank_pdf = tmp_path / "blank.pdf"
-    _make_text_then_blank_pdf(blank_pdf)
-    assert not read_document_text(blank_pdf).unextractable_pages
-
-
-def test_pdf_reports_vector_outline_pages_as_unextractable(tmp_path) -> None:
-    """转曲正文页：无文字层、无图片，只有矢量轮廓，仍须逐页报告。
-
-    回归：此前无文字层的页面只在有栅格图片时才报告，于是矢量转曲
-    正文（文字被轮廓化成 path）被当成空白页，直登静默丢掉整页正文。
-    现在非背景矢量对象达到阈值的页面被逐页报告，直登据此拒绝；
-    真·空白页（只有一个满页背景 path）不被误报。
-    """
-    doc = tmp_path / "vector.pdf"
-    _make_text_then_vector_pdf(doc)
-    result = read_document_text(doc)
-    # complete 标志证明不了内容完整（它只对页数上限敏感）。
-    assert result.extraction_complete is True
-    # 第 2 页是转曲正文：无文字层、无图片，只有矢量轮廓 -> 被报告。
-    assert result.unextractable_pages == (2,)
-    # 第 1 页的可复制正文仍被抽出（证明只是转曲页被拒，不是全文失败）。
-    assert "SCENE ONE" in result.indexed_text
-
-
-def test_pdf_reports_merged_outline_pages_as_unextractable(tmp_path) -> None:
-    """合并转曲页：整页字形被并成单个 path，仍须逐页报告。
-
-    回归：仅按矢量对象个数判定会漏掉“整页轮廓合并成一个 path”的
-    常见转曲产物（Ghostscript/ps2pdf、Illustrator 拼合）——对象数只有 1，
-    够不到阈值 3，页面被当成空白、正文静默丢失。现在单个 path 的
-    segment 数达阈值即判为正文；真·空白页背景只有 ~4-5 段不误报。
-    """
-    doc = tmp_path / "merged.pdf"
-    _make_text_then_merged_outline_pdf(doc)
-    result = read_document_text(doc)
-    assert result.extraction_complete is True
-    # 第 2 页只有单个合并轮廓 path（对象数不足）-> 靠 segment 数被报告。
-    assert result.unextractable_pages == (2,)
-    assert "SCENE ONE" in result.indexed_text
-
-
-def test_pdf_reports_scanned_body_behind_a_copyable_header(tmp_path) -> None:
-    """可复制页眉 + 扫描正文页：页眉有文字层也证明不了正文完整。
-
-    回归：此前只要页面有任意可提取文字就跳过图片覆盖检查，于是「可复制
-    页码/页眉 + 扫描正文」被当成完整文字剧本，正文台词被静默丢弃。现在
-    含未覆盖扫描图像的混合页（稀疏文字 + 整页图片）被逐页报告，直登据此
-    拒绝；纯文字封面页不受影响。
-    """
-    doc = tmp_path / "header_scan.pdf"
-    _make_header_plus_scan_pdf(doc)
-    result = read_document_text(doc)
-
-    # complete 标志仍证明不了内容完整（它只对页数上限敏感）。
-    assert result.extraction_complete is True
-    # 第 2 页有可复制页眉（文字层存在），但正文在整页图片里 -> 被报告。
-    assert result.unextractable_pages == (2,)
-    # 栅格化的台词没有进索引文本（证明正文确实抽不出）。
-    assert "missing ending" not in result.indexed_text
-    # 可复制页眉本身仍被抽出（证明该页确有文字层，不是纯图片页）。
-    assert "Page 2" in result.indexed_text
-
-
-def test_pdf_reports_tiled_scan_behind_a_copyable_header(tmp_path) -> None:
-    """分块扫描正文 + 可复制页眉：单块都不主导，合起来仍须被报告。
-
-    回归：覆盖率此前只取「单张最大图片」，于是被切成多块的整页扫描
-    （每块低于阈值）+ 稀疏页眉被当成完整文字剧本，正文被静默丢弃。
-    现在按图片 bounds 累加/封顶计算覆盖率，分块扫描页同样被逐页报告，
-    直登据此拒绝；纯文字封面页不受影响。
-    """
-    doc = tmp_path / "tiled_scan.pdf"
-    _make_tiled_scan_pdf(doc)
-    result = read_document_text(doc)
-
-    # complete 标志仍证明不了内容完整（它只对页数上限敏感）。
-    assert result.extraction_complete is True
-    # 第 2 页有可复制页眉（文字层存在），但正文被切成多块图片 -> 被报告。
-    assert result.unextractable_pages == (2,)
-    # 栅格化的台词没有进索引文本（证明正文确实抽不出）。
-    assert "missing ending" not in result.indexed_text
-    # 可复制页眉本身仍被抽出（证明该页确有文字层，不是纯图片页）。
-    assert "Page 2" in result.indexed_text
+    assert result.unextractable_pages == unextractable
+    assert visible_text in result.indexed_text
+    if rasterized_text is not None:
+        assert rasterized_text not in result.indexed_text
 
 
 def test_csv_display_cap_and_row_cap_extraction_reporting(
@@ -527,3 +504,559 @@ def test_readable_errors_for_unsupported_inputs(tmp_path, monkeypatch):
     html.write_text("<html><body>hello</body></html>", encoding="utf-8")
     with pytest.raises(ValidationError, match="WEB_ENABLED"):
         _read(html, tmp_path / "pages")
+
+
+def _pdf_bytes(pages: int = 3, *, text: str | None = None) -> bytes:
+    import io
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    buffer = io.BytesIO()
+    with PdfPages(buffer) as pdf:
+        for number in range(1, pages + 1):
+            fig = plt.figure(figsize=(4, 3))
+            fig.text(
+                0.1,
+                0.5,
+                text or f"Script page {number} Scene beats {number}",
+            )
+            pdf.savefig(fig)
+            plt.close(fig)
+    return buffer.getvalue()
+
+
+def _services_with_source(
+    tmp_path: Path,
+    *,
+    name: str,
+    content: bytes,
+    media_type: str,
+) -> tuple[CreatorFileServices, str, str]:
+    services = CreatorFileServices.create(tmp_path.resolve())
+    services.projects.create(Project.new(project_id="project-1", name="One"))
+    result, _ = _ingest_many_sync(
+        services,
+        project_id="project-1",
+        key="doc-asset-1",
+        inputs=[
+            _AssetInput(name=name, content=content, media_type=media_type),
+        ],
+        attach_source=True,
+        scope="document-source-test",
+    )
+    item = result["items"][0]
+    return services, item["assetId"], item["assetVersionId"]
+
+
+def _services_with_document(
+    tmp_path: Path,
+) -> tuple[CreatorFileServices, str, str]:
+    return _services_with_source(
+        tmp_path,
+        name="script.pdf",
+        content=_pdf_bytes(pages=3),
+        media_type="application/pdf",
+    )
+
+
+def _running_context(
+    service: SourceMediaAnalysisService,
+    services: CreatorFileServices,
+    asset_id: str,
+    *,
+    tool_call_id: str,
+) -> SourceAgentToolContext:
+    run_id = "specialist-run-doc-vlm"
+    try:
+        service.executions.get_run("project-1", run_id)
+    except Exception:  # pylint: disable=broad-except
+        snapshot = services.projects.read("project-1")
+        service.executions.create_specialist_run(
+            SpecialistRunRecord(
+                run_id=run_id,
+                project_id="project-1",
+                round_id="round-doc-vlm",
+                role=SpecialistRole.SOURCE_INTELLIGENCE,
+                target_refs=[f"asset:{asset_id}"],
+                input_generation=snapshot.generation,
+                input_etag=snapshot.etag,
+            ),
+        )
+        service.executions.transition_specialist_run(
+            "project-1",
+            run_id,
+            expected_status=SpecialistRunStatus.QUEUED,
+            status=SpecialistRunStatus.RUNNING_MODEL,
+        )
+    return SourceAgentToolContext(
+        specialist_run_id=run_id,
+        tool_call_id=tool_call_id,
+        assistant_message_id=f"assistant-{tool_call_id}",
+        provider_message_id=f"provider-{tool_call_id}",
+        provider="configured_vlm",
+        model="vlm-v1",
+    )
+
+
+def _document_shot(page: int, description: str) -> dict:
+    return {
+        "startMs": (page - 1) * 1000,
+        "endMs": page * 1000,
+        "description": description,
+        "events": [f"第{page}页要点"],
+        "confidence": 0.95,
+    }
+
+
+def _read_then_commit(
+    service: SourceMediaAnalysisService,
+    services: CreatorFileServices,
+    asset_id: str,
+    version_id: str,
+    *,
+    tag: str,
+    shots: list[dict],
+    between_read_and_commit=None,
+    mutate_stored=None,
+    extra_arguments: dict | None = None,
+):
+    """Shared read -> (mutate) -> commit flow for document tests."""
+    read_context = _running_context(
+        service,
+        services,
+        asset_id,
+        tool_call_id=f"{tag}-read",
+    )
+
+    async def scenario():
+        read_result = await service.read_source_document(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": f"asset-version:{version_id}"},
+            context=read_context,
+        )
+        stored = dict(read_result)
+        if mutate_stored is not None:
+            mutate_stored(stored)
+        service.executions.append_specialist_message(
+            "project-1",
+            read_context.specialist_run_id,
+            message_id=f"tool-{tag}-result",
+            role="tool",
+            content_parts=[{"type": "text", "text": json.dumps(stored)}],
+            metadata={"tool": "read_document", "toolCallId": f"{tag}-read"},
+        )
+        if between_read_and_commit is not None:
+            between_read_and_commit(read_result)
+        commit_context = _running_context(
+            service,
+            services,
+            asset_id,
+            tool_call_id=f"{tag}-commit",
+        )
+        committed = await service.commit_agent_intelligence(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            command_id=f"{tag}-commit-1",
+            context=commit_context,
+            arguments={
+                "summary": f"{tag} 场景的文档理解。",
+                "shots": shots,
+                "entities": [],
+                "semanticEntries": [],
+                "moduleResultRefs": {"document": read_result["resultRef"]},
+                **(extra_arguments or {}),
+            },
+        )
+        return read_result, committed
+
+    return asyncio.run(scenario())
+
+
+def test_document_commit_produces_document_index(tmp_path) -> None:
+    services, asset_id, version_id = _services_with_document(tmp_path)
+    service = SourceMediaAnalysisService(services)
+    read_result, committed = _read_then_commit(
+        service,
+        services,
+        asset_id,
+        version_id,
+        tag="doc",
+        shots=[
+            _document_shot(1, "封面页：标题与主角介绍。"),
+            _document_shot(2, "第二页：冲突展开的场景节拍。"),
+            _document_shot(3, "第三页：结尾与情绪收束。"),
+        ],
+        extra_arguments={
+            "summary": "三页剧本：逐页给出场景节拍与关键动作。",
+            "semanticEntries": [
+                {
+                    "text": "第 2 页给出冲突场景的节拍列表",
+                    "tags": ["page-2", "冲突"],
+                    "confidence": 0.9,
+                },
+            ],
+        },
+    )
+
+    assert committed["status"] == "SUCCEEDED"
+    assert committed["shotCount"] == 3
+    index = service.load("project-1", asset_id)
+    assert index.media.media_kind == "document"
+    assert index.media.document is not None
+    assert index.media.document.format == "pdf"
+    assert index.media.document.page_count == 3
+    visual = index.coverage["visual"]
+    assert visual.mode == "available"
+    assert visual.producer == "document_reader"
+    assert visual.ratio == 1.0
+    assert read_result["format"] == "pdf"
+    assert read_result["pageCount"] == 3
+    assert "Scene beats 2" in read_result["textExcerpt"]
+    resolved = resolve_document_page_ref(
+        services.projects.project_root("project-1"),
+        read_result["pageImageRefs"][0],
+    )
+    assert resolved is not None and resolved[1] == 1
+    assert [item.keyframe_ref for item in index.shots] == list(
+        read_result["pageImageRefs"],
+    )
+    assert [(item.start_ms, item.end_ms) for item in index.shots] == [
+        (0, 1000),
+        (1000, 2000),
+        (2000, 3000),
+    ]
+
+    # Extracted document text is indexed deterministically alongside the
+    # model-authored entries, attributed to the document reader module run.
+    doc_text_entries = [
+        item for item in index.semantic_entries if "document-text" in item.tags
+    ]
+    assert doc_text_entries
+    assert any("Scene beats 2" in item.text for item in doc_text_entries)
+    assert "document_reader" in {run.provider for run in index.model_runs}
+    model_entries = [
+        item
+        for item in index.semantic_entries
+        if "document-text" not in item.tags
+    ]
+    assert len(model_entries) == 1
+
+    # Admission boundary: a fileRef outside the admitted asset is rejected.
+    async def out_of_boundary():
+        return await service.read_source_document(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": "asset-version:another-project-version"},
+            context=_running_context(
+                service,
+                services,
+                asset_id,
+                tool_call_id="doc-call-boundary",
+            ),
+        )
+
+    with pytest.raises(ValidationError, match="准入边界"):
+        asyncio.run(out_of_boundary())
+
+
+def test_document_commit_rejects_wrong_page_intervals(tmp_path) -> None:
+    services, asset_id, version_id = _services_with_document(tmp_path)
+    service = SourceMediaAnalysisService(services)
+    with pytest.raises(ValidationError, match="页伪"):
+        _read_then_commit(
+            service,
+            services,
+            asset_id,
+            version_id,
+            tag="doc-mismatch",
+            shots=[_document_shot(1, "只有一页的提交")],
+        )
+
+
+_LONG_TEXT_MARKER = "结尾彩蛋：星光电影院重新亮灯。"
+
+
+def _long_text_body() -> bytes:
+    # A text source larger than the 20k model excerpt: the deterministic
+    # semantic index must still contain content past the excerpt boundary.
+    body = "\n\n".join(
+        f"段落 {number}：" + "剧情推进。" * 120 for number in range(1, 50)
+    )
+    content = f"{body}\n\n{_LONG_TEXT_MARKER}\n"
+    assert len(content) > 25_000
+    return content.encode("utf-8")
+
+
+def test_long_text_source_enters_document_flow_end_to_end(tmp_path) -> None:
+    # The tool result stays bounded for model context, while the indexed
+    # text is persisted separately with honest coverage numbers.
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="long-script.txt",
+        content=_long_text_body(),
+        media_type="text/plain",
+    )
+    snapshot = services.projects.read("project-1")
+    assert (
+        snapshot.project.assets.source_versions_by_id[version_id].media_kind
+        == "document"
+    )
+    service = SourceMediaAnalysisService(services)
+    read_result, committed = _read_then_commit(
+        service,
+        services,
+        asset_id,
+        version_id,
+        tag="long-txt",
+        shots=[_document_shot(1, "全文概括。")],
+    )
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    assert index.media.media_kind == "document"
+    assert index.media.document is not None
+    assert len(read_result["textExcerpt"]) <= 20_000
+    assert read_result["textCoverage"]["extractedChars"] > 25_000
+    assert (
+        read_result["textCoverage"]["indexedChars"]
+        == read_result["textCoverage"]["extractedChars"]
+    )
+    assert _LONG_TEXT_MARKER not in read_result["textExcerpt"]
+    doc_text = [
+        item for item in index.semantic_entries if "document-text" in item.tags
+    ]
+    assert any(_LONG_TEXT_MARKER in item.text for item in doc_text)
+    # Text-extraction coverage is persisted on the ocr modality.
+    ocr = index.coverage["ocr"]
+    assert ocr.mode == "available"
+    assert ocr.producer == "document_reader"
+    assert ocr.ratio == 1.0
+
+
+def test_carriage_return_text_survives_commit_integrity_check(
+    tmp_path,
+) -> None:
+    # Regression: the indexed text is persisted/verified byte-for-byte.
+    # pdfium emits \r\n for line breaks inside a text block, and commits
+    # previously failed the sha256 integrity check on every attempt
+    # (read_text() collapsed \r\n to \n), locking the source-intelligence
+    # agent into a retry loop.
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="windows-notes.pdf",
+        content=_pdf_bytes(
+            pages=1,
+            text="Scene 1: cat enters frame\nScene 2: camera pulls back\nScene 3: rooftop finale",
+        ),
+        media_type="application/pdf",
+    )
+    service = SourceMediaAnalysisService(services)
+    read_result, committed = _read_then_commit(
+        service,
+        services,
+        asset_id,
+        version_id,
+        tag="cr",
+        shots=[_document_shot(1, "全文概括。")],
+    )
+
+    coverage = read_result["textCoverage"]
+    stored = document_indexed_text_path(
+        services.projects.project_root("project-1"),
+        read_result["sourceChecksum"],
+        read_result["resultRef"],
+    ).read_bytes()
+    assert b"\r" in stored, "fixture must exercise carriage returns"
+    assert len(stored.decode("utf-8")) == coverage["indexedChars"]
+    assert committed["status"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize(
+    ("tag", "break_runtime", "coverage_mutation", "message"),
+    [
+        pytest.param(
+            "doc-missing-file",
+            "delete",
+            None,
+            "Runtime 文件缺失",
+            id="missing-runtime-file",
+        ),
+        pytest.param(
+            "doc-tampered-file",
+            "tamper",
+            None,
+            "不一致",
+            id="tampered-runtime-file",
+        ),
+        pytest.param(
+            "doc-null-coverage",
+            "swap",
+            "null",
+            "textCoverage 不合法",
+            id="coverage-null",
+        ),
+    ],
+)
+def test_document_commit_fails_closed_on_indexed_text_integrity(
+    tmp_path,
+    tag,
+    break_runtime,
+    coverage_mutation,
+    message,
+) -> None:
+    # Fail-close: a new-format result must be backed by the intact Runtime
+    # indexed-text file, and an explicit "textCoverage": null must hit the
+    # strict model instead of the legacy branch — otherwise a same-length
+    # content swap could be committed with ratio=1.0.
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="notes.txt",
+        content=("剧情推进。" * 2000).encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    project_root = services.projects.project_root("project-1")
+    checksum = (
+        services.projects.read("project-1")
+        .project.assets.source_versions_by_id[version_id]
+        .checksum
+    )
+
+    def break_runtime_text(read_result):
+        path = document_indexed_text_path(
+            project_root,
+            checksum,
+            read_result["resultRef"],
+        )
+        if break_runtime == "delete":
+            path.unlink()
+        elif break_runtime == "tamper":
+            path.write_text("被替换的内容", encoding="utf-8")
+        else:  # same-length content swap
+            path.write_text(
+                "Z" * len(path.read_text(encoding="utf-8")),
+                encoding="utf-8",
+            )
+
+    def mutate_stored(stored):
+        stored["textCoverage"] = None
+
+    with pytest.raises(ValidationError, match=message):
+        _read_then_commit(
+            service,
+            services,
+            asset_id,
+            version_id,
+            tag=tag,
+            shots=[_document_shot(1, "全文概括。")],
+            between_read_and_commit=break_runtime_text,
+            mutate_stored=mutate_stored if coverage_mutation else None,
+        )
+
+
+def test_unknown_ratio_is_confined_to_document_ocr() -> None:
+    # CR P2: the honest-unknown ratio must not weaken every modality's
+    # frozen invariant.
+    from schemas.assets import SourceCoverage
+
+    with pytest.raises(ValueError):
+        SourceCoverage.model_validate(
+            {"mode": "available", "producer": "model_native", "ratio": None},
+        )
+    SourceCoverage.model_validate(
+        {"mode": "available", "producer": "document_reader", "ratio": None},
+    )
+
+
+def test_truncated_indexing_persists_partial_ocr_ratio(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # Indexing truncation must surface as coverage.ocr.ratio < 1 and the
+    # cut tail must not appear in the semantic entries.
+    monkeypatch.setattr(
+        "services.document_reader.MAX_INDEXED_TEXT_CHARS",
+        5000,
+    )
+    marker = "末尾唯一标记：星光不灭。"
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="long.txt",
+        content=("剧情推进。" * 1600 + marker).encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    read_result, committed = _read_then_commit(
+        service,
+        services,
+        asset_id,
+        version_id,
+        tag="doc-truncated",
+        shots=[_document_shot(1, "全文概括。")],
+    )
+    coverage = read_result["textCoverage"]
+    assert coverage["indexedChars"] == 5000
+    assert coverage["extractedChars"] > 5000
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    ocr = index.coverage["ocr"]
+    assert ocr.mode == "available"
+    assert ocr.producer == "document_reader"
+    assert ocr.ratio == pytest.approx(5000 / coverage["extractedChars"])
+    assert all(
+        marker not in item.text
+        for item in index.semantic_entries
+        if "document-text" in item.tags
+    )
+
+
+def test_one_specialist_run_commits_multiple_assets(tmp_path) -> None:
+    """A batch delegation commits several assets from one run.
+
+    Round provenance (caused_by_request_id) is immutable per Round, so
+    each commit must own its Round; reusing the specialist run id across
+    commits rejected every asset after the first.
+    """
+
+    services, first_asset, first_version = _services_with_document(tmp_path)
+    result, _ = _ingest_many_sync(
+        services,
+        project_id="project-1",
+        key="doc-asset-2",
+        inputs=[
+            _AssetInput(
+                name="script-two.pdf",
+                content=_pdf_bytes(pages=2),
+                media_type="application/pdf",
+            ),
+        ],
+        attach_source=True,
+        scope="document-source-test",
+    )
+    second_asset = result["items"][0]["assetId"]
+    second_version = result["items"][0]["assetVersionId"]
+    service = SourceMediaAnalysisService(services)
+
+    for ordinal, (asset_id, version_id, page_count) in enumerate(
+        [(first_asset, first_version, 3), (second_asset, second_version, 2)],
+        start=1,
+    ):
+        _read_result, committed = _read_then_commit(
+            service,
+            services,
+            asset_id,
+            version_id,
+            tag=f"doc-batch-{ordinal}",
+            shots=[
+                _document_shot(page, f"第 {page} 页节拍。")
+                for page in range(1, page_count + 1)
+            ],
+            extra_arguments={"summary": f"第 {ordinal} 份剧本：逐页节拍。"},
+        )
+        assert committed["status"] == "SUCCEEDED"
+    assert service.load("project-1", first_asset).summary.startswith("第 1")
+    assert service.load("project-1", second_asset).summary.startswith("第 2")

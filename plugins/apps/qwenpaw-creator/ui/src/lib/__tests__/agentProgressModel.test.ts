@@ -1,3 +1,21 @@
+import type { CreatorMessage } from "@/contracts/creator";
+import {
+  publicAssistantText,
+  shouldRenderConversationMessage,
+  isUserAuthorityMessage,
+} from "@/lib/creatorMessagePresentation";
+import { humanizeCreatorRefs } from "@/lib/creatorPresentation";
+import i18n from "@/i18n";
+import type {
+  AgentStatusBarView,
+  CreatorSessionStatus,
+  CreatorSessionView,
+} from "@/contracts/creator";
+import type { ToolCallPresentation } from "@/lib/creatorMessagePresentation";
+import {
+  deriveAgentLiveStatus,
+  type AgentLiveStatusInput,
+} from "@/lib/agentLiveStatus";
 import { describe, expect, it } from "vitest";
 import type {
   ProjectDocument,
@@ -355,5 +373,174 @@ describe("retried source understanding", () => {
 
     expect(items(result).map((item) => item.id)).toContain("run:src-only");
     expect(result.counts.attention).toBe(1);
+  });
+});
+
+describe("Live thinking projection", () => {
+  function session(status: CreatorSessionStatus): CreatorSessionView {
+    return {
+      id: "session-1",
+      projectId: "p1",
+      status,
+      lastMessageSeq: 0,
+      lastConsumedMessageSeq: 0,
+      lastEventSeq: 0,
+    };
+  }
+
+  function statusBar(
+    overrides: Partial<AgentStatusBarView["progress"]> = {},
+  ): AgentStatusBarView {
+    return {
+      progress: {
+        phase: "visual_development",
+        label: "正在制作",
+        sourceEventSeq: 1,
+        updatedAt: "now",
+        ...overrides,
+      },
+      badges: [],
+    };
+  }
+
+  const delegateCall: ToolCallPresentation = {
+    actionId: "action-1",
+    order: 1,
+    status: "started",
+    executing: true,
+    tool: "delegate_to_agent",
+    arguments: { role: "visual_development_agent" },
+  };
+
+  const live = (overrides: Partial<AgentLiveStatusInput> = {}) =>
+    deriveAgentLiveStatus({
+      session: session("RUNNING"),
+      agentStatusBar: statusBar(),
+      stopping: false,
+      hasQueuedInput: false,
+      isReplaying: false,
+      subagentActivities: {},
+      toolCalls: [],
+      tasks: [],
+      project: projectDocument,
+      ...overrides,
+    });
+
+  it("presents thinking in the live status without overriding user decisions or execution", () => {
+    expect(live({ mainThinking: true }).label).toBe("正在思考");
+    expect(live({ mainThinking: true, stopping: true }).state).toBe("stopping");
+    expect(live({ mainThinking: true, pendingReviewCount: 1 }).state).toBe(
+      "waiting",
+    );
+    expect(live({ mainThinking: true, session: session("IDLE") }).state).toBe(
+      "idle",
+    );
+    expect(
+      live({
+        mainThinking: true,
+        toolCalls: [{ ...delegateCall, tool: "read_project" }],
+      }).label,
+    ).toBe("处理中");
+  });
+});
+
+describe("Interactive conversation messages", () => {
+  it("resolves only referenced names and updates them with a new project snapshot", async () => {
+    const project = {
+      timelines: {
+        items: {
+          main: {
+            elements_by_id: {
+              "scene-one": { label: "序章" },
+              "scene-unnamed": { label: "scene-unnamed" },
+            },
+          },
+        },
+      },
+      visual: { entities: { items: {} } },
+      assets: {
+        artifact_versions_by_id: new Proxy(
+          {
+            "video-one": { name: "献诏片段" },
+            "video-unnamed": { name: "" },
+          },
+          {
+            ownKeys: () => {
+              throw new Error("Do not enumerate unrelated generated versions");
+            },
+          },
+        ),
+        source_versions_by_id: {},
+      },
+    } as unknown as ProjectDocument;
+    const raw =
+      "检查 scene-one 和 `video-one`，保留《scene-one》和 https://example.com/scene-one。";
+    expect(publicAssistantText(raw, { project })).toBe(
+      "检查 序章 和 献诏片段，保留《scene-one》和 https://example.com/scene-one。",
+    );
+    const renamed = {
+      ...project,
+      timelines: {
+        ...project.timelines,
+        items: {
+          ...project.timelines.items,
+          main: {
+            ...project.timelines.items.main,
+            elements_by_id: {
+              ...project.timelines.items.main.elements_by_id,
+              "scene-one": {
+                ...project.timelines.items.main.elements_by_id["scene-one"],
+                label: "新序章",
+              },
+            },
+          },
+        },
+      },
+    };
+    expect(publicAssistantText("scene-one", { project: renamed })).toBe(
+      "新序章",
+    );
+    expect(publicAssistantText("scene-one", { project })).toBe("序章");
+    const originalLanguage = i18n.language;
+    try {
+      await i18n.changeLanguage("en");
+      expect(humanizeCreatorRefs("scene-unnamed", project)).toBe(
+        i18n.t("presentation.targets.timelineContent"),
+      );
+      expect(publicAssistantText("`video-unnamed`", { project })).toBe(
+        i18n.t("presentation.targets.genResult"),
+      );
+    } finally {
+      await i18n.changeLanguage(originalLanguage);
+    }
+  });
+
+  const creatorMessage = (
+    overrides: Partial<CreatorMessage>,
+  ): CreatorMessage => ({
+    messageId: "notice",
+    messageSeq: 1,
+    role: "assistant",
+    content: [],
+    metadata: {},
+    createdAt: "now",
+    ...overrides,
+  });
+  const text = (value: string): CreatorMessage["content"] => [
+    { type: "text", text: value },
+  ];
+
+  it("shows execution pause notices without granting user authority", () => {
+    const notice = creatorMessage({
+      role: "assistant",
+      source: "creator_execution_notice",
+      content: text("【自动执行已暂停】项目仍有待处理事项，请检查后继续。"),
+      metadata: { executionPause: { reason: "no_committed_progress" } },
+    });
+    expect(shouldRenderConversationMessage(notice)).toBe(true);
+    expect(isUserAuthorityMessage(notice)).toBe(false);
+    expect(shouldRenderConversationMessage({ ...notice, role: "user" })).toBe(
+      false,
+    );
   });
 });

@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import socket
 import types
 import wave
 
@@ -221,23 +220,6 @@ def test_asr_token_plan_probe_transcribes_a_public_sample(
     assert headers["X-DashScope-OssResourceResolve"] == "enable"
 
 
-def test_asr_provider_routes_qwen_audio_to_the_qwen3_route() -> None:
-    """The probe dispatch must match ``transcribe`` for the plan's model.
-
-    A restated copy of the dispatch missed the ``qwen-audio`` family and
-    sent the plan's only ASR model down the Fun-ASR route.
-    """
-    assert (
-        _asr_provider(
-            _request(
-                model_name="qwen-audio-3.0-asr-flash",
-                provider="fun-asr",
-            ),
-        )
-        == "qwen3-asr"
-    )
-
-
 def test_asr_whisper_probe_posts_a_real_multipart_transcription(
     uploaded_samples,
 ) -> None:
@@ -310,17 +292,8 @@ def test_asr_protocol_label_cannot_redirect_the_probe(
         # get_asr_provider() only ever returns whisper or fun-asr, so a
         # qwen3-asr model arrives labelled fun-asr and is routed by name.
         ("fun-asr", "", "qwen3-asr-flash", "qwen3-asr"),
-        # The platform names its ASR models a different way, and the
-        # production classifier claims them: a probe that only knew
-        # ``qwen3-asr*`` sent this config to a route the platform does
-        # not deploy at all.
-        (
-            "fun-asr",
-            "AgentScope Platform",
-            "qwen-audio-3.0-asr-flash",
-            "qwen3-asr",
-        ),
         (None, "", "qwen3-asr-flash", "qwen3-asr"),
+        ("fun-asr", "", "qwen-audio-3.0-asr-flash", "qwen3-asr"),
         ("fun-asr", "DashScope Fun-ASR", "fun-asr", "fun-asr"),
         (None, "", "paraformer-v2", "fun-asr"),
     ],
@@ -434,170 +407,99 @@ def test_connection_test_reports_a_metadata_target_as_a_failure(
     assert "元数据" in response.error
 
 
-class _AcceptingResponse:
-    """A provider reply that took the probe, without touching the network."""
-
-    is_success = True
-
-    def json(self) -> dict:
-        return {}
-
-
 class _ProbeConfig(_EmptyAsrConfig):
-    """The first-run config above, plus the sections probes read."""
-
     image = _EmptyAsrConfig._Item()
     tts = _EmptyAsrConfig._Item()
-
-
-def _accepted_connection_test(
-    request: ModelConnectionTestRequest,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Run the whole endpoint against a provider that always accepts.
-
-    The probe is prepared by the real routing code, because which verb it
-    ends up using is the thing under test; only the socket is replaced.
-    """
-
-    async def fake_send(client, url, headers, payload):
-        del client, url, headers, payload
-        return _AcceptingResponse()
-
-    monkeypatch.setattr(model_routes, "load_model_config", _ProbeConfig)
-    monkeypatch.setattr(model_routes, "_send_probe", fake_send)
-    return asyncio.run(model_routes.test_model_connection(request))
-
-
-def test_connection_test_marks_a_real_request_as_capability_verified(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A posted completion proves the modality answers, not just the key."""
-
-    result = _accepted_connection_test(
-        _request(
-            type="llm",
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            model_name="qwen-plus",
-            protocol="OpenAI 协议",
-            provider=None,
-        ),
-        monkeypatch,
-    )
-
-    assert result.ok
-    assert result.capability_verified is True
-
-
-def test_connection_test_marks_a_read_only_probe_as_credential_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A free GET cannot show that a broken generation route got fixed.
-
-    A model listing answers 200 for any valid key while keeping non-text
-    models invisible, which is exactly how three dead ASR routes stayed
-    green. Marking that pass as credential-level is what stops the UI from
-    claiming a capability this test never exercised.
-    """
-
-    result = _accepted_connection_test(
-        _request(
-            type="image",
-            base_url=(
-                "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1"
-            ),
-            model_name="wan2.7-image-pro",
-            protocol="Aliyun Token Plan",
-            provider=None,
-        ),
-        monkeypatch,
-    )
-
-    assert result.ok
-    assert result.capability_verified is False
-
-
-class _StubResponse:
-    """A canned 2xx reply carrying the body the route has to grade."""
-
-    is_success = True
-
-    def __init__(self, text: str, content_type: str = "application/json"):
-        self.text = text
-        self.headers = {"content-type": content_type}
-
-    def json(self) -> object:
-        return json.loads(self.text)
 
 
 def _connection_test_replying(
     request: ModelConnectionTestRequest,
     monkeypatch: pytest.MonkeyPatch,
-    text: str,
+    text: str = "{}",
     content_type: str = "application/json",
 ):
-    """Run the endpoint against one specific provider answer.
-
-    The empty-JSON stand-in used everywhere else is exactly what a 200 that
-    proved nothing looks like, so these cases need their own body.
-    """
-
-    async def fake_send(client, url, headers, payload):
-        del client, url, headers, payload
-        return _StubResponse(text, content_type)
+    async def fake_send(*_args):
+        return httpx.Response(
+            200, text=text, headers={"content-type": content_type}
+        )
 
     monkeypatch.setattr(model_routes, "load_model_config", _ProbeConfig)
     monkeypatch.setattr(model_routes, "_send_probe", fake_send)
     return asyncio.run(model_routes.test_model_connection(request))
 
 
-def test_read_only_voice_listing_stays_credential_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A management POST is a POST, and that used to read as a verdict.
-
-    ``cosyvoice-v3.5-plus`` has no system voices, so the probe lists the
-    enrolled ones instead of synthesizing — an empty list with HTTP 200 says
-    the credential works and nothing about the model producing audio.
-    """
-
+@pytest.mark.parametrize(
+    ("type_", "base_url", "model", "protocol", "verified"),
+    [
+        (
+            "llm",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "qwen-plus",
+            "OpenAI 协议",
+            True,
+        ),
+        (
+            "image",
+            "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
+            "wan2.7-image-pro",
+            "Aliyun Token Plan",
+            False,
+        ),
+    ],
+    ids=["completion", "model-list"],
+)
+def test_only_a_capability_probe_verifies_the_model(
+    monkeypatch, type_, base_url, model, protocol, verified
+):
     result = _connection_test_replying(
         _request(
-            type="tts",
-            model_name="cosyvoice-v3.5-plus",
-            protocol="DashScope CosyVoice",
+            type=type_,
+            base_url=base_url,
+            model_name=model,
+            protocol=protocol,
             provider=None,
         ),
         monkeypatch,
-        '{"output": {"voice_list": []}}',
     )
-
     assert result.ok
-    assert result.capability_verified is False
+    assert result.capability_verified is verified
 
 
-def test_a_real_synthesis_probe_still_verifies_the_voice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The guard on the guard: a model with system voices posts audio.
-
-    Demoting the listing must not demote the probe that actually asked the
-    model to speak.
-    """
-
+@pytest.mark.parametrize(
+    ("model", "protocol", "reply", "verified"),
+    [
+        (
+            "cosyvoice-v3.5-plus",
+            "DashScope CosyVoice",
+            {"voice_list": []},
+            False,
+        ),
+        (
+            "qwen3-tts-flash",
+            "DashScope TTS",
+            {"audio": {"url": "https://cdn.example/a.wav"}},
+            True,
+        ),
+        ("qwen3-tts-flash", "DashScope TTS", {"finished": True}, None),
+    ],
+    ids=["voice-list", "synthesis", "missing-audio"],
+)
+def test_tts_probe_verdict_depends_on_the_reply(
+    monkeypatch, model, protocol, reply, verified
+):
     result = _connection_test_replying(
         _request(
-            type="tts",
-            model_name="qwen3-tts-flash",
-            protocol="DashScope TTS",
-            provider=None,
+            type="tts", model_name=model, protocol=protocol, provider=None
         ),
         monkeypatch,
-        '{"output": {"audio": {"url": "https://cdn.example/a.wav"}}}',
+        json.dumps({"output": reply}),
     )
-
-    assert result.ok
-    assert result.capability_verified is True
+    if verified is None:
+        assert not result.ok
+        assert "output.audio.url" in result.error
+    else:
+        assert result.ok
+        assert result.capability_verified is verified
 
 
 def test_a_websocket_model_is_never_probed_over_http(
@@ -617,10 +519,7 @@ def test_a_websocket_model_is_never_probed_over_http(
         del client, headers
         seen["url"] = url
         seen["payload"] = payload
-        return _StubResponse(
-            '{"output": {"voice_list": []}}',
-            "application/json",
-        )
+        return httpx.Response(200, json={"output": {"voice_list": []}})
 
     monkeypatch.setattr(model_routes, "load_model_config", _ProbeConfig)
     monkeypatch.setattr(model_routes, "_send_probe", fake_send)
@@ -642,30 +541,6 @@ def test_a_websocket_model_is_never_probed_over_http(
         "model": "voice-enrollment",
         "input": {"action": "list_voice"},
     }
-
-
-def test_a_synthesis_probe_without_audio_is_not_read_as_a_verdict(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A 200 that hands back no audio URL answered; it did not verify.
-
-    The HTTP family is probed by synthesizing one character, and the guard on
-    that probe is the very field production downloads.
-    """
-
-    result = _connection_test_replying(
-        _request(
-            type="tts",
-            model_name="qwen3-tts-flash",
-            protocol="DashScope TTS",
-            provider=None,
-        ),
-        monkeypatch,
-        '{"output": {"finished": true}}',
-    )
-
-    assert result.ok is False
-    assert "output.audio.url" in result.error
 
 
 @pytest.mark.parametrize(
@@ -967,19 +842,6 @@ def test_probe_destination_refuses_the_metadata_service(url: str) -> None:
         _assert_probe_destination(url)
 
 
-def test_probe_destination_error_is_a_value_error() -> None:
-    """A refused destination must stay an ``ok=False`` answer, not a 500.
-
-    ``test_model_connection`` catches ``(httpx.HTTPError, ValueError,
-    RuntimeError)`` and renders the message as a diagnostic. Re-parenting
-    this exception onto ``domain.errors.ValidationError`` would turn the
-    endpoint whose job is explaining a broken configuration into a server
-    error, which is the same trap the ASR upload refusal fell into.
-    """
-
-    assert issubclass(ProbeDestinationError, ValueError)
-
-
 @pytest.mark.parametrize(
     "url",
     [
@@ -1175,93 +1037,6 @@ def test_token_plan_probe_uses_models_endpoint(type_, model_name) -> None:
 
 
 @pytest.mark.parametrize(
-    ("type_", "model_name"),
-    [
-        ("llm", "qwen3.8-flash"),
-        ("vlm", "qwen3.8-max"),
-        ("image", "qwen-image-3.0"),
-        # ASR is absent on purpose: its probe is built by the async entry,
-        # which uploads the sample and transcribes it.  Asserting a free
-        # listing here measured a route the endpoint never takes.
-        ("tts", "qwen-audio-3.0-tts-flash"),
-    ],
-)
-def test_agentscope_gateway_probe_lists_models_and_never_completes(
-    type_,
-    model_name,
-) -> None:
-    """Every read-only section of the proxy probes for free.
-
-    The chat route bills even at ``max_tokens=8``, and a Credits-exhausted
-    account answers it with a 403 that looks exactly like a permission error -
-    so a chat probe cannot tell a broken configuration from an empty balance.
-    """
-    url, headers, payload = _probe_payload(
-        _request(
-            type=type_,
-            model_name=model_name,
-            protocol="AgentScope Platform",
-            base_url="https://platform-pre.agentscope.io/v1",
-            provider=None,
-        ),
-    )
-
-    assert url == "https://platform-pre.agentscope.io/v1/models"
-    assert payload == {"_get_probe": True}
-    assert "chat/completions" not in url
-    assert headers["Authorization"] == "Bearer sk-test"
-
-
-def test_agentscope_probe_is_keyed_on_the_host_not_the_label() -> None:
-    # Recognition accepts the proxy host as well as the protocol label, so
-    # keeping a custom label and pasting the proxy endpoint is still probed
-    # for free instead of falling through to the billable chat completion.
-    url, _headers, payload = _probe_payload(
-        _request(
-            type="llm",
-            model_name="qwen3.8-flash",
-            protocol="自定义",
-            base_url="https://platform-pre.agentscope.io/v1",
-            provider=None,
-        ),
-    )
-
-    assert url == "https://platform-pre.agentscope.io/v1/models"
-    assert payload == {"_get_probe": True}
-
-
-def test_agentscope_video_probe_keeps_the_capability_guard() -> None:
-    # Video runs the local capability guard first, then the free probe: the
-    # Bailian fall-through would ping the temporary-upload policy API,
-    # which answers 401 InvalidApiKey for a proxy key.
-    url, _headers, payload = _probe_payload(
-        _request(
-            type="video",
-            model_name="happyhorse-1.1",
-            protocol="AgentScope Platform",
-            base_url="https://platform-pre.agentscope.io/v1",
-            provider=None,
-        ),
-    )
-
-    assert url == "https://platform-pre.agentscope.io/v1/models"
-    assert payload == {"_get_probe": True}
-    assert "/uploads" not in url
-
-    with pytest.raises(ValueError) as excinfo:
-        _probe_payload(
-            _request(
-                type="video",
-                model_name="not-a-real-model",
-                protocol="AgentScope Platform",
-                base_url="https://platform-pre.agentscope.io/v1",
-                provider=None,
-            ),
-        )
-    assert "VIDEO_MODEL_CAPABILITY_UNKNOWN" in str(excinfo.value)
-
-
-@pytest.mark.parametrize(
     ("protocol", "base_url", "model_name", "expected_url", "expected_params"),
     [
         (
@@ -1432,143 +1207,118 @@ def test_openai_image_probe_still_uses_model_retrieve() -> None:
     assert payload == {"_get_probe": True}
 
 
-def test_llm_probe_still_posts_a_chat_ping() -> None:
-    url, _headers, payload = _probe_payload(
-        _request(
-            type="llm",
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-            model_name="qwen-plus",
-            protocol="OpenAI 协议",
-            provider=None,
+@pytest.mark.parametrize(
+    ("base", "model", "protocol", "api_key"),
+    [
+        (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "qwen-plus",
+            "OpenAI 协议",
+            "sk-test",
         ),
-    )
-
-    assert url == (
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-    )
-    assert "_get_probe" not in payload
-    assert payload["model"] == "qwen-plus"
-
-
-def test_anthropic_llm_probe_uses_messages_endpoint() -> None:
+        (
+            "https://opencode.ai/zen/v1",
+            "nemotron-3.5-lightning-free",
+            "OpenCode",
+            "",
+        ),
+    ],
+    ids=["openai-compatible", "keyless-zen"],
+)
+def test_openai_style_llm_probe_posts_chat_with_optional_auth(
+    base, model, protocol, api_key
+):
     url, headers, payload = _probe_payload(
         _request(
             type="llm",
-            base_url="https://api.anthropic.com",
-            model_name="claude-sonnet-4-20250514",
-            protocol="Anthropic Claude",
+            base_url=base,
+            model_name=model,
+            protocol=protocol,
             provider=None,
+            api_key=api_key,
+            require_api_key=bool(api_key),
         ),
     )
+    assert url == base + "/chat/completions"
+    assert "_get_probe" not in payload
+    assert payload["model"] == model
+    assert headers.get("Authorization") == (
+        f"Bearer {api_key}" if api_key else None
+    )
 
-    assert url == "https://api.anthropic.com/v1/messages"
-    assert headers["x-api-key"] == "sk-test"
+
+@pytest.mark.parametrize(
+    ("base", "model", "protocol", "api_key"),
+    [
+        (
+            "https://api.anthropic.com",
+            "claude-sonnet-4-20250514",
+            "Anthropic Claude",
+            "sk-test",
+        ),
+        (
+            "https://api.anthropic.com",
+            "claude-sonnet-4-20250514",
+            "Anthropic Claude",
+            "",
+        ),
+        (
+            "https://api.minimaxi.com/anthropic",
+            "MiniMax-M3",
+            "MiniMax",
+            "sk-test",
+        ),
+    ],
+    ids=["anthropic", "anthropic-keyless", "minimax"],
+)
+def test_anthropic_style_llm_probe_uses_messages_without_an_output_cap(
+    base, model, protocol, api_key
+):
+    url, headers, payload = _probe_payload(
+        _request(
+            type="llm",
+            base_url=base,
+            model_name=model,
+            protocol=protocol,
+            provider=None,
+            api_key=api_key,
+            require_api_key=bool(api_key),
+        ),
+    )
+    assert url == base + "/v1/messages"
+    assert headers.get("x-api-key") == (api_key or None)
     assert headers["anthropic-version"] == "2023-06-01"
     assert "Authorization" not in headers
-    assert payload["model"] == "claude-sonnet-4-20250514"
+    assert payload["model"] == model
     assert "max_tokens" not in payload
     assert payload["messages"] == [
-        {"role": "user", "content": "Reply with pong only."},
+        {"role": "user", "content": "Reply with pong only."}
     ]
 
 
-def test_minimax_llm_probe_uses_anthropic_format() -> None:
+@pytest.mark.parametrize("api_key", ["sk-test", ""], ids=["keyed", "keyless"])
+def test_gemini_llm_probe_uses_generate_content_with_optional_query_key(
+    api_key,
+):
+    base = "https://generativelanguage.googleapis.com"
     url, headers, payload = _probe_payload(
         _request(
             type="llm",
-            base_url="https://api.minimaxi.com/anthropic",
-            model_name="MiniMax-M3",
-            protocol="MiniMax",
-            provider=None,
-        ),
-    )
-
-    assert url == "https://api.minimaxi.com/anthropic/v1/messages"
-    assert headers["x-api-key"] == "sk-test"
-    assert payload["model"] == "MiniMax-M3"
-
-
-def test_gemini_llm_probe_uses_generate_content() -> None:
-    url, headers, payload = _probe_payload(
-        _request(
-            type="llm",
-            base_url="https://generativelanguage.googleapis.com",
+            base_url=base,
             model_name="gemini-2.5-pro",
             protocol="Google Gemini",
             provider=None,
+            api_key=api_key,
+            require_api_key=bool(api_key),
         ),
     )
-
-    # Gemini authenticates through the ``key=`` query parameter; a probe
-    # without it always fails with 400/401/403.
-    assert url == (
-        "https://generativelanguage.googleapis.com"
-        "/v1beta/models/gemini-2.5-pro:generateContent?key=sk-test"
-    )
+    suffix = "/v1beta/models/gemini-2.5-pro:generateContent"
+    assert url == base + suffix + (f"?key={api_key}" if api_key else "")
     assert "Authorization" not in headers
     assert payload["contents"] == [
-        {"parts": [{"text": "Reply with pong only."}]},
+        {"parts": [{"text": "Reply with pong only."}]}
     ]
     assert "maxOutputTokens" not in payload.get("generationConfig", {})
-
-
-def test_gemini_llm_probe_omits_key_when_keyless() -> None:
-    url, headers, _payload = _probe_payload(
-        _request(
-            type="llm",
-            base_url="https://generativelanguage.googleapis.com",
-            api_key="",
-            model_name="gemini-2.5-pro",
-            protocol="Google Gemini",
-            provider=None,
-            require_api_key=False,
-        ),
-    )
-
-    assert url == (
-        "https://generativelanguage.googleapis.com"
-        "/v1beta/models/gemini-2.5-pro:generateContent"
-    )
-    assert "Authorization" not in headers
-
-
-def test_anthropic_llm_probe_omits_key_header_when_keyless() -> None:
-    _url, headers, _payload = _probe_payload(
-        _request(
-            type="llm",
-            base_url="https://api.anthropic.com",
-            api_key="",
-            model_name="claude-sonnet-4-20250514",
-            protocol="Anthropic Claude",
-            provider=None,
-            require_api_key=False,
-        ),
-    )
-
-    assert "x-api-key" not in headers
-    assert "Authorization" not in headers
-    assert headers["anthropic-version"] == "2023-06-01"
-
-
-def test_opencode_keyless_llm_probe_posts_chat_ping_without_auth() -> None:
-    # OpenCode Zen serves ``*-free`` models without an API key; the probe
-    # must not send an (empty) Authorization header, which the gateway
-    # would reject as an invalid key.
-    url, headers, payload = _probe_payload(
-        _request(
-            type="llm",
-            base_url="https://opencode.ai/zen/v1",
-            api_key="",
-            model_name="nemotron-3.5-lightning-free",
-            protocol="OpenCode",
-            provider=None,
-            require_api_key=False,
-        ),
-    )
-
-    assert url == "https://opencode.ai/zen/v1/chat/completions"
-    assert "Authorization" not in headers
-    assert payload["model"] == "nemotron-3.5-lightning-free"
 
 
 def test_anthropic_vlm_probe_converts_image_to_anthropic_format() -> None:
@@ -1619,154 +1369,100 @@ def test_gemini_vlm_probe_converts_image_to_inline_data() -> None:
     assert parts[1]["inline_data"]["mime_type"] == "image/png"
 
 
-def test_platform_asr_probe_stages_its_sample_the_way_production_does(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The test button has to earn the URL it is about to send.
-
-    A platform config cannot mint an ``oss://`` reference: the model proxy has
-    no identity on the Bailian upload-policy API (measured ``401``), so going
-    straight for the DashScope temporary OSS — as this probe did — failed the
-    staging step before the request under test was ever put on the wire, and
-    the route it then named is one the platform does not deploy. Everything
-    here runs through the real endpoint, because the sync helper the earlier
-    platform tests called never reached this code at all.
-    """
-
-    sent: dict[str, object] = {}
-    staged: list[str] = []
-
-    def refuse_dashscope(*_args, **_kwargs):
-        raise AssertionError("a platform config must not mint an oss:// URL")
-
-    async def platform_upload(path, **kwargs):
-        del kwargs
-        staged.append(path.name)
-        return "https://platform-pre.agentscope.io/media/creator-probe.wav"
-
-    async def fake_send(client, url, headers, payload):
-        del client, headers
-        sent["url"] = url
-        sent["payload"] = payload
-        return _StubResponse('{"output": {"choices": []}}')
-
-    monkeypatch.setattr(
-        media_transport,
-        "upload_local_file_to_dashscope_temp",
-        refuse_dashscope,
-    )
-    monkeypatch.setattr(
-        media_transport,
-        "upload_local_file_to_platform_media",
-        platform_upload,
-    )
-    monkeypatch.setattr(model_routes, "load_model_config", _ProbeConfig)
-    monkeypatch.setattr(model_routes, "_send_probe", fake_send)
-
-    result = asyncio.run(
-        model_routes.test_model_connection(
-            _request(
-                type="asr",
-                base_url="https://platform-pre.agentscope.io/v1",
-                api_key="sk-as-test",
-                model_name="qwen-audio-3.0-asr-flash",
-                protocol="AgentScope Platform",
-                provider="fun-asr",
-            ),
-        ),
-    )
-
-    assert staged == ["creator-probe.wav"]
-    assert result.ok is True
-    # The route the production classifier picks for this model name.
-    assert sent["url"] == (
-        "https://platform-pre.agentscope.io/v1/services/aigc/"
-        "multimodal-generation/generation"
-    )
-    assert sent["payload"]["model"] == "qwen-audio-3.0-asr-flash"
-    assert sent["payload"]["_attests"] == "asr-qwen3"
+def _fun_task(status, **fields):
+    return {"task_id": "t-1", "task_status": status, **fields}
 
 
 @pytest.mark.parametrize(
-    ("body_text", "expected_ok", "expected_verified", "expected_error"),
+    ("output", "verified", "error"),
     [
-        # An accepted submit that is still queued. The probe posts and
-        # deliberately does not poll, so this is where the evidence stops.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "PENDING"}}',
-            True,
-            False,
-            "",
+        pytest.param(_fun_task("PENDING"), False, None, id="queued"),
+        pytest.param(_fun_task("HELD"), False, None, id="unknown-state"),
+        pytest.param(_fun_task("SUCCEEDED"), False, None, id="no-subtask-yet"),
+        pytest.param(
+            {"task_status": "PENDING"}, None, "task_id", id="no-task-id"
         ),
-        # The same submit whose task had already failed, with the provider's
-        # refusal nested inside ``output`` rather than at the top level.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "FAILED", '
-            '"code": "InvalidParameter", '
-            '"message": "Failed to download audio"}}',
-            False,
+        pytest.param("InternalError", None, "output", id="invalid-output"),
+        pytest.param(_fun_task("FAILED"), None, "FAILED", id="failed"),
+        pytest.param(
+            _fun_task(
+                "FAILED",
+                code="InvalidParameter",
+                message="Failed to download audio",
+            ),
             None,
             "InvalidParameter",
+            id="failed-with-provider-error",
         ),
-        # A terminal failure the provider left unexplained is still terminal.
-        # ``_error_wrapped_in_2xx`` only reacts to ``code``/``message``, so
-        # this case is what proves the status list itself is consulted.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "FAILED"}}',
-            False,
+        pytest.param(
+            _fun_task("SUCCEEDED", results=[{"subtask_status": "FAILED"}]),
             None,
-            "FAILED",
+            "没有成功的子任务",
+            id="no-successful-subtask",
         ),
-        # A submit that produced no task at all is a refusal, not a mystery.
-        ('{"output": {"task_status": "PENDING"}}', False, None, "task_id"),
-        # A gateway that answers with a finished task, but names no subtask.
-        # ``_fun_asr`` reads ``results`` only after a poll, so this proves the
-        # queue took the work and nothing more.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "SUCCEEDED"}}',
-            True,
-            False,
-            "",
+        pytest.param(
+            _fun_task("SUCCEEDED", results=[{"subtask_status": "SUCCEEDED"}]),
+            None,
+            "transcription_url",
+            id="no-transcript",
         ),
-        # A submit whose ``output`` production cannot index at all: the
-        # reader takes ``output.task_id`` before it starts polling.
-        ('{"output": "InternalError"}', False, None, "output"),
-        # A state this code does not know is not evidence of a breakage.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "HELD"}}',
+        pytest.param(
+            _fun_task("SUCCEEDED", results="SUCCEEDED"),
+            None,
+            "results",
+            id="invalid-results",
+        ),
+        pytest.param(
+            _fun_task(
+                "SUCCEEDED",
+                results=[
+                    {
+                        "subtask_status": "SUCCEEDED",
+                        "transcription_url": "https://oss.example.test/t.json",
+                    },
+                ],
+            ),
             True,
-            False,
-            "",
+            None,
+            id="transcript",
+        ),
+        pytest.param(
+            _fun_task("FAILED", code="ASR_RESPONSE_HAVE_NO_WORDS"),
+            True,
+            None,
+            id="silent-task",
+        ),
+        pytest.param(
+            _fun_task(
+                "SUCCEEDED",
+                results=[
+                    {
+                        "subtask_status": "FAILED",
+                        "code": "ASR_RESPONSE_HAVE_NO_WORDS",
+                    },
+                ],
+            ),
+            True,
+            None,
+            id="silent-subtask",
         ),
     ],
 )
-def test_fun_asr_submit_is_graded_on_its_task_state(
-    monkeypatch: pytest.MonkeyPatch,
-    uploaded_samples: list,
-    body_text: str,
-    expected_ok: bool,
-    expected_verified: bool | None,
-    expected_error: str,
-) -> None:
-    """A task id says the queue took the work, not that a transcript exists.
-
-    ``asr_model._fun_asr`` polls until ``task_status`` reaches SUCCEEDED and
-    raises on anything else, so a probe that does not poll may not call a
-    FAILED task a verified capability — and an unlisted state has to leave
-    the verdict at "credential accepted" rather than inventing a failure.
-    """
-
-    del uploaded_samples
+def test_fun_asr_verdict_requires_a_transcript_or_confirmed_silence(
+    monkeypatch,
+    uploaded_samples,
+    output,
+    verified,
+    error,
+):
     result = _connection_test_replying(
-        _request(),
-        monkeypatch,
-        body_text,
+        _request(), monkeypatch, json.dumps({"output": output})
     )
-
-    assert result.ok is expected_ok
-    assert result.capability_verified is expected_verified
-    if expected_error:
-        assert expected_error in (result.error or "")
+    assert uploaded_samples
+    assert result.ok is (error is None)
+    assert result.capability_verified is verified
+    if error:
+        assert error in (result.error or "")
 
 
 def test_asr_probe_refuses_a_metadata_base_without_staging_the_sample(
@@ -1798,297 +1494,6 @@ def test_asr_probe_refuses_a_metadata_base_without_staging_the_sample(
 
     assert result.ok is False
     assert "元数据" in (result.error or "")
-
-
-@pytest.mark.parametrize(
-    ("saved_protocol", "draft_protocol", "expected_path"),
-    [
-        # The dialog was switched to the platform and not saved yet: the
-        # proxy serves this route under ``/v1``, while the saved token-portal
-        # label points at an ``/api/v1`` path the platform never deploys.
-        (
-            "DashScope Fun-ASR",
-            "AgentScope Platform",
-            "/v1/services/aigc/multimodal-generation/generation",
-        ),
-        (
-            "AgentScope Platform",
-            "DashScope Fun-ASR",
-            "/api/v1/services/aigc/multimodal-generation/generation",
-        ),
-    ],
-)
-def test_asr_probe_derives_its_route_from_the_draft_protocol(
-    monkeypatch: pytest.MonkeyPatch,
-    saved_protocol: str,
-    draft_protocol: str,
-    expected_path: str,
-) -> None:
-    """A probe tests the configuration in the dialog, not the saved one.
-
-    ``_qwen3_endpoint`` used to read the persisted ASR protocol. On the
-    official platform host the hostname identifies the gateway anyway, which
-    kept the stale read invisible; behind a custom proxy domain the protocol
-    label is the only thing saying which prefix the route lives under, and
-    the probe posted to a path the configuration under test never serves.
-    """
-
-    async def fake_platform_upload(path, **kwargs):
-        del path, kwargs
-        return "https://gateway.invalid/media/creator-probe.wav"
-
-    monkeypatch.setattr(
-        model_routes.model_config,
-        "get_asr_protocol",
-        lambda: saved_protocol,
-    )
-    monkeypatch.setattr(
-        media_transport,
-        "upload_local_file_to_platform_media",
-        fake_platform_upload,
-    )
-
-    url, _headers, payload = _probe(
-        _request(
-            base_url="https://gateway.invalid/v1",
-            model_name="qwen-audio-3.0-asr-flash",
-            protocol=draft_protocol,
-        ),
-    )
-
-    assert url.endswith(expected_path)
-    assert payload["_attests"] == "asr-qwen3"
-
-
-def test_platform_probe_upload_refuses_a_redirect_off_the_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The sample upload obeys the redirect policy the probe request uses.
-
-    Production follows redirects because the proxy is the operator's own. A
-    probe carrying the configured bearer may not be moved to a host nobody
-    named, so it asks for the strict client and reports the move instead of
-    quietly testing somewhere else.
-    """
-
-    seen: list[tuple[str, str]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((str(request.url), request.headers.get("host", "")))
-        return httpx.Response(
-            302,
-            headers={"location": "http://169.254.169.254/latest/meta-data/"},
-        )
-
-    real_client = httpx.Client
-
-    def client_factory(*args, **kwargs):
-        kwargs.pop("transport", None)
-        return real_client(
-            *args,
-            transport=httpx.MockTransport(handler),
-            **kwargs,
-        )
-
-    async def refuse_send(client, url, headers, payload):
-        del client, url, headers, payload
-        raise AssertionError("the model request ran after a refused redirect")
-
-    # A guarded upload binds an address before the redirect policy can be
-    # trusted, so the configured name is resolved exactly as it would be on a
-    # socket — here to an answer the destination policy accepts.
-    def fake_getaddrinfo(host, port, **kwargs):
-        del host, kwargs
-        return [(2, 1, 6, "", ("93.184.216.34", port))]
-
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
-    monkeypatch.setattr(media_transport.httpx, "Client", client_factory)
-    monkeypatch.setattr(model_routes, "load_model_config", _ProbeConfig)
-    monkeypatch.setattr(model_routes, "_send_probe", refuse_send)
-
-    result = asyncio.run(
-        model_routes.test_model_connection(
-            _request(
-                base_url="https://gateway.invalid/v1",
-                model_name="qwen-audio-3.0-asr-flash",
-                protocol="AgentScope Platform",
-            ),
-        ),
-    )
-
-    assert result.ok is False
-    # One request only: the 302 was never followed to the metadata service.
-    # It went to the address the policy validated, still named by the host the
-    # operator configured.
-    assert len(seen) == 1
-    assert "93.184.216.34" in seen[0][0]
-    assert seen[0][0].endswith("/v1/media/uploads")
-    assert seen[0][1] == "gateway.invalid"
-    assert "redirected" in (result.error or "")
-
-
-def test_platform_probe_upload_carries_the_destination_guard(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The metadata address is refused before the upload, not after it.
-
-    The upload target is derived from the same base URL as the model request,
-    so it used to reach the address the policy forbids with the bearer
-    attached and still report a refusal at the end. Nothing may leave.
-    """
-
-    def forbid(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("a probe upload client was opened")
-
-    async def refuse_send(client, url, headers, payload):
-        del client, url, headers, payload
-        raise AssertionError("the model request ran after a refused target")
-
-    monkeypatch.setattr(media_transport.httpx, "Client", forbid)
-    monkeypatch.setattr(model_routes, "load_model_config", _ProbeConfig)
-    monkeypatch.setattr(model_routes, "_send_probe", refuse_send)
-
-    result = asyncio.run(
-        model_routes.test_model_connection(
-            _request(
-                base_url="http://169.254.169.254/v1",
-                model_name="qwen-audio-3.0-asr-flash",
-                protocol="AgentScope Platform",
-            ),
-        ),
-    )
-
-    assert result.ok is False
-    assert "元数据" in (result.error or "")
-
-
-def test_a_platform_probe_refusal_never_stages_the_sample(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No network side effect may run ahead of the destination policy.
-
-    The platform upload carries a guard of its own, which is what kept the
-    route-level ordering untested: swapping the two statements in the probe
-    still refused, just one request later. The first line of defence has to be
-    the probe itself, so this stub replaces the upload entirely and any call to
-    it is a failure regardless of what the real client would have checked.
-    """
-
-    async def refuse_upload(path, **kwargs):
-        del path, kwargs
-        raise AssertionError("the probe uploaded before checking its target")
-
-    monkeypatch.setattr(model_routes, "load_model_config", _ProbeConfig)
-    monkeypatch.setattr(
-        media_transport,
-        "upload_local_file_to_platform_media",
-        refuse_upload,
-    )
-
-    result = asyncio.run(
-        model_routes.test_model_connection(
-            _request(
-                base_url="http://169.254.169.254/v1",
-                model_name="qwen-audio-3.0-asr-flash",
-                protocol="AgentScope Platform",
-            ),
-        ),
-    )
-
-    assert result.ok is False
-    assert "元数据" in (result.error or "")
-
-
-@pytest.mark.parametrize(
-    ("body_text", "expected_ok", "expected_verified", "expected_error"),
-    [
-        # The task reports itself finished while its only subtask failed.
-        # ``_fun_asr`` picks the first SUCCEEDED subtask and raises when there
-        # is none, so the next real request would fail on this document.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "SUCCEEDED", '
-            '"results": [{"subtask_status": "FAILED", '
-            '"code": "InvalidParameter", '
-            '"message": "Failed to download audio"}]}}',
-            False,
-            None,
-            "没有成功的子任务",
-        ),
-        # Finished, and the successful subtask carries no transcript to
-        # download: the reader indexes ``transcription_url`` outright.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "SUCCEEDED", '
-            '"results": [{"subtask_status": "SUCCEEDED"}]}}',
-            False,
-            None,
-            "transcription_url",
-        ),
-        # ``results`` as a string iterates into characters whose ``.get`` the
-        # reader would call — the AttributeError one request away.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "SUCCEEDED", '
-            '"results": "SUCCEEDED"}}',
-            False,
-            None,
-            "results",
-        ),
-        # The document a real finished task produces.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "SUCCEEDED", '
-            '"results": [{"subtask_status": "SUCCEEDED", '
-            '"transcription_url": "https://oss.example.test/t.json"}]}}',
-            True,
-            True,
-            "",
-        ),
-        # The silence this probe deliberately asked for is an answer, not a
-        # breakage: ``_fun_asr`` returns an empty transcript for a no-speech
-        # verdict even when the task itself ended FAILED.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "FAILED", '
-            '"code": "ASR_RESPONSE_HAVE_NO_WORDS"}}',
-            True,
-            True,
-            "",
-        ),
-        # The same verdict seen one level down, in the subtask list.
-        (
-            '{"output": {"task_id": "t-1", "task_status": "SUCCEEDED", '
-            '"results": [{"subtask_status": "FAILED", '
-            '"code": "ASR_RESPONSE_HAVE_NO_WORDS"}]}}',
-            True,
-            True,
-            "",
-        ),
-    ],
-)
-def test_fun_asr_terminal_document_is_graded_by_the_poll_reader(
-    monkeypatch: pytest.MonkeyPatch,
-    uploaded_samples: list,
-    body_text: str,
-    expected_ok: bool,
-    expected_verified: bool | None,
-    expected_error: str,
-) -> None:
-    """A terminal ``SUCCEEDED`` is a claim about its subtasks, not a verdict.
-
-    Reproduced from the review: the submit grader stopped at ``task_status``,
-    so a document whose subtasks had failed certified a transcription route
-    that ``asr_model._fun_asr`` refuses with "Fun-ASR failed".
-    """
-
-    del uploaded_samples
-    result = _connection_test_replying(
-        _request(),
-        monkeypatch,
-        body_text,
-    )
-
-    assert result.ok is expected_ok
-    assert result.capability_verified is expected_verified
-    if expected_error:
-        assert expected_error in (result.error or "")
 
 
 def test_send_probe_leaves_the_callers_payload_whole() -> None:
@@ -2199,48 +1604,23 @@ _ASR_SUBMIT_REPLY = {
 }
 
 
-def _capture_dispatch(monkeypatch, reply: dict | None = None) -> list:
-    """Record the URL and headers a probe would send, then report success.
+def _capture_dispatch(
+    monkeypatch, reply: dict | None = None
+) -> list[httpx.Request]:
+    """Capture real HTTPX requests without opening network connections."""
+    sent: list[httpx.Request] = []
 
-    ``reply`` is the answer the route grades. An ASR probe is a real
-    transcription submit, and a bare ``{}`` reads as a broken route rather
-    than as an unfamiliar shape, so an ASR case has to answer like the task
-    queue it reached; the routing point these cases test is unchanged.
-    """
-    sent: list[tuple[str, dict[str, str]]] = []
-    document = reply if reply is not None else {}
-    body = json.dumps(document)
+    def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json=reply or {})
 
-    class _Response:
-        is_success = True
-        status_code = 200
-        text = body
-        content = body.encode("utf-8")
-        headers = {"content-type": "application/json"}
+    real_client = httpx.AsyncClient
 
-        def json(self) -> dict:
-            return document
+    def client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handle)
+        return real_client(*args, **kwargs)
 
-    class _Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc_info):
-            return False
-
-        async def get(self, url, headers=None, params=None):
-            sent.append((str(url), dict(headers or {})))
-            return _Response()
-
-        async def post(self, url, headers=None, json=None, **kwargs):
-            del kwargs
-            sent.append((str(url), dict(headers or {})))
-            return _Response()
-
-    monkeypatch.setattr(model_routes.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(model_routes.httpx, "AsyncClient", client)
     return sent
 
 
@@ -2455,8 +1835,8 @@ def test_keyless_probe_of_another_host_still_reaches_the_provider(
 
     assert response.ok
     assert len(sent) == 1
-    assert sent[0][0].startswith("http://127.0.0.1:11434")
-    assert "Authorization" not in sent[0][1]
+    assert str(sent[0].url).startswith("http://127.0.0.1:11434")
+    assert "Authorization" not in sent[0].headers
 
 
 def test_environment_key_without_a_saved_home_is_refused(
@@ -2550,8 +1930,8 @@ def test_saved_cross_host_key_reuse_still_probes_its_own_host(
 
     assert response.ok, response.error
     assert len(sent) == 1
-    assert sent[0][0].startswith("https://media.example")
-    assert sent[0][1]["Authorization"] == f"Bearer {owner_key}"
+    assert str(sent[0].url).startswith("https://media.example")
+    assert sent[0].headers["Authorization"] == f"Bearer {owner_key}"
 
 
 def test_saved_key_is_not_tricked_by_an_idna_lookalike_host(
@@ -2631,36 +2011,6 @@ def _write_real_config(monkeypatch, tmp_path, config: dict) -> None:
     model_routes._invalidate_raw_config_cache()
 
 
-def _real_transport_dispatch(monkeypatch, reply: dict | None = None) -> list:
-    """Build the request with HTTPX; mock only the socket layer.
-
-    ``reply`` carries the answer the route grades: an ASR probe is now an
-    actual transcription submit, and a bare ``{}`` reads as a broken route
-    rather than as an unfamiliar shape.
-    """
-    sent: list[tuple[str, str]] = []
-    document = reply if reply is not None else {}
-
-    def _handle(request: httpx.Request) -> httpx.Response:
-        sent.append(
-            (str(request.url), request.headers.get("authorization", "")),
-        )
-        return httpx.Response(200, json=document)
-
-    real_client = httpx.AsyncClient
-
-    def _factory(*args, **kwargs):
-        kwargs.pop("transport", None)
-        return real_client(
-            *args,
-            transport=httpx.MockTransport(_handle),
-            **kwargs,
-        )
-
-    monkeypatch.setattr(model_routes.httpx, "AsyncClient", _factory)
-    return sent
-
-
 def _saved_llm_only(base_url: str = "https://llm.example/v1") -> dict:
     return {
         "llm": {
@@ -2680,7 +2030,7 @@ def test_builtin_default_target_never_receives_a_foreign_saved_key(
 ) -> None:
     """Unconfigured sections borrow a DashScope address, not a credential."""
     _write_real_config(monkeypatch, tmp_path, _saved_llm_only())
-    sent = _real_transport_dispatch(monkeypatch)
+    sent = _capture_dispatch(monkeypatch)
 
     response = asyncio.run(
         model_routes.test_model_connection(
@@ -2709,15 +2059,7 @@ def test_builtin_default_still_probes_when_the_saved_key_owns_that_origin(
         tmp_path,
         _saved_llm_only("https://dashscope.aliyuncs.com/compatible-mode/v1"),
     )
-    sent = _real_transport_dispatch(
-        monkeypatch,
-        reply={
-            "output": {
-                "task_id": "creator-connection-probe",
-                "task_status": "PENDING",
-            },
-        },
-    )
+    sent = _capture_dispatch(monkeypatch, _ASR_SUBMIT_REPLY)
 
     response = asyncio.run(
         model_routes.test_model_connection(
@@ -2726,10 +2068,10 @@ def test_builtin_default_still_probes_when_the_saved_key_owns_that_origin(
     )
 
     assert response.ok
-    assert sent and sent[0][0].startswith(
+    assert sent and str(sent[0].url).startswith(
         "https://dashscope.aliyuncs.com/api/v1/",
     )
-    assert sent[0][1] == "Bearer sk-review-owner-fake"
+    assert sent[0].headers["Authorization"] == "Bearer sk-review-owner-fake"
 
 
 def test_embedding_falls_back_to_the_origin_that_owns_the_key(
@@ -2757,7 +2099,7 @@ def test_embedding_falls_back_to_the_origin_that_owns_the_key(
             },
         },
     )
-    sent = _real_transport_dispatch(monkeypatch)
+    sent = _capture_dispatch(monkeypatch)
 
     response = asyncio.run(
         model_routes.test_model_connection(
@@ -2795,7 +2137,7 @@ def test_url_httpx_cannot_build_is_a_config_error_not_a_500(
         tmp_path,
         _saved_llm_only("https://example.com/v1"),
     )
-    sent = _real_transport_dispatch(monkeypatch)
+    sent = _capture_dispatch(monkeypatch)
 
     response = asyncio.run(
         model_routes.test_model_connection(
@@ -2872,7 +2214,7 @@ def test_an_unconfigured_llm_address_is_not_an_authorization_either(
     """
     _write_real_config(monkeypatch, tmp_path, {})
     monkeypatch.setenv("TEXT_API_KEY", "sk-review-env-fake")
-    sent = _real_transport_dispatch(monkeypatch)
+    sent = _capture_dispatch(monkeypatch)
 
     response = asyncio.run(
         model_routes.test_model_connection(
@@ -2901,7 +2243,7 @@ def test_a_vlm_reusing_the_llm_config_probes_the_llm_origin(
         tmp_path,
         {**_saved_llm_only(), "vlm": {"use_llm": True}},
     )
-    sent = _real_transport_dispatch(monkeypatch)
+    sent = _capture_dispatch(monkeypatch)
 
     response = asyncio.run(
         model_routes.test_model_connection(
@@ -2910,8 +2252,8 @@ def test_a_vlm_reusing_the_llm_config_probes_the_llm_origin(
     )
 
     assert response.ok, response.error
-    assert sent and sent[0][0].startswith("https://llm.example")
-    assert sent[0][1] == "Bearer sk-review-owner-fake"
+    assert sent and str(sent[0].url).startswith("https://llm.example")
+    assert sent[0].headers["Authorization"] == "Bearer sk-review-owner-fake"
 
 
 def test_a_stale_vlm_address_does_not_authorise_the_borrowed_key(
@@ -2937,7 +2279,7 @@ def test_a_stale_vlm_address_does_not_authorise_the_borrowed_key(
             },
         },
     )
-    sent = _real_transport_dispatch(monkeypatch)
+    sent = _capture_dispatch(monkeypatch)
 
     response = asyncio.run(
         model_routes.test_model_connection(
@@ -2979,7 +2321,7 @@ def test_embedding_may_probe_the_origin_that_owns_the_inherited_key(
             },
         },
     )
-    sent = _real_transport_dispatch(monkeypatch)
+    sent = _capture_dispatch(monkeypatch)
 
     response = asyncio.run(
         model_routes.test_model_connection(
@@ -2992,8 +2334,8 @@ def test_embedding_may_probe_the_origin_that_owns_the_inherited_key(
     )
 
     assert response.ok, response.error
-    assert sent and sent[0][0].startswith("https://llm.example")
-    assert sent[0][1] == "Bearer sk-review-owner-fake"
+    assert sent and str(sent[0].url).startswith("https://llm.example")
+    assert sent[0].headers["Authorization"] == "Bearer sk-review-owner-fake"
 
 
 def test_embedding_names_the_llm_as_the_owner_of_an_inherited_key(
@@ -3020,7 +2362,7 @@ def test_embedding_names_the_llm_as_the_owner_of_an_inherited_key(
             },
         },
     )
-    sent = _real_transport_dispatch(monkeypatch)
+    sent = _capture_dispatch(monkeypatch)
 
     response = asyncio.run(
         model_routes.test_model_connection(

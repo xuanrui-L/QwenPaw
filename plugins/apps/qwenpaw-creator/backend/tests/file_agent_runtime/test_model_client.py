@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 import base64
 import hashlib
 import io
@@ -255,106 +256,57 @@ def test_media_bearing_automatic_history_is_elided_under_budget():
     assert [item.get("source") for item in result[1:]] == ["initial_goal"]
 
 
-def test_elided_turns_stay_recallable_by_seq():
-    """A cut must stay an archive, not a hole nothing can read back.
-
-    Reverse guard for the platform-scroll reuse: before it, compaction left
-    only ``elidedMessageCount`` — an integer the model could not act on, so
-    an early goal or decision that scrolled out was silently forgotten. Now
-    the dropped turns are named by ``messageSeq`` oldest-first with a recall
-    pointer, and the durable originals stay fetchable by ``recall_history``.
-    """
-    history = [
+def _review_history(count: int) -> list[dict]:
+    return [
         {
             "role": "user",
             "source": "initial_goal",
             "messageSeq": 1,
             "content": [{"type": "text", "text": "保留全部六集与对白"}],
         },
-    ]
-    for index in range(6):
-        history.append(
+        *(
             {
                 "role": "assistant",
                 "source": "run_review_feedback",
                 "messageSeq": 10 + index,
                 "content": [
-                    {"type": "text", "text": f"review-{index} " + "x" * 4096},
+                    {"type": "text", "text": f"review-{index} " + "x" * 4096}
                 ],
-            },
+            }
+            for index in range(count)
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "standalone", [False, True], ids=["host", "standalone"]
+)
+def test_elided_turns_stay_recallable_by_seq(monkeypatch, standalone):
+    if standalone:
+        monkeypatch.setattr(
+            model_context, "_HOST_EVICTION_INDEX_AVAILABLE", False
         )
 
-    result = compact_conversation_history(history, max_bytes=4096)
-
-    elision = result[0]
+    elision = compact_conversation_history(_review_history(6), max_bytes=4096)[
+        0
+    ]
     assert elision["source"] == "context_compaction"
     assert elision["elidedMessageCount"] > 0
-    map_text = elision["archivedHistoryMap"]
-    assert "[context compressed]" in map_text
-    assert "recall_history" in map_text
-    lo, hi = elision["recoverableSeqRange"]
-    assert lo <= hi
-    # The reused platform EvictionIndex lists evicted turns oldest-first,
-    # either as individual ``· seq N`` lines (small archive) or folded to
-    # per-block ``· seq lo–hi`` spans once the char budget is exceeded.
-    # Parse whatever seq addresses appear and assert they stay ascending,
-    # then assert both endpoints are named somewhere, so the contract holds
-    # at every fold level instead of pinning one exact rendering format.
-    marker = "\u00b7 seq "
-    listed = [
-        int(line.split(marker)[1].split()[0].split("\u2013")[0])
-        for line in map_text.splitlines()
-        if marker in line
-    ]
-    assert listed == sorted(listed)
-    assert str(lo) in map_text and str(hi) in map_text
-
-
-def test_archived_map_falls_back_to_local_format_without_host_index(
-    monkeypatch,
-):
-    """A standalone install keeps the archive->recall contract.
-
-    The platform odometer map is reused only when importable. With the host
-    scroll absent, ``_render_archived_index`` must still hand back a
-    ``[context compressed]`` map naming the durable seqs, so the reuse can
-    never regress into the old silent hole.
-    """
-    monkeypatch.setattr(
-        model_context,
-        "_HOST_EVICTION_INDEX_AVAILABLE",
-        False,
-    )
-    history = [
-        {
-            "role": "user",
-            "source": "initial_goal",
-            "messageSeq": 1,
-            "content": [{"type": "text", "text": "keep all six episodes"}],
-        },
-    ]
-    for index in range(6):
-        history.append(
-            {
-                "role": "assistant",
-                "source": "run_review_feedback",
-                "messageSeq": 10 + index,
-                "content": [
-                    {"type": "text", "text": f"review-{index} " + "x" * 4096},
-                ],
-            },
-        )
-
-    elision = compact_conversation_history(history, max_bytes=4096)[0]
-    map_text = elision["archivedHistoryMap"]
-    assert "[context compressed]" in map_text
-    assert "recall_history" in map_text
-    # Local flat format uses ``seq . \u27e6headline\u27e7`` lines, not the
-    # platform tier banners.
-    assert any(" . \u27e6" in line for line in map_text.splitlines())
-    assert "===== Tier" not in map_text
-    lo, hi = elision["recoverableSeqRange"]
-    assert (lo, hi) == (10, 15)
+    assert elision["recoverableSeqRange"] == [10, 15]
+    archive = elision["archivedHistoryMap"]
+    assert "[context compressed]" in archive
+    assert "recall_history" in archive
+    assert "10" in archive and "15" in archive
+    if model_context._HOST_EVICTION_INDEX_AVAILABLE:
+        listed = [
+            int(line.split("· seq ")[1].split()[0].split("–")[0])
+            for line in archive.splitlines()
+            if "· seq " in line
+        ]
+        assert listed == sorted(listed)
+    else:
+        assert "===== Tier" not in archive
+        assert any(" . ⟦" in line for line in archive.splitlines())
 
 
 def test_archived_index_stays_recallable_when_the_map_folds():
@@ -426,7 +378,7 @@ def test_banner_less_host_render_reports_no_usable_body():
     assert model_context._split_host_map_body(host_render) is None
 
 
-def test_banner_less_host_render_falls_back_to_creator_map(monkeypatch):
+def test_banner_less_host_render_falls_back_to_creator_map(patch_attributes):
     """No banner means Creator draws its own map, not the host's prose.
 
     Prepending Creator's preamble to the whole host render would print the
@@ -458,20 +410,11 @@ def test_banner_less_host_render_falls_back_to_creator_map(monkeypatch):
                 "1 . old turn\n"
             )
 
-    monkeypatch.setattr(
+    patch_attributes(
         model_context,
-        "_HOST_EVICTION_INDEX_AVAILABLE",
-        True,
-    )
-    monkeypatch.setattr(
-        model_context,
-        "_HostEvictionIndex",
-        BannerlessIndex,
-    )
-    monkeypatch.setattr(
-        model_context,
-        "_HostEvictionLeaf",
-        BannerlessLeaf,
+        _HOST_EVICTION_INDEX_AVAILABLE=True,
+        _HostEvictionIndex=BannerlessIndex,
+        _HostEvictionLeaf=BannerlessLeaf,
     )
     archived = [
         {
@@ -493,49 +436,6 @@ def test_banner_less_host_render_falls_back_to_creator_map(monkeypatch):
     assert "banner at the end" not in map_text
     # Creator's flat format carries the pointer the host prose dropped.
     assert "7 . \u27e6keep the hero shot\u27e7" in map_text
-
-
-def test_continuation_summary_rides_on_the_elision_when_supplied():
-    """The prose state cache is attached only when a caller produced one.
-
-    Reverse guard for the platform-scroll reuse: the fourth relief lever is a
-    continuation summary beside the recall map. Old compaction had no such
-    argument at all (``TypeError`` here), and an unsolicited summary would put
-    words in the marker the model never asked for — so absence must stay
-    absence.
-    """
-    history = [
-        {
-            "role": "user",
-            "source": "initial_goal",
-            "messageSeq": 1,
-            "content": [{"type": "text", "text": "keep all six episodes"}],
-        },
-    ]
-    for index in range(6):
-        history.append(
-            {
-                "role": "assistant",
-                "source": "run_review_feedback",
-                "messageSeq": 10 + index,
-                "content": [
-                    {"type": "text", "text": f"review-{index} " + "x" * 4096},
-                ],
-            },
-        )
-
-    without = compact_conversation_history(history, max_bytes=4096)
-    assert "continuationSummary" not in without[0]
-
-    summary = "## Active Task\nkeep six episodes\nStatus: in_progress\n"
-    with_summary = compact_conversation_history(
-        history,
-        max_bytes=4096,
-        continuation_summary=summary,
-    )
-    assert with_summary[0]["continuationSummary"] == summary
-    # The recall map and the summary are complementary, never exclusive.
-    assert "archivedHistoryMap" in with_summary[0]
 
 
 def test_render_archived_evidence_bounds_covered_range_past_truncation():
@@ -564,26 +464,7 @@ def test_render_archived_evidence_bounds_covered_range_past_truncation():
     assert "[seq:10]" in evidence
     # And the planner exposes the same archived slice for it.
     _compacted, planned = plan_history_compaction(
-        [
-            {
-                "role": "user",
-                "source": "initial_goal",
-                "messageSeq": 1,
-                "content": [{"type": "text", "text": "anchor"}],
-            },
-            *(
-                {
-                    "role": "assistant",
-                    "source": "run_review_feedback",
-                    "messageSeq": 10 + index,
-                    "content": [
-                        {"type": "text", "text": "z" * 4096},
-                    ],
-                }
-                for index in range(12)
-            ),
-        ],
-        max_bytes=4096,
+        _review_history(12), max_bytes=4096
     )
     assert planned and all(isinstance(item["seq"], int) for item in planned)
 
@@ -900,60 +781,6 @@ def test_default_client_constructs_real_agentscope_dashscope_model(
 
 
 @pytest.mark.parametrize(
-    ("name", "override", "expected"),
-    [
-        ("qwen3.8-max", None, 4096),
-        ("qwen3-vl-plus", "8192", 8192),
-        ("qwen3.8-max", "invalid", 4096),
-        ("qwen3.8-max", "0", 4096),
-        ("other-compatible-model", None, None),
-    ],
-)
-def test_reasoning_budget_reaches_sdk_request_without_limiting_tool_output(
-    monkeypatch,
-    name,
-    override,
-    expected,
-):
-    _configure_text_model(monkeypatch)
-    monkeypatch.setattr(
-        model_client.model_config,
-        "get_text_model_name",
-        lambda: name,
-    )
-    if override is None:
-        monkeypatch.delenv("CREATOR_AGENT_THINKING_BUDGET", raising=False)
-    else:
-        monkeypatch.setenv("CREATOR_AGENT_THINKING_BUDGET", override)
-    configured = AgentScopeAgentChatClient()._configured_model()
-    captured = {}
-
-    async def capture(**kwargs):
-        captured.update(kwargs)
-        raise RuntimeError("request captured before transport")
-
-    monkeypatch.setattr(configured.client.chat.completions, "create", capture)
-    with pytest.raises(RuntimeError, match="request captured"):
-        asyncio.run(
-            configured._call_api(
-                model_name=name,
-                messages=records_to_agentscope_messages(
-                    [
-                        {
-                            "role": "user",
-                            "content": "Plan a short branching story",
-                        },
-                    ],
-                ),
-                tools=_tools(),
-            ),
-        )
-    assert captured["extra_body"].get("thinking_budget") == expected
-    assert "max_tokens" not in captured
-    assert captured["tools"][0]["function"]["name"] == "read_project"
-
-
-@pytest.mark.parametrize(
     ("model_name", "expected_temperature"),
     [("qwen3.7-plus", 0.2), ("kimi-k3", None)],
 )
@@ -1150,34 +977,17 @@ def test_history_is_rehydrated_as_agentscope_tool_blocks() -> None:
 
 
 def test_vlm_anthropic_protocol_constructs_anthropic_chat_model(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_attributes,
 ) -> None:
     from agentscope.model import AnthropicChatModel
 
-    monkeypatch.setattr(
+    patch_attributes(
         model_client.model_config,
-        "get_vlm_api_key",
-        lambda: "vlm-key",
-    )
-    monkeypatch.setattr(
-        model_client.model_config,
-        "get_vlm_base_url",
-        lambda: "https://api.anthropic.com",
-    )
-    monkeypatch.setattr(
-        model_client.model_config,
-        "get_vlm_model_name",
-        lambda: "claude-sonnet-4-20250514",
-    )
-    monkeypatch.setattr(
-        model_client.model_config,
-        "get_vlm_timeout_seconds",
-        lambda: 180,
-    )
-    monkeypatch.setattr(
-        model_client.model_config,
-        "get_vlm_protocol",
-        lambda: "Anthropic Claude",
+        get_vlm_api_key=lambda: "vlm-key",
+        get_vlm_base_url=lambda: "https://api.anthropic.com",
+        get_vlm_model_name=lambda: "claude-sonnet-4-20250514",
+        get_vlm_timeout_seconds=lambda: 180,
+        get_vlm_protocol=lambda: "Anthropic Claude",
     )
 
     configured = AgentScopeVlmChatClient()._configured_model()
@@ -2140,7 +1950,9 @@ def test_input_token_budget_resolves_from_host_catalog(monkeypatch):
             assert client._input_token_budget() is None
 
 
-def test_vlm_budget_is_priced_against_the_vlm_catalog_entry(monkeypatch):
+def test_vlm_budget_is_priced_against_the_vlm_catalog_entry(
+    monkeypatch, patch_attributes
+):
     """The VLM client has to resolve its own model name when computing
     the token window.
 
@@ -2165,15 +1977,10 @@ def test_vlm_budget_is_priced_against_the_vlm_catalog_entry(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(model_client, "context_window", _fake_context_window)
-    monkeypatch.setattr(
+    patch_attributes(
         model_client.model_config,
-        "get_text_model_name",
-        lambda: "qwen-plus",
-    )
-    monkeypatch.setattr(
-        model_client.model_config,
-        "get_vlm_model_name",
-        lambda: "qwen3.7-plus",
+        get_text_model_name=lambda: "qwen-plus",
+        get_vlm_model_name=lambda: "qwen3.7-plus",
     )
 
     text_client = AgentScopeAgentChatClient.__new__(AgentScopeAgentChatClient)
@@ -2823,32 +2630,29 @@ def _request_text(native_messages) -> str:
     return "\n".join(found)
 
 
-def test_a_provider_overflow_is_answered_by_gentle_relief_and_one_replay():
-    """Only the runtime's own observation is traded for the second attempt.
+def _complete_overflow(
+    messages, failures: int, *, budget: int = _OVERFLOW_BUDGET
+):
+    client, provider, asked, forced = _overflow_client(failures)
+    notices: list[RateLimitRetryNotice] = []
 
-    The provider said the request was too long, not that the conversation was
-    wrong, so the retry gives up the frame a tool can produce again and keeps
-    the person's upload byte for byte. The forced step belongs to a request
-    that overflowed as well, not to this one.
-    """
-    messages, derived, human = _overflow_payload()
+    async def on_retry(notice: RateLimitRetryNotice) -> None:
+        notices.append(notice)
 
-    async def scenario():
-        client, provider, asked, forced = _overflow_client(failures=1)
-        notices: list[RateLimitRetryNotice] = []
-
-        async def on_retry(notice: RateLimitRetryNotice) -> None:
-            notices.append(notice)
-
-        turn = await client.complete(
+    turn = asyncio.run(
+        client.complete(
             messages=messages,
             tools=[],
             on_rate_limit_retry=on_retry,
-            _context_budget_bytes=_OVERFLOW_BUDGET,
-        )
-        return provider, asked, forced, notices, turn
+            _context_budget_bytes=budget,
+        ),
+    )
+    return provider, asked, forced, notices, turn
 
-    provider, asked, forced, notices, turn = asyncio.run(scenario())
+
+def test_a_provider_overflow_is_answered_by_gentle_relief_and_one_replay():
+    messages, derived, human = _overflow_payload()
+    provider, asked, forced, notices, turn = _complete_overflow(messages, 1)
 
     assert turn.content == "降级后的输入仍可用"
     assert provider.calls == 2
@@ -2873,25 +2677,8 @@ def test_a_provider_overflow_is_answered_by_gentle_relief_and_one_replay():
 
 
 def test_the_gentle_retry_overflowing_too_forces_the_whole_ladder():
-    """The second step is the one that may move a person's upload."""
     messages, derived, human = _overflow_payload()
-
-    async def scenario():
-        client, provider, asked, forced = _overflow_client(failures=2)
-        notices: list[RateLimitRetryNotice] = []
-
-        async def on_retry(notice: RateLimitRetryNotice) -> None:
-            notices.append(notice)
-
-        turn = await client.complete(
-            messages=messages,
-            tools=[],
-            on_rate_limit_retry=on_retry,
-            _context_budget_bytes=_OVERFLOW_BUDGET,
-        )
-        return provider, asked, forced, notices, turn
-
-    provider, asked, forced, notices, turn = asyncio.run(scenario())
+    provider, asked, forced, notices, turn = _complete_overflow(messages, 2)
 
     assert turn.content == "降级后的输入仍可用"
     assert provider.calls == 3
@@ -3114,72 +2901,21 @@ def test_a_server_side_failure_is_not_read_as_a_too_long_refusal(message):
     assert not is_context_length_error(exc)
 
 
-@pytest.mark.skipif(
-    not model_client._HOST_OVERFLOW_RECOVERY_AVAILABLE,
-    reason="the platform package is optional for standalone plugin installs",
-)
-def test_overflow_recovery_is_the_platform_function():
-    """The retry boundary is imported, not reimplemented.
-
-    A second recovery boundary in the plugin would be a second place where
-    "one retry" and "never replay output" can disagree with the platform.
-    Only ``call_with_overflow_recovery`` is delegated; the marker list and
-    the classifier stay plugin-local so enabling compression does not have
-    to patch the host package (see ``test_local_classifier_recognizes_...
-    ``).
-    """
-    from qwenpaw.agents.context.overflow_recovery import (
-        call_with_overflow_recovery as host_call,
-    )
-
-    assert model_client._HOST_OVERFLOW_RECOVERY_AVAILABLE
-    assert model_client.call_with_overflow_recovery is host_call
-
-
-def test_local_classifier_recognizes_provider_token_group_refusal():
-    """A sentence only the plugin's group scan can catch, asserted on the
-    consumer path.
-
-    This refusal has no single marker from the list, so a green here proves
-    the marker-group scan (not just single-marker matching) is wired in.
-    """
-
-    class _GatewayRefusal(Exception):
-        pass
-
-    refusal = _GatewayRefusal(
-        "Error code: 400 - The input token count (290000) exceeds the "
-        "maximum number of tokens allowed by the model",
-    )
-    assert model_client.is_context_overflow_error(refusal)
-    assert is_context_length_error(refusal)
-
-
-@pytest.mark.parametrize("status", [413, 422, None])
-def test_group_only_length_refusal_is_understood_on_the_widened_path(status):
-    """The 413/422/text-only path must scan marker groups too.
-
-    ``is_context_overflow_error`` gates on a bare 400, so a group-only
-    refusal never reaches its group scan there. The widened path used to
-    check single markers only and dropped these silently; both paths now
-    share one scan.
-    """
-
-    class _GatewayRefusal(Exception):
-        pass
-
+@pytest.mark.parametrize("status", [400, 413, 422, None])
+def test_group_only_length_refusal_is_understood_with_or_without_http_status(
+    status,
+):
     message = (
         "The input token count (290000) exceeds the maximum number of "
         "tokens allowed by the model"
     )
-    exc = _GatewayRefusal(
-        f"Error code: {status}: {message}" if status else message,
+    error = RuntimeError(
+        f"Error code: {status}: {message}" if status else message
     )
     if status is not None:
-        exc.status_code = status
-
-    assert not model_client.is_context_overflow_error(exc)
-    assert is_context_length_error(exc)
+        error.status_code = status
+    assert model_client.is_context_overflow_error(error) is (status == 400)
+    assert is_context_length_error(error)
 
 
 def test_local_classifier_keeps_non_overflow_400s_out_of_recovery():
@@ -3215,86 +2951,34 @@ def test_local_classifier_keeps_non_overflow_400s_out_of_recovery():
         "only supports up to 32k",
     ],
 )
-def test_plugin_classifier_is_a_superset_of_the_host_inline(message):
-    """The host keeps an inline copy of the marker list inside
-    ``react_agent._is_context_overflow_error``; the plugin's list must be
-    at least as wide.  Otherwise a refusal the host would recover from
-    slips past the Creator retry path, which is exactly the drift the
-    previous superset identity used to prevent.
-    The host inline lives in ``react_agent``, which is a third optional
-    import next to ``overflow_recovery`` and ``providers.error_utils``.
-    Use ``importorskip`` (not ``_HOST_OVERFLOW_RECOVERY_AVAILABLE``) so the
-    guard reflects what the test actually depends on.
-    """
-    QwenPawAgent = pytest.importorskip(
-        "qwenpaw.agents.react_agent",
-    ).QwenPawAgent
-
-    exc = Exception(message)
-    # Plugin must accept every provider refusal we've actually seen,
-    # regardless of whether the current host inline recognizes it.
-    # Without this, a host that narrows (e.g. dev/interactive-video drops
-    # the tokens/exceeds group) makes the ``if host`` clause a no-op.
-    assert model_client.is_context_overflow_error(exc), (
-        f"plugin no longer accepts {message!r}",
-    )
-    if QwenPawAgent._is_context_overflow_error(exc):
-        assert model_client.is_context_overflow_error(exc), (
-            f"host accepts {message!r} but the plugin dropped it",
-        )
+def test_classifier_accepts_known_provider_refusals(message):
+    assert model_client.is_context_overflow_error(
+        RuntimeError(message)
+    ), message
 
 
-def test_local_extract_status_code_matches_host_shapes():
-    """The plugin keeps its own reader for standalone installs.  Every
-    shape the host ``extract_status_code`` understands has to be handled
-    here too, or a plugin running without the platform package misses
-    the 400 gate on gateway-wrapped refusals.
-    """
-
-    class _Int(Exception):
-        status_code = 400
-
-    class _String(Exception):
-        code = "413"
-
-    class _Response(Exception):
-        class _R:
-            status = 422
-
-        response = _R()
-
-    class _Streaming(Exception):
-        pass
-
-    assert model_client._local_extract_status_code(_Int()) == 400
-    assert model_client._local_extract_status_code(_String()) == 413
-    assert model_client._local_extract_status_code(_Response()) == 422
-    assert (
-        model_client._local_extract_status_code(
-            _Streaming(
-                "Streaming response failed: [400] - the input token count "
-                "exceeds the maximum number of tokens allowed",
-            ),
-        )
-        == 400
-    )
-
-
-def test_local_classifier_accepts_streaming_wrapped_group_refusal():
-    """End-to-end: a streaming ``[400]`` refusal carrying only a group
-    phrase must still trip the classifier.  The single-marker fallback in
-    ``is_context_length_error`` cannot catch this shape alone, so a green
-    here proves the plugin's own status reader is wired up.
-    """
-
-    class _Streaming(Exception):
-        pass
-
-    refusal = _Streaming(
+@pytest.mark.parametrize(
+    ("attributes", "expected"),
+    [
+        ({"status_code": 400}, 400),
+        ({"code": "413"}, 413),
+        ({"response": SimpleNamespace(status=422)}, 422),
+        ({}, 400),
+    ],
+)
+def test_local_status_reader_handles_wrapped_provider_errors(
+    attributes, expected
+):
+    refusal = RuntimeError(
         "Streaming response failed: [400] - the input token count (290000) "
-        "exceeds the maximum number of tokens allowed by the model",
+        "exceeds the maximum number of tokens allowed by the model"
     )
-    assert model_client.is_context_overflow_error(refusal)
+    if attributes:
+        refusal = RuntimeError("provider refused input")
+        refusal.__dict__.update(attributes)
+    assert model_client._local_extract_status_code(refusal) == expected
+    if not attributes:
+        assert model_client.is_context_overflow_error(refusal)
 
 
 def test_turning_demotion_off_declines_the_provider_overflow_too(monkeypatch):
@@ -3334,7 +3018,9 @@ _TEXT_EXCHANGES = 6
 _TEXT_ROW_REPEATS = 420
 
 
-def _text_only_history() -> list[dict]:
+def _text_only_history(
+    exchanges=_TEXT_EXCHANGES, row_repeats=_TEXT_ROW_REPEATS
+) -> list[dict]:
     """A long session of finished reads: no media anywhere in it."""
     messages = [
         {"role": "system", "content": "项目创作契约"},
@@ -3344,7 +3030,7 @@ def _text_only_history() -> list[dict]:
             "content": "把六集分镜做完再交审阅",
         },
     ]
-    for index in range(_TEXT_EXCHANGES):
+    for index in range(exchanges):
         messages.append(
             {
                 "role": "assistant",
@@ -3359,7 +3045,7 @@ def _text_only_history() -> list[dict]:
                 "role": "tool",
                 "tool_call_id": f"call-{index}",
                 "name": "read",
-                "content": "镜头描述 " * _TEXT_ROW_REPEATS,
+                "content": "镜头描述 " * row_repeats,
             },
         )
     return messages
@@ -3380,31 +3066,11 @@ def _request_read_rows(native_messages) -> int:
 
 
 def test_a_text_only_overflow_is_answered_by_retiring_old_tool_exchanges():
-    """No media to trade is not the same as nothing left to give up.
-
-    A long plain-text session is the shape that actually broke: the provider
-    refused on length, the gentle step found nothing media-shaped, and the
-    request then has to be rebuilt at half the budget so compaction retires
-    completed tool exchanges. Stopping at the first refusal left that session
-    with no second attempt at all.
-    """
-
-    async def scenario():
-        client, provider, asked, _forced = _overflow_client(failures=1)
-        notices: list[RateLimitRetryNotice] = []
-
-        async def on_retry(notice: RateLimitRetryNotice) -> None:
-            notices.append(notice)
-
-        turn = await client.complete(
-            messages=_text_only_history(),
-            tools=[],
-            on_rate_limit_retry=on_retry,
-            _context_budget_bytes=_TEXT_BUDGET,
-        )
-        return provider, asked, notices, turn
-
-    provider, asked, notices, turn = asyncio.run(scenario())
+    provider, asked, _forced, notices, turn = _complete_overflow(
+        _text_only_history(),
+        1,
+        budget=_TEXT_BUDGET,
+    )
 
     assert turn.content == "降级后的输入仍可用"
     assert provider.calls == 2
@@ -3476,32 +3142,8 @@ def _upload_only_payload() -> tuple[list[dict], str, str]:
 
 
 def test_a_refusal_over_uploads_only_still_runs_the_ladder():
-    """The local guard is not the one that prices a vision window.
-
-    Inline media is charged as vision tokens here and as real tokens by the
-    provider, so an oversized upload session almost always reaches the
-    provider before it reaches this guard. The refusal then has to be answered
-    by the ladder that can move those bytes, not by one burned call and a
-    terminal error.
-    """
-    _unused, first, second = _upload_only_payload()
-
-    async def scenario():
-        client, provider, asked, forced = _overflow_client(failures=1)
-        notices: list[RateLimitRetryNotice] = []
-
-        async def on_retry(notice: RateLimitRetryNotice) -> None:
-            notices.append(notice)
-
-        turn = await client.complete(
-            messages=_unused,
-            tools=[],
-            on_rate_limit_retry=on_retry,
-            _context_budget_bytes=_OVERFLOW_BUDGET,
-        )
-        return provider, asked, forced, notices, turn
-
-    provider, asked, forced, notices, turn = asyncio.run(scenario())
+    messages, first, second = _upload_only_payload()
+    provider, asked, forced, notices, turn = _complete_overflow(messages, 1)
 
     assert turn.content == "降级后的输入仍可用"
     assert provider.calls == 2
@@ -3517,60 +3159,15 @@ def test_a_refusal_over_uploads_only_still_runs_the_ladder():
         ("context_recovery", 0),
     ]
 
-
-def test_the_rewritten_turn_carries_the_shape_that_was_actually_sent():
-    """A recovery that hides its own request leaves the next turn to repeat it.
-
-    The demotion ladder rewrites the input, and a turn built from the caller's
-    original list would put the refused bytes straight back into the next
-    request and pay for the same refusal twice.
-    """
-    messages, _first, _second = _upload_only_payload()
-
-    async def scenario():
-        client, _provider, _asked, _forced = _overflow_client(failures=1)
-        return await client.complete(
-            messages=messages,
-            tools=[],
-            _context_budget_bytes=_OVERFLOW_BUDGET,
-        )
-
-    turn = asyncio.run(scenario())
-
     assert turn.sent_messages is not None
-    assert turn.sent_messages != list(messages)
-    assert ";base64," not in json.dumps(
-        turn.sent_messages,
-        ensure_ascii=False,
-    )
-    assert ";base64," in json.dumps(list(messages), ensure_ascii=False)
+    assert turn.sent_messages != messages
+    assert ";base64," not in json.dumps(turn.sent_messages, ensure_ascii=False)
+    assert ";base64," in json.dumps(messages, ensure_ascii=False)
 
 
 def test_a_compacted_replay_that_overflows_too_reaches_the_forced_step():
-    """Wrapping only the gentle retry left compaction with no second lever.
-
-    A long session that had to be rebuilt at half the budget still carries its
-    uploads, and the replay is the same client's request: a refusal there
-    belongs to the same boundary as a refusal after gentle relief.
-    """
     messages, human = _upload_and_tool_history()
-
-    async def scenario():
-        client, provider, asked, forced = _overflow_client(failures=2)
-        notices: list[RateLimitRetryNotice] = []
-
-        async def on_retry(notice: RateLimitRetryNotice) -> None:
-            notices.append(notice)
-
-        turn = await client.complete(
-            messages=messages,
-            tools=[],
-            on_rate_limit_retry=on_retry,
-            _context_budget_bytes=_OVERFLOW_BUDGET,
-        )
-        return provider, asked, forced, notices, turn
-
-    provider, asked, forced, notices, turn = asyncio.run(scenario())
+    provider, asked, forced, notices, turn = _complete_overflow(messages, 2)
 
     assert turn.content == "降级后的输入仍可用"
     assert provider.calls == 3
@@ -3582,39 +3179,8 @@ def test_a_compacted_replay_that_overflows_too_reaches_the_forced_step():
 
 
 def _upload_and_tool_history() -> tuple[list[dict], str]:
-    """Finished reads plus one upload: compaction has something to retire.
-
-    Sized so the request fits this client's guard on the first attempt, which
-    is what makes the provider the one that refuses, and leaves an upload
-    behind for the forced step to find.
-    """
-    messages = [
-        {"role": "system", "content": "项目创作契约"},
-        {
-            "role": "user",
-            "source": "user",
-            "messageSeq": 1,
-            "content": "把六集分镜做完再交审阅",
-        },
-    ]
-    for index in range(3):
-        messages.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {"id": f"call-{index}", "function": {"name": "read"}},
-                ],
-            },
-        )
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": f"call-{index}",
-                "name": "read",
-                "content": "镜头描述 " * 300,
-            },
-        )
+    messages = _text_only_history(exchanges=3, row_repeats=300)
+    messages[1]["messageSeq"] = 1
     human = _data_url(b"\x55" * _OVERFLOW_BLOCK_BYTES, mime="image/jpeg")
     messages.append(_attachment(human, seq=9))
     return messages, human

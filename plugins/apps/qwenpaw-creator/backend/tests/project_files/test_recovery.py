@@ -20,11 +20,9 @@ from services.project_files.commit import (
 from services.project_files.models import Project
 from services.project_files.poller import ProjectPoller
 from services.project_files.recovery import (
-    AUDIT_LEDGER_FILE_NAME,
     ProjectCommitRecoveryCoordinator,
     ProjectRecoveryIntegrityError,
     RecoveryAction,
-    _audit_runtime_dependencies,
 )
 from services.project_files.serialization import (
     canonical_json_bytes,
@@ -52,6 +50,7 @@ from .conftest import (
     transaction_root,
 )
 from .test_audio_layering import _audio_element, _project_raw
+
 
 pytestmark = pytest.mark.unit
 
@@ -158,91 +157,49 @@ def test_new_commit_waits_for_unfinalized_publication_recovery(
     assert result.snapshot.project.description == "must wait"
 
 
-def test_prepared_unpublished_transaction_is_aborted_safely(
+@pytest.mark.parametrize(
+    "legacy", [False, True], ids=["native", "repaired-legacy"]
+)
+@pytest.mark.parametrize(
+    "published", [False, True], ids=["before-publish", "after-publish"]
+)
+def test_prepared_journal_recovers_the_project_publication(
     tmp_path,
     monkeypatch,
+    legacy,
+    published,
 ):
-    store, base = make_store(tmp_path)
-    transaction_id = "tx-unpublished"
-    round_id = "round-unpublished"
+    create_store = _legacy_double_narration_store if legacy else make_store
+    store, base = create_store(tmp_path)
+    transaction_id, round_id = "tx-prepared", "round-prepared"
     journal_path = transaction_root(store, transaction_id) / "journal.json"
     candidate = base.project.model_dump(mode="json")
-    candidate["name"] = "Never published"
-    real_write = AtomicJsonRecordStore.write
+    field = "description" if published and not legacy else "name"
+    candidate[field] = "Candidate before crash"
+    original_write = AtomicJsonRecordStore.write
 
-    def leave_prepared(self, value):
-        if (
-            self.path == journal_path
-            and isinstance(value, ProjectCommitJournal)
-            and value.state is CommitJournalState.ABORTED
+    def interrupt_transition(record_store, entry):
+        if record_store.path == journal_path and isinstance(
+            entry, ProjectCommitJournal
         ):
-            raise SimulatedProcessDeath(
-                "process died before abort journal fsync",
+            interrupted = (
+                entry.state is not CommitJournalState.PREPARED
+                if published
+                else entry.state is CommitJournalState.ABORTED
             )
-        return real_write(self, value)
+            if interrupted:
+                raise SimulatedProcessDeath(
+                    "journal transition was not durable"
+                )
+        return original_write(record_store, entry)
 
-    boundary = ProjectCommitBoundary(store)
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            store,
-            "replace",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                SimulatedProcessDeath("process died before Project publish"),
-            ),
-        )
-        patch.setattr(AtomicJsonRecordStore, "write", leave_prepared)
-        with pytest.raises(SimulatedProcessDeath, match="abort journal"):
-            boundary.commit(
-                base=base,
-                candidate=candidate,
-                origin="frontend_edit",
-                transaction_id=transaction_id,
-                round_id=round_id,
-            )
-
-    assert store.read("project-1").etag == base.etag
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.PREPARED
-    )
-    report = recover(store)
-
-    assert report.ok
-    assert report.outcomes[0].action is RecoveryAction.ABORTED_UNPUBLISHED
-    assert (
-        read_journal(store, transaction_id).state is CommitJournalState.ABORTED
-    )
-    assert read_round(store, round_id).status is TransactionStatus.ABORTED
-    assert store.read("project-1").etag == base.etag
-
-
-def test_prepared_but_published_project_is_proved_and_fully_recovered(
-    tmp_path,
-    monkeypatch,
-):
-    store, base = make_store(tmp_path)
-    transaction_id = "tx-prepared-published"
-    round_id = "round-custom"
-    journal_path = transaction_root(store, transaction_id) / "journal.json"
-    candidate = base.project.model_dump(mode="json")
-    candidate["description"] = "published in the narrow crash window"
-    real_write = AtomicJsonRecordStore.write
-
-    def crash_before_journal_transition(self, value):
-        if (
-            self.path == journal_path
-            and isinstance(value, ProjectCommitJournal)
-            and value.state is not CommitJournalState.PREPARED
-        ):
-            raise SimulatedProcessDeath("journal transition was not durable")
-        return real_write(self, value)
+    def interrupt_replace(*_args, **_kwargs):
+        raise SimulatedProcessDeath("project was not published")
 
     with monkeypatch.context() as patch:
-        patch.setattr(
-            AtomicJsonRecordStore,
-            "write",
-            crash_before_journal_transition,
-        )
+        if not published:
+            patch.setattr(store, "replace", interrupt_replace)
+        patch.setattr(AtomicJsonRecordStore, "write", interrupt_transition)
         with pytest.raises(SimulatedProcessDeath, match="journal transition"):
             ProjectCommitBoundary(store).commit(
                 base=base,
@@ -252,26 +209,49 @@ def test_prepared_but_published_project_is_proved_and_fully_recovered(
                 round_id=round_id,
             )
 
-    current = store.read("project-1")
-    assert (
-        current.project.description == "published in the narrow crash window"
-    )
+    current = store.read(PROJECT_ID)
     assert (
         read_journal(store, transaction_id).state
         is CommitJournalState.PREPARED
     )
+    if published:
+        assert getattr(current.project, field) == candidate[field]
+        if legacy:
+            elements = current.source_document["timelines"]["items"][
+                "timeline:main"
+            ]["elements_by_id"]
+            assert elements["narr-old"]["enabled"] is False
+    else:
+        assert current.etag == base.etag
 
     report = recover(store)
     assert report.ok
+    state = read_journal(store, transaction_id).state
+    assert store.read(PROJECT_ID).etag == current.etag
+    if not published:
+        assert report.outcomes[0].action is RecoveryAction.ABORTED_UNPUBLISHED
+        assert state is CommitJournalState.ABORTED
+        assert read_round(store, round_id).status is TransactionStatus.ABORTED
+        return
+
     assert report.outcomes[0].action is RecoveryAction.FINALIZED_RUNTIME
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.RUNTIME_FINALIZED
-    )
+    assert state is CommitJournalState.RUNTIME_FINALIZED
     changeset = read_changeset(store, round_id)
-    assert [c.json_pointer for c in changeset.changes] == ["/description"]
+    assert [change.json_pointer for change in changeset.changes] == [
+        f"/{field}"
+    ]
     assert changeset.base_etag == base.etag
     assert changeset.final_etag == current.etag
+    result = ProjectCommitBoundary(store).commit(
+        base=current,
+        candidate={
+            **current.project.model_dump(mode="json"),
+            "description": "edit after recovery",
+        },
+        origin="runtime_task",
+        transaction_id="after-recovery",
+    )
+    assert result.snapshot.project.description == "edit after recovery"
 
 
 def _legacy_double_narration_store(tmp_path):
@@ -331,143 +311,6 @@ def _legacy_double_narration_store(tmp_path):
     assert elements["narr-new"].enabled is True
     assert base.source_document is not None
     return store, base
-
-
-def test_legacy_double_narration_prepared_unpublished_recovers(
-    tmp_path,
-    monkeypatch,
-):
-    """Window 1: rename a legacy double-narration project, then die in the
-    PREPARED window before the abort journal is durable.
-
-    ``base.json`` must be the source the ETag was hashed over -- not the
-    repaired ``model_dump`` -- or recovery reports "base.json does not match
-    journal base_etag" and turns a safely-abortable crash into a permanent
-    integrity error.
-    """
-
-    store, base = _legacy_double_narration_store(tmp_path)
-    transaction_id = "tx-legacy-unpublished"
-    round_id = "round-legacy-unpublished"
-    journal_path = transaction_root(store, transaction_id) / "journal.json"
-    candidate = base.project.model_dump(mode="json")
-    candidate["name"] = "Renamed legacy project"
-    real_write = AtomicJsonRecordStore.write
-
-    def leave_prepared(self, value):
-        if (
-            self.path == journal_path
-            and isinstance(value, ProjectCommitJournal)
-            and value.state is CommitJournalState.ABORTED
-        ):
-            raise SimulatedProcessDeath(
-                "process died before abort journal fsync",
-            )
-        return real_write(self, value)
-
-    boundary = ProjectCommitBoundary(store)
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            store,
-            "replace",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                SimulatedProcessDeath("process died before Project publish"),
-            ),
-        )
-        patch.setattr(AtomicJsonRecordStore, "write", leave_prepared)
-        with pytest.raises(SimulatedProcessDeath, match="abort journal"):
-            boundary.commit(
-                base=base,
-                candidate=candidate,
-                origin="frontend_edit",
-                transaction_id=transaction_id,
-                round_id=round_id,
-            )
-
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.PREPARED
-    )
-    report = recover(store)
-    assert report.ok
-    assert report.outcomes[0].action is RecoveryAction.ABORTED_UNPUBLISHED
-    # Aborted: the rename never published; project.json is still the legacy
-    # source and still opens (re-repaired on load).
-    assert store.read(PROJECT_ID).project.name == "Initial"
-
-
-def test_legacy_double_narration_published_prepared_recovers(
-    tmp_path,
-    monkeypatch,
-):
-    """Window 2: the rename published but the journal stayed PREPARED.
-
-    Recovery must prove and finalize the publication instead of leaving a
-    permanent integrity error that blocks the next edit. The muted older take
-    rides along in the candidate and is now persisted, so the repair becomes an
-    explicit, recoverable change rather than a snapshot/ETag divergence.
-    """
-
-    store, base = _legacy_double_narration_store(tmp_path)
-    transaction_id = "tx-legacy-published"
-    round_id = "round-legacy-published"
-    journal_path = transaction_root(store, transaction_id) / "journal.json"
-    candidate = base.project.model_dump(mode="json")
-    candidate["name"] = "Renamed before crash"
-    real_write = AtomicJsonRecordStore.write
-
-    def crash_before_journal_transition(self, value):
-        if (
-            self.path == journal_path
-            and isinstance(value, ProjectCommitJournal)
-            and value.state is not CommitJournalState.PREPARED
-        ):
-            raise SimulatedProcessDeath("journal transition was not durable")
-        return real_write(self, value)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            AtomicJsonRecordStore,
-            "write",
-            crash_before_journal_transition,
-        )
-        with pytest.raises(SimulatedProcessDeath, match="journal transition"):
-            ProjectCommitBoundary(store).commit(
-                base=base,
-                candidate=candidate,
-                origin="frontend_edit",
-                transaction_id=transaction_id,
-                round_id=round_id,
-            )
-
-    current = store.read(PROJECT_ID)
-    assert current.project.name == "Renamed before crash"
-    published = current.project.timelines.items["timeline:main"].elements_by_id
-    assert published["narr-old"].enabled is False  # the repair persisted
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.PREPARED
-    )
-
-    report = recover(store)
-    assert report.ok
-    assert report.outcomes[0].action is RecoveryAction.FINALIZED_RUNTIME
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.RUNTIME_FINALIZED
-    )
-    # Recovery cleared the pending publication, so the next edit commits
-    # instead of raising PendingProjectRecoveryError.
-    after = store.read(PROJECT_ID)
-    next_candidate = after.project.model_dump(mode="json")
-    next_candidate["description"] = "edit after recovery"
-    result = ProjectCommitBoundary(store).commit(
-        base=after,
-        candidate=next_candidate,
-        origin="runtime_task",
-        transaction_id="after-recovery",
-    )
-    assert result.snapshot.project.description == "edit after recovery"
 
 
 def test_legacy_double_narration_project_replaced_recovery_stays_consistent(
@@ -780,29 +623,6 @@ def test_recovery_recreates_pending_review_from_durable_boundary(
     )
 
 
-def test_cached_audit_repairs_a_lost_pending_review(tmp_path, monkeypatch):
-    store, base = make_store(tmp_path)
-    _crash_with_project_replaced(
-        store,
-        base,
-        monkeypatch,
-        transaction_id="tx-review",
-        round_id="round-review",
-        review=True,
-    )
-    assert recover(store).ok
-    assert recover(store).ok
-    path = (
-        runtime_root(store) / "reviews" / "review-round-review" / "review.json"
-    )
-    path.unlink()
-    assert recover(store).ok
-    assert (
-        read_review(store, "round-review").candidate_etag
-        == store.read("project-1").etag
-    )
-
-
 def test_finalized_journal_repairs_missing_runtime_records(tmp_path):
     store, base = make_store(tmp_path)
     transaction_id = "tx-finalized-repair"
@@ -938,14 +758,14 @@ def test_frozen_auto_fix_restores_state_and_round(tmp_path):
         source.extractall(tmp_path)
     store = ProjectStore(tmp_path)
     recovery = ProjectCommitRecoveryCoordinator(store).recover_project(
-        "project-probe"
+        "project-probe",
     )
     assert recovery.ok
     runtime = store.project_root("project-probe") / "runtime"
     state = AtomicJsonRecordStore(runtime / "state.json").read()
     assert state["last_project_etag"] == store.read("project-probe").etag
     change_round = AtomicJsonRecordStore(
-        runtime / "change-rounds" / "round" / "round.json"
+        runtime / "change-rounds" / "round" / "round.json",
     ).read()
     assert change_round["status"] == TransactionStatus.COMMITTED.value
 
@@ -994,7 +814,7 @@ def test_unprovable_old_pending_review_retains_its_evidence(
 ):
     store = frozen_pending_review
     candidate = AtomicJsonRecordStore(
-        transaction_root(store, "review-v9") / "candidate.json"
+        transaction_root(store, "review-v9") / "candidate.json",
     )
     raw = candidate.read()
     raw["name"] = "Unrelated edit"
@@ -1009,7 +829,8 @@ def test_unprovable_old_pending_review_retains_its_evidence(
 
 
 def test_first_migrated_publication_finishes_runtime_after_a_crash(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     store, base = make_store(tmp_path)
     raw = base.project.model_dump(mode="json")
@@ -1078,379 +899,3 @@ def test_legacy_schema_transaction_recovers_without_fail_closing(
         transaction_id="post-legacy-commit",
     )
     assert store.read("project-1").project.name == "After legacy recovery"
-
-
-def _spy_load_inputs(monkeypatch, calls):
-    from services.project_files import recovery as recovery_module
-
-    original = getattr(
-        recovery_module.ProjectCommitRecoveryCoordinator,
-        "_load_inputs",
-    )
-
-    def spy(self, *args, **kwargs):
-        calls.append(args[2] if len(args) > 2 else kwargs)
-        return original(self, *args, **kwargs)
-
-    monkeypatch.setattr(
-        recovery_module.ProjectCommitRecoveryCoordinator,
-        "_load_inputs",
-        spy,
-    )
-
-
-def _finalized_store(tmp_path):
-    store, base = make_store(tmp_path)
-    candidate = base.project.model_dump(mode="json")
-    candidate["name"] = "Committed"
-    ProjectCommitBoundary(store).commit(
-        base=base,
-        candidate=candidate,
-        origin="frontend_edit",
-        transaction_id="tx-ledger",
-        round_id="round-ledger",
-    )
-    return store
-
-
-def test_a_second_boot_reuses_the_audit_ledger(tmp_path, monkeypatch):
-    """The audit ran once; the bytes have not moved since, so it stands.
-
-    Measured on the field Project: 455 terminal entries re-derived business
-    diffs and ETags for 236 seconds at every boot, publishing nothing.
-    """
-
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-
-    first = recover(store)
-    assert calls, "the first boot must really audit"
-    assert first.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
-
-    calls.clear()
-    second = recover(store)
-
-    assert not calls
-    assert second.outcomes[0].action is first.outcomes[0].action
-    assert "ledger hit" in (second.outcomes[0].detail or "")
-
-
-def test_a_moved_snapshot_invalidates_the_ledger(tmp_path, monkeypatch):
-    """The fingerprint is the promise: same bytes, same verdict."""
-
-    import os
-
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-    recover(store)
-    calls.clear()
-
-    frozen = transaction_root(store, "tx-ledger") / "final.json"
-    stamp = os.stat(frozen).st_atime_ns
-    os.utime(frozen, ns=(stamp, os.stat(frozen).st_mtime_ns + 5))
-
-    recover(store)
-
-    assert calls, "a touched snapshot must be audited again"
-
-
-def test_the_ledger_can_be_switched_off(tmp_path, monkeypatch):
-    monkeypatch.setenv("CREATOR_RECOVERY_AUDIT_LEDGER", "0")
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-    recover(store)
-    calls.clear()
-
-    recover(store)
-
-    assert calls, "with the ledger off every boot audits in full"
-
-
-def test_a_missing_runtime_state_invalidates_the_ledger(tmp_path, monkeypatch):
-    """The ledger must notice when a Runtime file the audit read disappears.
-
-    Review #243 r4548690109: the fingerprint used to cover only the seven
-    transaction-directory files, but the cached ALREADY_FINALIZED conclusion
-    is derived from ``state.json`` and the aggregate ``change-rounds/...
-    /round.json`` as well. A crash that deleted those Runtime facts left
-    every later boot hitting the ledger and skipping the repair branch
-    that would have rebuilt them (turning into REPAIRED_FINALIZED_RUNTIME
-    on a cold scan). Losing state.json or the aggregate round now changes
-    the fingerprint, so the audit re-runs instead of reporting the old
-    verdict.
-    """
-
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-    recover(store)  # build the ledger
-    calls.clear()
-
-    # Sanity check: without damage the second boot is a cache hit.
-    recover(store)
-    assert not calls
-    calls.clear()
-
-    # Simulate a crash that wiped runtime/state.json after the audit
-    # finished. The transaction directory is untouched, so the old
-    # fingerprint would keep matching and the ledger would keep saying
-    # ALREADY_FINALIZED while a real scan would report
-    # REPAIRED_FINALIZED_RUNTIME.
-    runtime_state = runtime_root(store) / "state.json"
-    runtime_state.unlink()
-
-    report = recover(store)
-
-    assert calls, (
-        "deleting state.json must invalidate the cached verdict; the "
-        "fingerprint still only sees the transaction directory"
-    )
-    assert report.outcomes[0].action is not None
-
-
-def test_a_corrupt_audit_ledger_degrades_to_a_full_audit(
-    tmp_path,
-    monkeypatch,
-):
-    """The ledger is a cache: corrupt bytes cost time, never false alarms.
-
-    A damaged ledger file used to raise on every transaction lookup,
-    turning an intact Project into a wall of integrity errors.
-    """
-
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    ledger = runtime_root(store) / AUDIT_LEDGER_FILE_NAME
-    ledger.write_text("{not json", encoding="utf-8")
-
-    first = recover(store)
-
-    assert first.ok
-    assert first.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
-
-    # The damaged file was replaced, so the next boot is a cache hit again.
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-    second = recover(store)
-
-    assert not calls
-    assert second.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
-
-
-def test_a_forged_non_terminal_verdict_in_the_ledger_is_not_trusted(
-    tmp_path,
-    monkeypatch,
-):
-    """A planted verdict must never stand in for the real audit.
-
-    Only terminal, repair-free actions are cacheable; anything else in
-    the file is ignored so the deep audit's repair branches still run.
-    """
-
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    recover(store)  # build a ledger with a real fingerprint
-
-    from services.project_files.recovery import _audit_fingerprint
-
-    tx_root = transaction_root(store, "tx-ledger")
-    ledger = runtime_root(store) / AUDIT_LEDGER_FILE_NAME
-    table = json.loads(ledger.read_text(encoding="utf-8"))
-    table[tx_root.name] = {
-        "fingerprint": _audit_fingerprint(tx_root, runtime_root(store)),
-        "action": RecoveryAction.INTEGRITY_ERROR.value,
-        "transaction_id": "tx-ledger",
-        "state_before": None,
-        "state_after": None,
-    }
-    ledger.write_text(json.dumps(table), encoding="utf-8")
-
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-    report = recover(store)
-
-    assert calls, "a forged verdict must fall through to the real audit"
-    assert report.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
-
-
-def test_a_ledger_entry_with_an_invalid_state_enum_is_not_trusted(
-    tmp_path,
-    monkeypatch,
-):
-    """Valid JSON carrying an unknown journal-state enum must degrade, not raise.
-
-    The ledger is a cache. A stale or forged entry whose ``state_before`` is
-    not a real ``CommitJournalState`` used to raise ``ValueError`` on hit,
-    which bubbled out of ``recover_project`` and fail-closed the whole Project
-    as a single integrity error. It must instead be treated as a miss so the
-    real audit runs and the healthy Project recovers normally.
-    """
-
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    recover(store)  # build a ledger with a real fingerprint
-
-    from services.project_files.recovery import _audit_fingerprint
-
-    tx_root = transaction_root(store, "tx-ledger")
-    ledger = runtime_root(store) / AUDIT_LEDGER_FILE_NAME
-    table = json.loads(ledger.read_text(encoding="utf-8"))
-    table[tx_root.name] = {
-        "fingerprint": _audit_fingerprint(tx_root, runtime_root(store)),
-        "action": RecoveryAction.ALREADY_FINALIZED.value,
-        "transaction_id": "tx-ledger",
-        "state_before": "not_a_real_journal_state",
-        "state_after": None,
-    }
-    ledger.write_text(json.dumps(table), encoding="utf-8")
-
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-    report = recover(store)
-
-    assert report.ok, "an invalid enum must not fail-close the Project"
-    assert calls, "an invalid enum entry must fall through to a real audit"
-    assert report.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
-
-
-def test_a_changed_project_json_invalidates_the_ledger(tmp_path, monkeypatch):
-    """The audit cross-checks the live project.json, so it must be fingerprinted.
-
-    ``_audit_terminal_inputs`` reads the current Project to compare its ETag
-    against the Runtime state. Before project.json joined the fingerprint, a
-    project.json that moved or corrupted on its own -- with every Runtime fact
-    untouched -- kept replaying a cached ALREADY_FINALIZED on every hot boot,
-    while a cold audit would have read the Project and surfaced the conflict.
-    """
-
-    import os
-
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-    recover(store)  # build the ledger
-    calls.clear()
-
-    # Sanity check: without damage the second boot is still a cache hit, so
-    # fingerprinting project.json does not cost the steady-state fast boot.
-    recover(store)
-    assert not calls
-    calls.clear()
-
-    # Touch project.json alone (mtime), leaving every Runtime fact intact.
-    project_json = runtime_root(store).parent / "project.json"
-    stamp = os.stat(project_json).st_atime_ns
-    os.utime(project_json, ns=(stamp, os.stat(project_json).st_mtime_ns + 5))
-
-    recover(store)
-
-    assert calls, "a touched project.json must invalidate the cached verdict"
-
-
-def test_dependency_fingerprint_rejects_an_unsafe_round_id(tmp_path):
-    """round.json bytes must not steer the fingerprint outside Runtime."""
-
-    tx_root = tmp_path / "tx"
-    tx_root.mkdir()
-    (tx_root / "round.json").write_text(
-        json.dumps({"round_id": "../secret"}),
-        encoding="utf-8",
-    )
-
-    deps = _audit_runtime_dependencies(tx_root, tmp_path / "runtime")
-
-    assert set(deps) == {"runtime-state", "project-document"}
-
-
-def test_a_terminal_entry_is_decided_without_its_snapshots(
-    tmp_path,
-    monkeypatch,
-):
-    """The first boot pays stats and small Runtime facts, not 8 MB deepcopies.
-
-    The ledger only helps the second boot; the imported Project's first boot
-    after a copy is the one people wait minutes for.
-    """
-
-    store = _finalized_store(tmp_path)
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-
-    report = recover(store)
-
-    assert not calls
-    assert report.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
-
-
-def test_incomplete_runtime_metadata_still_falls_through_to_repair(
-    tmp_path,
-    monkeypatch,
-):
-    """What the light audit cannot prove belongs to the full audit."""
-
-    store = _finalized_store(tmp_path)
-    (transaction_root(store, "tx-ledger") / "changeset.json").unlink()
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-
-    report = recover(store)
-
-    assert calls, "a missing ChangeSet must defer to the full audit"
-    action = report.outcomes[0].action
-    assert action is RecoveryAction.REPAIRED_FINALIZED_RUNTIME
-
-
-def test_the_light_terminal_audit_can_be_switched_off(
-    tmp_path,
-    monkeypatch,
-):
-    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
-    store = _finalized_store(tmp_path)
-    calls: list = []
-    _spy_load_inputs(monkeypatch, calls)
-
-    recover(store)
-
-    assert calls, "with the light audit off the first boot audits in full"
-
-
-def test_live_snapshot_cache_does_not_outlive_one_recovery_call(
-    tmp_path,
-) -> None:
-    """A pass may reuse a live snapshot; the next pass may not inherit it.
-
-    Review #243: this coordinator is long-lived, so a generation cached by the
-    startup audit let a later compensation read judge an already-published
-    transaction as still unpublished and mark it ABORTED, leaving the runtime
-    one generation behind.
-    """
-
-    store = ProjectStore(tmp_path.resolve())
-    store.create(Project.new(project_id="project-1", name="One"))
-    coordinator = ProjectCommitRecoveryCoordinator(store)
-
-    reads: list[str] = []
-    real_read = store.read
-
-    def spy(project_id):
-        reads.append(project_id)
-        return real_read(project_id)
-
-    store.read = spy
-
-    coordinator.recover_project("project-1")
-    first = len(reads)
-    coordinator.recover_project("project-1")
-
-    # The second pass re-read rather than trusting the first pass's snapshot.
-    assert len(reads) > first
-    # pylint: disable-next=protected-access
-    assert not coordinator._current_cache

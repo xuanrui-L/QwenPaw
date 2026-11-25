@@ -1,17 +1,387 @@
-import { describe, expect, it } from "vitest";
-import type { ProjectDocument } from "@/contracts/creator";
+import { makeReviewRecord, makeReviewOperation } from "@/test/agentFixtures";
+import { cloneProject } from "@/test/projectSnapshotFixtures";
+import { importTimelineScript, setSubtitleStyle } from "@/api/creator";
+import { installMockFetch } from "@/test/mockFetch";
+import type {
+  FileProjectReviewRecord,
+  ProjectDocument,
+} from "@/contracts/creator";
 import {
   createSnapshotOperations,
   deleteTimelineOperations,
   duplicateTimelineOperations,
   snapshotMatchesTimeline,
 } from "@/api/creator/timelines";
-import { projectDocument } from "@/test/creatorFixtures";
 import { resolveElementPlayback } from "@/selectors/elementPlaybackSelectors";
+import { describe, expect, it, vi } from "vitest";
+import {
+  getProjectSnapshot,
+  decideFileProjectReview,
+  getActiveFileProjectReview,
+  parseFileProjectReview,
+} from "@/api/creator";
 
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
+function response(
+  status: number,
+  body?: unknown,
+  headers: Record<string, string> = {},
+): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 304 ? "Not Modified" : "OK",
+    headers: new Headers(headers),
+    json: vi.fn(async () => body),
+  } as unknown as Response;
 }
+
+function project(generation: number) {
+  return {
+    schema_version: 1,
+    project_id: "p1",
+    generation,
+    created_at: "2026-07-15T00:00:00Z",
+    updated_at: "2026-07-15T00:00:00Z",
+    name: "Project",
+    description: "",
+    scenario: "general",
+    settings: {},
+    strategy: {},
+    sources: {},
+    visual: {},
+    story: {},
+    production: {},
+    post_production: {},
+    assets: {},
+  };
+}
+
+describe("Project snapshot API", () => {
+  it("returns a validated snapshot envelope, then honours If-None-Match with a 304", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        response(
+          200,
+          {
+            projectId: "p1",
+            generation: 8,
+            etag: "sha256:body",
+            syncStatus: "healthy",
+            project: project(8),
+          },
+          { ETag: '"sha256:header"' },
+        ),
+      )
+      .mockResolvedValueOnce(
+        response(304, undefined, {
+          ETag: '"sha256:header"',
+          "X-Project-Generation": "8",
+          "X-Project-Sync-Status": "healthy",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    // The HTTP entity tag wins over the body etag.
+    await expect(getProjectSnapshot("p1")).resolves.toMatchObject({
+      kind: "updated",
+      projectId: "p1",
+      generation: 8,
+      etag: '"sha256:header"',
+      syncStatus: "healthy",
+    });
+    await expect(getProjectSnapshot("p1", '"sha256:header"')).resolves.toEqual({
+      kind: "not_modified",
+      etag: '"sha256:header"',
+      generation: 8,
+      syncStatus: "healthy",
+    });
+    const request = fetchMock.mock.calls[1];
+    expect(request[0]).toBe("/api/qwenpaw-creator/projects/p1/project");
+    expect(new Headers(request[1]?.headers).get("If-None-Match")).toBe(
+      '"sha256:header"',
+    );
+  });
+
+  it("exposes PROJECT_INVALID as sync state instead of raw Project data", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        response(409, {
+          code: "PROJECT_INVALID",
+          syncStatus: "invalid",
+          lastGoodGeneration: 8,
+          message: "schema validation failed",
+        }),
+      ),
+    );
+
+    await expect(getProjectSnapshot("p1", '"sha256:g8"')).resolves.toEqual({
+      kind: "invalid",
+      code: "PROJECT_INVALID",
+      syncStatus: "invalid",
+      lastGoodGeneration: 8,
+      message: "schema validation failed",
+    });
+  });
+});
+
+describe("Project review requests", () => {
+  const review = (overrides: Partial<FileProjectReviewRecord> = {}) =>
+    makeReviewRecord({
+      request_message_seq: 4,
+      baseline_generation: 2,
+      baseline_etag: "base-2",
+      candidate_generation: 3,
+      candidate_etag: "candidate-3",
+      operations: [
+        makeReviewOperation({ ui_locator: { route: "/project/p1/plan" } }),
+      ],
+      ...overrides,
+    });
+
+  describe("file-native Project Review API", () => {
+    it("reads the strict snake_case contract and treats 204/304 as protocol results", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(response(200, [review()], { ETag: '"token-1"' }))
+        .mockResolvedValueOnce(response(204))
+        .mockResolvedValueOnce(response(304, undefined, { ETag: '"token-1"' }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(getActiveFileProjectReview("p1")).resolves.toMatchObject({
+        kind: "updated",
+        etag: '"token-1"',
+        reviews: [
+          {
+            review_id: "review-1",
+            candidate_generation: 3,
+            decision_token: "token-1",
+          },
+        ],
+      });
+      await expect(getActiveFileProjectReview("p1")).resolves.toEqual({
+        kind: "empty",
+      });
+      await expect(
+        getActiveFileProjectReview("p1", '"token-1"'),
+      ).resolves.toEqual({
+        kind: "not_modified",
+        etag: '"token-1"',
+      });
+      expect(
+        new Headers(fetchMock.mock.calls[2][1].headers).get("If-None-Match"),
+      ).toBe('"token-1"');
+    });
+
+    it("posts operation decisions with camel request metadata and an Idempotency-Key", async () => {
+      const resolved = review({
+        decision_token: "token-2",
+        status: "RESOLVED",
+        operations: [
+          {
+            ...review().operations[0],
+            decision: "ACCEPTED",
+          },
+        ],
+      });
+      const fetchMock = vi.fn(
+        async (_input: RequestInfo | URL, _init: RequestInit = {}) =>
+          response(200, resolved),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(
+        decideFileProjectReview(
+          "p1",
+          "review-1",
+          {
+            decisionId: "decision-1",
+            decisionToken: "token-1",
+            decisions: [{ operation_id: "operation-1", decision: "ACCEPT" }],
+          },
+          "idempotency-1",
+        ),
+      ).resolves.toMatchObject({ status: "RESOLVED" });
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(
+        "/api/qwenpaw-creator/projects/p1/runtime/reviews/review-1/decisions",
+      );
+      expect(init.method).toBe("POST");
+      expect(new Headers(init.headers).get("Idempotency-Key")).toBe(
+        "idempotency-1",
+      );
+      expect(JSON.parse(String(init.body))).toEqual({
+        decisionId: "decision-1",
+        decisionToken: "token-1",
+        decisions: [{ operation_id: "operation-1", decision: "ACCEPT" }],
+      });
+    });
+
+    it("rejects malformed operations instead of exposing an untyped payload", () => {
+      const malformed = review({
+        operations: [
+          { ...review().operations[0], json_pointer: "story/title" },
+        ],
+      });
+      expect(() => parseFileProjectReview(malformed)).toThrow("JSON Pointer");
+    });
+  });
+});
+
+const IMPORT_RESULT = {
+  resultKind: "script_import",
+  projectId: "p1",
+  timelineId: "timeline:main",
+  slotId: "script:timeline:main",
+  artifactVersionId: "script-1",
+  fileId: "file-script-1",
+  checksum: "a".repeat(64),
+  blockCount: 3,
+  characterCount: 42,
+  generation: 4,
+  etag: "etag-4",
+  replayed: false,
+  reviewId: null,
+  changedPointers: ["/assets/artifact_slots_by_id/script:timeline:main"],
+  summary: "剧本正文（3 块 / 42 字）已直接登记为该集剧本版本。",
+};
+
+function mockScriptImport(result = IMPORT_RESULT) {
+  return installMockFetch([
+    {
+      match: "/projects/p1/timelines/timeline%3Amain/script-import",
+      method: "POST",
+      response: { ok: true, status: 201, json: result },
+    },
+  ]);
+}
+
+describe("importTimelineScript (剧本直登)", () => {
+  it("uploads a script file as multipart against the timeline route", async () => {
+    const { calls } = mockScriptImport();
+
+    const file = new File(["## 场 1\n\n开场。"], "我的剧本.md", {
+      type: "text/markdown",
+    });
+
+    const outcome = await importTimelineScript("p1", "timeline:main", { file });
+
+    expect(outcome.artifactVersionId).toBe("script-1");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("POST");
+    // FormData wraps the uploaded File, so assert its identity by name.
+    const uploaded = (calls[0].body as Record<string, File>).file;
+    expect(uploaded.name).toBe("我的剧本.md");
+    expect(uploaded.type).toBe("text/markdown");
+  });
+
+  it("sends pasted text as a JSON body without the script bytes in a query", async () => {
+    const { calls } = mockScriptImport({ ...IMPORT_RESULT, replayed: true });
+
+    const outcome = await importTimelineScript("p1", "timeline:main", {
+      content: "## 场 1\n\n开场。",
+      name: "粘贴剧本",
+    });
+
+    expect(outcome.replayed).toBe(true);
+    expect(calls[0].body).toEqual({
+      content: "## 场 1\n\n开场。",
+      name: "粘贴剧本",
+    });
+    expect(calls[0].headers["content-type"]).toBe("application/json");
+  });
+
+  it("sends a per-request Idempotency-Key so re-picking old content is a new edit", async () => {
+    const { calls } = mockScriptImport();
+
+    // Two separate imports (the A -> B -> A flow) each carry a fresh key, so
+    // the backend mints a distinct edit transaction and never collides with a
+    // previously committed one for the same content.
+    await importTimelineScript("p1", "timeline:main", { content: "A" });
+    await importTimelineScript("p1", "timeline:main", { content: "B" });
+    const [first, second] = calls.map((c) => c.headers["idempotency-key"]);
+    expect(first).toMatch(/^script-import-/);
+    expect(second).toMatch(/^script-import-/);
+    expect(first).not.toBe(second);
+
+    // An explicit key is passed through verbatim, so a network retry of the
+    // same request reuses it and the backend dedupes the retry.
+    await importTimelineScript(
+      "p1",
+      "timeline:main",
+      { content: "A" },
+      "script-import-fixed",
+    );
+    expect(calls[2].headers["idempotency-key"]).toBe("script-import-fixed");
+  });
+});
+
+const STYLE_RESULT = {
+  ok: true,
+  generation: 7,
+  subtitleTemplate: "variety_pop",
+  subtitleStyle: null,
+  styleLine: "综艺花字：特粗无衬线大字",
+  syncedPrompts: 12,
+  redrawnDocuments: 12,
+  skippedNonTemplate: 0,
+};
+
+const subtitleCases: Array<{
+  name: string;
+  request: Parameters<typeof setSubtitleStyle>[1];
+  counters?: Partial<typeof STYLE_RESULT>;
+}> = [
+  {
+    name: "selected template",
+    request: { subtitleTemplate: "variety_pop" },
+  },
+  {
+    name: "partial update with untouched controls omitted",
+    request: {
+      animation: { entrance: "slide", loop: false },
+      elementIds: ["caption-1"],
+    },
+  },
+  {
+    name: "custom captions that skip the selected pack",
+    request: { animation: { entrance: "pop" }, elementIds: ["cap-1", "cap-2"] },
+    counters: { syncedPrompts: 0, redrawnDocuments: 0, skippedNonTemplate: 2 },
+  },
+  {
+    name: "explicit reset to smart recommend",
+    request: { subtitleTemplate: null, subtitleStyle: null },
+  },
+];
+
+describe("setSubtitleStyle", () => {
+  it.each(subtitleCases)(
+    "preserves the wire update and result for $name",
+    async ({ request, counters }) => {
+      const result = { ...STYLE_RESULT, ...counters };
+      const { calls } = installMockFetch([
+        {
+          match: "/projects/p1/subtitles/style",
+          method: "PATCH",
+          response: { ok: true, status: 200, json: structuredClone(result) },
+        },
+      ]);
+
+      expect(
+        await setSubtitleStyle("p1", structuredClone(request)),
+      ).toMatchObject({
+        syncedPrompts: result.syncedPrompts,
+        redrawnDocuments: result.redrawnDocuments,
+        skippedNonTemplate: result.skippedNonTemplate,
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ method: "PATCH" });
+      expect(calls[0].body).toEqual(request);
+    },
+  );
+});
 
 describe("duplicateTimelineOperations", () => {
   it("copies editable elements, references and output history while reusing media files", () => {

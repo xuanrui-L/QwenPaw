@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
+# flake8: noqa: E501
 # pylint: disable=protected-access
+"""Durable session streams and frontend edit handoff."""
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +25,13 @@ from services.runtime_files import (
     RuntimeProjectState,
     SessionStateConflict,
 )
-from services.runtime_files.jsonl_store import DurableJsonlStore
+from services.runtime_files import manual_edit_store as store_module
+from services.runtime_files.manual_edit_store import (
+    ManualEditBufferStore,
+    ManualEditChangeConflict,
+    ManualEditGenerationConflict,
+)
+from services.runtime_files.models import ProjectChange, ProjectChangeKind
 
 pytestmark = pytest.mark.unit
 
@@ -529,303 +538,202 @@ def test_restart_repairs_heads_and_restores_missing_boundary(tmp_path):
     assert next_message.message_seq == 3
 
 
-def _spy_full_reads(monkeypatch) -> list[str]:
-    """Record whole-stream reads, so a paging test can prove it skipped one."""
-
-    reads: list[str] = []
-    original = DurableJsonlStore._read_bytes_unlocked
-
-    def spy(self):  # type: ignore[no-untyped-def]
-        reads.append(self.path.name)
-        return original(self)
-
-    monkeypatch.setattr(DurableJsonlStore, "_read_bytes_unlocked", spy)
-    return reads
+def _store(tmp_path: Path) -> tuple[Path, ManualEditBufferStore]:
+    root = tmp_path.resolve()
+    ProjectStore(root).create(
+        Project.new(project_id=PROJECT_ID, name="Project"),
+    )
+    return root, ManualEditBufferStore(root)
 
 
-def test_list_recent_messages_reads_only_the_tail_window(
-    tmp_path,
-    monkeypatch,
-):
-    # Opening a conversation asks for the newest handful. This used to parse
-    # every message the session ever wrote and slice in Python, which on a long
-    # session cost hundreds of MB per page.
-    _, _, store, _ = _runtime(tmp_path)
-    for index in range(30):
-        _append(store, "user", f"message {index}")
-    reads = _spy_full_reads(monkeypatch)
-
-    page = store.list_recent_messages(
-        PROJECT_ID,
-        SESSION_ID,
-        limit=5,
-        conversation_id=CONVERSATION_ID,
+def _change(
+    pointer: str,
+    before_hash: str,
+    after_hash: str,
+    *,
+    before: object,
+    after: object,
+    kind: ProjectChangeKind = ProjectChangeKind.UPDATE,
+) -> ProjectChange:
+    return ProjectChange(
+        kind=kind,
+        json_pointer=pointer,
+        before_hash=before_hash,
+        after_hash=after_hash,
+        before=before,
+        after=after,
     )
 
-    assert [item.message_seq for item in page] == [26, 27, 28, 29, 30]
-    assert not reads
+
+def _name(before: str, after: str) -> ProjectChange:
+    return _change(
+        "/name",
+        f"sha256:{before}",
+        f"sha256:{after}",
+        before=before,
+        after=after,
+    )
 
 
-def test_message_at_reads_only_the_named_line(tmp_path, monkeypatch):
-    # A review follow-up already names the seq of the request it belongs to.
-    # Locating that message used to parse every record the session ever wrote,
-    # which on the field's long sessions meant hundreds of MB per lookup.
-    _, _, store, _ = _runtime(tmp_path)
-    for index in range(30):
-        _append(store, "user", f"message {index}")
-    reads = _spy_full_reads(monkeypatch)
-
-    found = store.message_at(PROJECT_ID, SESSION_ID, message_seq=7)
-
-    assert found is not None
-    assert found.message_seq == 7
-    assert not reads
-    # A seq that names nothing is answered without touching the disk.
-    assert store.message_at(PROJECT_ID, SESSION_ID, message_seq=0) is None
+def _commit(store: ManualEditBufferStore, base: int, head: int, *changes):
+    return store.record_frontend_commit(
+        PROJECT_ID,
+        base_generation=base,
+        head_generation=head,
+        changes=list(changes),
+    )
 
 
-def test_find_recent_message_answers_existence_without_the_stream(
+def test_frontend_commits_coalesce_first_before_to_latest_after(tmp_path):
+    _root, store = _store(tmp_path)
+    first = _commit(store, 0, 1, _name("A", "B"))
+    final = _commit(store, 1, 2, _name("B", "C"))
+
+    assert first is not None and final is not None
+    assert first.buffer_id == final.buffer_id
+    assert final.base_generation == 0
+    assert final.head_generation == 2
+    assert final.head == 2
+    name = final.changes[0]
+    assert (name.before_hash, name.after_hash) == ("sha256:A", "sha256:C")
+    assert (name.before, name.after) == ("A", "C")
+    assert store.read(PROJECT_ID) == final
+
+
+def test_restoring_baseline_removes_update_and_create_delete_buffer(tmp_path):
+    root, store = _store(tmp_path)
+    _commit(store, 0, 1, _name("A", "B"))
+    restored = _commit(store, 1, 2, _name("B", "A"))
+
+    assert restored is None
+    assert store.read(PROJECT_ID) is None
+    buffer_path = root / PROJECT_ID / "runtime" / "manual-edit" / "buffer.json"
+    assert not buffer_path.exists()
+
+
+def test_record_rejects_generation_gaps_payload_gaps_and_duplicates(tmp_path):
+    _root, store = _store(tmp_path)
+    first_change = _name("A", "B")
+    first = _commit(store, 0, 1, first_change)
+
+    with pytest.raises(ManualEditGenerationConflict, match="expected base=1"):
+        _commit(store, 0, 2)
+    with pytest.raises(ManualEditChangeConflict, match="expected before"):
+        _commit(
+            store,
+            1,
+            2,
+            _change(
+                "/name",
+                "sha256:unrelated",
+                "sha256:C",
+                before="Other",
+                after="C",
+            ),
+        )
+    with pytest.raises(ManualEditChangeConflict, match="duplicate"):
+        _commit(store, 1, 2, first_change, first_change)
+
+    assert store.read(PROJECT_ID) == first
+
+
+def test_concurrent_same_consumer_gets_one_take_and_durable_replays(tmp_path):
+    root, store = _store(tmp_path)
+    expected = _commit(store, 0, 1, _name("A", "B"))
+    consumer_id = "../../agent/request/1"
+
+    def consume(_index: int):
+        return ManualEditBufferStore(root).consume(
+            PROJECT_ID,
+            consumer_id=consumer_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(consume, range(6)))
+
+    assert expected is not None
+    consumptions = [result for result in results if result is not None]
+    assert len(consumptions) == 6
+    assert sum(item.replayed is False for item in consumptions) == 1
+    assert sum(item.replayed is True for item in consumptions) == 5
+    assert {item.buffer.buffer_id for item in consumptions} == {
+        expected.buffer_id,
+    }
+    assert store.read(PROJECT_ID) is None
+    receipt = store.receipt_path(PROJECT_ID, consumer_id)
+    assert receipt.is_file()
+    assert ".." not in receipt.name and "request" not in receipt.name
+
+
+def test_restart_replays_receipt_when_directory_fsync_failed_after_rename(
     tmp_path,
     monkeypatch,
 ):
-    # "Was this pause notice already filed" is an existence question.  The walk
-    # is exhaustive -- a miss really means absent -- but it never materializes
-    # the stream, which is what a 606 MB history could not afford.
-    _, _, store, _ = _runtime(tmp_path)
-    for index in range(20):
-        _append(store, "user", f"noise {index}")
-    marker = _append(
+    root, store = _store(tmp_path)
+    expected = _commit(store, 0, 1, _name("A", "B"))
+    real_fsync = store_module.fsync_directory
+    calls = 0
+
+    def fail_after_rename(path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected receipt fsync failure")
+        real_fsync(path)
+
+    monkeypatch.setattr(store_module, "fsync_directory", fail_after_rename)
+    with pytest.raises(OSError, match="injected receipt fsync failure"):
+        store.consume(PROJECT_ID, consumer_id="agent-request")
+    monkeypatch.setattr(store_module, "fsync_directory", real_fsync)
+
+    restarted = ManualEditBufferStore(root)
+    replay = restarted.consume(PROJECT_ID, consumer_id="agent-request")
+    assert expected is not None and replay is not None
+    assert replay.replayed is True
+    assert replay.buffer == expected
+    assert restarted.read(PROJECT_ID) is None
+
+
+def test_non_frontend_commit_keeps_unrelated_edits_and_drops_overlap(tmp_path):
+    _root, store = _store(tmp_path)
+    _commit(
         store,
-        "assistant",
-        "filed",
-        metadata={"executionPauseKey": "pause-key-1"},
-    )
-    reads = _spy_full_reads(monkeypatch)
-
-    found = store.find_recent_message(
-        PROJECT_ID,
-        SESSION_ID,
-        where=lambda item: item.metadata.get("executionPauseKey")
-        == "pause-key-1",
-    )
-
-    assert found is not None
-    assert found.message_seq == marker.message.message_seq
-    assert (
-        store.find_recent_message(
-            PROJECT_ID,
-            SESSION_ID,
-            where=lambda item: item.metadata.get("executionPauseKey")
-            == "never-filed",
-        )
-        is None
-    )
-    assert not reads
-
-
-def test_last_message_seq_tracks_the_head_without_reading_the_stream(
-    tmp_path,
-    monkeypatch,
-):
-    # The YOLO fuse asks "did anything land since I decided?" once per second.
-    # Answering that with list_messages rebuilt the whole history every tick.
-    _, _, store, _ = _runtime(tmp_path)
-    assert store.last_message_seq(PROJECT_ID, SESSION_ID) == 0
-    _append(store, "user", "first")
-    _append(store, "assistant", "reply")
-    reads = _spy_full_reads(monkeypatch)
-
-    head = store.last_message_seq(PROJECT_ID, SESSION_ID)
-
-    assert head == 2
-    assert not reads
-    _append(store, "user", "third")
-    assert store.last_message_seq(PROJECT_ID, SESSION_ID) == 3
-
-
-def test_list_recent_messages_pages_backwards_from_a_cursor(tmp_path):
-    _, _, store, _ = _runtime(tmp_path)
-    for index in range(30):
-        _append(store, "user", f"message {index}")
-
-    older = store.list_recent_messages(
-        PROJECT_ID,
-        SESSION_ID,
-        limit=5,
-        conversation_id=CONVERSATION_ID,
-        before_seq=26,
-    )
-
-    assert [item.message_seq for item in older] == [21, 22, 23, 24, 25]
-
-
-def test_list_recent_messages_filters_conversation_while_scanning(tmp_path):
-    # The conversation filter has to live in the scan: a page of one
-    # conversation must not be truncated by newer messages of another.
-    _, _, store, _ = _runtime(tmp_path)
-    other = store.create_conversation(
-        PROJECT_ID,
-        SESSION_ID,
-        conversation_id="conversation-2",
-        title="Other",
-    )
-    for index in range(4):
-        _append(store, "user", f"first {index}")
-        store.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            other.conversation_id,
-            role="user",
-            content_parts=_text(f"second {index}"),
-        )
-
-    page = store.list_recent_messages(
-        PROJECT_ID,
-        SESSION_ID,
-        limit=3,
-        conversation_id=CONVERSATION_ID,
-    )
-
-    # Sequences 1, 3, 5, 7 belong to the default conversation.
-    assert [item.message_seq for item in page] == [3, 5, 7]
-    assert {item.conversation_id for item in page} == {CONVERSATION_ID}
-
-
-def test_list_recent_events_finds_the_admission_in_the_tail_window(
-    tmp_path,
-    monkeypatch,
-):
-    _, _, store, _ = _runtime(tmp_path)
-    admitted = _admit(store, "request-tail")
-    store.append_event(
-        PROJECT_ID,
-        SESSION_ID,
-        event_type="message.accepted",
-        actor="user",
-        message_id=admitted.message.message_id,
-    )
-    for index in range(40):
-        store.append_event(
-            PROJECT_ID,
-            SESSION_ID,
-            event_type="task.progress_updated",
-            payload={"index": index},
-        )
-    reads = _spy_full_reads(monkeypatch)
-
-    found = store.list_recent_events(
-        PROJECT_ID,
-        SESSION_ID,
-        limit=1,
-        event_type="message.accepted",
-        message_id=admitted.message.message_id,
-        max_scan=200,
-    )
-
-    assert [item.message_id for item in found] == [admitted.message.message_id]
-    # A window too small answers "not in the tail" rather than walking back to
-    # the head: the send route turns that into an explicit full-scan fallback.
-    assert (
-        store.list_recent_events(
-            PROJECT_ID,
-            SESSION_ID,
-            limit=1,
-            event_type="message.accepted",
-            message_id=admitted.message.message_id,
-            max_scan=5,
-        )
-        == []
-    )
-    assert not reads
-
-
-def test_create_goal_reads_the_root_message_without_a_full_scan(
-    tmp_path,
-    monkeypatch,
-):
-    # A goal references exactly one message, but the old code materialized the
-    # whole durable stream and indexed it in Python -- inside the exclusive
-    # Project lock, where every 10s lock waiter pays for it.
-    _, _, store, _ = _runtime(tmp_path)
-    root = _append(store, "user", "objective")
-    for index in range(30):
-        _append(store, "user", f"message {index}")
-    reads = _spy_full_reads(monkeypatch)
-
-    goal = store.create_goal(
-        PROJECT_ID,
-        SESSION_ID,
-        CONVERSATION_ID,
-        goal_id="goal-read",
-        root_message_seq=root.message.message_seq,
-        intent="Create the Project",
-    )
-
-    assert goal.root_message_seq == 1
-    # Recovery legitimately walks the (small) queued stream; the message stream
-    # is the one that used to be materialized whole, and it must not be read as
-    # a whole here.
-    assert "messages.jsonl" not in reads
-
-
-def test_client_id_lookup_reaches_the_head_without_holding_the_stream(
-    tmp_path,
-    monkeypatch,
-):
-    _, _, store, _ = _runtime(tmp_path)
-    oldest = _append(
-        store,
-        "user",
-        "oldest",
-        client_message_id="client-oldest",
-    )
-    for index in range(30):
-        _append(store, "user", f"message {index}")
-    reads = _spy_full_reads(monkeypatch)
-
-    found = store._message_by_client_id_unlocked(
-        PROJECT_ID,
-        SESSION_ID,
-        "client-oldest",
-    )
-    missing = store._message_by_client_id_unlocked(
-        PROJECT_ID,
-        SESSION_ID,
-        "client-never-used",
-    )
-
-    assert found is not None
-    assert found.message_id == oldest.message.message_id
-    # "absent" still means absent everywhere: the replay walks to the head
-    # of the stream, it just holds one page at a time instead of the whole
-    # history.
-    assert missing is None
-    assert not reads
-
-
-def test_recovery_restores_a_boundary_beyond_one_replay_page(
-    tmp_path,
-    monkeypatch,
-):
-    # Recovery replays the message stream in pages to re-assert review
-    # boundaries. The page window must not decide which history gets seen, so
-    # force one record per page while the boundary sits on message 2.
-    monkeypatch.setattr(
-        "services.runtime_files.session_store._MESSAGE_REPLAY_PAGE",
+        0,
         1,
+        _name("A", "B"),
+        _change(
+            "/story/title",
+            "sha256:title-a",
+            "sha256:title-b",
+            before="Old",
+            after="New",
+        ),
     )
-    root, snapshot, store, _bootstrap = _runtime(tmp_path)
-    _activate_runtime(root, snapshot, store)
-    _admit(store, "request-review", "change")
-    for index in range(4):
-        _append(store, "assistant", f"later {index}")
-    boundary_path = _boundary_file(store, "request-review")
-    boundary_path.unlink()
 
-    recovered = ProjectRuntimeSessionStore(root).get_session(
+    retained = store.reconcile_non_frontend_commit(
         PROJECT_ID,
-        SESSION_ID,
+        base_generation=1,
+        head_generation=2,
+        changes=[
+            _change(
+                "/story",
+                "sha256:story-a",
+                "sha256:story-b",
+                before={},
+                after={"title": "Agent"},
+            ),
+        ],
     )
+    assert retained is not None
+    assert retained.head_generation == 2
+    assert [change.json_pointer for change in retained.changes] == ["/name"]
 
-    assert recovered.last_message_seq == 6
-    assert boundary_path.is_file()
+
+def test_forward_generation_gap_restarts_buffer_instead_of_failing(tmp_path):
+    _root, store = _store(tmp_path)
+    _commit(store, 0, 1, _name("A", "B"))
+
+    fresh = _commit(store, 5, 6, _name("X", "Y"))
+    assert fresh is not None
+    assert (fresh.base_generation, fresh.head_generation) == (5, 6)
+    assert [item.before_hash for item in fresh.changes] == ["sha256:X"]

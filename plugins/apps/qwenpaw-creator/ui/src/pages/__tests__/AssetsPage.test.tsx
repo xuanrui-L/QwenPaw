@@ -1,3 +1,4 @@
+import { cloneProject, seedProject } from "@/test/projectSnapshotFixtures";
 import {
   act,
   fireEvent,
@@ -21,25 +22,9 @@ import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
-import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument } from "@/contracts/creator";
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
-
-function seedProject(project = cloneProject()) {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project,
-    generation: project.generation,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-  });
-}
+import AssetMediaPreview from "@/components/assets/AssetMediaPreview";
 
 function renderPage(entry = "/project/p1/assets") {
   return render(
@@ -1158,5 +1143,42 @@ describe("AssetsPage upload of a file the Project already holds", () => {
       expect(toastCounts().success).toBeGreaterThan(before.success),
     );
     expect(toastCounts().info).toBe(before.info);
+  });
+});
+
+describe("AssetMediaPreview audio waveform", () => {
+  it("renders a waveform for ready audio instead of a blank placeholder", () => {
+    const { container } = render(
+      <AssetMediaPreview
+        name="旁白 v1"
+        mediaType="audio"
+        previewUrl="http://media.test/audio.wav"
+        state="ready"
+        mediaClassName="media"
+        placeholderClassName="placeholder"
+      />,
+    );
+    const waveform = container.querySelector(
+      '[data-asset-preview-kind="audio-waveform"]',
+    );
+    expect(waveform).toBeInTheDocument();
+    expect(waveform?.querySelectorAll("i").length).toBeGreaterThan(10);
+    expect(container.querySelector(".placeholder")).not.toBeInTheDocument();
+  });
+
+  it("keeps the ingest-state placeholder for audio that is not ready yet", () => {
+    const { container } = render(
+      <AssetMediaPreview
+        name="旁白 v1"
+        mediaType="audio"
+        state="processing"
+        mediaClassName="media"
+        placeholderClassName="placeholder"
+      />,
+    );
+    expect(
+      container.querySelector('[data-asset-preview-kind="audio-waveform"]'),
+    ).toBeNull();
+    expect(screen.getByText("入库中")).toBeInTheDocument();
   });
 });

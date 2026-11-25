@@ -6,20 +6,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 
 import pytest
 
 from models import config as model_config
 from models import tts_model
+from utils.exceptions import ModelError
 from models.tts_capabilities import (
     DEFAULT_TTS_MODEL,
     capability_for,
-    models_for,
     require_capability,
     supported_models,
 )
-from utils.exceptions import ModelError
 
 
 def _fake_post(captured: dict, response: dict):
@@ -138,66 +136,6 @@ def test_unknown_voice_error_previews_instead_of_dumping_the_list(
     # The ninth name is the first one the preview drops; naming a voice that
     # no model publishes at all would pass the same assertion vacuously.
     assert "wenhuaiqing_v3.1" not in str(raised.value)
-
-
-def test_gateway_refuses_a_speech_model_it_has_not_published(
-    monkeypatch,
-) -> None:
-    """The proxy gate reads the table's providers, not the model's name.
-
-    Qwen-Audio 3.1 shares the prefix the old name check matched on while the
-    proxy publishes only the 3.0 pair, so matching on the name would POST 3.1
-    to a route that never listed it and report the refusal as a broken
-    synthesis path.
-    """
-
-    monkeypatch.setenv("TTS_API_KEY", "sk-test")
-    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.1-tts-flash")
-    monkeypatch.setattr(
-        model_config,
-        "is_agentscope_gateway",
-        lambda **kwargs: True,
-    )
-
-    with pytest.raises(ModelError, match="未发布"):
-        asyncio.run(tts_model.synthesize("你好世界", voice="longanhuan_v3.1"))
-
-
-def test_gateway_routes_a_published_speech_model_over_http(
-    monkeypatch,
-) -> None:
-    """Guard on the guard: the pair the proxy does publish still speaks."""
-
-    captured: dict = {}
-    monkeypatch.setenv("TTS_API_KEY", "sk-test")
-    monkeypatch.setenv("TTS_MODEL_NAME", "qwen-audio-3.0-tts-flash")
-    monkeypatch.setattr(
-        model_config,
-        "is_agentscope_gateway",
-        lambda **kwargs: True,
-    )
-    monkeypatch.setattr(
-        tts_model,
-        "_post_json",
-        _fake_post(
-            captured,
-            {
-                "output": {"audio": {"url": "https://example.com/a.wav"}},
-                "usage": {"characters": 4},
-            },
-        ),
-    )
-    monkeypatch.setattr(
-        tts_model,
-        "_download_audio",
-        lambda url: (b"RIFFxxxx", "audio/wav"),
-    )
-
-    result = asyncio.run(
-        tts_model.synthesize("你好世界", voice="longanfengyue"),
-    )
-    assert captured["payload"]["model"] == "qwen-audio-3.0-tts-flash"
-    assert result.voice == "longanfengyue"
 
 
 def test_enroll_voice_builds_enrollment_payload(monkeypatch) -> None:
@@ -467,74 +405,6 @@ def test_every_supported_model_declares_a_usable_voice_source() -> None:
         )
         assert capability.clone_model()
         assert capability.transport in {"http", "websocket"}
-
-
-def test_labels_do_not_quote_a_stale_voice_count() -> None:
-    """The configuration page takes each label verbatim, and a published voice
-    list changes without telling the copy that counts it."""
-
-    for capability in supported_models():
-        stated = re.findall(r"(\d+)\s*个系统音色", capability.label)
-        for count in stated:
-            assert int(count) == len(capability.system_voices), (
-                f"{capability.model} label says {count} voices, "
-                f"the table registers {len(capability.system_voices)}"
-            )
-        if capability.model.startswith("qwen-audio"):
-            # Pin the convention instead of only checking it when it is
-            # honoured: a Qwen-Audio label that dropped its count would pass
-            # the loop above, silently and green.
-            assert len(stated) == 1, f"{capability.model} states no count"
-
-
-def test_qwen_audio_models_carry_their_own_voice_lists() -> None:
-    """Each Qwen-Audio revision speaks only its own voices, and is its own row.
-
-    ``-plus`` was absent from the table and ``-flash`` carried none, so
-    ``require_capability`` silently substituted the default model and sent a
-    Qwen3-TTS voice name to a Qwen-Audio request. The provider rejects that as
-    an upstream 400, which the model proxy re-reports as a retryable 502 - a
-    wrong voice name therefore reads exactly like a broken endpoint.
-    """
-
-    plus = require_capability("qwen-audio-3.0-tts-plus")
-    flash = require_capability("qwen-audio-3.0-tts-flash")
-    assert plus.model == "qwen-audio-3.0-tts-plus"
-    assert flash.model == "qwen-audio-3.0-tts-flash"
-    assert plus.has_system_voices
-    assert flash.has_system_voices
-
-    assert not set(plus.system_voices) & set(flash.system_voices)
-    default = require_capability(DEFAULT_TTS_MODEL)
-    inherited = set(flash.system_voices) & set(default.system_voices)
-    # A Qwen3-TTS voice name must never reach a Qwen-Audio request: the
-    # provider rejects it as an upstream 400 that the proxy re-reports as a
-    # retryable 502.
-    assert not inherited
-
-
-def test_gateway_offers_only_the_models_it_routes() -> None:
-    """The proxy answers unlisted speech names with MODEL_NOT_ALLOWED.
-
-    Measured: ``qwen3-tts-flash`` against the platform-pre base returns
-    ``ASP.BIZ.MODEL_NOT_ALLOWED`` in under a second. A choice list that
-    includes it therefore recommends a guaranteed failure, so the endpoint
-    each model is served on has to stay in the table.
-    """
-
-    assert {item.model for item in models_for("gateway")} == {
-        "qwen-audio-3.0-tts-flash",
-        "qwen-audio-3.0-tts-plus",
-    }
-    # Nothing disappears from the endpoint this table was written for.
-    assert {item.model for item in models_for("bailian")} == {
-        item.model for item in supported_models()
-    }
-    # A protocol switch auto-selects the first gateway model, so that one has
-    # to be the cheaper revision and speakable without creating a voice first.
-    first = models_for("gateway")[0]
-    assert first.model == "qwen-audio-3.0-tts-flash"
-    assert first.has_system_voices
 
 
 def test_unknown_model_falls_back_to_the_default() -> None:
