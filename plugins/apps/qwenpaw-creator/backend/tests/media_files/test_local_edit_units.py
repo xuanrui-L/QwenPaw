@@ -174,85 +174,85 @@ def test_atempo_filters_bound_extreme_finite_rates(
 
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
-
-
-@pytest.mark.skipif(
+requires_ffmpeg = pytest.mark.skipif(
     _FFMPEG is None or _FFPROBE is None,
     reason="ffmpeg is not installed",
 )
-def test_still_image_input_renders_a_timed_segment(tmp_path) -> None:
-    image = tmp_path / "backdrop.png"
-    subprocess.run(
-        [
-            _FFMPEG,
-            "-y",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=orange:s=640x360:d=0.1",
-            "-frames:v",
-            "1",
-            str(image),
-        ],
-        check=True,
-    )
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    output = tmp_path / "output.mp4"
-    spec = LocalMediaExecutionSpec(
-        command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
-        target_ref="timeline:main",
-        task_id="task-still",
-        work_dir=work_dir,
-        output_path=output,
-        inputs=(
-            LocalMediaInput(
-                version_id="artifact-version-still",
-                file_id="file-still",
-                checksum="sha256:still",
-                media_type="image/png",
-                path=image,
-                source_ref="element:bg-1",
-                start_seconds=0.0,
-                end_seconds=2.0,
-                duration_seconds=None,
-            ),
-        ),
-        transitions=(),
-        audio_plan="preserve",
-        expected_duration_seconds=2.0,
-        canvas_size=(640, 360),
-    )
-    runner = FfmpegLocalMediaRunner(_FFMPEG)
-    result = asyncio.run(runner.render(spec))
-    assert result["media_type"] == "video/mp4"
 
-    assert output.exists()
-    probe = subprocess.run(
+
+def _ffmpeg(*args, log_level="error"):
+    return subprocess.run(
+        [_FFMPEG, "-v", log_level, *map(str, args)],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _probe_csv(path, entries):
+    return subprocess.run(
         [
             _FFPROBE,
             "-v",
             "error",
             "-show_entries",
-            "format=duration",
+            entries,
             "-of",
             "csv=p=0",
-            str(output),
+            str(path),
         ],
+        check=True,
         capture_output=True,
         text=True,
-        check=True,
+    ).stdout.strip()
+
+
+def _render_spec(
+    source, media_type, *, duration=2.0, element="clip-1", **input_options
+):
+    work = source.parent / "work"
+    work.mkdir()
+    return LocalMediaExecutionSpec(
+        command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
+        target_ref="timeline:main",
+        task_id="task-render",
+        work_dir=work,
+        output_path=source.parent / "output.mp4",
+        inputs=(
+            LocalMediaInput(
+                version_id=f"version:{element}",
+                file_id=f"file:{element}",
+                checksum=f"sha256:{element}",
+                media_type=media_type,
+                path=source,
+                source_ref=f"element:{element}",
+                start_seconds=0.0,
+                end_seconds=2.0,
+                **input_options,
+            ),
+        ),
+        transitions=(),
+        audio_plan="preserve",
+        expected_duration_seconds=duration,
+        canvas_size=(640, 360),
     )
-    duration = float(probe.stdout.strip())
-    assert duration == pytest.approx(2.0, abs=0.15)
 
 
-@pytest.mark.skipif(
-    _FFMPEG is None or _FFPROBE is None,
-    reason="ffmpeg is not installed",
-)
+@requires_ffmpeg
+def test_still_image_input_renders_a_timed_segment(tmp_path) -> None:
+    from PIL import Image
+
+    image = tmp_path / "backdrop.png"
+    Image.new("RGB", (640, 360), "orange").save(image)
+    spec = _render_spec(image, "image/png")
+    result = asyncio.run(FfmpegLocalMediaRunner(_FFMPEG).render(spec))
+
+    assert result["media_type"] == "video/mp4"
+    assert float(
+        _probe_csv(spec.output_path, "format=duration")
+    ) == pytest.approx(2.0, abs=0.15)
+
+
+@requires_ffmpeg
 @pytest.mark.parametrize(
     ("playback_rate", "expected_duration"),
     ((0.5, 4.0), (2.0, 1.0)),
@@ -263,86 +263,46 @@ def test_video_playback_rate_controls_real_output_duration(
     expected_duration: float,
 ) -> None:
     source = tmp_path / "source.mp4"
-    subprocess.run(
-        [
-            _FFMPEG,
-            "-y",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=size=640x360:rate=30:duration=2",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=44100:duration=2",
-            "-shortest",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            str(source),
-        ],
-        check=True,
+    _ffmpeg(
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=640x360:rate=30:duration=2",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=44100:duration=2",
+        "-shortest",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        source,
     )
-    rate_label = str(playback_rate).replace(".", "-")
-    work_dir = tmp_path / f"work-{rate_label}"
-    work_dir.mkdir()
-    output = tmp_path / f"retimed-{rate_label}.mp4"
-    spec = LocalMediaExecutionSpec(
-        command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
-        target_ref="timeline:main",
-        task_id=f"task-{rate_label}",
-        work_dir=work_dir,
-        output_path=output,
-        inputs=(
-            LocalMediaInput(
-                version_id=f"asset-version-{rate_label}",
-                file_id=f"file-{rate_label}",
-                checksum=f"sha256:rate-{rate_label}-source-v1",
-                media_type="video/mp4",
-                path=source,
-                source_ref=f"element:{rate_label}",
-                start_seconds=0.0,
-                end_seconds=2.0,
-                duration_seconds=2.0,
-                playback_rate=playback_rate,
-            ),
-        ),
-        transitions=(),
-        audio_plan="preserve",
-        expected_duration_seconds=expected_duration,
-        canvas_size=(640, 360),
+    spec = _render_spec(
+        source,
+        "video/mp4",
+        duration=expected_duration,
+        duration_seconds=2.0,
+        playback_rate=playback_rate,
     )
-
     asyncio.run(FfmpegLocalMediaRunner(_FFMPEG).render(spec))
 
-    probe = subprocess.run(
-        [
-            _FFPROBE,
-            "-v",
-            "error",
-            "-show_entries",
-            "stream=codec_type,duration",
-            "-of",
-            "csv=p=0",
-            str(output),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
+    durations = dict(
+        line.split(",")
+        for line in _probe_csv(
+            spec.output_path, "stream=codec_type,duration"
+        ).splitlines()
     )
-    durations = {
-        kind: float(duration)
-        for kind, duration in (
-            line.split(",") for line in probe.stdout.splitlines()
-        )
-    }
-    assert durations["video"] == pytest.approx(expected_duration, abs=0.15)
-    assert durations["audio"] == pytest.approx(expected_duration, abs=0.15)
+    assert float(durations["video"]) == pytest.approx(
+        expected_duration, abs=0.15
+    )
+    assert float(durations["audio"]) == pytest.approx(
+        expected_duration, abs=0.15
+    )
 
 
 def _materialize_keyframe(project_root: Path, source: Path, timestamp: float):
@@ -409,21 +369,14 @@ def test_real_keyframe_is_published_and_reused(tmp_path: Path) -> None:
     project_root = tmp_path / "中文 project"
     project_root.mkdir()
     source = project_root / "源视频.mp4"
-    subprocess.run(
-        [
-            _FFMPEG,
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=orange:s=640x360:d=1",
-            "-pix_fmt",
-            "yuv420p",
-            str(source),
-        ],
-        check=True,
-        capture_output=True,
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=orange:s=640x360:d=1",
+        "-pix_fmt",
+        "yuv420p",
+        source,
     )
     kwargs = {
         "source_path": source,
@@ -456,98 +409,53 @@ def test_keyframe_cache_rejects_directory_redirect(tmp_path, directory_link):
     assert not list(outside.iterdir())
 
 
-def test_normalized_overlay_carries_the_caption_animation_pick() -> None:
-    """The compose-time fallback must burn the user's entrance triple.
-
-    Regression: ``_normalized_overlay`` used to drop
-    ``caption_animation``, so every fallback caption silently reverted to
-    the pack's signature motion (the field report: "the animation setting
-    did nothing").
-    """
-
-    pick = {"entrance": "pop", "exit": "shrink", "loop": True}
-    normalized = FfmpegLocalMediaRunner._normalized_overlay(
-        {
-            "kind": "pet_os",
-            "text": "你好",
-            "appear_at": 0.5,
-            "duration": 2.0,
-            "subtitle_template": "warm_note",
-            "caption_animation": pick,
-        },
-        5.0,
-    )
+@pytest.mark.parametrize(
+    "pick", [None, {"entrance": "pop", "exit": "shrink", "loop": True}]
+)
+def test_normalized_overlay_respects_user_or_pack_animation(pick) -> None:
+    overlay = {
+        "kind": "pet_os",
+        "text": "你好",
+        "appear_at": 0.0,
+        "duration": 2.0,
+        "subtitle_template": "warm_note",
+    }
+    if pick is not None:
+        overlay.update(appear_at=0.5, caption_animation=pick)
+    normalized = FfmpegLocalMediaRunner._normalized_overlay(overlay, 5.0)
     assert normalized is not None
     assert normalized["caption_animation"] == pick
     kwargs = _caption_fallback_style_kwargs(normalized)
-    assert kwargs["entrance"] == "pop"
-    assert kwargs["exit"] == "shrink"
-    assert kwargs["loop"] is True
+    expected = pick or subtitle_pack_animation("warm_note")
+    assert {
+        key: kwargs[key] for key in ("entrance", "exit", "loop")
+    } == expected
 
 
-def test_normalized_overlay_without_a_pick_keeps_the_pack_motion() -> None:
-    normalized = FfmpegLocalMediaRunner._normalized_overlay(
-        {
-            "kind": "pet_os",
-            "text": "你好",
-            "appear_at": 0.0,
-            "duration": 2.0,
-            "subtitle_template": "warm_note",
-        },
-        5.0,
-    )
-    assert normalized is not None
-    assert normalized["caption_animation"] is None
-    kwargs = _caption_fallback_style_kwargs(normalized)
-    expected = subtitle_pack_animation("warm_note")
-    assert kwargs["entrance"] == expected["entrance"]
-    assert kwargs["exit"] == expected["exit"]
-    assert kwargs["loop"] == expected["loop"]
-
-
-requires_ffmpeg = pytest.mark.skipif(
-    _FFMPEG is None or _FFPROBE is None,
-    reason="ffmpeg is not installed",
-)
-
-
-def _gray_clip(path, duration: float = 0.5) -> None:
-    subprocess.run(
-        [
-            _FFMPEG,
-            "-y",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=c=gray:s=64x64:d={duration}",
-            "-pix_fmt",
-            "yuv420p",
-            str(path),
-        ],
-        check=True,
+def _gray_clip(path) -> None:
+    _ffmpeg(
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=gray:s=64x64:d=0.5",
+        "-pix_fmt",
+        "yuv420p",
+        path,
     )
 
 
 def _mean_rgb(path) -> tuple[float, float, float]:
-    out = subprocess.run(
-        [
-            _FFMPEG,
-            "-v",
-            "error",
-            "-i",
-            str(path),
-            "-vf",
-            "scale=1:1,format=rgb24",
-            "-frames:v",
-            "1",
-            "-f",
-            "rawvideo",
-            "-",
-        ],
-        capture_output=True,
-        check=True,
+    out = _ffmpeg(
+        "-i",
+        path,
+        "-vf",
+        "scale=1:1,format=rgb24",
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-",
     ).stdout
     return float(out[0]), float(out[1]), float(out[2])
 
@@ -929,10 +837,7 @@ _CLIP_HTML = (
 )
 
 
-@pytest.mark.skipif(
-    _FFMPEG is None or _FFPROBE is None,
-    reason="ffmpeg is not installed",
-)
+@requires_ffmpeg
 @pytest.mark.skipif(
     not _PLAYWRIGHT,
     reason="playwright is not installed (motion frames render through it)",
@@ -944,73 +849,42 @@ _CLIP_HTML = (
 def test_motion_clip_segment_renders_the_document_as_the_picture(
     tmp_path,
 ) -> None:
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    output = tmp_path / "output.mp4"
-    spec = LocalMediaExecutionSpec(
-        command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
-        target_ref="timeline:main",
-        task_id="task-clip",
-        work_dir=work_dir,
-        output_path=output,
-        inputs=(
-            LocalMediaInput(
-                version_id="motion-clip-clip-1",
-                file_id="file-clip",
-                checksum="sha256:clip",
-                media_type="text/html",
-                path=tmp_path / "unused.html",
-                source_ref="element:clip-1",
-                start_seconds=0.0,
-                end_seconds=2.0,
-                motion_clip={
-                    "element_id": "clip-1",
-                    "format": "html_css",
-                    "html": _CLIP_HTML,
-                    "checksum": "clip",
-                    "fps": 24,
-                    "loop": True,
-                    "location": None,
-                    "appear_at": 0.0,
-                    "duration": 2.0,
-                },
-            ),
-        ),
-        transitions=(),
-        audio_plan="preserve",
-        expected_duration_seconds=2.0,
-        canvas_size=(640, 360),
+    spec = _render_spec(
+        tmp_path / "unused.html",
+        "text/html",
+        motion_clip={
+            "element_id": "clip-1",
+            "format": "html_css",
+            "html": _CLIP_HTML,
+            "checksum": "clip",
+            "fps": 24,
+            "loop": True,
+            "location": None,
+            "appear_at": 0.0,
+            "duration": 2.0,
+        },
     )
-    runner = FfmpegLocalMediaRunner(_FFMPEG)
-    result = asyncio.run(runner.render(spec))
+    result = asyncio.run(FfmpegLocalMediaRunner(_FFMPEG).render(spec))
     assert result["media_type"] == "video/mp4"
-    assert output.exists()
-    # The document paints its own backdrop: the frame must not be the
-    # black base canvas.
-    signature = subprocess.run(
-        [
-            _FFMPEG,
-            "-v",
-            "info",
-            "-ss",
-            "1.0",
-            "-i",
-            str(output),
-            "-frames:v",
-            "1",
-            "-vf",
-            "signalstats,metadata=print:key=lavfi.signalstats.YAVG",
-            "-f",
-            "null",
-            "-",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    yavg_lines = [
-        line for line in signature.stderr.splitlines() if "YAVG" in line
+    # The motion document must paint over the black base canvas.
+    signature = _ffmpeg(
+        "-ss",
+        "1.0",
+        "-i",
+        spec.output_path,
+        "-frames:v",
+        "1",
+        "-vf",
+        "signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+        "-f",
+        "null",
+        "-",
+        log_level="info",
+    ).stderr.decode()
+    levels = [
+        line.rsplit("=", 1)[1]
+        for line in signature.splitlines()
+        if "YAVG=" in line
     ]
-    assert yavg_lines, signature.stderr
-    yavg = float(yavg_lines[0].rsplit("=", 1)[1])
-    assert yavg > 24.0, f"frame is almost black (YAVG={yavg})"
+    assert levels, signature
+    assert float(levels[0]) > 24.0, f"frame is almost black (YAVG={levels[0]})"

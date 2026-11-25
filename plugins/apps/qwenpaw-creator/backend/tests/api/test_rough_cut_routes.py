@@ -54,26 +54,6 @@ def _app(tmp_path):
     return app, services, snapshot
 
 
-def _make_still_bytes(tmp_path) -> bytes:
-    target = tmp_path / "storyboard-src.png"
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=red:s=320x240:d=0.1",
-            "-frames:v",
-            "1",
-            str(target),
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return target.read_bytes()
-
-
 def _commit_storyboard_element(services, snapshot, png_bytes: bytes) -> None:
     """One enabled element whose storyboard slot holds a real indexed PNG."""
 
@@ -143,49 +123,45 @@ def _commit_storyboard_element(services, snapshot, png_bytes: bytes) -> None:
 
 
 @pytest.mark.usefixtures("api_runtime_root")
-def test_rough_cut_unknown_timeline_is_404(tmp_path, run_scenario):
-    app, _services, _snapshot = _app(tmp_path)
-
-    async def scenario(client):
-        response = await client.get(
-            f"/projects/{PROJECT_ID}/timelines/timeline:nope/rough-cut",
-        )
-        assert response.status_code == 404
-
-    run_scenario(app, scenario)
-
-
-@pytest.mark.usefixtures("api_runtime_root")
-def test_rough_cut_without_material_fails_closed_409(tmp_path, run_scenario):
-    app, _services, _snapshot = _app(tmp_path)
-
-    async def scenario(client):
-        response = await client.get(
-            f"/projects/{PROJECT_ID}/timelines/{TIMELINE_ID}/rough-cut",
-        )
-        assert response.status_code == 409
+@pytest.mark.parametrize(
+    ("timeline", "status"),
+    [("timeline:nope", 404), (TIMELINE_ID, 409)],
+    ids=["missing-timeline", "missing-material"],
+)
+def test_rough_cut_requires_a_timeline_with_material(
+    tmp_path,
+    api_request,
+    timeline,
+    status,
+):
+    app, _, _ = _app(tmp_path)
+    response = api_request(
+        app,
+        "GET",
+        f"/projects/{PROJECT_ID}/timelines/{timeline}/rough-cut",
+    )
+    assert response.status_code == status
+    if status == 409:
         assert "粗剪素材" in response.json()["message"]
-
-    run_scenario(app, scenario)
 
 
 @requires_ffmpeg
 @pytest.mark.usefixtures("api_runtime_root")
-def test_rough_cut_with_storyboard_returns_mp4(tmp_path, run_scenario):
+def test_rough_cut_with_storyboard_returns_mp4(tmp_path, api_request):
     app, services, snapshot = _app(tmp_path)
-    _commit_storyboard_element(services, snapshot, _make_still_bytes(tmp_path))
+    image = tmp_path / "storyboard-src.png"
+    _make_still(image)
+    _commit_storyboard_element(services, snapshot, image.read_bytes())
 
-    async def scenario(client):
-        response = await client.get(
-            f"/projects/{PROJECT_ID}/timelines/{TIMELINE_ID}/rough-cut",
-        )
-        assert response.status_code == 200, response.text
-        assert response.headers["content-type"] == "video/mp4"
-        payload = response.content
-        assert len(payload) > 1000
-        assert b"ftyp" in payload[:64]
-
-    run_scenario(app, scenario)
+    response = api_request(
+        app,
+        "GET",
+        f"/projects/{PROJECT_ID}/timelines/{TIMELINE_ID}/rough-cut",
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "video/mp4"
+    assert len(response.content) > 1000
+    assert b"ftyp" in response.content[:64]
 
 
 def _services_and_project(tmp_path):
@@ -299,21 +275,9 @@ def _make_video(path: Path, seconds: float) -> None:
 
 
 def _make_still(path: Path) -> None:
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=c=red:s=320x240:d=0.1",
-            "-frames:v",
-            "1",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    from PIL import Image
+
+    Image.new("RGB", (320, 240), "red").save(path)
 
 
 def _duration_seconds(path_bytes: bytes, workdir: Path) -> float:

@@ -1,7 +1,11 @@
+import { makeReviewRecord, makeReviewOperation } from "@/test/agentFixtures";
 import { cloneProject } from "@/test/projectSnapshotFixtures";
 import { importTimelineScript, setSubtitleStyle } from "@/api/creator";
 import { installMockFetch } from "@/test/mockFetch";
-import type { ProjectDocument } from "@/contracts/creator";
+import type {
+  FileProjectReviewRecord,
+  ProjectDocument,
+} from "@/contracts/creator";
 import {
   createSnapshotOperations,
   deleteTimelineOperations,
@@ -19,7 +23,7 @@ import {
 
 function response(
   status: number,
-  body: unknown,
+  body?: unknown,
   headers: Record<string, string> = {},
 ): Response {
   return {
@@ -123,53 +127,18 @@ describe("Project snapshot API", () => {
 });
 
 describe("Project review requests", () => {
-  function review(overrides: Record<string, unknown> = {}) {
-    return {
-      review_id: "review-1",
-      round_id: "round-1",
-      request_id: "request-1",
+  const review = (overrides: Partial<FileProjectReviewRecord> = {}) =>
+    makeReviewRecord({
       request_message_seq: 4,
-      interrupted_run_id: "run-1",
       baseline_generation: 2,
       baseline_etag: "base-2",
       candidate_generation: 3,
       candidate_etag: "candidate-3",
-      decision_token: "token-1",
-      status: "PENDING",
       operations: [
-        {
-          kind: "update",
-          json_pointer: "/story/title",
-          file_id: null,
-          target_ref: null,
-          before_hash: "before-hash",
-          after_hash: "after-hash",
-          before: "Old title",
-          after: "New title",
-          operation_id: "operation-1",
-          ui_locator: { route: "/project/p1/plan" },
-          decision: "PENDING",
-        },
+        makeReviewOperation({ ui_locator: { route: "/project/p1/plan" } }),
       ],
-      created_at: "2026-07-15T00:00:00Z",
-      updated_at: "2026-07-15T00:00:01Z",
       ...overrides,
-    };
-  }
-
-  function response(
-    status: number,
-    body?: unknown,
-    headers: Record<string, string> = {},
-  ): Response {
-    return {
-      ok: status >= 200 && status < 300,
-      status,
-      statusText: status === 304 ? "Not Modified" : "OK",
-      headers: new Headers(headers),
-      json: vi.fn(async () => body),
-    } as unknown as Response;
-  }
+    });
 
   describe("file-native Project Review API", () => {
     it("reads the strict snake_case contract and treats 204/304 as protocol results", async () => {
@@ -279,15 +248,20 @@ const IMPORT_RESULT = {
   summary: "剧本正文（3 块 / 42 字）已直接登记为该集剧本版本。",
 };
 
+function mockScriptImport(result = IMPORT_RESULT) {
+  return installMockFetch([
+    {
+      match: "/projects/p1/timelines/timeline%3Amain/script-import",
+      method: "POST",
+      response: { ok: true, status: 201, json: result },
+    },
+  ]);
+}
+
 describe("importTimelineScript (剧本直登)", () => {
   it("uploads a script file as multipart against the timeline route", async () => {
-    const { calls } = installMockFetch([
-      {
-        match: "/projects/p1/timelines/timeline%3Amain/script-import",
-        method: "POST",
-        response: { ok: true, status: 201, json: IMPORT_RESULT },
-      },
-    ]);
+    const { calls } = mockScriptImport();
+
     const file = new File(["## 场 1\n\n开场。"], "我的剧本.md", {
       type: "text/markdown",
     });
@@ -304,17 +278,7 @@ describe("importTimelineScript (剧本直登)", () => {
   });
 
   it("sends pasted text as a JSON body without the script bytes in a query", async () => {
-    const { calls } = installMockFetch([
-      {
-        match: "/script-import",
-        method: "POST",
-        response: {
-          ok: true,
-          status: 201,
-          json: { ...IMPORT_RESULT, replayed: true },
-        },
-      },
-    ]);
+    const { calls } = mockScriptImport({ ...IMPORT_RESULT, replayed: true });
 
     const outcome = await importTimelineScript("p1", "timeline:main", {
       content: "## 场 1\n\n开场。",
@@ -330,13 +294,7 @@ describe("importTimelineScript (剧本直登)", () => {
   });
 
   it("sends a per-request Idempotency-Key so re-picking old content is a new edit", async () => {
-    const { calls } = installMockFetch([
-      {
-        match: "/script-import",
-        method: "POST",
-        response: { ok: true, status: 201, json: IMPORT_RESULT },
-      },
-    ]);
+    const { calls } = mockScriptImport();
 
     // Two separate imports (the A -> B -> A flow) each carry a fresh key, so
     // the backend mints a distinct edit transaction and never collides with a
@@ -371,98 +329,58 @@ const STYLE_RESULT = {
   skippedNonTemplate: 0,
 };
 
+const subtitleCases: Array<{
+  name: string;
+  request: Parameters<typeof setSubtitleStyle>[1];
+  counters?: Partial<typeof STYLE_RESULT>;
+}> = [
+  {
+    name: "selected template",
+    request: { subtitleTemplate: "variety_pop" },
+  },
+  {
+    name: "partial update with untouched controls omitted",
+    request: {
+      animation: { entrance: "slide", loop: false },
+      elementIds: ["caption-1"],
+    },
+  },
+  {
+    name: "custom captions that skip the selected pack",
+    request: { animation: { entrance: "pop" }, elementIds: ["cap-1", "cap-2"] },
+    counters: { syncedPrompts: 0, redrawnDocuments: 0, skippedNonTemplate: 2 },
+  },
+  {
+    name: "explicit reset to smart recommend",
+    request: { subtitleTemplate: null, subtitleStyle: null },
+  },
+];
+
 describe("setSubtitleStyle", () => {
-  it("patches the subtitle style route and returns what the sync reached", async () => {
-    const { calls } = installMockFetch([
-      {
-        match: "/projects/p1/subtitles/style",
-        method: "PATCH",
-        response: { ok: true, status: 200, json: STYLE_RESULT },
-      },
-    ]);
-
-    const outcome = await setSubtitleStyle("p1", {
-      subtitleTemplate: "variety_pop",
-    });
-
-    expect(outcome.redrawnDocuments).toBe(12);
-    // The refusal counter has to survive the round trip: without it the UI can
-    // only ever claim a full success.
-    expect(outcome.skippedNonTemplate).toBe(0);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe("PATCH");
-    expect(calls[0].body).toEqual({ subtitleTemplate: "variety_pop" });
-  });
-
-  it("sends only the keys the caller set, so an untouched control cannot reset the project", async () => {
-    const { calls } = installMockFetch([
-      {
-        match: "/subtitles/style",
-        method: "PATCH",
-        response: { ok: true, status: 200, json: STYLE_RESULT },
-      },
-    ]);
-
-    await setSubtitleStyle("p1", {
-      animation: { entrance: "slide", loop: false },
-      elementIds: ["caption-1"],
-    });
-
-    expect(calls[0].body).toEqual({
-      animation: { entrance: "slide", loop: false },
-      elementIds: ["caption-1"],
-    });
-  });
-
-  it("reports captions whose own design beat the pack", async () => {
-    installMockFetch([
-      {
-        match: "/subtitles/style",
-        method: "PATCH",
-        response: {
-          ok: true,
-          status: 200,
-          json: {
-            ...STYLE_RESULT,
-            syncedPrompts: 0,
-            redrawnDocuments: 0,
-            skippedNonTemplate: 2,
-          },
+  it.each(subtitleCases)(
+    "preserves the wire update and result for $name",
+    async ({ request, counters }) => {
+      const result = { ...STYLE_RESULT, ...counters };
+      const { calls } = installMockFetch([
+        {
+          match: "/projects/p1/subtitles/style",
+          method: "PATCH",
+          response: { ok: true, status: 200, json: structuredClone(result) },
         },
-      },
-    ]);
+      ]);
 
-    const outcome = await setSubtitleStyle("p1", {
-      animation: { entrance: "pop" },
-      elementIds: ["cap-1", "cap-2"],
-    });
-
-    expect(outcome).toMatchObject({
-      syncedPrompts: 0,
-      redrawnDocuments: 0,
-      skippedNonTemplate: 2,
-    });
-  });
-
-  it("keeps an explicit null so the UI can go back to smart recommend", async () => {
-    const { calls } = installMockFetch([
-      {
-        match: "/subtitles/style",
-        method: "PATCH",
-        response: { ok: true, status: 200, json: STYLE_RESULT },
-      },
-    ]);
-
-    await setSubtitleStyle("p1", {
-      subtitleTemplate: null,
-      subtitleStyle: null,
-    });
-
-    expect(calls[0].body).toEqual({
-      subtitleTemplate: null,
-      subtitleStyle: null,
-    });
-  });
+      expect(
+        await setSubtitleStyle("p1", structuredClone(request)),
+      ).toMatchObject({
+        syncedPrompts: result.syncedPrompts,
+        redrawnDocuments: result.redrawnDocuments,
+        skippedNonTemplate: result.skippedNonTemplate,
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ method: "PATCH" });
+      expect(calls[0].body).toEqual(request);
+    },
+  );
 });
 
 describe("duplicateTimelineOperations", () => {
