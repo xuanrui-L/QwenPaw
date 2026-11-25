@@ -42,13 +42,7 @@ def _restore_process_environment():
         os.environ[key] = value
 
 
-def _load_plugin_entrypoint(monkeypatch):
-    # Discard a partially loaded or foreign qwenpaw module before loading
-    # the checked-out host source so this contract test is deterministic.
-    for module_name in tuple(sys.modules):
-        if module_name == "qwenpaw" or module_name.startswith("qwenpaw."):
-            monkeypatch.delitem(sys.modules, module_name, raising=False)
-    monkeypatch.syspath_prepend(str(QWENPAW_SOURCE))
+def _load_plugin_entrypoint():
     spec = importlib.util.spec_from_file_location(
         "qwenpaw_creator_plugin_host_contract",
         PLUGIN_ENTRYPOINT,
@@ -59,14 +53,40 @@ def _load_plugin_entrypoint(monkeypatch):
     return module
 
 
+@pytest.fixture
+def load_plugin_entrypoint(monkeypatch):
+    """Keep modules loaded by the fresh host import together."""
+
+    def is_host_module(name: str) -> bool:
+        return name == "qwenpaw" or name.startswith("qwenpaw.")
+
+    previous_modules = {
+        name: module
+        for name, module in sys.modules.copy().items()
+        if is_host_module(name)
+    }
+    for name in previous_modules:
+        del sys.modules[name]
+    monkeypatch.syspath_prepend(str(QWENPAW_SOURCE))
+    try:
+        yield _load_plugin_entrypoint
+    finally:
+        # New submodules must not outlive the temporary parent package.
+        for name in tuple(sys.modules):
+            if is_host_module(name):
+                del sys.modules[name]
+        sys.modules.update(previous_modules)
+
+
 def test_plugin_defaults_runtime_paths_to_qwenpaw_working_dir(
     tmp_path,
     monkeypatch,
+    load_plugin_entrypoint,
 ) -> None:
     monkeypatch.setenv("CREATOR_DATA_ROOT", "")
     monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", "")
     monkeypatch.setenv("CREATOR_BINARY_DIR", "")
-    module = _load_plugin_entrypoint(monkeypatch)
+    module = load_plugin_entrypoint()
 
     working_dir = tmp_path / "qwenpaw-home"
     (
@@ -94,6 +114,7 @@ def test_plugin_defaults_runtime_paths_to_qwenpaw_working_dir(
 def test_plugin_rejects_unsafe_runtime_path_configuration(
     tmp_path,
     monkeypatch,
+    load_plugin_entrypoint,
 ) -> None:
     # A model config path escaping the runtime root fails closed.
     monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path / "creator-runtime"))
@@ -101,7 +122,7 @@ def test_plugin_rejects_unsafe_runtime_path_configuration(
         "CREATOR_MODEL_CONFIG_PATH",
         str(tmp_path / "outside" / "model_config.json"),
     )
-    module = _load_plugin_entrypoint(monkeypatch)
+    module = load_plugin_entrypoint()
     with pytest.raises(
         module.CreatorDataRootError,
         match="inside CREATOR_DATA_ROOT",
@@ -111,9 +132,9 @@ def test_plugin_rejects_unsafe_runtime_path_configuration(
 
 def test_real_qwenpaw_host_mount_keeps_creator_errors_local_and_structured(
     api_runtime_root,
-    monkeypatch,
+    load_plugin_entrypoint,
 ) -> None:
-    module = _load_plugin_entrypoint(monkeypatch)
+    module = load_plugin_entrypoint()
     from qwenpaw.plugins.api import PluginApi
     from qwenpaw.plugins.registry import PluginRegistry
 

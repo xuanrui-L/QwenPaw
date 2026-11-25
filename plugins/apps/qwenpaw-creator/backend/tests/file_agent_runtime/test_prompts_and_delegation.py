@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -156,6 +158,15 @@ def test_image_model_guidance_uses_the_configured_reference_limit(
     assert f"{limit} 张" in prompt
 
 
+def test_image_budget_guidance_blocks_paid_calls_before_exceeding_user_limit():
+    prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
+
+    assert "共享设计图数 + R2V Element 数" in prompt
+    assert re.search(r"超出上限时[^。]*付费调用前[^。]*\[BLOCKED\]", prompt)
+    assert re.search(r"不能用共享设计 Artifact[^。]*跨 Element 复用", prompt)
+    assert re.search(r"不得建立 cast lineup[^。]*第二个可调度视觉节点", prompt)
+
+
 @pytest.mark.parametrize(
     ("model", "backend", "duration"),
     [
@@ -174,6 +185,31 @@ def test_video_model_guidance_uses_the_configured_duration(
     monkeypatch.setattr(model_config, "get_video_backend", lambda: backend)
     prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
     assert duration in prompt
+
+
+@pytest.mark.parametrize(
+    ("model", "marker"),
+    [
+        ("kling/kling-v3-omni-video-generation", "<<<image_{}>>>"),
+        ("kling-3.0-omni", "@image_{}"),
+    ],
+    ids=["bailian", "direct"],
+)
+def test_kling_guidance_uses_only_the_configured_channel_reference_syntax(
+    monkeypatch,
+    model,
+    marker,
+) -> None:
+    monkeypatch.setattr(model_config, "get_video_model_name", lambda: model)
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "kling")
+    prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
+
+    references = set(
+        re.findall(r"<<<image_(?:N|\d+)>>>|@image_(?:N|\d+)", prompt)
+    )
+    assert {marker.format(1), marker.format("N")} <= references
+    prefix = marker.split("{", 1)[0]
+    assert all(reference.startswith(prefix) for reference in references)
 
 
 def _tts(monkeypatch, *, model: str, configured: bool = True) -> None:

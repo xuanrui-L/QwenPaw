@@ -443,12 +443,13 @@ def test_automatic_timeline_render_respects_manual_hold(
     run_scenario(app, scenario)
 
 
-def test_timeline_render_dispatches_once_and_returns_before_completion(
+def _timeline_render_prechecks(
     tmp_path,
     monkeypatch,
     run_scenario,
-) -> None:
+) -> list[dict[str, object]]:
     app, _services, _snapshot, _bootstrap = _app(tmp_path)
+    prechecks: list[dict[str, object]] = []
 
     async def scenario(client):
         started = asyncio.Event()
@@ -476,7 +477,7 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
         )
         monkeypatch.setattr(
             "services.media_files.local_execution.validate_local_media_execution",
-            lambda *_args, **_kwargs: None,
+            lambda _services, **kwargs: prechecks.append(kwargs),
         )
 
         first = await client.post(
@@ -500,6 +501,15 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
     assert second.json()["taskId"] == "task-compose-1"
     assert second.json()["replayed"] is True
     assert calls == [("project-1", "timeline:timeline:main")]
+    return prechecks
+
+
+def test_timeline_render_dispatches_once_and_returns_before_completion(
+    tmp_path,
+    monkeypatch,
+    run_scenario,
+) -> None:
+    assert _timeline_render_prechecks(tmp_path, monkeypatch, run_scenario)
 
 
 def test_file_execution_authorization_can_be_polled_and_approved(
