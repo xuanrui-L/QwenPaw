@@ -211,23 +211,29 @@ export default function FileProjectReviewPanel({
         operation_id: operation.operation_id,
         decision,
       }));
-      if (rejectionFeedback) {
-        await decide(
-          projectId,
-          review.review_id,
-          decisionItems,
-          rejectionFeedback,
-        );
+      const decided = rejectionFeedback
+        ? await decide(
+            projectId,
+            review.review_id,
+            decisionItems,
+            rejectionFeedback,
+          )
+        : await decide(projectId, review.review_id, decisionItems);
+      if (decided?.followupDeferred) {
+        // The decision is durable, but the follow-up (waking the Agent to
+        // regenerate, or publishing accepted assets) was deferred to recovery.
+        // A plain success toast here is exactly what made "undo & redo" look
+        // like it did nothing, so surface the deferral instead.
+        message.warning(t("fileReview.followupDeferred"), 6);
       } else {
-        await decide(projectId, review.review_id, decisionItems);
+        message.success(
+          decision === "ACCEPT"
+            ? t("fileReview.keptCount", { count: affectedUnits })
+            : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
+            ? t("fileReview.undoneCount", { count: affectedUnits })
+            : t("fileReview.undoneCountSimple", { count: affectedUnits }),
+        );
       }
-      message.success(
-        decision === "ACCEPT"
-          ? t("fileReview.keptCount", { count: affectedUnits })
-          : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
-          ? t("fileReview.undoneCount", { count: affectedUnits })
-          : t("fileReview.undoneCountSimple", { count: affectedUnits }),
-      );
       return true;
     } catch {
       message.error(t("fileReview.public.decisionFailed"));

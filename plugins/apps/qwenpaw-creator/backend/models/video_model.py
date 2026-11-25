@@ -1439,6 +1439,20 @@ async def submit_video_task(
                 # retry, and each submit attempt costs a provider round trip.
                 retryable=False,
             )
+        if e.response.status_code == 413:
+            # The gateway rejected the request body itself, not the task.
+            # Resending the identical oversized payload cannot succeed, and
+            # the usual cause is inlined Base64 references that are too large
+            # or too numerous. Name the real reason instead of leaking a bare
+            # "413: " with an empty upstream body, which tells the user
+            # nothing about whether a retry can help.
+            raise ModelError(
+                "视频任务提交被网关拒绝：请求体超过大小限制（HTTP 413）。"
+                "常见原因是内联参考图过大或多张叠加；请压缩或减少参考图后"
+                "重试，原样重试无效。",
+                model_name=model_name,
+                retryable=False,
+            )
         # Keep a long enough response body: error codes such as content
         # moderation appear after ~200 characters, and truncating too short
         # prevents callers from recognising the error type (end-to-end Run
@@ -1457,10 +1471,48 @@ async def submit_video_task(
     except ModelError:
         raise
     except Exception as e:
-        logger.error(f"Video task submission failed: {e}")
+        # str(e) is empty for several transport-level failures (e.g. a
+        # connection reset wrapped with no message), which used to surface as
+        # a bare "Video task submission failed:" with nothing after the colon.
+        # Fall back to repr and always name the exception type.
+        detail = str(e).strip() or repr(e)
+        logger.error(
+            f"Video task submission failed ({type(e).__name__}): {detail}",
+        )
+        # Classify a transport failure by how far the request got, never by
+        # what the body contained. An oversized body is only ever reported by
+        # the explicit HTTP 413 branch above or the pre-submit downscale
+        # refusal, both measured against the provider's known byte ceiling; a
+        # drop is never proof of oversize, because a small inlined reference
+        # hits transient drops too. Blaming the body there would mislead the
+        # user into compressing references and mishandle the retry.
+        #
+        # A failure after the body went out -- the server closed or garbled
+        # the response (RemoteProtocolError "peer closed connection without
+        # sending complete message body", ReadError) -- leaves the outcome
+        # unknown: the provider bills on acceptance, so the task may already
+        # be running and paid for. Report that honestly and keep it
+        # non-retryable, or a blind auto-resend could mint a second task; the
+        # caller must confirm nothing was created before retrying by hand.
+        # Anything that fired before the request was fully sent (ConnectError,
+        # WriteError, ...) never reached the provider, so it cannot have been
+        # accepted and stays a transient, retryable blip.
+        response_phase_drop = isinstance(
+            e,
+            (httpx.RemoteProtocolError, httpx.ReadError),
+        )
+        if response_phase_drop:
+            suffix = (
+                " 请求体已发出但响应中断，任务可能已被服务端接收甚至计费；"
+                "为避免重复扣费不会自动重发，请先在提供方任务列表确认没有"
+                "生成重复任务，再决定是否手动重试。"
+            )
+        else:
+            suffix = ""
         raise ModelError(
-            f"Video task submission failed: {str(e)}",
+            f"Video task submission failed ({type(e).__name__}): {detail}.{suffix}",
             model_name=model_name,
+            retryable=not response_phase_drop,
         )
 
 

@@ -517,6 +517,23 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
     const status = node.manuallyHeld
       ? "manual_hold"
       : projectedTask?.status ?? (outdatedCompose ? "stale" : node.status);
+    // A stale script node at media stage is a non-blocking sync hint, not an
+    // execution item. The user already approved the current script content --
+    // derive_production_stage only returns the stage to "script" when the
+    // content fingerprint changes -- so "stale" here just means upstream
+    // creative inputs drifted after approval. assert_media_production_allowed
+    // never blocks at media stage, and the blueprint panel already carries the
+    // signal via its “待同步 · 更新剧本” chip, so drop it from the progress
+    // overview instead of alarming the “需要关注” group. Empty groups are
+    // filtered out below, so skipping the push leaves no dangling section.
+    // (field report 2026-11-24)
+    if (
+      node.kind === "script" &&
+      status === "stale" &&
+      project?.settings.production_stage === "media"
+    ) {
+      continue;
+    }
     const promptPreparation =
       !projectedTask &&
       node.status === "gated" &&
