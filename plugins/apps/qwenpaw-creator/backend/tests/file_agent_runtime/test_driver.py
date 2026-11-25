@@ -5721,42 +5721,17 @@ def test_the_next_turn_resumes_from_the_shape_that_was_sent(tmp_path):
     assert [item["role"] for item in seen[1]][-2:] == ["assistant", "tool"]
 
 
-def test_plan_continuation_summary_round_trips_and_fails_closed(
+@pytest.mark.parametrize("summary_result", ["valid", "malformed", "error"])
+def test_creator_receives_continuation_summary_only_when_usable(
+    tmp_path,
     monkeypatch,
+    summary_result,
 ) -> None:
-    """The summary is really produced from the archived slice, not a no-op.
-
-    Wiring checks only prove the call exists; this drives the real host
-    library end to end (build prompt -> model -> parse -> validate) so a
-    regression that quietly made the planner always return "" would surface,
-    and confirms an unusable reply is dropped rather than injected.
-    """
     if not driver_module._HOST_CONTINUATION_SUMMARY_AVAILABLE:
         pytest.skip("host continuation_summary library not importable")
     monkeypatch.delenv("CREATOR_CONTINUATION_SUMMARY_ENABLED", raising=False)
 
-    # Enough droppable runtime history to force real archival (over the
-    # 128KB default history budget).
-    prior_context = [
-        _record(
-            seq,
-            role="tool",
-            source="runtime_action_result",
-            text=f"review marker {seq} " + "z" * 3000,
-        )
-        for seq in range(1, 60)
-    ]
-
-    class _Harness:
-        _plan_continuation_summary = (
-            FileCreatorAgentRuntime._plan_continuation_summary
-        )
-        _complete_model_turn = FileCreatorAgentRuntime._complete_model_turn
-        model_turn_timeout_seconds = 30
-
-        def __init__(self, client) -> None:
-            self.model_client = client
-
+    archived_note = "Review approved the vertical format."
     markdown = (
         "## Active Task\nContinue the episode plan.\nStatus: in_progress\n\n"
         "## Current State\n- Six episodes are locked.\n\n"
@@ -5764,30 +5739,64 @@ def test_plan_continuation_summary_round_trips_and_fails_closed(
         "## Decisions\n- Use the vertical format.\n\n"
         "## Open Work\n- Render the title card.\n"
     )
+    calls: list[tuple[bool, str]] = []
 
-    async def _scenario() -> tuple[str, list]:
-        seen_tools: list[list] = []
+    async def complete(messages, tools):
+        calls.append((bool(tools), messages[-1]["content"]))
+        if tools:
+            return AgentModelTurn(content="已继续分集计划。")
+        if summary_result == "error":
+            raise RuntimeError("summary provider unavailable")
+        return AgentModelTurn(
+            content=markdown if summary_result == "valid" else "too short",
+        )
 
-        async def summarize(messages, tools):
-            seen_tools.append(tools)
-            return AgentModelTurn(content=markdown)
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="制定分集计划。",
+        )
+        services.sessions.mark_messages_consumed(
+            PROJECT_ID,
+            SESSION_ID,
+            through_seq=1,
+        )
+        archived = services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="tool",
+            source="runtime_action_result",
+            content_parts=[
+                {"type": "text", "text": archived_note + "z" * (140 * 1024)},
+            ],
+        ).message
+        request = services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            source="user",
+            content_parts=[{"type": "text", "text": "继续分集计划。"}],
+            channel=MessageChannel.AGENTDOCK,
+        ).message
+        driver = _driver(services, complete)
+        try:
+            await _run_to_idle(driver, services, seq=request.message_seq)
+        finally:
+            await driver.stop()
+        return archived.message_seq
 
-        good = await _Harness(
-            CallbackAgentChatClient(summarize),
-        )._plan_continuation_summary(prior_context)
-        return good, seen_tools[0]
-
-    summary, tools = asyncio.run(_scenario())
-    assert tools == [], "the summary turn must not offer tools"
-    assert "archived task state" in summary
-    assert "Continue the episode plan." in summary
-
-    async def _fail_closed() -> str:
-        async def junk(messages, tools):
-            return AgentModelTurn(content="this is not a summary")
-
-        return await _Harness(
-            CallbackAgentChatClient(junk),
-        )._plan_continuation_summary(prior_context)
-
-    assert asyncio.run(_fail_closed()) == ""
+    archived_seq = asyncio.run(scenario())
+    assert [has_tools for has_tools, _content in calls] == [False, True]
+    assert archived_note in calls[0][1]
+    context, request_text = calls[1][1].split("\n\nCURRENT_USER_REQUEST=\n", 1)
+    history = json.loads(context.split("CONVERSATION_HISTORY_JSON=", 1)[1])
+    marker = history[0]
+    assert marker["source"] == "context_compaction"
+    assert marker["recoverableSeqRange"] == [archived_seq, archived_seq]
+    assert "继续分集计划。" in request_text
+    if summary_result == "valid":
+        assert "Continue the episode plan." in marker["continuationSummary"]
+    else:
+        assert "continuationSummary" not in marker
