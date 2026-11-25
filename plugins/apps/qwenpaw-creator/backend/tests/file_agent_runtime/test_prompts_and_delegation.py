@@ -149,18 +149,24 @@ def test_retired_specialists_have_no_active_prompt(role) -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "limit"),
-    [("qwen-image-3.0", "3"), ("gpt-image-2", "16")],
+    ("model", "rules"),
+    [
+        ("qwen-image-3.0", ("总数必须不超过 3", "400 拒绝")),
+        ("gpt-image-2", ("单次最多 16 张输入参考图",)),
+    ],
 )
 def test_image_model_guidance_uses_the_configured_reference_limit(
     monkeypatch,
     model,
-    limit,
+    rules,
 ) -> None:
     monkeypatch.setattr(model_config, "get_image_model_name", lambda: model)
-    prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
-    assert model in prompt
-    assert f"{limit} 张" in prompt
+    prompt = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
+    )
+    assert f"当前图片生成模型是 `{model}`" in prompt
+    for rule in rules:
+        assert rule in prompt
 
 
 def test_image_budget_guidance_blocks_paid_calls_before_exceeding_user_limit():
@@ -210,12 +216,23 @@ def test_storyboard_keeps_the_users_stage_specific_medium() -> None:
                 "HappyHorse：只能使用 `[Image 1]`、`[Image 2]`",
                 "storyboard 固定为第一张，因此是 `[Image 1]`",
                 "不支持参考视频",
+                "分辨率仅支持 720P/1080P",
             ),
         ),
         (
             "doubao-seedance-2-5-260628",
             "seedance2",
             ("4–30 秒整数", "30 秒长段", "不套用 8–10 秒默认值"),
+        ),
+        (
+            "wan2.7-r2v",
+            "wan",
+            (
+                "中文 Prompt 用“图1、图2",
+                "图片最多 5 张",
+                "视频最多 5 个",
+                "图片与视频合计最多 5 个",
+            ),
         ),
         ("wan3.0-video", "wan", ("Wan3.0", "2–30 秒整数")),
         (
@@ -225,7 +242,7 @@ def test_storyboard_keeps_the_users_stage_specific_medium() -> None:
         ),
         ("VIDUQ2-PRO", "vidu", ("1–10 秒整数",)),
     ],
-    ids=["happyhorse", "seedance-2.5", "wan-3.0", "veo", "vidu-q2"],
+    ids=["happyhorse", "seedance-2.5", "wan-2.7", "wan-3.0", "veo", "vidu-q2"],
 )
 def test_creator_prompt_includes_configured_video_model_rules(
     monkeypatch,
@@ -313,7 +330,10 @@ def test_configured_tts_guidance_preserves_native_dialogue(
     )
     assert "tts_generation" not in source
 
-    creator_tts = creator.partition("\n# 旁白与配音能力\n")[2]
+    _, tts_heading, creator_tts = creator.partition("\n# 旁白与配音能力\n")
+    assert bool(tts_heading) is configured
+    for tool_name in ("create_character_voice", "tts_generation"):
+        assert (tool_name in creator) is configured, tool_name
     creator_tts = creator_tts.partition("\n# ")[0]
     for rule in (
         "台词与旁白优先由视频模型原生生成",
