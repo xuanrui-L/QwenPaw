@@ -31,6 +31,7 @@ from api.project_file_routes import router
 from domain.errors import CreatorError
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
+from test_file_runtime_api import _timeline_render_prechecks
 from test_project_file_api import PROJECT_URL, _patch_payload
 
 from services.project_files.models import SceneLedgerRow
@@ -371,6 +372,16 @@ def test_delegated_compose_stays_ready_after_a_superseded_final(
     # Delegated mode still auto-composes: the superseded final is READY,
     # not STALE, so the scheduler picks it up without a user press.
     assert graph.by_id["compose:timeline:main"].status.value == "ready"
+
+
+def test_manual_render_leaves_stale_scene_locks_for_auto_rereview(
+    tmp_path,
+    monkeypatch,
+    run_scenario,
+) -> None:
+    prechecks = _timeline_render_prechecks(tmp_path, monkeypatch, run_scenario)
+    assert prechecks
+    assert all(check.get("enforce_scene_gate") is False for check in prechecks)
 
 
 def test_precheck_can_skip_the_gate_that_auto_rereview_repairs(

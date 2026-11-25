@@ -218,6 +218,47 @@ def test_file_dispatcher_keeps_bailian_upload_for_dashscope(
     assert calls == ["dashscope"]
 
 
+def test_native_asset_upload_forwards_configured_platform_endpoint(
+    monkeypatch, tmp_path
+):
+    from file_agent_runtime.test_native_media import (
+        _ingest_local_video,
+        _local_video_request,
+        _project,
+    )
+    from services.file_agent_runtime import native_media
+
+    services = _project(tmp_path)
+    video = _ingest_local_video(services, scope="platform-native-upload")
+    base_url = "https://creator-gateway.example/v1"
+    protocol = "AgentScope Platform"
+    public_url = "https://media.example/uploaded/input.mp4"
+    config = native_media.model_config
+    monkeypatch.setattr(config, "get_vlm_api_key", lambda: "sk-as-fixture")
+    monkeypatch.setattr(config, "get_vlm_model_name", lambda: "qwen3.7-plus")
+    monkeypatch.setattr(config, "get_vlm_base_url", lambda: base_url)
+    monkeypatch.setattr(config, "get_vlm_protocol", lambda: protocol)
+    routes = []
+
+    async def upload(_path, **kwargs):
+        routes.append((kwargs.get("base_url"), kwargs.get("protocol")))
+        return public_url
+
+    monkeypatch.setattr(
+        native_media, "upload_reference_file_for_provider", upload
+    )
+    parts = asyncio.run(
+        native_media.source_intelligence_content_parts(
+            services,
+            project_id="project-1",
+            request=_local_video_request(video["assetVersionId"]),
+        ),
+    )
+
+    assert routes == [(base_url, protocol)]
+    assert parts[0]["video_url"]["url"] == public_url
+
+
 def test_agentscope_predicate_never_trusts_a_lookalike_url() -> None:
     config = media_transport.model_config
 

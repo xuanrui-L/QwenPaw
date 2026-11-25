@@ -17,6 +17,7 @@ import importlib
 import re
 import sys
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -251,6 +252,76 @@ def test_creator_presentation_is_authored_html(exported):
         )
     assert presentation.screens == {}
     assert presentation.stylesheets == ()
+
+
+@pytest.mark.parametrize("document", ["interaction", "presentation"])
+def test_creator_and_player_agree_on_authored_markup(document):
+    from ivb.format import interaction_html as player_interaction
+    from ivb.format import presentation_html as player_presentation
+    from services.project_files import interaction_html as creator_interaction
+    from services.project_files import (
+        presentation_html as creator_presentation,
+    )
+
+    if document == "interaction":
+        html = (
+            "<html><body><span data-interaction-countdown></span>"
+            '<button data-edge-ref="next">继续</button></body></html>'
+        )
+        options = {"edge_refs": ["next"], "require_countdown": True}
+        creator_validate = partial(
+            creator_interaction.validate_interaction_html, **options
+        )
+        player_validate = partial(
+            player_interaction.validate_interaction_html, **options
+        )
+        invalid = [
+            html.replace('data-edge-ref="next"', 'data-edge-ref="unknown"'),
+            html.replace("data-interaction-countdown", "data-unused"),
+        ]
+    else:
+        html = (
+            (ROOT / "tests/fixtures/authored-presentation.html")
+            .read_text(encoding="utf-8")
+            .replace(
+                "__NODES__",
+                '<button data-action="jump" data-node-ref="next">继续</button>',
+            )
+        )
+        creator_validate = partial(
+            creator_presentation.validate_presentation_html, node_ids=["next"]
+        )
+        player_validate = partial(
+            player_presentation.validate_presentation_html, node_ids=["next"]
+        )
+        invalid = [
+            html.replace('data-node-ref="next"', 'data-node-ref="unknown"'),
+            html.replace('data-action="start"', 'data-action="unknown"'),
+        ]
+
+    assert not creator_validate(html)
+    assert not player_validate(html)
+    for sample in invalid:
+        assert creator_validate(sample)
+        assert player_validate(sample)
+
+    # Probe any element either parser claims to support, including a tag
+    # newly allowed on just one side. Keep the surrounding document valid.
+    tags = creator_interaction._ALLOWED | player_interaction._ALLOWED
+    tags |= {"mark", "iframe", "video"}
+    fragments = [
+        f"<{tag}></{tag}>" for tag in sorted(tags - {"html", "head", "body"})
+    ]
+    fragments.append('<a href="#next">继续</a>')
+    for fragment in fragments:
+        sample = html.replace("</body>", f"{fragment}</body>", 1)
+        creator_problems = creator_validate(sample)
+        player_problems = player_validate(sample)
+        assert bool(creator_problems) is bool(player_problems), (
+            fragment,
+            creator_problems,
+            player_problems,
+        )
 
 
 @pytest.mark.parametrize(

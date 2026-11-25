@@ -1177,7 +1177,9 @@ describe("AssetMediaPreview audio waveform", () => {
     const waveform = container.querySelector(
       '[data-asset-preview-kind="audio-waveform"]',
     );
-    expect(waveform).toBeTruthy();
+    expect(waveform).toBeInTheDocument();
+    expect(waveform?.children.length).toBeGreaterThan(0);
+    expect(container.querySelector(".placeholder")).not.toBeInTheDocument();
   });
 
   it("keeps the ingest-state placeholder for audio that is not ready yet", () => {
