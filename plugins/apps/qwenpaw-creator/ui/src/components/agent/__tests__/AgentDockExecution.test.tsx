@@ -12,19 +12,9 @@ import AgentDock, { simplifyErrorMessage } from "@/components/agent/AgentDock";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
-import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
-import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
-import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
-import {
-  evt,
-  makePendingAuthorization,
-  makeReviewRecord,
-  makeRun,
-  msg,
-  seedCreatorSession,
-} from "@/test/agentFixtures";
+import { evt, makeRun, msg, seedCreatorSession } from "@/test/agentFixtures";
 
 function renderDock(switchProjects = false) {
   return render(
@@ -533,40 +523,11 @@ describe("AgentDock public output and interactions", () => {
   });
 });
 
-describe("AgentDock older-history paging while replay is suppressed", () => {
+describe("AgentDock during event replay", () => {
   beforeEach(() => {
     seedCreatorSession();
     useAgentDockUiStore.getState().setOpen(true);
   });
-
-  const historyCalls = (calls: Array<{ url: string }>) =>
-    calls.filter((call) => call.url.includes("messages?before=")).length;
-
-  const routes: Parameters<typeof installMockFetch>[0] = [
-    {
-      match: "messages?before=",
-      response: {
-        json: {
-          items: [
-            msg({ messageId: "tail-4", messageSeq: 4, text: "更早的消息" }),
-          ],
-          nextBefore: null,
-        },
-      },
-    },
-    { match: "/specialist-runs", response: { json: { items: [] } } },
-    { match: "/tasks", response: { json: { items: [] } } },
-  ];
-
-  /** The state a dying EventSource leaves behind: replay never finished. */
-  const seedStuckReplay = (connectionState: "reconnecting" | "connected") =>
-    useCreatorSessionStore.setState({
-      messages: [msg({ messageId: "tail-5", messageSeq: 5 })],
-      hasMoreMessages: true,
-      isReplaying: true,
-      loadingOlder: false,
-      connectionState,
-    });
 
   it("holds the composer button at 发送 while a replay is still catching up", () => {
     // The measured defect: a Project whose session had already ended in ERROR

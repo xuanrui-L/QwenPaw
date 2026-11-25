@@ -480,36 +480,37 @@ def test_committed_import_crash_rejects_a_different_body_under_same_key(
     assert retry.artifact_version_id == first.artifact_version_id
 
 
+def _review_publish(store, text: str, seq: int):
+    snapshot = store.read(PROJECT_ID)
+    boundary = ReviewBoundary(
+        request_message_seq=seq,
+        request_id=f"request-{seq}",
+        interrupted_run_id=f"run-{seq - 1}",
+        accepted_generation=snapshot.generation,
+        accepted_etag=snapshot.etag,
+    )
+    return _publish(
+        store,
+        text=text,
+        commit_metadata={
+            "origin": ChangeOrigin.AGENTDOCK_INTERRUPT,
+            "review_policy": ReviewPolicy.REQUIRE_REVIEW,
+            "review_boundary": boundary,
+            "caused_by_request_id": boundary.request_id,
+            "caused_by_message_seq": boundary.request_message_seq,
+        },
+    )
+
+
 def test_reselecting_previous_content_under_review_is_a_new_edit(
     tmp_path,
 ) -> None:
     """待审阅场景下重新选用旧稿同样是新编辑，各拿到独立事务与审阅。"""
     store, base = make_store(tmp_path)
 
-    def _review_publish(text: str, seq: int):
-        snapshot = store.read(PROJECT_ID)
-        boundary = ReviewBoundary(
-            request_message_seq=seq,
-            request_id=f"request-{seq}",
-            interrupted_run_id=f"run-{seq - 1}",
-            accepted_generation=snapshot.generation,
-            accepted_etag=snapshot.etag,
-        )
-        return _publish(
-            store,
-            text=text,
-            commit_metadata={
-                "origin": ChangeOrigin.AGENTDOCK_INTERRUPT,
-                "review_policy": ReviewPolicy.REQUIRE_REVIEW,
-                "review_boundary": boundary,
-                "caused_by_request_id": boundary.request_id,
-                "caused_by_message_seq": boundary.request_message_seq,
-            },
-        )
-
-    first = _review_publish(SCRIPT_TEXT, 2)
-    _review_publish(REVISED_TEXT, 3)
-    third = _review_publish(SCRIPT_TEXT, 4)
+    first = _review_publish(store, SCRIPT_TEXT, 2)
+    _review_publish(store, REVISED_TEXT, 3)
+    third = _review_publish(store, SCRIPT_TEXT, 4)
 
     assert first.review_id is not None and third.review_id is not None
     assert third.review_id != first.review_id
@@ -534,33 +535,12 @@ def test_identical_reimport_under_pending_review_keeps_the_review_id(
     """
     store, base = make_store(tmp_path)
 
-    def _review_publish(text: str, seq: int):
-        snapshot = store.read(PROJECT_ID)
-        boundary = ReviewBoundary(
-            request_message_seq=seq,
-            request_id=f"request-{seq}",
-            interrupted_run_id=f"run-{seq - 1}",
-            accepted_generation=snapshot.generation,
-            accepted_etag=snapshot.etag,
-        )
-        return _publish(
-            store,
-            text=text,
-            commit_metadata={
-                "origin": ChangeOrigin.AGENTDOCK_INTERRUPT,
-                "review_policy": ReviewPolicy.REQUIRE_REVIEW,
-                "review_boundary": boundary,
-                "caused_by_request_id": boundary.request_id,
-                "caused_by_message_seq": boundary.request_message_seq,
-            },
-        )
-
-    first = _review_publish(SCRIPT_TEXT, 2)
+    first = _review_publish(store, SCRIPT_TEXT, 2)
     assert first.replayed is False
     assert first.review_id is not None
 
     # 审阅尚未通过时再导入同一正文 A：命中同正文提前返回分支。
-    again = _review_publish(SCRIPT_TEXT, 3)
+    again = _review_publish(store, SCRIPT_TEXT, 3)
     assert again.replayed is True
     assert again.artifact_version_id == first.artifact_version_id
     # 关键：待审阅身份被保留，工具据此仍报“待审阅”而非“已登记”。
@@ -594,28 +574,7 @@ def test_identical_reimport_after_script_line_decided_is_not_pending(
 
     store, _base = make_store(tmp_path)
 
-    def _review_publish(text: str, seq: int):
-        snapshot = store.read(PROJECT_ID)
-        boundary = ReviewBoundary(
-            request_message_seq=seq,
-            request_id=f"request-{seq}",
-            interrupted_run_id=f"run-{seq - 1}",
-            accepted_generation=snapshot.generation,
-            accepted_etag=snapshot.etag,
-        )
-        return _publish(
-            store,
-            text=text,
-            commit_metadata={
-                "origin": ChangeOrigin.AGENTDOCK_INTERRUPT,
-                "review_policy": ReviewPolicy.REQUIRE_REVIEW,
-                "review_boundary": boundary,
-                "caused_by_request_id": boundary.request_id,
-                "caused_by_message_seq": boundary.request_message_seq,
-            },
-        )
-
-    first = _review_publish(SCRIPT_TEXT, 2)
+    first = _review_publish(store, SCRIPT_TEXT, 2)
     assert first.review_id is not None
     service = ProjectReviewService(store)
     review = next(
@@ -644,7 +603,7 @@ def test_identical_reimport_after_script_line_decided_is_not_pending(
     assert partial.status is ReviewStatus.PENDING
 
     # 同正文重导入：命中同正文复放，但剧本行已决议 -> 不再报待审阅。
-    again = _review_publish(SCRIPT_TEXT, 3)
+    again = _review_publish(store, SCRIPT_TEXT, 3)
     assert again.replayed is True
     assert again.artifact_version_id == first.artifact_version_id
     assert again.review_id is None

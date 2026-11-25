@@ -18,20 +18,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI
 
-from api.dependencies import creator_error_handler, project_file_services
-from api.project_file_routes import router
 from api.work_graph_routes import _task_admission_detail
 from domain.enums import CreatorCommandType, TaskStatus
-from domain.errors import CreatorError, ValidationError
+from domain.errors import ValidationError
 from services.file_agent_runtime.work_scheduler import (
     _abandoned_queued_task_ids,
 )
 from services.media_files import local_execution
-from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
-    Project,
     SceneLedgerRow,
     SourceAssetVersion,
     SourceVersionRenderSource,
@@ -40,7 +35,7 @@ from services.render_review import scene_review as scene_review_module
 
 from render_review.test_scene_review import _plan, _timeline_with_scene
 from test_file_runtime_api import _app
-from test_project_file_api import PROJECT_URL, _patch_payload
+from test_project_file_api import _select_historical_video
 
 pytestmark = pytest.mark.unit
 
@@ -273,7 +268,7 @@ def test_manual_render_routes_stale_scenes_to_repair_before_dispatch(
 
 def test_delegated_compose_stays_ready_after_a_superseded_final(
     tmp_path,
-    run_scenario,
+    api_request,
     monkeypatch,
 ) -> None:
     """Delegated (YOLO) keeps auto-compose, only co-creation pauses.
@@ -298,105 +293,7 @@ def test_delegated_compose_stays_ready_after_a_superseded_final(
         lambda: models_config.EXECUTION_MODE_DELEGATED,
     )
 
-    project = Project.new(project_id="project-1", name="Delegated compose")
-    document = project.model_dump(mode="json")
-    document["timelines"]["items"]["timeline:main"]["elements_by_id"] = {
-        "clip": {
-            "element_id": "clip",
-            "label": "Clip",
-            "span": {"start_tick": 0, "duration_tick": 4000},
-            "location": {},
-            "creation": {"type": "t2v", "video_prompt": "Current prompt"},
-            "outputs": {"main": {"slot_id": "element:clip:main"}},
-            "render_source": {
-                "type": "element_output",
-                "element_id": "clip",
-                "output_name": "main",
-            },
-        },
-    }
-    assets = document["assets"]
-    for kind, owner, slot_id, versions, current in (
-        (
-            "element_video",
-            "element:clip",
-            "element:clip:main",
-            ["old", "new"],
-            "new",
-        ),
-        (
-            "final_video",
-            "timeline:timeline:main",
-            "timeline:timeline:main:render",
-            ["final"],
-            "final",
-        ),
-    ):
-        assets["artifact_slots_by_id"][slot_id] = {
-            "slot_id": slot_id,
-            "kind": kind,
-            "owner_ref": owner,
-            "version_ids": versions,
-            "selected_version_id": current,
-        }
-        for version_id in versions:
-            checksum = hashlib.sha256(version_id.encode()).hexdigest()
-            assets["files_by_id"][version_id] = {
-                "file_id": version_id,
-                "kind": "artifact_payload",
-                "relative_uri": f"assets/{version_id}.mp4",
-                "sha256": checksum,
-                "size_bytes": len(version_id),
-                "media_type": "video/mp4",
-                "created_at": "2026-09-17T00:00:00Z",
-            }
-            assets["artifact_versions_by_id"][version_id] = {
-                "version_id": version_id,
-                "name": version_id,
-                "slot_id": slot_id,
-                "kind": kind,
-                "owner_ref": owner,
-                "file_id": version_id,
-                "checksum": checksum,
-                "based_on_generation": 0,
-                "stale": version_id == "old",
-                "stale_reason": "Old inputs" if version_id == "old" else None,
-                "created_at": "2026-09-17T00:00:00Z",
-            }
-
-    def initialize(root):
-        (root / "assets").mkdir(exist_ok=True)
-        for version_id in ("old", "new", "final"):
-            (root / f"assets/{version_id}.mp4").write_bytes(
-                version_id.encode(),
-            )
-
-    services = CreatorFileServices.create(tmp_path.resolve())
-    base = services.projects.create(
-        Project.model_validate(document),
-        initialize_staged_project=initialize,
-    )
-    app = FastAPI()
-    app.add_exception_handler(CreatorError, creator_error_handler)
-    app.include_router(router)
-    app.dependency_overrides[project_file_services] = lambda: services
-    payload = _patch_payload(
-        "choose-history",
-        "old",
-        base,
-        path=(
-            "/assets/artifact_slots_by_id/element:clip:main/"
-            "selected_version_id"
-        ),
-        expected="new",
-    )
-
-    async def scenario(client):
-        return await client.patch(PROJECT_URL, json=payload)
-
-    response = run_scenario(app, scenario)
-    assert response.status_code == 200, response.text
-    saved = services.projects.read("project-1").project
+    saved, _impact = _select_historical_video(tmp_path, api_request)
     graph = derive_work_graph(saved)
     # Delegated mode still auto-composes: the superseded final is READY,
     # not STALE, so the scheduler picks it up without a user press.

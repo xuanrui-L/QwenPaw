@@ -1,3 +1,4 @@
+import { cloneProject } from "@/test/projectSnapshotFixtures";
 import { describe, expect, it } from "vitest";
 import type {
   ProjectDocument,
@@ -15,17 +16,12 @@ import {
   isPetContent,
   isSubtitleOverlay,
 } from "@/selectors/timelineElementSelectors";
-import { projectDocument } from "@/test/creatorFixtures";
 import {
   playbackLayersAtTick,
   playbackLayersInWindow,
   resolveElementPlayback,
   transitionOpacityAtTick,
 } from "@/selectors/elementPlaybackSelectors";
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
 
 /** Trim the two-episode fixture to a single live timeline. */
 function singleTimeline(project: ProjectDocument): ProjectDocument {

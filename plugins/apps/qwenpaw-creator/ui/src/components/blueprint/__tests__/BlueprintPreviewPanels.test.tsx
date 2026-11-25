@@ -1,4 +1,4 @@
-import { beforeEach } from "vitest";
+import { cloneProject } from "@/test/projectSnapshotFixtures";
 import TimelineCanvas from "@/components/timeline/TimelineCanvas";
 import TimelineLivePreview from "@/components/timeline/TimelineLivePreview";
 import {
@@ -18,10 +18,6 @@ import { projectDocument } from "@/test/creatorFixtures";
 import type { ProjectDocument } from "@/contracts/creator";
 import BlueprintScriptPanel from "@/components/blueprint/BlueprintScriptPanel";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
 
 /**
  * A whole film only exists for a single live timeline whose render slot

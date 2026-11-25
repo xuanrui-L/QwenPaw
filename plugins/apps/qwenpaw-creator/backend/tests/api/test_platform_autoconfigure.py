@@ -11,25 +11,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 
+import httpx
 import pytest
 
 from api import model_routes
-from domain.errors import ValidationError
-
-import socket
-import httpx
 from api.model_routes import _probe_payload
+from domain.errors import ValidationError
 from models import media_transport
 from test_model_connection_probe import (
     _ProbeConfig,
-    _StubResponse,
     _probe,
     _request,
 )
 
 _CHAT_URL = "https://platform-pre.agentscope.io/v1/chat/completions"
-_PROXIED = ("llm", "vlm", "image", "video", "tts", "asr")
 
 
 def _section(**overrides) -> dict:
@@ -91,36 +88,35 @@ def _apply(api_key: str = "sk-as-issued", chat_url: str = _CHAT_URL) -> dict:
     )
 
 
-def test_the_issued_key_reaches_every_proxied_section(config_path) -> None:
-    _apply()
+def test_autoconfigure_applies_the_key_and_presets_to_proxied_sections(
+    config_path,
+) -> None:
+    result = _apply()
 
     loaded = model_routes.load_model_config(include_environment=False)
-    for name in _PROXIED:
+    for name, preset in (
+        ("llm", "qwen3.8-flash"),
+        ("vlm", "qwen3.8-flash"),
+        ("image", "qwen-image-3.0"),
+        ("video", "wan3.0-video"),
+        ("tts", "qwen-audio-3.0-tts-flash"),
+        ("asr", "qwen-audio-3.0-asr-flash"),
+    ):
         item = getattr(loaded, name)
         assert item.protocol == "AgentScope Platform", name
         assert item.api_key == "sk-as-issued", name
-        # The chat suffix is stripped: sections other than the text lane
-        # address the proxy API root, not one endpoint inside it.
         assert item.base_url == "https://platform-pre.agentscope.io/v1", name
+        assert item.enabled is True, name
+        assert item.model_name == preset, name
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["video"]["base_url"].endswith("/v1")
 
-
-def test_every_proxied_section_lands_on_a_preset_model(config_path) -> None:
-    # A fresh container only has the text lane filled. Without a preset the
-    # other five would be written as "configured" with no model behind them.
-    result = _apply()
-
-    loaded = model_routes.load_model_config(include_environment=False)
-    for name in _PROXIED:
-        assert getattr(loaded, name).enabled is True, name
-    assert loaded.llm.model_name == "qwen3.8-flash"
-    assert loaded.vlm.model_name == "qwen3.8-flash"
-    assert loaded.image.model_name == "qwen-image-3.0"
-    assert loaded.video.model_name == "wan3.0-video"
-    assert loaded.tts.model_name == "qwen-audio-3.0-tts-flash"
-    assert loaded.asr.model_name == "qwen-audio-3.0-asr-flash"
+    for name in ("s2v", "embedding"):
+        item = getattr(loaded, name)
+        assert item.protocol == "DashScope（百炼）", name
+        assert item.api_key == "bailian-key", name
+    assert loaded.grounding.tavily_api_key == "tvly"
 
     by_section = {row["section"]: row for row in result["sections"]}
     assert by_section["llm"] == {
@@ -129,8 +125,7 @@ def test_every_proxied_section_lands_on_a_preset_model(config_path) -> None:
         "ready": True,
         "replaced": False,
     }
-    # ``vlm`` resolves to the text lane while use_llm is on, so it never reads
-    # as moved. The sections that started empty all take their preset.
+    # Reusing the LLM does not count as replacing the VLM's model.
     assert by_section["vlm"]["replaced"] is False
     assert by_section["image"]["replaced"] is True
     assert by_section["tts"]["replaced"] is True
@@ -157,19 +152,6 @@ def test_a_foreign_model_is_reset_while_a_valid_choice_survives(
     by_section = {row["section"]: row for row in result["sections"]}
     assert by_section["asr"]["replaced"] is True
     assert by_section["video"]["replaced"] is False
-
-
-def test_sections_the_proxy_cannot_serve_keep_their_own_backend(
-    config_path,
-) -> None:
-    _apply()
-
-    loaded = model_routes.load_model_config(include_environment=False)
-    for name in ("s2v", "embedding"):
-        item = getattr(loaded, name)
-        assert item.protocol == "DashScope（百炼）", name
-        assert item.api_key == "bailian-key", name
-    assert loaded.grounding.tavily_api_key == "tvly"
 
 
 def test_a_foreign_endpoint_is_refused_before_it_lands(config_path) -> None:
@@ -318,7 +300,7 @@ def test_platform_asr_probe_stages_its_sample_the_way_production_does(
         del client, headers
         sent["url"] = url
         sent["payload"] = payload
-        return _StubResponse('{"output": {"choices": []}}')
+        return httpx.Response(200, json={"output": {"choices": []}})
 
     monkeypatch.setattr(
         media_transport,
@@ -555,15 +537,3 @@ def test_a_platform_probe_refusal_never_stages_the_sample(
 
     assert result.ok is False
     assert "元数据" in (result.error or "")
-
-
-def test_platform_asr_model_uses_the_production_classifier():
-    from api.model_routes import _asr_provider
-    from test_model_connection_probe import _request
-
-    request = _request(
-        provider="fun-asr",
-        protocol="AgentScope Platform",
-        model_name="qwen-audio-3.0-asr-flash",
-    )
-    assert _asr_provider(request) == "qwen3-asr"

@@ -1,10 +1,10 @@
+import { cloneProject } from "@/test/projectSnapshotFixtures";
 import { act, fireEvent, render } from "@testing-library/react";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import TimelineLivePreview, {
   syncMotionAnimation,
 } from "@/components/timeline/TimelineLivePreview";
 import type { ProjectDocument, TaskView } from "@/contracts/creator";
-import { projectDocument } from "@/test/creatorFixtures";
 
 /** Stub a prototype getter and return a restore function. */
 function stubProtoGetter(proto: object, name: string, value: number) {
@@ -28,10 +28,6 @@ beforeAll(() => {
 afterAll(() => {
   restores.splice(0).forEach((restore) => restore());
 });
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
 
 function runningTask(elementId: string): TaskView {
   return {

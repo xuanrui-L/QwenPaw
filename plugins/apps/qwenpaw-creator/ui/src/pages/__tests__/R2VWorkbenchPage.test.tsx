@@ -1,3 +1,4 @@
+import { cloneProject, seedProject } from "@/test/projectSnapshotFixtures";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -15,22 +16,6 @@ import type { ProjectDocument } from "@/contracts/creator";
 import type { WorkGraphNode } from "@/contracts/creator/workGraph";
 
 const mediaBudget = { mediaCallBudget: 20 };
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
-
-function seedProject(project = cloneProject()) {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project,
-    generation: project.generation,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-  });
-}
 
 function withSecondVideoVersion(project = cloneProject()): ProjectDocument {
   project.assets.files_by_id["file:r2v-video2"] = {

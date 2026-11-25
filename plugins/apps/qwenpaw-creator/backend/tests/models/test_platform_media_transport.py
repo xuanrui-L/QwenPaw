@@ -133,7 +133,7 @@ def test_post_platform_upload_fails_loudly_without_a_url(
 
 
 def test_bytes_dispatcher_prefers_the_proxy_upload_channel(
-    monkeypatch,
+    patch_attributes,
 ) -> None:
     calls: list[tuple[str, str]] = []
 
@@ -152,15 +152,10 @@ def test_bytes_dispatcher_prefers_the_proxy_upload_channel(
         calls.append(("dashscope", model_name))
         return "oss://dashscope-instant/a.png"
 
-    monkeypatch.setattr(
+    patch_attributes(
         media_transport,
-        "upload_reference_bytes_to_platform_media",
-        fake_platform,
-    )
-    monkeypatch.setattr(
-        media_transport,
-        "upload_reference_bytes_to_dashscope_temp",
-        fake_temp,
+        upload_reference_bytes_to_platform_media=fake_platform,
+        upload_reference_bytes_to_dashscope_temp=fake_temp,
     )
 
     url = asyncio.run(
@@ -179,7 +174,7 @@ def test_bytes_dispatcher_prefers_the_proxy_upload_channel(
 
 def test_file_dispatcher_keeps_bailian_upload_for_dashscope(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
 ) -> None:
     media = tmp_path / "ref.png"
     media.write_bytes(b"png-bytes")
@@ -193,15 +188,10 @@ def test_file_dispatcher_keeps_bailian_upload_for_dashscope(
         calls.append("dashscope")
         return "oss://dashscope-instant/ref.png"
 
-    monkeypatch.setattr(
+    patch_attributes(
         media_transport,
-        "upload_local_file_to_platform_media",
-        fake_platform,
-    )
-    monkeypatch.setattr(
-        media_transport,
-        "upload_local_file_to_dashscope_temp",
-        fake_temp,
+        upload_local_file_to_platform_media=fake_platform,
+        upload_local_file_to_dashscope_temp=fake_temp,
     )
 
     url = asyncio.run(
@@ -287,7 +277,7 @@ def test_agentscope_predicate_never_trusts_a_lookalike_url() -> None:
 
 def test_file_dispatcher_inlines_for_a_plain_openai_gateway(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
 ) -> None:
     """A third endpoint shape: neither the proxy nor DashScope gets the bytes.
 
@@ -307,15 +297,10 @@ def test_file_dispatcher_inlines_for_a_plain_openai_gateway(
         calls.append("dashscope")
         raise AssertionError("the Bailian upload is not reachable here")
 
-    monkeypatch.setattr(
+    patch_attributes(
         media_transport,
-        "upload_local_file_to_platform_media",
-        forbidden_platform,
-    )
-    monkeypatch.setattr(
-        media_transport,
-        "upload_local_file_to_dashscope_temp",
-        forbidden_temp,
+        upload_local_file_to_platform_media=forbidden_platform,
+        upload_local_file_to_dashscope_temp=forbidden_temp,
     )
 
     url = asyncio.run(

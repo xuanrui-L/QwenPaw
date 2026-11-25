@@ -1,7 +1,11 @@
+import {
+  cloneProject,
+  seedProject,
+  singleProject,
+} from "@/test/projectSnapshotFixtures";
 import { filenameFromDisposition } from "@/components/creator/ProjectExportActions";
 import { waitFor } from "@testing-library/react";
 import { ProjectComposer } from "@/components/creator/ProjectComposer";
-import HeroComposerCard from "@/components/creator/HeroComposerCard";
 import { configuredModelConfig } from "@/test/agentFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import { useModelConfigStore } from "@/store/modelConfigStore";
@@ -506,29 +510,6 @@ describe("story map layout", () => {
     expect(nodesOverlap(dropped, applied.get("n16")!)).toBe(false);
   });
 });
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
-
-function seedProject(project: ProjectDocument) {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project,
-    generation: project.generation,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-  });
-}
-
-function singleProject(): ProjectDocument {
-  const project = cloneProject();
-  project.timelines.order = ["timeline:main"];
-  delete project.timelines.items["timeline:ep2"];
-  return project;
-}
 
 function renderPage(entry = "/project/p1") {
   return render(

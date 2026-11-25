@@ -157,91 +157,49 @@ def test_new_commit_waits_for_unfinalized_publication_recovery(
     assert result.snapshot.project.description == "must wait"
 
 
-def test_prepared_unpublished_transaction_is_aborted_safely(
+@pytest.mark.parametrize(
+    "legacy", [False, True], ids=["native", "repaired-legacy"]
+)
+@pytest.mark.parametrize(
+    "published", [False, True], ids=["before-publish", "after-publish"]
+)
+def test_prepared_journal_recovers_the_project_publication(
     tmp_path,
     monkeypatch,
+    legacy,
+    published,
 ):
-    store, base = make_store(tmp_path)
-    transaction_id = "tx-unpublished"
-    round_id = "round-unpublished"
+    create_store = _legacy_double_narration_store if legacy else make_store
+    store, base = create_store(tmp_path)
+    transaction_id, round_id = "tx-prepared", "round-prepared"
     journal_path = transaction_root(store, transaction_id) / "journal.json"
     candidate = base.project.model_dump(mode="json")
-    candidate["name"] = "Never published"
-    real_write = AtomicJsonRecordStore.write
+    field = "description" if published and not legacy else "name"
+    candidate[field] = "Candidate before crash"
+    original_write = AtomicJsonRecordStore.write
 
-    def leave_prepared(self, value):
-        if (
-            self.path == journal_path
-            and isinstance(value, ProjectCommitJournal)
-            and value.state is CommitJournalState.ABORTED
+    def interrupt_transition(record_store, entry):
+        if record_store.path == journal_path and isinstance(
+            entry, ProjectCommitJournal
         ):
-            raise SimulatedProcessDeath(
-                "process died before abort journal fsync",
+            interrupted = (
+                entry.state is not CommitJournalState.PREPARED
+                if published
+                else entry.state is CommitJournalState.ABORTED
             )
-        return real_write(self, value)
+            if interrupted:
+                raise SimulatedProcessDeath(
+                    "journal transition was not durable"
+                )
+        return original_write(record_store, entry)
 
-    boundary = ProjectCommitBoundary(store)
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            store,
-            "replace",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                SimulatedProcessDeath("process died before Project publish"),
-            ),
-        )
-        patch.setattr(AtomicJsonRecordStore, "write", leave_prepared)
-        with pytest.raises(SimulatedProcessDeath, match="abort journal"):
-            boundary.commit(
-                base=base,
-                candidate=candidate,
-                origin="frontend_edit",
-                transaction_id=transaction_id,
-                round_id=round_id,
-            )
-
-    assert store.read("project-1").etag == base.etag
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.PREPARED
-    )
-    report = recover(store)
-
-    assert report.ok
-    assert report.outcomes[0].action is RecoveryAction.ABORTED_UNPUBLISHED
-    assert (
-        read_journal(store, transaction_id).state is CommitJournalState.ABORTED
-    )
-    assert read_round(store, round_id).status is TransactionStatus.ABORTED
-    assert store.read("project-1").etag == base.etag
-
-
-def test_prepared_but_published_project_is_proved_and_fully_recovered(
-    tmp_path,
-    monkeypatch,
-):
-    store, base = make_store(tmp_path)
-    transaction_id = "tx-prepared-published"
-    round_id = "round-custom"
-    journal_path = transaction_root(store, transaction_id) / "journal.json"
-    candidate = base.project.model_dump(mode="json")
-    candidate["description"] = "published in the narrow crash window"
-    real_write = AtomicJsonRecordStore.write
-
-    def crash_before_journal_transition(self, value):
-        if (
-            self.path == journal_path
-            and isinstance(value, ProjectCommitJournal)
-            and value.state is not CommitJournalState.PREPARED
-        ):
-            raise SimulatedProcessDeath("journal transition was not durable")
-        return real_write(self, value)
+    def interrupt_replace(*_args, **_kwargs):
+        raise SimulatedProcessDeath("project was not published")
 
     with monkeypatch.context() as patch:
-        patch.setattr(
-            AtomicJsonRecordStore,
-            "write",
-            crash_before_journal_transition,
-        )
+        if not published:
+            patch.setattr(store, "replace", interrupt_replace)
+        patch.setattr(AtomicJsonRecordStore, "write", interrupt_transition)
         with pytest.raises(SimulatedProcessDeath, match="journal transition"):
             ProjectCommitBoundary(store).commit(
                 base=base,
@@ -251,26 +209,49 @@ def test_prepared_but_published_project_is_proved_and_fully_recovered(
                 round_id=round_id,
             )
 
-    current = store.read("project-1")
-    assert (
-        current.project.description == "published in the narrow crash window"
-    )
+    current = store.read(PROJECT_ID)
     assert (
         read_journal(store, transaction_id).state
         is CommitJournalState.PREPARED
     )
+    if published:
+        assert getattr(current.project, field) == candidate[field]
+        if legacy:
+            elements = current.source_document["timelines"]["items"][
+                "timeline:main"
+            ]["elements_by_id"]
+            assert elements["narr-old"]["enabled"] is False
+    else:
+        assert current.etag == base.etag
 
     report = recover(store)
     assert report.ok
+    state = read_journal(store, transaction_id).state
+    assert store.read(PROJECT_ID).etag == current.etag
+    if not published:
+        assert report.outcomes[0].action is RecoveryAction.ABORTED_UNPUBLISHED
+        assert state is CommitJournalState.ABORTED
+        assert read_round(store, round_id).status is TransactionStatus.ABORTED
+        return
+
     assert report.outcomes[0].action is RecoveryAction.FINALIZED_RUNTIME
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.RUNTIME_FINALIZED
-    )
+    assert state is CommitJournalState.RUNTIME_FINALIZED
     changeset = read_changeset(store, round_id)
-    assert [c.json_pointer for c in changeset.changes] == ["/description"]
+    assert [change.json_pointer for change in changeset.changes] == [
+        f"/{field}"
+    ]
     assert changeset.base_etag == base.etag
     assert changeset.final_etag == current.etag
+    result = ProjectCommitBoundary(store).commit(
+        base=current,
+        candidate={
+            **current.project.model_dump(mode="json"),
+            "description": "edit after recovery",
+        },
+        origin="runtime_task",
+        transaction_id="after-recovery",
+    )
+    assert result.snapshot.project.description == "edit after recovery"
 
 
 def _legacy_double_narration_store(tmp_path):
@@ -330,143 +311,6 @@ def _legacy_double_narration_store(tmp_path):
     assert elements["narr-new"].enabled is True
     assert base.source_document is not None
     return store, base
-
-
-def test_legacy_double_narration_prepared_unpublished_recovers(
-    tmp_path,
-    monkeypatch,
-):
-    """Window 1: rename a legacy double-narration project, then die in the
-    PREPARED window before the abort journal is durable.
-
-    ``base.json`` must be the source the ETag was hashed over -- not the
-    repaired ``model_dump`` -- or recovery reports "base.json does not match
-    journal base_etag" and turns a safely-abortable crash into a permanent
-    integrity error.
-    """
-
-    store, base = _legacy_double_narration_store(tmp_path)
-    transaction_id = "tx-legacy-unpublished"
-    round_id = "round-legacy-unpublished"
-    journal_path = transaction_root(store, transaction_id) / "journal.json"
-    candidate = base.project.model_dump(mode="json")
-    candidate["name"] = "Renamed legacy project"
-    real_write = AtomicJsonRecordStore.write
-
-    def leave_prepared(self, value):
-        if (
-            self.path == journal_path
-            and isinstance(value, ProjectCommitJournal)
-            and value.state is CommitJournalState.ABORTED
-        ):
-            raise SimulatedProcessDeath(
-                "process died before abort journal fsync",
-            )
-        return real_write(self, value)
-
-    boundary = ProjectCommitBoundary(store)
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            store,
-            "replace",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                SimulatedProcessDeath("process died before Project publish"),
-            ),
-        )
-        patch.setattr(AtomicJsonRecordStore, "write", leave_prepared)
-        with pytest.raises(SimulatedProcessDeath, match="abort journal"):
-            boundary.commit(
-                base=base,
-                candidate=candidate,
-                origin="frontend_edit",
-                transaction_id=transaction_id,
-                round_id=round_id,
-            )
-
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.PREPARED
-    )
-    report = recover(store)
-    assert report.ok
-    assert report.outcomes[0].action is RecoveryAction.ABORTED_UNPUBLISHED
-    # Aborted: the rename never published; project.json is still the legacy
-    # source and still opens (re-repaired on load).
-    assert store.read(PROJECT_ID).project.name == "Initial"
-
-
-def test_legacy_double_narration_published_prepared_recovers(
-    tmp_path,
-    monkeypatch,
-):
-    """Window 2: the rename published but the journal stayed PREPARED.
-
-    Recovery must prove and finalize the publication instead of leaving a
-    permanent integrity error that blocks the next edit. The muted older take
-    rides along in the candidate and is now persisted, so the repair becomes an
-    explicit, recoverable change rather than a snapshot/ETag divergence.
-    """
-
-    store, base = _legacy_double_narration_store(tmp_path)
-    transaction_id = "tx-legacy-published"
-    round_id = "round-legacy-published"
-    journal_path = transaction_root(store, transaction_id) / "journal.json"
-    candidate = base.project.model_dump(mode="json")
-    candidate["name"] = "Renamed before crash"
-    real_write = AtomicJsonRecordStore.write
-
-    def crash_before_journal_transition(self, value):
-        if (
-            self.path == journal_path
-            and isinstance(value, ProjectCommitJournal)
-            and value.state is not CommitJournalState.PREPARED
-        ):
-            raise SimulatedProcessDeath("journal transition was not durable")
-        return real_write(self, value)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            AtomicJsonRecordStore,
-            "write",
-            crash_before_journal_transition,
-        )
-        with pytest.raises(SimulatedProcessDeath, match="journal transition"):
-            ProjectCommitBoundary(store).commit(
-                base=base,
-                candidate=candidate,
-                origin="frontend_edit",
-                transaction_id=transaction_id,
-                round_id=round_id,
-            )
-
-    current = store.read(PROJECT_ID)
-    assert current.project.name == "Renamed before crash"
-    published = current.project.timelines.items["timeline:main"].elements_by_id
-    assert published["narr-old"].enabled is False  # the repair persisted
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.PREPARED
-    )
-
-    report = recover(store)
-    assert report.ok
-    assert report.outcomes[0].action is RecoveryAction.FINALIZED_RUNTIME
-    assert (
-        read_journal(store, transaction_id).state
-        is CommitJournalState.RUNTIME_FINALIZED
-    )
-    # Recovery cleared the pending publication, so the next edit commits
-    # instead of raising PendingProjectRecoveryError.
-    after = store.read(PROJECT_ID)
-    next_candidate = after.project.model_dump(mode="json")
-    next_candidate["description"] = "edit after recovery"
-    result = ProjectCommitBoundary(store).commit(
-        base=after,
-        candidate=next_candidate,
-        origin="runtime_task",
-        transaction_id="after-recovery",
-    )
-    assert result.snapshot.project.description == "edit after recovery"
 
 
 def test_legacy_double_narration_project_replaced_recovery_stays_consistent(

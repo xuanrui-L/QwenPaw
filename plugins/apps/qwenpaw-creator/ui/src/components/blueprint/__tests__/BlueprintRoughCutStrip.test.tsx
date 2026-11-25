@@ -1,12 +1,8 @@
+import { cloneProject } from "@/test/projectSnapshotFixtures";
 import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import BlueprintRoughCutStrip from "@/components/blueprint/BlueprintRoughCutStrip";
-import { projectDocument } from "@/test/creatorFixtures";
 import type { ProjectDocument } from "@/contracts/creator";
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
 
 /**
  * A whole film only exists for a single live timeline whose render slot

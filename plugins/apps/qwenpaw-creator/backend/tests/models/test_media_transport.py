@@ -238,35 +238,18 @@ def test_reference_media_checks_local_size_before_reading(tmp_path) -> None:
     ],
 )
 def test_creator_oss_readiness_has_explicit_three_states(
-    monkeypatch,
+    patch_attributes,
     values,
     expected_status,
 ) -> None:
     access_id, access_secret, endpoint = values
-    monkeypatch.setattr(
+    patch_attributes(
         media_transport.model_config,
-        "get_oss_access_key_id",
-        lambda: access_id,
-    )
-    monkeypatch.setattr(
-        media_transport.model_config,
-        "get_oss_access_key_secret",
-        lambda: access_secret,
-    )
-    monkeypatch.setattr(
-        media_transport.model_config,
-        "get_oss_endpoint",
-        lambda: endpoint,
-    )
-    monkeypatch.setattr(
-        media_transport.model_config,
-        "get_oss_bucket",
-        lambda default: default,
-    )
-    monkeypatch.setattr(
-        media_transport.model_config,
-        "get_oss_public_base_url",
-        lambda: "",
+        get_oss_access_key_id=lambda: access_id,
+        get_oss_access_key_secret=lambda: access_secret,
+        get_oss_endpoint=lambda: endpoint,
+        get_oss_bucket=lambda default: default,
+        get_oss_public_base_url=lambda: "",
     )
 
     readiness = media_transport.creator_oss_readiness()
@@ -492,18 +475,15 @@ def test_preparing_asr_reference_keeps_audio_bytes_out_of_logs(
 
 
 @pytest.mark.parametrize("name", ["cat.jpg", "猫咪 photo #1.jpg"])
-def test_wan_upload_receives_native_file_path(tmp_path, monkeypatch, name):
+def test_wan_upload_receives_native_file_path(
+    tmp_path, monkeypatch, patch_attributes, name
+):
     photo = tmp_path / name
     photo.write_bytes(b"photo-reference")
-    monkeypatch.setattr(
+    patch_attributes(
         video_model.model_config,
-        "get_video_model_name",
-        lambda: "wan3.0-video-prime",
-    )
-    monkeypatch.setattr(
-        video_model.model_config,
-        "get_video_api_key",
-        lambda: "test-key",
+        get_video_model_name=lambda: "wan3.0-video-prime",
+        get_video_api_key=lambda: "test-key",
     )
 
     async def upload(path, **_kwargs):

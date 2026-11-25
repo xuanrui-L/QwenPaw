@@ -17,6 +17,7 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import pytest
 from agentscope.formatter import AnthropicChatFormatter, OpenAIChatFormatter
 from agentscope.message import Msg
@@ -30,6 +31,38 @@ from utils.exceptions import ModelError
 pytestmark = pytest.mark.unit
 
 DASHSCOPE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+@asynccontextmanager
+async def _vlm_slot(_kind):
+    yield
+
+
+def _capture_http(monkeypatch, reply, *, stages=None):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if stages is not None:
+            stages.append("request")
+        return httpx.Response(200, json=reply)
+
+    async_client = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handle)
+        return async_client(*args, **kwargs)
+
+    monkeypatch.setattr(vlm_model.httpx, "AsyncClient", client)
+    return requests
+
+
+def _gemini_reply(text="ok"):
+    return {
+        "candidates": [
+            {"content": {"parts": [{"text": text}]}, "finishReason": "STOP"},
+        ],
+    }
 
 
 def _transport(part, model, base_url):
@@ -112,54 +145,15 @@ def test_direct_protocol_entries_inherit_the_part_declaration(
         lambda: 1024 * 1024,
     )
 
-    captured: dict = {}
-
-    class FakeResponse:
-        status_code = 200
-        headers: dict = {}
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            return {
-                "content": [{"type": "text", "text": "ok"}],
-                "max_tokens": 4096,
-                "candidates": [
-                    {
-                        "content": {"parts": [{"text": "ok"}]},
-                        "finishReason": "STOP",
-                    },
-                ],
-            }
-
-    class FakeAsyncClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_exc):
-            return False
-
-        async def post(self, url, *, headers, json):
-            del url, headers
-            captured["body"] = json
-            return FakeResponse()
-
-        async def get(self, url, *, headers):
-            # ``anthropic_output_limit`` resolves an unknown model through the
-            # read-only Models API before it builds the request.
-            del url, headers
-            return FakeResponse()
-
-    @asynccontextmanager
-    async def fake_model_slot(_kind):
-        yield
-
-    monkeypatch.setattr(vlm_model.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(vlm_model, "model_slot", fake_model_slot)
+    requests = _capture_http(
+        monkeypatch,
+        {
+            **_gemini_reply(),
+            "content": [{"type": "text", "text": "ok"}],
+            "max_tokens": 4096,
+        },
+    )
+    monkeypatch.setattr(vlm_model, "model_slot", _vlm_slot)
 
     still = tmp_path / "frame.bin"
     still.write_bytes(b"\x00" * 64)
@@ -186,7 +180,9 @@ def test_direct_protocol_entries_inherit_the_part_declaration(
         ),
     )
     assert (
-        captured["body"]["messages"][0]["content"][0]["source"]["media_type"]
+        json.loads(requests[-1].content)["messages"][0]["content"][0][
+            "source"
+        ]["media_type"]
         == "image/tiff"
     )
 
@@ -210,7 +206,9 @@ def test_direct_protocol_entries_inherit_the_part_declaration(
         ),
     )
     assert (
-        captured["body"]["contents"][0]["parts"][0]["inline_data"]["mime_type"]
+        json.loads(requests[-1].content)["contents"][0]["parts"][0][
+            "inline_data"
+        ]["mime_type"]
         == "video/quicktime"
     )
 
@@ -458,7 +456,7 @@ def test_local_media_transport_dashscope_temp_and_data_url_fallback(
 
 def test_oversized_image_is_downscaled_instead_of_refused(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
 ):
     """An image over the inline budget is re-encoded, not refused.
 
@@ -472,15 +470,10 @@ def test_oversized_image_is_downscaled_instead_of_refused(
     Image.new("RGB", (1200, 1200), color="blue").save(image, format="BMP")
     assert image.stat().st_size > 64 * 1024
 
-    monkeypatch.setattr(
+    patch_attributes(
         vlm_model.model_config,
-        "get_vlm_max_inline_bytes",
-        lambda: 64 * 1024,
-    )
-    monkeypatch.setattr(
-        vlm_model.model_config,
-        "get_vlm_model_name",
-        lambda: "gpt-vision",
+        get_vlm_max_inline_bytes=lambda: 64 * 1024,
+        get_vlm_model_name=lambda: "gpt-vision",
     )
 
     url = vlm_model._data_url(image, "image/png")
@@ -495,7 +488,7 @@ def test_oversized_image_is_downscaled_instead_of_refused(
 
 def test_downscaled_image_is_rotated_to_match_exif_orientation(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
 ):
     """Re-encoding must not leave a portrait phone photo on its side.
 
@@ -512,15 +505,10 @@ def test_downscaled_image_is_rotated_to_match_exif_orientation(
     frame.save(image, format="JPEG", exif=exif)
     assert image.stat().st_size > 4096
 
-    monkeypatch.setattr(
+    patch_attributes(
         vlm_model.model_config,
-        "get_vlm_max_inline_bytes",
-        lambda: 4096,
-    )
-    monkeypatch.setattr(
-        vlm_model.model_config,
-        "get_vlm_model_name",
-        lambda: "gpt-vision",
+        get_vlm_max_inline_bytes=lambda: 4096,
+        get_vlm_model_name=lambda: "gpt-vision",
     )
 
     url = vlm_model._data_url(image, "image/jpeg")
@@ -668,29 +656,26 @@ def test_reencoded_keyed_png_composites_to_white(tmp_path):
 
 def test_oversized_non_image_media_still_refused_with_guidance(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
 ):
     """A clip cannot be downscaled here, so the refusal must say what to do."""
 
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"\x00" * 4096)
 
-    monkeypatch.setattr(
+    patch_attributes(
         vlm_model.model_config,
-        "get_vlm_max_inline_bytes",
-        lambda: 1024,
-    )
-    monkeypatch.setattr(
-        vlm_model.model_config,
-        "get_vlm_model_name",
-        lambda: "gpt-vision",
+        get_vlm_max_inline_bytes=lambda: 1024,
+        get_vlm_model_name=lambda: "gpt-vision",
     )
 
     with pytest.raises(ModelError, match="VLM_MAX_INLINE_BYTES"):
         vlm_model._data_url(clip, "video/mp4")
 
 
-def test_chat_completion_preserves_mixed_content_parts_in_request(monkeypatch):
+def test_chat_completion_preserves_mixed_content_parts_in_request(
+    monkeypatch, patch_attributes
+):
     captured: dict[str, object] = {}
     stages: list[str] = []
     content = [
@@ -715,44 +700,23 @@ def test_chat_completion_preserves_mixed_content_parts_in_request(monkeypatch):
         def learn(self, model, capability, value):
             captured["capability_learn"] = (model, capability, value)
 
-    class FakeResponse:
-        # The chat decoder reads what httpx exposes (media type + body), so
-        # the double has to carry both instead of only ``json()``.
-        headers = {"content-type": "application/json"}
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        @property
-        def text(self):
-            return json.dumps(self.json())
-
-        def json(self):
-            message = {
-                "content": [
-                    {"type": "text", "text": "看到了图像"},
-                    {"type": "text", "text": "也看到了完整视频"},
-                ],
-            }
-            return {
-                "choices": [{"finish_reason": "stop", "message": message}],
-            }
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout):
-            captured["timeout"] = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, _exc_type, _exc, _tb):
-            return False
-
-        async def post(self, url, *, headers, json):
-            stages.append("request")
-            captured.update(url=url, headers=headers, body=json)
-            return FakeResponse()
+    requests = _capture_http(
+        monkeypatch,
+        {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "看到了图像"},
+                            {"type": "text", "text": "也看到了完整视频"},
+                        ],
+                    },
+                }
+            ],
+        },
+        stages=stages,
+    )
 
     original_transport = vlm_model._transport_local_media_part
 
@@ -766,18 +730,12 @@ def test_chat_completion_preserves_mixed_content_parts_in_request(monkeypatch):
         stages.append("slot")
         yield
 
-    monkeypatch.setattr(
+    patch_attributes(
         vlm_model,
-        "get_capability_cache",
-        lambda: FakeCapabilityCache(),
+        get_capability_cache=lambda: FakeCapabilityCache(),
+        model_slot=fake_model_slot,
+        _transport_local_media_part=track_transport,
     )
-    monkeypatch.setattr(vlm_model, "model_slot", fake_model_slot)
-    monkeypatch.setattr(
-        vlm_model,
-        "_transport_local_media_part",
-        track_transport,
-    )
-    monkeypatch.setattr(vlm_model.httpx, "AsyncClient", FakeAsyncClient)
     config = {
         "get_vlm_api_key": "test-vlm-key",
         "get_vlm_model_name": "qwen3.7-plus",
@@ -804,7 +762,7 @@ def test_chat_completion_preserves_mixed_content_parts_in_request(monkeypatch):
         "video_url": {"url": "https://cdn.example.com/clip.mp4"},
         "fps": 1.0,
     }
-    assert captured["body"] == {
+    assert json.loads(requests[-1].content) == {
         "model": "qwen3.7-plus",
         "messages": [
             {"role": "system", "content": "仅分析提供的素材。"},
@@ -814,7 +772,7 @@ def test_chat_completion_preserves_mixed_content_parts_in_request(monkeypatch):
         "enable_thinking": False,
     }
     assert content[1]["max_frames"] == 24
-    assert captured["headers"]["Authorization"] == "Bearer test-vlm-key"
+    assert requests[-1].headers["Authorization"] == "Bearer test-vlm-key"
 
 
 def test_invalid_media_payload_does_not_poison_capability_cache() -> None:
@@ -940,38 +898,7 @@ def test_gemini_caller_downloads_remote_media_and_inlines_it(
     media_bytes = b"fake-image-bytes"
     captured: dict = {}
 
-    class FakeResponse:
-        def __init__(self, method: str):
-            self._method = method
-            self.status_code = 200
-            self.headers = {}
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            return {
-                "candidates": [
-                    {
-                        "content": {"parts": [{"text": "red"}]},
-                        "finishReason": "STOP",
-                    },
-                ],
-            }
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout, follow_redirects=False):
-            captured["timeout"] = timeout
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, _exc_type, _exc, _tb):
-            return False
-
-        async def post(self, url, *, headers, json):
-            captured.update(post_url=url, headers=headers, body=json)
-            return FakeResponse("POST")
+    requests = _capture_http(monkeypatch, _gemini_reply("red"))
 
     async def fake_download(url, fallback_mime, timeout):
         captured.update(
@@ -981,12 +908,7 @@ def test_gemini_caller_downloads_remote_media_and_inlines_it(
         )
         return "image/png", base64.b64encode(media_bytes).decode("ascii")
 
-    @asynccontextmanager
-    async def fake_model_slot(_kind):
-        yield
-
-    monkeypatch.setattr(vlm_model.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(vlm_model, "model_slot", fake_model_slot)
+    monkeypatch.setattr(vlm_model, "model_slot", _vlm_slot)
     monkeypatch.setattr(vlm_model, "_download_remote_media", fake_download)
     monkeypatch.setattr(
         vlm_model.model_config,
@@ -1015,11 +937,11 @@ def test_gemini_caller_downloads_remote_media_and_inlines_it(
     assert result is not None
     assert captured["get_url"] == "https://cdn.example.com/ref.png"
     # Authenticated Gemini calls transport the key as a query parameter.
-    assert captured["post_url"] == (
+    assert str(requests[-1].url) == (
         "https://generativelanguage.googleapis.com"
         "/v1beta/models/gemini-2.5-pro:generateContent?key=gm-test-key"
     )
-    parts = captured["body"]["contents"][0]["parts"]
+    parts = json.loads(requests[-1].content)["contents"][0]["parts"]
     assert parts[0] == {"text": "描述图片"}
     inline = parts[1]["inline_data"]
     assert inline["mime_type"] == "image/png"
@@ -1038,39 +960,8 @@ def test_gemini_remote_downloader_rejects_loopback_before_connecting() -> None:
 
 
 def test_gemini_caller_omits_key_param_when_keyless(monkeypatch) -> None:
-    captured: dict = {}
-
-    class FakeResponse:
-        status_code = 200
-        content = b""
-        headers: dict = {}
-
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout, follow_redirects=False):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, _exc_type, _exc, _tb):
-            return False
-
-        async def post(self, url, *, headers, json):
-            captured["post_url"] = url
-            return FakeResponse()
-
-    @asynccontextmanager
-    async def fake_model_slot(_kind):
-        yield
-
-    monkeypatch.setattr(vlm_model.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(vlm_model, "model_slot", fake_model_slot)
+    requests = _capture_http(monkeypatch, _gemini_reply())
+    monkeypatch.setattr(vlm_model, "model_slot", _vlm_slot)
 
     asyncio.run(
         vlm_model._call_gemini_vlm(
@@ -1084,4 +975,4 @@ def test_gemini_caller_omits_key_param_when_keyless(monkeypatch) -> None:
         ),
     )
 
-    assert "key=" not in captured["post_url"]
+    assert "key=" not in str(requests[-1].url)

@@ -130,24 +130,21 @@ def test_gateway_refuses_a_genuine_websocket_model(monkeypatch) -> None:
     assert "WebSocket" in str(excinfo.value)
 
 
-def test_bailian_keeps_refusing_an_unknown_voice(monkeypatch) -> None:
+def test_bailian_keeps_refusing_an_unknown_voice(
+    monkeypatch, patch_attributes
+) -> None:
     """The pass-through is gateway-only; a name the caller typed must still
     fail fast."""
     captured: dict = {}
     monkeypatch.setenv("TTS_API_KEY", "sk-test")
-    monkeypatch.setattr(config, "get_tts_protocol", lambda: "")
-    monkeypatch.setattr(
+    patch_attributes(
         config,
-        "get_tts_base_url",
-        lambda: "https://dashscope.aliyuncs.com/api/v1",
+        get_tts_protocol=lambda: "",
+        get_tts_base_url=lambda: "https://dashscope.aliyuncs.com/api/v1",
+        get_tts_model_name=lambda: "qwen3-tts-flash",
+        get_tts_voice=lambda: "Cherry",
+        get_tts_timeout_seconds=lambda: 30,
     )
-    monkeypatch.setattr(
-        config,
-        "get_tts_model_name",
-        lambda: "qwen3-tts-flash",
-    )
-    monkeypatch.setattr(config, "get_tts_voice", lambda: "Cherry")
-    monkeypatch.setattr(config, "get_tts_timeout_seconds", lambda: 30)
     monkeypatch.setattr(tts_model, "_post_json", _fake_post(captured, {}))
 
     with pytest.raises(ValueError, match="unknown voice"):
@@ -158,6 +155,7 @@ def test_bailian_keeps_refusing_an_unknown_voice(monkeypatch) -> None:
 
 def test_bailian_replaces_a_default_voice_the_model_cannot_speak(
     monkeypatch,
+    patch_attributes,
 ) -> None:
     """A deployment default is not a caller's typo.
 
@@ -167,19 +165,14 @@ def test_bailian_replaces_a_default_voice_the_model_cannot_speak(
     """
     captured: dict = {}
     monkeypatch.setenv("TTS_API_KEY", "sk-test")
-    monkeypatch.setattr(config, "get_tts_protocol", lambda: "")
-    monkeypatch.setattr(
+    patch_attributes(
         config,
-        "get_tts_base_url",
-        lambda: "https://dashscope.aliyuncs.com/api/v1",
+        get_tts_protocol=lambda: "",
+        get_tts_base_url=lambda: "https://dashscope.aliyuncs.com/api/v1",
+        get_tts_model_name=lambda: "qwen-audio-3.1-tts-flash",
+        get_tts_voice=lambda: "NotAVoice",
+        get_tts_timeout_seconds=lambda: 30,
     )
-    monkeypatch.setattr(
-        config,
-        "get_tts_model_name",
-        lambda: "qwen-audio-3.1-tts-flash",
-    )
-    monkeypatch.setattr(config, "get_tts_voice", lambda: "NotAVoice")
-    monkeypatch.setattr(config, "get_tts_timeout_seconds", lambda: 30)
 
     def fake_ws(*, model, voice, text, api_key, speech_rate=1.0):
         captured.update(model=model, voice=voice)

@@ -1,3 +1,4 @@
+import { cloneProject } from "@/test/projectSnapshotFixtures";
 import { importTimelineScript, setSubtitleStyle } from "@/api/creator";
 import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument } from "@/contracts/creator";
@@ -7,7 +8,6 @@ import {
   duplicateTimelineOperations,
   snapshotMatchesTimeline,
 } from "@/api/creator/timelines";
-import { projectDocument } from "@/test/creatorFixtures";
 import { resolveElementPlayback } from "@/selectors/elementPlaybackSelectors";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -464,10 +464,6 @@ describe("setSubtitleStyle", () => {
     });
   });
 });
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
 
 describe("duplicateTimelineOperations", () => {
   it("copies editable elements, references and output history while reusing media files", () => {

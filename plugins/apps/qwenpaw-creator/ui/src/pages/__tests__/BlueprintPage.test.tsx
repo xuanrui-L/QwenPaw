@@ -1,4 +1,9 @@
 import {
+  cloneProject,
+  seedProject,
+  singleProject,
+} from "@/test/projectSnapshotFixtures";
+import {
   fireEvent,
   render,
   screen,
@@ -20,29 +25,6 @@ import type { ProjectDocument } from "@/contracts/creator";
 import { Modal } from "antd";
 import ProductionStageControl from "../../components/creator/ProductionStageControl";
 import { installMockFetch } from "@/test/mockFetch";
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
-
-function seedProject(project: ProjectDocument) {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project,
-    generation: project.generation,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-  });
-}
-
-function singleProject(): ProjectDocument {
-  const project = cloneProject();
-  project.timelines.order = ["timeline:main"];
-  delete project.timelines.items["timeline:ep2"];
-  return project;
-}
 
 function renderPage(entry = "/project/p1") {
   return render(

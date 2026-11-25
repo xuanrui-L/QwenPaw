@@ -135,15 +135,21 @@ def _mock_chat(monkeypatch, replies: list[str]):
     return calls
 
 
+def _interaction_call(
+    services, key, *, target_ref=f"element:{ELEMENT_ID}", arguments=None
+):
+    return execute_file_interaction_command(
+        services,
+        project_id=PROJECT_ID,
+        target_ref=target_ref,
+        arguments={} if arguments is None else arguments,
+        idempotency_key=key,
+    )
+
+
 def _execute(services, key: str = "dag-interaction-1"):
     return asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={},
-            idempotency_key=key,
-        ),
+        _interaction_call(services, key),
     )
 
 
@@ -315,12 +321,8 @@ def test_bad_inputs_are_rejected_fail_closed(tmp_path, monkeypatch):
     del calls[:]
     with pytest.raises(ValidationError, match="element 不存在"):
         asyncio.run(
-            execute_file_interaction_command(
-                services,
-                project_id=PROJECT_ID,
-                target_ref="element:el:ghost",
-                arguments={},
-                idempotency_key="dag-interaction-x",
+            _interaction_call(
+                services, "dag-interaction-x", target_ref="element:el:ghost"
             ),
         )
     assert not calls
@@ -372,12 +374,8 @@ def test_motion_is_reviewable_and_guidance_regenerates(tmp_path, monkeypatch):
         _assemble(PROJECT_ID, services)
     _decide_all(services)
     revised = asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={"guidance": "横屏，蓝色大按钮"},
-            idempotency_key="revise-1",
+        _interaction_call(
+            services, "revise-1", arguments={"guidance": "横屏，蓝色大按钮"}
         ),
     )
     assert (
@@ -425,13 +423,7 @@ def test_inflight_input_change_discards_stale_result(tmp_path, monkeypatch):
             chat,
         )
         task = asyncio.create_task(
-            execute_file_interaction_command(
-                services,
-                project_id=PROJECT_ID,
-                target_ref=f"element:{ELEMENT_ID}",
-                arguments={},
-                idempotency_key="inflight",
-            ),
+            _interaction_call(services, "inflight"),
         )
         await entered.wait()
         execution = ProjectExecutionStore(services.root)
@@ -820,13 +812,7 @@ def test_repeated_live_edits_keep_one_frozen_baseline_and_publish_to_live(
     calls = _mock_chat(monkeypatch, [GOOD_HTML])
 
     async def scenario():
-        await execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={},
-            idempotency_key="history-first",
-        )
+        await _interaction_call(services, "history-first")
         _decide_all(services)
         agent = AgentProjectTools(
             services.projects,
@@ -896,20 +882,12 @@ def test_repeated_live_edits_keep_one_frozen_baseline_and_publish_to_live(
         assert frozen[history[0]] == first_frozen
         frozen_element = next(iter(first_frozen["elements_by_id"]))
         with pytest.raises(ValidationError):
-            await execute_file_interaction_command(
+            await _interaction_call(
                 services,
-                project_id=PROJECT_ID,
+                "frozen-forbidden",
                 target_ref=f"element:{frozen_element}",
-                arguments={},
-                idempotency_key="frozen-forbidden",
             )
-        await execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={},
-            idempotency_key="history-final",
-        )
+        await _interaction_call(services, "history-final")
         _decide_all(services)
         after = services.projects.read(PROJECT_ID)
         assert {
@@ -982,12 +960,8 @@ def test_project_interface_discards_model_commentary(tmp_path, monkeypatch):
         [f"这是完整的页面。\n```html\n{html}\n```\n### 分支选择与状态回看\n优化建议。"],
     )
     asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key="wrapped-page",
+        _interaction_call(
+            services, "wrapped-page", target_ref=f"project:{PROJECT_ID}"
         ),
     )
     saved = services.projects.read(PROJECT_ID).project
@@ -1015,16 +989,12 @@ def test_incomplete_html_retries_or_persists_failure(
 
     def execute():
         return asyncio.run(
-            execute_file_interaction_command(
+            _interaction_call(
                 services,
-                project_id=PROJECT_ID,
-                target_ref=(
-                    f"project:{PROJECT_ID}"
-                    if project_interface
-                    else f"element:{ELEMENT_ID}"
-                ),
-                arguments={},
-                idempotency_key="incomplete-html",
+                "incomplete-html",
+                target_ref=f"project:{PROJECT_ID}"
+                if project_interface
+                else f"element:{ELEMENT_ID}",
             ),
         )
 
@@ -1078,21 +1048,11 @@ def test_parallel_page_review_does_not_discard_finished_choice(
             chat,
         )
         choice = asyncio.create_task(
-            execute_file_interaction_command(
-                services,
-                project_id=PROJECT_ID,
-                target_ref=f"element:{ELEMENT_ID}",
-                arguments={},
-                idempotency_key="parallel-choice",
-            ),
+            _interaction_call(services, "parallel-choice"),
         )
         await entered.wait()
-        await execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key="parallel-page",
+        await _interaction_call(
+            services, "parallel-page", target_ref=f"project:{PROJECT_ID}"
         )
         page_review = services.reviews.all_pending(PROJECT_ID)[0]
         release.set()
@@ -1148,12 +1108,11 @@ def test_project_interface_review_revision_and_stability(
 
     def execute(key, guidance=""):
         return asyncio.run(
-            execute_file_interaction_command(
+            _interaction_call(
                 services,
-                project_id=PROJECT_ID,
+                key,
                 target_ref=f"project:{PROJECT_ID}",
                 arguments={"guidance": guidance},
-                idempotency_key=key,
             ),
         )
 
@@ -1286,12 +1245,8 @@ def test_structured_controls_repair_label_and_revise_only_page(
     html = _presentation_html().replace(">开始</button>", ">沿海出发</button>")
     calls = _mock_chat(monkeypatch, [_presentation_html(), html])
     asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key="structured-page",
+        _interaction_call(
+            services, "structured-page", target_ref=f"project:{PROJECT_ID}"
         ),
     )
     assert len(calls) == 2
@@ -1387,12 +1342,11 @@ def test_explicit_regeneration_is_reviewed_and_deduped(tmp_path, monkeypatch):
 
     def execute(key, regenerate=False):
         return asyncio.run(
-            execute_file_interaction_command(
+            _interaction_call(
                 services,
-                project_id=PROJECT_ID,
+                key,
                 target_ref=f"project:{PROJECT_ID}",
                 arguments={"regenerate": regenerate},
-                idempotency_key=key,
             ),
         )
 
@@ -1444,12 +1398,11 @@ def test_changed_page_prompt_cannot_publish_identical_old_interface(
 
     def execute(key):
         return asyncio.run(
-            execute_file_interaction_command(
+            _interaction_call(
                 services,
-                project_id=PROJECT_ID,
+                key,
                 target_ref=f"project:{PROJECT_ID}",
                 arguments={"regenerate": True},
-                idempotency_key=key,
             ),
         )
 
@@ -1509,12 +1462,8 @@ def test_http_manual_regeneration_uses_new_slot_without_changing_prompt(
     )
 
     async def scenario():
-        await execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key="seed-page",
+        await _interaction_call(
+            services, "seed-page", target_ref=f"project:{PROJECT_ID}"
         )
         _decide_all(services)
         before = services.projects.read(PROJECT_ID).project
@@ -1569,12 +1518,8 @@ def test_page_copy_contract_retries_and_loads_design_skill(
     }[bad_copy]
     calls = _mock_chat(monkeypatch, [bad, good])
     asyncio.run(
-        execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"project:{PROJECT_ID}",
-            arguments={},
-            idempotency_key=f"copy-{bad_copy}",
+        _interaction_call(
+            services, f"copy-{bad_copy}", target_ref=f"project:{PROJECT_ID}"
         ),
     )
     assert len(calls) == 2
@@ -1696,13 +1641,7 @@ def test_task_finalization_does_not_block_review_coroutines(
             "chat_completion",
             chat,
         )
-        call = execute_file_interaction_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments={},
-            idempotency_key="review-contention",
-        )
+        call = _interaction_call(services, "review-contention")
         if failed:
             with pytest.raises(ModelError, match="provider timeout"):
                 await call
@@ -1739,13 +1678,7 @@ def test_concurrent_identical_generation_admits_only_one_provider_call(
     async def scenario():
         return await asyncio.gather(
             *[
-                execute_file_interaction_command(
-                    services,
-                    project_id=PROJECT_ID,
-                    target_ref=f"element:{ELEMENT_ID}",
-                    arguments={},
-                    idempotency_key="concurrent-identical",
-                )
+                _interaction_call(services, "concurrent-identical")
                 for _ in range(2)
             ],
             return_exceptions=True,

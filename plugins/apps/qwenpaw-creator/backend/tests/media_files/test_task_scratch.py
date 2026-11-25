@@ -762,9 +762,7 @@ def _stamp(path: Path, moment: datetime) -> None:
         os.utime(item, (epoch, epoch))
 
 
-def test_profile_splits_scratch_and_transactions_at_the_baseline(
-    tmp_path: Path,
-) -> None:
+def _scratch_on_both_sides_of_baseline(tmp_path):
     legacy = _scratch(tmp_path, "task-legacy")
     transactions = tmp_path / PROJECT_ID / "runtime" / "transactions"
     old_tx = transactions / "tx-legacy"
@@ -794,6 +792,15 @@ def test_profile_splits_scratch_and_transactions_at_the_baseline(
             to=TaskStatus.FAILED,
             updated_at=moment,
         )
+    return legacy, fresh, old_tx, new_tx
+
+
+def test_profile_splits_scratch_and_transactions_at_the_baseline(
+    tmp_path: Path,
+) -> None:
+    legacy, fresh, old_tx, new_tx = _scratch_on_both_sides_of_baseline(
+        tmp_path
+    )
 
     entry = project_storage_profile(
         _services(tmp_path),

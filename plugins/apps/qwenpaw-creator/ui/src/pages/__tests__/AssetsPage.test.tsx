@@ -1,3 +1,4 @@
+import { cloneProject, seedProject } from "@/test/projectSnapshotFixtures";
 import {
   act,
   fireEvent,
@@ -21,26 +22,9 @@ import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
-import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument } from "@/contracts/creator";
 import AssetMediaPreview from "@/components/assets/AssetMediaPreview";
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
-
-function seedProject(project = cloneProject()) {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project,
-    generation: project.generation,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-  });
-}
 
 function renderPage(entry = "/project/p1/assets") {
   return render(
