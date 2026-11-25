@@ -1,3 +1,4 @@
+import { cloneProject, seedProject } from "@/test/projectSnapshotFixtures";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -14,21 +15,7 @@ import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument } from "@/contracts/creator";
 import type { WorkGraphNode } from "@/contracts/creator/workGraph";
 
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
-
-function seedProject(project = cloneProject()) {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project,
-    generation: project.generation,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-  });
-}
+const mediaBudget = { mediaCallBudget: 20 };
 
 function withSecondVideoVersion(project = cloneProject()): ProjectDocument {
   project.assets.files_by_id["file:r2v-video2"] = {
@@ -76,7 +63,7 @@ function modelRoutes(model: string): Parameters<typeof installMockFetch>[0] {
           counts: {},
           nodes: [],
           mediaCalls: 0,
-          mediaCallBudget: 20,
+          ...mediaBudget,
         },
       },
     },
@@ -207,7 +194,7 @@ function seedWorkGraph(...nodes: WorkGraphNode[]) {
       generation: 1,
       counts: {},
       mediaCalls: 0,
-      mediaCallBudget: 20,
+      ...mediaBudget,
       nodes,
     },
   });

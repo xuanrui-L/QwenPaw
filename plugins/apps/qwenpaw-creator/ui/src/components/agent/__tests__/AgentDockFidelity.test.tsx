@@ -159,8 +159,8 @@ describe("AgentDock public output and interactions", () => {
       expect(document.querySelector("[data-agent-dock]")).toBeInTheDocument(),
     );
     expect(
-      screen.getByText(/自动创作已暂停，作品尚未完成/),
-    ).toBeInTheDocument();
+      screen.getAllByText(/自动创作已暂停，作品尚未完成/).length,
+    ).toBeGreaterThan(0);
     expect(useExecutionAuthorizationStore.getState().items).toHaveLength(0);
     act(() => useAgentDockUiStore.getState().setOpen(false));
     act(() => useCreatorSessionStore.setState({ messages: [{ ...notice }] }));

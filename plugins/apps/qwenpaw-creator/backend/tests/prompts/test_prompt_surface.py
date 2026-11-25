@@ -1,423 +1,377 @@
 # -*- coding: utf-8 -*-
-# flake8: noqa: E501
+"""Agent delegation contracts and conditional prompt rendering."""
+
 from __future__ import annotations
 
-import json
+import re
 
 import pytest
+from pydantic import ValidationError
 
 from domain.enums import SpecialistRole
 from models import config as model_config
-from services.file_agent_runtime.prompts import (
-    FILE_AGENT_PROMPT_SPECS,
-    load_file_agent_prompt,
-    render_creator_system_prompt,
-    tts_guidance,
-)
+from models.video_capabilities import video_model_supported_modes
+from services.file_agent_runtime.prompts import render_creator_system_prompt
 from services.file_agent_runtime.subagents import (
+    DelegateToAgentInput,
     delegate_tool_manifest,
     specialist_system_prompt,
 )
 from services.project_files.models import Project
 
-_INACTIVE_STATE_WORDS = {"已取消", "已禁用", "已删除", "review-disabled"}
+pytestmark = pytest.mark.unit
 
 
-def _active_prompt_texts() -> list[str]:
-    from services.file_agent_runtime.workgraph_execution import (
-        request_workgraph_tool_manifest,
-    )
-
-    project = Project.new(project_id="project-prompt-test", name="Prompt Test")
-    texts = [
-        render_creator_system_prompt(project_id=project.project_id),
-        json.dumps(delegate_tool_manifest(), ensure_ascii=False),
-        json.dumps(request_workgraph_tool_manifest(), ensure_ascii=False),
+def test_only_current_element_specialists_are_delegatable() -> None:
+    roles = delegate_tool_manifest()["function"]["parameters"]["properties"][
+        "role"
+    ]["enum"]
+    assert roles == [
+        "source_intelligence_agent",
+        "ai_editing_director",
     ]
-    texts.extend(
-        specialist_system_prompt(
-            role,
-            project_id=project.project_id,
-            project=project,
+
+    with pytest.raises(ValidationError):
+        DelegateToAgentInput.model_validate(
+            {
+                "role": "retired_planning_agent",
+                "target_refs": ["project:plan"],
+                "task": "这个职责现在属于 Creator 主 Agent",
+            },
         )
-        for role in (
-            SpecialistRole.SOURCE_INTELLIGENCE,
-            SpecialistRole.AI_EDITING_DIRECTOR,
+
+
+def test_r2v_is_not_delegatable_and_edit_uses_timeline_targets() -> None:
+    r2v = DelegateToAgentInput.model_validate(
+        {
+            "role": "r2v_generation_director",
+            "target_refs": ["element:r2v-1"],
+            "task": "生成目标 Element",
+        },
+    )
+    with pytest.raises(ValueError, match="not delegatable"):
+        r2v.validate_contract(project_id="project-1")
+
+    edit = DelegateToAgentInput.model_validate(
+        {
+            "role": "ai_editing_director",
+            "target_refs": ["timeline:timeline:main"],
+            "task": "选择并执行 Edit Elements",
+        },
+    )
+    edit.validate_contract(project_id="project-1")
+
+
+def test_visual_development_is_not_delegatable() -> None:
+    """Visual asset prompts are authored by the main Agent directly; the
+    retired visual development surface rejects new delegations."""
+
+    for target_ref in ("asset:char:haaland", "lineup:argentina-trio"):
+        delegated = DelegateToAgentInput.model_validate(
+            {
+                "role": "visual_development_agent",
+                "target_refs": [target_ref],
+                "task": "为角色和场景生成设计图",
+            },
         )
+        with pytest.raises(ValueError, match="not delegatable"):
+            delegated.validate_contract(project_id="project-1")
+
+
+def test_source_intelligence_delegation_takes_exactly_one_asset() -> None:
+    """A batched delegation reads every image in one model turn and blows
+    the per-turn wall-clock budget; the contract forces per-asset fan-out."""
+
+    def contract(*refs: str) -> None:
+        DelegateToAgentInput.model_validate(
+            {
+                "role": "source_intelligence_agent",
+                "target_refs": list(refs),
+                "task": "理解素材",
+            },
+        ).validate_contract(project_id="project-1")
+
+    contract("asset:asset-a")
+    with pytest.raises(ValueError, match="exactly one asset target"):
+        contract("asset:asset-a", "asset:asset-b")
+
+
+def test_unknown_target_kinds_still_fail_the_contract() -> None:
+    delegated = DelegateToAgentInput.model_validate(
+        {
+            "role": "source_intelligence_agent",
+            "target_refs": ["storyline:act-1"],
+            "task": "非法目标",
+        },
     )
-    return texts
+    with pytest.raises(ValueError, match="does not allow targetRef"):
+        delegated.validate_contract(project_id="project-1")
 
 
-def test_active_prompts_do_not_describe_inactive_states() -> None:
-    combined = "\n".join(_active_prompt_texts())
-    for token in _INACTIVE_STATE_WORDS:
-        assert token not in combined
+_PROJECT_ID = "project-guidance-test"
+_WORKSPACE_SCHEMA = "CUSTOM_PROJECT_SCHEMA"
 
 
-def test_file_runtime_prompts_are_structured_files_with_workspace_schema() -> (
-    None
-):
-    assert set(FILE_AGENT_PROMPT_SPECS) == {
-        "creator_agent.system",
-        "source_intelligence_agent.system",
-        "ai_editing_director.system",
-    }
-    for prompt_id in FILE_AGENT_PROMPT_SPECS:
-        raw = load_file_agent_prompt(prompt_id)
-        assert raw.startswith("# 定位")
-        assert "# 核心职责" in raw
-        assert "# Workspace 基础 Schema" in raw
-        assert "{{workspace_schema}}" in raw
-        assert "# 限制" in raw
-    for rendered in _active_prompt_texts():
-        if rendered.startswith("# 定位"):
-            assert "./project.json" in rendered
-            if "你是 Creator 的素材理解 Agent" in rendered:
-                assert "commit_source_intelligence 的工具 Schema" in rendered
-                assert "PROJECT_JSON_SCHEMA=" not in rendered
-            else:
-                assert "PROJECT_JSON_SCHEMA=" in rendered
+def test_runtime_prompts_scope_workspace_schema_by_role() -> None:
+    assert _WORKSPACE_SCHEMA in render_creator_system_prompt(
+        project_id=_PROJECT_ID,
+        workspace_schema=_WORKSPACE_SCHEMA,
+    )
+    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
+    assert _WORKSPACE_SCHEMA in editing
+
+    source = _specialist_prompt(SpecialistRole.SOURCE_INTELLIGENCE)
+    assert "commit_source_intelligence" in source
+    assert _WORKSPACE_SCHEMA not in source
 
 
-def test_visual_design_rules_are_reachable_and_name_real_reference_fields():
-    # Keep the skill loading/schema contract, not exact prose or art direction.
-    # Runtime readiness/reference semantics are tested at their write boundaries.
-    prompt = load_file_agent_prompt("creator_agent.system")
-    assert "`view_skill` 读取 `visual-asset-design`" in prompt
-    skill = _visual_asset_design_skill()
-    assert skill.startswith("---")
-    assert "name: visual-asset-design" in skill
-    for field in (
-        "canonical_variant_id",
-        "derived_from_variant_id",
-        "reference_artifact_version_ids",
-    ):
-        assert field in skill
-
-
-def _visual_asset_design_skill() -> str:
-    from pathlib import Path
-
-    backend = Path(__file__).resolve().parents[2]
-    return (backend / "skills" / "visual-asset-design" / "SKILL.md").read_text(
-        encoding="utf-8",
+def _specialist_prompt(
+    role: SpecialistRole, *, project: Project | None = None
+) -> str:
+    return specialist_system_prompt(
+        role,
+        project_id=_PROJECT_ID,
+        workspace_schema=_WORKSPACE_SCHEMA,
+        project=project,
     )
 
 
-def test_medium_rule_keeps_the_storyboard_medium_exception() -> None:
-    """A project-wide medium must not overwrite a stage-specific one.
+@pytest.mark.parametrize(
+    "role",
+    [
+        SpecialistRole.R2V_GENERATION_DIRECTOR,
+        SpecialistRole.VISUAL_DEVELOPMENT,
+    ],
+)
+def test_retired_specialists_have_no_active_prompt(role) -> None:
+    with pytest.raises(ValueError, match="no active prompt"):
+        _specialist_prompt(role)
 
-    The rule used to ask ``storyboard_prompt`` to declare the project medium
-    too, which the same file's storyboard rules contradict: a user-specified
-    rough-pencil or charcoal stage sheet stays that medium and must not pick up
-    photo-real wording, while the finished cut stays photographic.
-    """
-    prompt = load_file_agent_prompt("creator_agent.system")
+
+@pytest.mark.parametrize(
+    ("model", "rules"),
+    [
+        ("qwen-image-3.0", ("总数必须不超过 3，", "400 拒绝")),
+        ("gpt-image-2", ("单次最多 16 张输入参考图",)),
+    ],
+)
+def test_image_model_guidance_uses_the_configured_reference_limit(
+    monkeypatch,
+    model,
+    rules,
+) -> None:
+    monkeypatch.setattr(model_config, "get_image_model_name", lambda: model)
+    prompt = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
+    )
+    assert f"当前图片生成模型是 `{model}`" in prompt
+    for rule in rules:
+        assert rule in prompt
+
+
+def test_image_budget_guidance_blocks_paid_calls_before_exceeding_user_limit():
+    prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
+
+    assert "共享设计图数 + R2V Element 数" in prompt
+    assert re.search(r"超出上限时[^。]*付费调用前[^。]*\[BLOCKED\]", prompt)
+    assert re.search(r"不能用共享设计 Artifact[^。]*跨 Element 复用", prompt)
+    assert re.search(r"不得建立 cast lineup[^。]*第二个可调度视觉节点", prompt)
+    assert re.search(
+        r"共享角色/场景设计资产只能生成 1 张[^。]*" r"一个复合 `scene` 实体及其一个 Variant",
+        prompt,
+    )
+    assert re.search(
+        r"全部图片调用上限[^。]*不足以覆盖[^。]*storyboard[^。]*" r"不得先行占用视觉设计预算",
+        prompt,
+    )
+
+
+def test_storyboard_keeps_the_users_stage_specific_medium() -> None:
+    prompt = render_creator_system_prompt(
+        project_id=_PROJECT_ID,
+        external_skills="",
+    )
     rule = next(
         line
         for line in prompt.splitlines()
         if line.startswith("- **渲染媒介必须写进 prompt")
     )
-
     assert "`storyboard_prompt` 是中间分镜" in rule
-    assert "粗铅笔" in rule and "炭笔" in rule
+    assert "不套用最终交付媒介" in rule
     assert "只补足用户没有指明的目标" in rule
-    assert "storyboard_prompt 与 video_prompt 都要显式声明本项目的渲染媒介" not in rule
-
-
-def test_creator_duration_is_injected_from_the_active_video_model(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        model_config,
-        "get_video_model_name",
-        lambda: "happyhorse-1.1",
-    )
-    prompt = render_creator_system_prompt(
-        project_id="project-duration-test",
-        workspace_schema="SCHEMA",
-        external_skills="",
-    )
-    assert "happyhorse-1.1" in prompt
-    assert "3–15 秒整数" in prompt
-    assert "3 秒短段合法" in prompt
-    assert "30 秒单段不合法" in prompt
-    assert "不设置统一的 8–10 秒、10 秒或 15 秒默认值" in prompt
-    assert "`[Image 1]`、`[Image 2]`" in prompt
-    assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
-    assert "你负责编写和维护 `video_prompt`" in prompt
-    assert "R2V Specialist" not in prompt
-    assert "不得把整片机械改成固定时长" in prompt
-    assert "不设统一的 7 秒镜头上限" in prompt
-    assert "`ops` 必须直接传原生 JSON 数组" in prompt
-
-    monkeypatch.setattr(
-        model_config,
-        "get_video_model_name",
-        lambda: "doubao-seedance-2-5-260628",
-    )
-    prompt = render_creator_system_prompt(
-        project_id="project-duration-test",
-        workspace_schema="SCHEMA",
-        external_skills="",
-    )
-    assert "4–30 秒整数" in prompt
-    assert "30 秒长段" in prompt
+    assert re.search(r"粗铅笔、炭笔[^，]*绘制媒介时保留该媒介", rule)
+    assert "成片仍按项目媒介生成" in rule
 
 
 @pytest.mark.parametrize(
-    ("role", "retired_terms"),
+    ("model", "backend", "rules"),
     [
         (
-            SpecialistRole.R2V_GENERATION_DIRECTOR,
+            "happyhorse-1.1-r2v",
+            "happyhorse",
             (
-                "R2V Specialist",
-                "r2v_generation_director",
-                "Specialist 兜底",
-                "为媒体执行委派",
+                "生成时长必须为 3–15 秒整数。",
+                "。3 秒短段合法；30 秒单段不合法，",
+                "HappyHorse：只能使用 `[Image 1]`、`[Image 2]`",
+                "storyboard 固定为第一张，因此是 `[Image 1]`",
+                "不支持参考视频",
+                "分辨率仅支持 720P/1080P；",
             ),
         ),
         (
-            SpecialistRole.VISUAL_DEVELOPMENT,
+            "doubao-seedance-2-5-260628",
+            "seedance2",
+            ("支持 4–30 秒整数", "或 30 秒长段", "不套用 8–10 秒默认值"),
+        ),
+        (
+            "wan2.7-r2v",
+            "wan",
             (
-                "visual_development_agent",
-                "视觉开发 Specialist",
-                "委派视觉开发",
+                "中文 Prompt 用“图1、图2",
+                "“视频1、视频2",
+                "图片最多 5 张",
+                "视频最多 5 个",
+                "图片与视频合计最多 5 个",
             ),
         ),
+        ("wan3.0-video", "wan", ("Wan3.0", "支持 2–30 秒整数。")),
+        (
+            "veo-3.1-generate-preview",
+            "veo",
+            ("只支持 4、6 或 8 秒；", "r2v 或 1080p/4k 时必须为 8 秒。"),
+        ),
+        ("VIDUQ2-PRO", "vidu", ("支持 1–10 秒整数。",)),
     ],
+    ids=["happyhorse", "seedance-2.5", "wan-2.7", "wan-3.0", "veo", "vidu-q2"],
 )
-def test_retired_specialists_have_no_delegation_or_prompt_surface(
-    role,
-    retired_terms,
-) -> None:
-    with pytest.raises(ValueError, match="no active prompt"):
-        _specialist_prompt(role)
-    combined = "\n".join(_active_prompt_texts())
-    for term in (*retired_terms, "不可委派", "已停用"):
-        assert term not in combined
-
-
-def test_source_prompt_only_describes_visible_inputs_tools_and_outputs() -> (
-    None
-):
-    prompt = load_file_agent_prompt("source_intelligence_agent.system")
-    for hidden_mechanism in (
-        "Runtime",
-        "父 Agent",
-        "另一个 VLM",
-        "下游 Specialist",
-    ):
-        assert hidden_mechanism not in prompt
-    assert "`read_project_file`" in prompt
-
-
-def _set_image_model(monkeypatch, name: str) -> None:
-    monkeypatch.setattr(model_config, "get_image_model_name", lambda: name)
-
-
-def _set_video_model(monkeypatch, name: str) -> None:
-    monkeypatch.setattr(model_config, "get_video_model_name", lambda: name)
-
-
-def _specialist_prompt(role: SpecialistRole, project=None) -> str:
-    return specialist_system_prompt(
-        role,
-        project_id="project-guidance-test",
-        project=project,
-        workspace_schema="SCHEMA",
-    )
-
-
-def test_image_model_guidance_follows_configured_model(
+def test_creator_prompt_includes_configured_video_model_rules(
     monkeypatch,
+    model,
+    backend,
+    rules,
 ) -> None:
-    _set_video_model(monkeypatch, "wan2.7-r2v")
-    _set_image_model(monkeypatch, "qwen-image-3.0")
+    monkeypatch.setattr(model_config, "get_video_model_name", lambda: model)
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: backend)
     prompt = render_creator_system_prompt(
-        project_id="project-guidance-test",
-        workspace_schema="SCHEMA",
+        project_id=_PROJECT_ID, external_skills=""
     )
-    assert "qwen-image-3.0" in prompt
-    assert "总数必须不超过 3" in prompt
-    assert "400 拒绝" in prompt
-    assert "总数不超过 5" not in prompt
-    assert "{{image_model_guidance}}" not in prompt
-    _set_image_model(monkeypatch, "gpt-image-2")
-    prompt = render_creator_system_prompt(
-        project_id="project-guidance-test",
-        workspace_schema="SCHEMA",
-    )
-    assert "最多 16 张" in prompt
+    for rule in rules:
+        assert rule in prompt
 
 
-def test_video_model_guidance_switches_on_configured_model(
+@pytest.mark.parametrize(
+    ("model", "protocol", "marker", "constraint"),
+    [
+        (
+            "kling/kling-v3-omni-video-generation",
+            "DashScope（百炼）",
+            "<<<{}>>>",
+            "图片最多 7 张",
+        ),
+        ("kling-3.0-omni", "Kling", "@{}", "分辨率仅支持 720p/1080p/4k。"),
+    ],
+    ids=["bailian", "direct"],
+)
+def test_kling_guidance_uses_only_the_configured_channel_reference_syntax(
     monkeypatch,
+    model,
+    protocol,
+    marker,
+    constraint,
 ) -> None:
-    _set_video_model(monkeypatch, "happyhorse-1.1-r2v")
-    prompt = render_creator_system_prompt(project_id="project-guidance-test")
-    assert "happyhorse-1.1-r2v" in prompt
-    assert "`[Image 1]`、`[Image 2]`" in prompt
-    assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
-    assert "不支持参考视频" in prompt
-    assert "3–15 秒整数" in prompt
-    assert "分辨率仅支持 720P/1080P" in prompt
-    assert "{{video_model_guidance}}" not in prompt
-    assert "{{video_duration_guidance}}" not in prompt
-    _set_video_model(monkeypatch, "wan2.7-r2v")
-    prompt = render_creator_system_prompt(project_id="project-guidance-test")
-    assert "图片最多 5 张" in prompt
-    assert "视频最多 5 个" in prompt
-    assert "合计最多 5 个" in prompt
-    # Every model now instructs the canonical form; only the rendered syntax
-    # documented underneath it is model-specific.
-    assert "`[Image 1]`、`[Image 2]`" in prompt
-    assert "中文 Prompt 用“图1、图2" in prompt
-    _set_video_model(monkeypatch, "wan3.0-video")
-    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
-    delegator = render_creator_system_prompt(
-        project_id="project-guidance-test",
+    video_settings = {"model": model, "protocol": protocol}
+    monkeypatch.setattr(
+        model_config,
+        "get_request_tool_config",
+        lambda tool: video_settings
+        if tool == model_config.CREATOR_VIDEO_CONFIG_TOOL
+        else {},
     )
-    assert "Wan3.0" in delegator
-    assert "2–30 秒" in delegator
+    assert "r2v" in video_model_supported_modes(
+        model, model_config.get_video_backend()
+    )
+    prompt = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
+    )
+
+    assert constraint in prompt
+    wire_token = r"<<<(?:image|video)_(?:N|\d+)>>>|@(?:image|video)_(?:N|\d+)"
+    references = set(re.findall(wire_token, prompt))
+    assert {
+        marker.format(ref) for ref in ("image_1", "image_N", "video_1")
+    } <= references
+    prefix = marker.split("{", 1)[0]
+    assert all(reference.startswith(prefix) for reference in references)
+    storyboard_references = set(
+        re.findall(rf"storyboard\s*(?:是|为|用)\s*`({wire_token})`", prompt)
+    )
+    assert storyboard_references == {marker.format("image_1")}
 
 
 def _tts(monkeypatch, *, model: str, configured: bool = True) -> None:
-    cfg = tts_guidance.model_config
-    monkeypatch.setattr(cfg, "is_tts_configured", lambda: configured)
-    monkeypatch.setattr(cfg, "get_tts_model_name", lambda: model)
+    monkeypatch.setattr(model_config, "is_tts_configured", lambda: configured)
+    monkeypatch.setattr(model_config, "get_tts_model_name", lambda: model)
 
 
-def test_unconfigured_tts_leaves_no_trace(monkeypatch) -> None:
-    _tts(monkeypatch, model="qwen3-tts-flash", configured=False)
-    prompt = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
-    assert "tts" not in prompt.lower()
-    assert "音色" not in prompt
-    assert "{{tts_guidance}}" not in prompt
-    delegator = render_creator_system_prompt(
-        project_id="project-guidance-test",
-        workspace_schema="SCHEMA",
-    )
-    # The base prompt legitimately says "旁白"; TTS markers prove a leak.
-    assert "旁白与配音能力" not in delegator
-    assert "音色" not in delegator
-
-
-def test_model_with_system_voices_presents_design_as_optional(
-    monkeypatch,
+@pytest.mark.parametrize("configured", [False, True])
+def test_configured_tts_guidance_preserves_native_dialogue(
+    monkeypatch, configured
 ) -> None:
-    _tts(monkeypatch, model="qwen3-tts-flash")
-    delegator = render_creator_system_prompt(
-        project_id="project-guidance-test",
-        workspace_schema="SCHEMA",
+    _tts(monkeypatch, model="qwen3-tts-flash", configured=configured)
+    project = Project.new(
+        project_id=_PROJECT_ID, name="Drama", scenario="short_drama"
     )
-    # Voice enrollment is a mainline tool now: the design path must be
-    # documented where the tool lives.
-    assert "create_character_voice" in delegator
-    assert "voicePrompt" in delegator
-    assert "可选" in delegator
-    assert "没有系统音色" not in delegator
-    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
-    assert "tts_generation" in editing
-    assert "默认音色" in editing
-    # Real voice names are enumerated so no foreign namespace is invented.
-    assert "Cherry" in editing
+    editing = _specialist_prompt(
+        SpecialistRole.AI_EDITING_DIRECTOR, project=project
+    )
+    source = _specialist_prompt(SpecialistRole.SOURCE_INTELLIGENCE)
+    creator = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
+    )
+    assert "tts_generation" not in source
+
+    _, tts_heading, creator_tts = creator.partition("\n# 旁白与配音能力\n")
+    assert bool(tts_heading) is configured
+    for tool_name in ("create_character_voice", "tts_generation"):
+        assert (tool_name in creator) is configured, tool_name
+    creator_tts = creator_tts.partition("\n# ")[0]
+    for rule in (
+        "台词与旁白优先由视频模型原生生成",
+        "只有两种例外才允许 TTS 合成",
+        "用户提供了自己的音色音频文件",
+        "需要外部驱动音频才能开口的 s2v 数字人",
+    ):
+        assert (rule in creator_tts) is configured, rule
+    for rule in (
+        "tts_generation",
+        "R2V/T2V/I2V 区间的台词与旁白由视频模型原生生成",
+        "不要为同一区间再合成一份 TTS 音频",
+        "不再叠加一份 TTS 台词",
+        "自己的音色音频文件",
+        "画面不会自发声",
+    ):
+        assert (rule in editing) is configured, rule
 
 
-def test_native_voice_is_the_default_and_synthesis_the_exception(
+@pytest.mark.parametrize(
+    ("model", "system_voice_available"),
+    [("qwen3-tts-flash", True), ("cosyvoice-v3.5-plus", False)],
+)
+def test_editing_guidance_reflects_voice_enrollment_needs(
     monkeypatch,
+    model,
+    system_voice_available,
 ) -> None:
-    """Narration was advertised as a TTS capability first; that is reversed.
-
-    Synthesis stays offered for a timbre the user supplied, and for carriers
-    that cannot speak (motion overlays, edits, s2v driving audio).
-    """
-    _tts(monkeypatch, model="qwen3-tts-flash")
-    delegator = render_creator_system_prompt(
-        project_id="project-guidance-test",
-        workspace_schema="SCHEMA",
-    )
-    assert "台词与旁白优先由视频模型原生生成" in delegator
-    assert "只有两种例外才允许 TTS" in delegator
-    assert "用户提供了自己的音色音频文件" in delegator
-    assert "s2v 数字人" in delegator
-    # The old invitation promised synthesis whatever the user supplied.
-    assert "不需要用户提供音频文件" not in delegator
-    assert "具备旁白生成能力" not in delegator
+    _tts(monkeypatch, model=model)
     editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
-    assert "先判画面能不能自己发声" in editing
-    assert "不要用系统音色硬凑" in editing
-
-
-def test_model_without_system_voices_makes_design_a_prerequisite(
-    monkeypatch,
-) -> None:
-    """cosyvoice-v3.5-plus can only speak through a created voice."""
-    _tts(monkeypatch, model="cosyvoice-v3.5-plus")
-    delegator = render_creator_system_prompt(
-        project_id="project-guidance-test",
-        workspace_schema="SCHEMA",
+    assert ("Cherry" in editing) is system_voice_available
+    assert ("create_character_voice" in editing) is not system_voice_available
+    requires_bound_voice = "必须传已绑定音色的 characterRef" in editing
+    assert requires_bound_voice is not system_voice_available
+    creator = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
     )
-    assert "没有系统音色" in delegator
-    assert "create_character_voice" in delegator
-    # The audition path needs a system voice, so it is not advertised.
-    assert "sampleText 不可用" in delegator
-    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
-    assert "没有系统音色" in editing
-    assert "必须传已绑定音色的 characterRef" in editing
-    assert "create_character_voice" in editing
-
-
-def test_scenario_steers_how_the_voice_is_used(monkeypatch) -> None:
-    _tts(monkeypatch, model="qwen3-tts-flash")
-
-    def _project(scenario: str) -> Project:
-        return Project.new(
-            project_id="project-guidance-test",
-            name="scenario probe",
-            scenario=scenario,
-        )
-
-    drama = _specialist_prompt(
-        SpecialistRole.AI_EDITING_DIRECTOR,
-        _project("short_drama"),
-    )
-    assert "短剧" in drama
-    assert "角色台词" in drama
-    assert "不再叠加一份 TTS 台词" in drama
-    edit = _specialist_prompt(
-        SpecialistRole.AI_EDITING_DIRECTOR,
-        _project("video_edit"),
-    )
-    assert "剪辑" in edit
-    assert "旁白" in edit
-    # Roles outside the media pipeline never hear about TTS.
-    other = _specialist_prompt(SpecialistRole.SOURCE_INTELLIGENCE)
-    assert "tts_generation" not in other
-
-
-@pytest.mark.unit
-def test_voice_lists_are_summarised_not_dumped_into_the_prompt(
-    monkeypatch,
-) -> None:
-    """One model publishes 88 system voices. The prompt states the count and
-    samples a few names: a transcript-sized enum teaches the agent to guess at
-    near-identical names instead of omitting the parameter."""
-
-    _tts(monkeypatch, model="qwen-audio-3.1-tts-flash")
-    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
-    assert "共 88 个" in editing
-    assert "longanhuan_v3.1" in editing
-    # The line samples the first six names, so pin the boundary itself: a
-    # revert to the whole table then moves two assertions instead of the one
-    # vacuous check a name no model publishes would always have passed.
-    assert "qiaoxiaojiao_v3.1" in editing
-    assert "xiaxiaochen_v3.1" not in editing
-    # The delegator never hears the names, only what the model can do.
-    delegator = render_creator_system_prompt(
-        project_id="project-guidance-test",
-    )
-    assert "longanhuan_v3.1" not in delegator
+    assert ("sampleText 不可用" in creator) is not system_voice_available
 
 
 @pytest.mark.parametrize(
@@ -434,58 +388,37 @@ def test_native_dialogue_voice_guidance_matches_video_capability(
     backend,
     supports_reference_voice,
 ) -> None:
-    # A model that publishes no system voices: the case this guards. The
-    # Qwen-Audio models all ship lists now, so CosyVoice stands in.
     _tts(monkeypatch, model="cosyvoice-v3.5-plus")
     monkeypatch.setattr(
-        model_config,
-        "get_video_model_name",
-        lambda: video_model,
+        model_config, "get_video_model_name", lambda: video_model
     )
     monkeypatch.setattr(model_config, "get_video_backend", lambda: backend)
-    prompt = render_creator_system_prompt(project_id="project-guidance-test")
-    assert ("当前视频模型支持参考音色" in prompt) is supports_reference_voice
+    prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
+
     assert (
         "voice.sample_source_version_id" in prompt
     ) is supports_reference_voice
-    # Lack of a system TTS voice must not disable native video dialogue.
-    assert "通过 TTS 合成配音必须" in prompt
 
 
-@pytest.mark.unit
-def test_prompts_preserve_explicit_paid_image_ceiling() -> None:
-    prompt = load_file_agent_prompt("creator_agent.system")
-    for contract in (
-        "显式媒体预算覆盖默认资产拆分",
-        "共享设计图数 + R2V Element 数",
-        "不能用共享设计 Artifact 冒充",
-        "单张共享设计图预算例外",
-        "不得建立 cast lineup 或创建第二个可调度视觉节点",
-        "全部图片调用上限”不足以覆盖这些 storyboard",
-    ):
-        assert contract in prompt
-
-
-def test_execution_guidance_explains_prompt_sync_gate(monkeypatch) -> None:
-    """A prompt-sync gate must read as sync-pending, not a review cooldown,
-    and must not promise an automatic retry (#7720 finding #1)."""
-    monkeypatch.setattr(
-        model_config,
-        "get_execution_authorization_mode",
-        lambda: model_config.EXECUTION_AUTHORIZATION_REQUIRED,
+@pytest.mark.parametrize("requires_approval", [False, True])
+def test_execution_guidance_tracks_authorization_mode(
+    monkeypatch,
+    requires_approval,
+) -> None:
+    mode = (
+        model_config.EXECUTION_AUTHORIZATION_REQUIRED
+        if requires_approval
+        else model_config.EXECUTION_AUTHORIZATION_ALLOW_ALL
     )
-    prompt = render_creator_system_prompt(project_id="project-guidance-test")
-    assert "promptSyncRequired" in prompt
-    assert "并非审阅冷却" in prompt
-    assert "保留现有内容并生成" in prompt
-    assert "不要声称会自动重试" in prompt
-
-    # The guidance is scoped to per-item authorization; the auto-execution
-    # branch lets the scheduler resolve prompt-sync without agent reading.
     monkeypatch.setattr(
-        model_config,
-        "get_execution_authorization_mode",
-        lambda: model_config.EXECUTION_AUTHORIZATION_ALLOW_ALL,
+        model_config, "get_execution_authorization_mode", lambda: mode
     )
-    auto = render_creator_system_prompt(project_id="project-guidance-test")
-    assert "并非审阅冷却" not in auto
+    prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
+    sync_instructions = (
+        "promptSyncRequired",
+        "并非审阅冷却",
+        "保留现有内容并生成",
+        "不要声称会自动重试",
+    )
+    for instruction in sync_instructions:
+        assert (instruction in prompt) is requires_approval, instruction

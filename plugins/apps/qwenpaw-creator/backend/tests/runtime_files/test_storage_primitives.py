@@ -834,15 +834,17 @@ def test_forward_cursor_replays_once_and_follows_repaired_tail(
         assert len(page) <= 7
         values.extend(item.value for item in page)
     assert values == list(range(after + 1, 81))
-    # The old reverse-window loop revalidated the remaining history per page.
-    assert validated == list(range(1, 81))
+    # Every record after the cursor is validated once, including when a
+    # reader also verifies the prefix to establish its starting point.
+    assert validated == list(range(validated[0], 81))
+    assert validated[-(80 - after) :] == list(range(after + 1, 81))
     with path.open("ab") as handle:
         handle.write(b'{"seq":81,"record":')
     assert not reader.read()
     writer.append(EventRecord(worker=1, value=81))
     assert [item.value for item in reader.read()] == [81]
     assert not reader.read()
-    assert validated == list(range(1, 82))
+    assert validated == list(range(validated[0], 82))
 
 
 @pytest.mark.parametrize("damage", ["invalid", "gap", "replace", "truncate"])

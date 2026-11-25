@@ -1,3 +1,4 @@
+import * as modelChoices from "../ModelConfigModal";
 import { message } from "antd";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -15,7 +16,6 @@ import ModelConfigModal, {
   VIDEO_PROTOCOLS,
   VLM_PROTOCOLS,
   modelSupportsImage,
-  ttsModelsForProtocol,
 } from "../ModelConfigModal";
 import type { HostProviderInfo } from "@/api/creator";
 import { installMockFetch } from "@/test/mockFetch";
@@ -155,6 +155,7 @@ const capabilities = {
       transport: "http",
       systemVoices: ["Cherry", "Ethan"],
       supportsDesign: true,
+      providers: ["bailian"],
     },
   ],
 };
@@ -714,26 +715,50 @@ describe("ModelConfigModal OpenCode support", () => {
   });
 });
 
-describe("ttsModelsForProtocol", () => {
+describe("TTS model choices by protocol", () => {
   const models = [
-    { model: "qwen-audio-3.0-tts-plus", label: "Qwen-Audio 3.0 TTS Plus" },
-    { model: "qwen-audio-3.0-tts-flash", label: "Qwen-Audio 3.0 TTS Flash" },
-    { model: "cosyvoice-v3.5-plus", label: "CosyVoice 3.5 Plus" },
-  ];
+    "qwen-audio-3.0-tts-plus",
+    "qwen-audio-3.0-tts-flash",
+    "cosyvoice-v3.5-plus",
+  ].map((model) => ({
+    model,
+    label: model,
+    family: "cosyvoice",
+    transport: "websocket",
+    systemVoices: ["longanlingxin"],
+    supportsDesign: true,
+    providers: ["bailian", "gateway"],
+  }));
+
+  function modelNamesFor(protocol: string) {
+    const choiceApi = modelChoices as {
+      ttsModelChoices?: (
+        provider: string,
+        candidates: typeof models,
+      ) => { model: string }[];
+      ttsModelsForProtocol?: (
+        candidates: typeof models,
+        provider: string,
+      ) => { value: string }[];
+    };
+    return choiceApi.ttsModelChoices
+      ? choiceApi.ttsModelChoices(protocol, models).map(({ model }) => model)
+      : choiceApi.ttsModelsForProtocol!(models, protocol).map(
+          ({ value }) => value,
+        );
+  }
 
   it("narrows Token Plan to the plan's documented synthesis model", () => {
     // The plan's model table lists exactly one speech-synthesis model; the
     // others here are Bailian-direct models the plan gateway answers
     // "Model not exist" for.
-    expect(
-      ttsModelsForProtocol(models, "Aliyun Token Plan").map((o) => o.value),
-    ).toEqual(["qwen-audio-3.0-tts-plus"]);
+    expect(modelNamesFor("Aliyun Token Plan")).toEqual([
+      "qwen-audio-3.0-tts-plus",
+    ]);
   });
 
-  it("keeps the whole capability table where no roster exists", () => {
-    expect(
-      ttsModelsForProtocol(models, "DashScope（百炼）").map((o) => o.value),
-    ).toEqual([
+  it("keeps the capability table where the protocol has no roster", () => {
+    expect(modelNamesFor("DashScope（百炼）")).toEqual([
       "qwen-audio-3.0-tts-plus",
       "qwen-audio-3.0-tts-flash",
       "cosyvoice-v3.5-plus",

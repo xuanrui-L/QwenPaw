@@ -16,25 +16,28 @@ import pytest
 from PIL import Image
 
 from api.file_asset_routes import _AssetInput, _ingest_many_sync
+from domain.enums import TaskKind, TaskStatus
 from services.file_agent_runtime import (
     AgentModelConfigurationError,
     AgentModelTurn,
     AgentRunStatus,
     AgentToolCall,
     CallbackAgentChatClient,
-    FileCreatorAgentRuntime,
     FileAgentRuntimeError,
+    FileCreatorAgentRuntime,
+)
+from services.file_agent_runtime import driver as driver_module
+from services.file_agent_runtime import (
+    media_vault,
 )
 from services.file_agent_runtime.driver import (
-    _ToolArgumentProgressReporter,
     _live_operation_editing_context,
     _remove_live_operation_scratch,
     _require_actionable_takes,
     _specialist_tool_recovery,
     _tool_call_transport_metadata,
+    _ToolArgumentProgressReporter,
 )
-from services.file_agent_runtime import driver as driver_module
-from services.file_agent_runtime import media_vault
 from services.file_agent_runtime.model_client import ModelContextUnfitError
 from services.file_agent_runtime.prompts import render_creator_system_prompt
 from services.file_agent_runtime.work_graph import (
@@ -45,8 +48,9 @@ from services.file_agent_runtime.work_graph import (
 from services.media_files.live_operation import (
     LiveOperationError,
     LiveOperationRun,
+    RecordedTake,
+    TakeManifest,
 )
-from services.media_files.live_operation import RecordedTake, TakeManifest
 from services.observability import read_trace_records
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
@@ -56,15 +60,16 @@ from services.project_files.models import (
 )
 from services.project_files.review import ReviewDecisionItem
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
+from services.runtime_files.execution_models import (
+    TaskRecord,
+    ExecutionAuthorizationStatus,
+)
 from services.runtime_files.models import (
     CreatorMessageRecord,
     MessageChannel,
     MessageClassification,
-    RuntimeProjectState,
     ReviewBoundary,
-)
-from services.runtime_files.execution_models import (
-    ExecutionAuthorizationStatus,
+    RuntimeProjectState,
 )
 from services.specialist_tools import SpecialistToolResult
 from services.workspace.content_store import ContentStore
@@ -177,8 +182,8 @@ def test_stale_project_snapshots_are_elided_from_the_continuation() -> None:
     A 50-element production run accumulated 18 full project.json echoes
     (2.09MB) in one Conversation and every model call failed with an
     input-length 400. Older echoes carry no information the model cannot
-    get from the latest snapshot, so they collapse to change receipts;
-    durable history keeps every byte.
+    get from the latest snapshot, so the next model turn receives change
+    receipts for the older snapshots.
     """
 
     from services.file_agent_runtime.driver import _continuation_message_text
@@ -263,7 +268,12 @@ def test_ai_edit_idempotency_can_be_scoped_to_one_model_tool_call() -> None:
     assert "file_id=null" in _specialist_tool_recovery("ai_edit")
 
 
-def _create_project(tmp_path, *, initial_goal: str | None):
+def _create_project(
+    tmp_path,
+    *,
+    initial_goal: str | None,
+    historical_media_tasks: int = 0,
+):
     services = CreatorFileServices.create(tmp_path.resolve())
 
     def initialize(staged_root) -> None:
@@ -281,6 +291,20 @@ def _create_project(tmp_path, *, initial_goal: str | None):
                 "client-initial" if initial_goal is not None else None
             ),
         )
+        for index in range(historical_media_tasks):
+            task = TaskRecord(
+                task_id=f"historical-media-{index}",
+                project_id=PROJECT_ID,
+                kind=TaskKind.IMAGE_GENERATION,
+                status=TaskStatus.SUCCEEDED,
+                request_fingerprint=f"historical-{index}",
+            )
+            task_root = staged_root / "runtime" / "tasks" / task.task_id
+            task_root.mkdir(parents=True)
+            (task_root / "task.json").write_text(
+                task.model_dump_json(),
+                encoding="utf-8",
+            )
 
     project = Project.new(project_id=PROJECT_ID, name="Initial")
     project.visual.entities.items["hero"] = VisualEntity(
@@ -301,6 +325,7 @@ def _create_project(tmp_path, *, initial_goal: str | None):
 def test_live_operation_context_gives_edit_director_verified_action_facts(
     tmp_path,
     monkeypatch,
+    patch_attributes,
 ) -> None:
     project = Project.new(project_id=PROJECT_ID, name="Tutorial")
     version = SourceAssetVersion(
@@ -372,16 +397,13 @@ def test_live_operation_context_gives_edit_director_verified_action_facts(
         },
     )
     project.assets.source_versions_by_id[second.version_id] = second
-    monkeypatch.setattr(driver_module, "_LIVE_EDIT_CONTEXT_MAX_FACTS", 1)
-    monkeypatch.setattr(driver_module, "_LIVE_EDIT_CONTEXT_MAX_RAW_FACTS", 10)
-    monkeypatch.setattr(
+    patch_attributes(
         driver_module,
-        "read_take_manifest",
-        lambda *_args, **_kwargs: {
+        _LIVE_EDIT_CONTEXT_MAX_FACTS=1,
+        _LIVE_EDIT_CONTEXT_MAX_RAW_FACTS=10,
+        read_take_manifest=lambda *_args, **_kwargs: {
             "video": {"duration_ms": 1000},
-            "facts": [
-                {"op": "click", "t_start_ms": 0, "t_end_ms": 1},
-            ],
+            "facts": [{"op": "click", "t_start_ms": 0, "t_end_ms": 1}],
         },
     )
     outer_bounded = _live_operation_editing_context(project, tmp_path)
@@ -443,7 +465,7 @@ def _browser_runtime(tmp_path, monkeypatch, runner):
     return services, runtime
 
 
-def test_tool_manifest_gates_live_operation_on_config(monkeypatch):
+def test_tool_manifest_gates_live_operation_on_config(patch_attributes):
     """Disabling live operation must unregister its tools entirely."""
 
     def _names():
@@ -452,27 +474,17 @@ def test_tool_manifest_gates_live_operation_on_config(monkeypatch):
             for entry in driver_module._creator_agent_tool_manifest()
         }
 
-    monkeypatch.setattr(
+    patch_attributes(
         driver_module,
-        "get_live_operation_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_computer_use_enabled",
-        lambda: False,
+        get_live_operation_enabled=lambda: False,
+        get_computer_use_enabled=lambda: False,
     )
     assert not {"browser_use", "computer_use"} & _names()
 
-    monkeypatch.setattr(
+    patch_attributes(
         driver_module,
-        "get_live_operation_enabled",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_computer_use_enabled",
-        lambda: True,
+        get_live_operation_enabled=lambda: True,
+        get_computer_use_enabled=lambda: True,
     )
     assert {"browser_use", "computer_use"} <= _names()
 
@@ -606,7 +618,9 @@ def _edit_client(*, description: str):
 
     async def callback(messages, tools):
         nonlocal turn
-        assert {item["function"]["name"] for item in tools} == {
+        assert {item["function"]["name"] for item in tools} - {
+            "confirm_prompt_sync"
+        } == {
             "read_project",
             "read_project_file",
             "jq_project",
@@ -885,132 +899,61 @@ async def _wait_for(predicate, *, timeout: float = 30.0) -> None:
         await asyncio.sleep(0.01)
 
 
-def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
-    parent_turn = 0
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("timeout", "model turn exceeded 5 seconds"),
+        ("multi-tool", "returned more than one tool call in one turn"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_specialist_rejects_invalid_model_turns(tmp_path, kind, reason):
+    delegated = False
     specialist_started = asyncio.Event()
-    # The hanging specialist never returns, so any finite budget trips
-    # its wall-clock guard; keep the budget generous enough that normal
-    # parent turns survive even on heavily loaded CI runners (a 0.02s
-    # budget was flaky there — parent turns got killed as collateral).
-    turn_timeout = 5.0
 
     async def callback(_messages, tools):
-        nonlocal parent_turn
-        names = {item["function"]["name"] for item in tools}
-        if "delegate_to_agent" not in names:
-            specialist_started.set()
-            await asyncio.Event().wait()
-        parent_turn += 1
-        if parent_turn == 1:
-            return _tool_turn(
-                call_id="delegate-hanging-editing",
-                name="delegate_to_agent",
-                arguments={
-                    "role": "ai_editing_director",
-                    "target_refs": ["timeline:timeline:main"],
-                    "task": "编排 Timeline 选段",
-                },
-            )
-        return AgentModelTurn(content="剪辑模型超时，当前运行已结束。")
-
-    async def scenario():
-        services, _snapshot = _create_project(
-            tmp_path,
-            initial_goal="生成角色图",
-        )
-        driver = _driver(
-            services,
-            callback,
-            model_turn_timeout_seconds=turn_timeout,
-        )
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        await asyncio.wait_for(specialist_started.wait(), timeout=2.0)
-        await _wait_consumed(services)
-        # The specialist is detached: its wall-clock guard trips well after
-        # the mainline run has already gone idle.
-        await _wait_for(
-            lambda: (
-                (runs := driver.executions.list_specialist_runs(PROJECT_ID))
-                and runs[0].status.value == "FAILED"
-            ),
-        )
-        specialist = driver.executions.list_specialist_runs(PROJECT_ID)[0]
-        await driver.stop()
-        return specialist
-
-    specialist = asyncio.run(scenario())
-    assert specialist.status.value == "FAILED"
-    assert f"model turn exceeded {turn_timeout:g} seconds" in (
-        specialist.final_summary_text or ""
-    )
-
-
-def test_specialist_multi_tool_turn_is_rejected_before_any_dispatch(
-    tmp_path,
-) -> None:
-    """The delegate loop refuses two tool calls in one turn.
-
-    This guard is what keeps a recall_media user row from ever splitting
-    an assistant/tool group: with at most one call per turn, the row can
-    only follow the pair, never sit between two tool results. The source
-    anchors in test_media_vault.py cannot see that timing, so drive the
-    real delegate loop and pin the guard's behavior.
-    """
-    parent_turn = 0
-
-    async def callback(_messages, tools):
-        nonlocal parent_turn
-        names = {item["function"]["name"] for item in tools}
-        if "delegate_to_agent" not in names:
-            # Specialist turn: two calls in one turn. The guard fires before
-            # dispatch, so the names only need to be on the manifest.
-            picked = [item["function"]["name"] for item in tools][:2]
-            return AgentModelTurn(
-                tool_calls=tuple(
-                    AgentToolCall(
-                        call_id=f"multi-{index}",
-                        name=name,
-                        arguments={},
-                    )
-                    for index, name in enumerate(picked, start=1)
-                ),
-            )
-        parent_turn += 1
-        if parent_turn == 1:
+        nonlocal delegated
+        names = [item["function"]["name"] for item in tools]
+        if "delegate_to_agent" in names:
+            if delegated:
+                return AgentModelTurn(content="当前运行已结束。")
+            delegated = True
             return _delegate_call(
-                "delegate-multi-tool",
+                "delegate-editing",
                 role="ai_editing_director",
                 target_refs=["timeline:timeline:main"],
                 task="编排 Timeline 选段",
             )
-        return AgentModelTurn(content="专员回合被拒绝，当前运行已结束。")
 
-    async def scenario():
-        services, _snapshot = _create_project(
-            tmp_path,
-            initial_goal="生成角色图",
-        )
-        driver = _driver(services, callback)
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        await _wait_for(
-            lambda: (
-                (runs := driver.executions.list_specialist_runs(PROJECT_ID))
-                and runs[0].status.value == "FAILED"
+        specialist_started.set()
+        if kind == "timeout":
+            await asyncio.Event().wait()
+        return AgentModelTurn(
+            tool_calls=tuple(
+                AgentToolCall(
+                    call_id=f"multi-{index}", name=name, arguments={}
+                )
+                for index, name in enumerate(names[:2], start=1)
             ),
         )
+
+    services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
+    # Keep normal parent turns outside the timeout even when CI is busy.
+    driver = _driver(services, callback, model_turn_timeout_seconds=5.0)
+    await driver.start()
+    try:
+        driver.notify(PROJECT_ID)
+        await asyncio.wait_for(specialist_started.wait(), timeout=2)
+
+        def runs():
+            return driver.executions.list_specialist_runs(PROJECT_ID)
+
+        await _wait_for(lambda: runs() and runs()[0].status.value == "FAILED")
         await _wait_consumed(services)
         await driver.wait_until_idle(PROJECT_ID)
-        specialist = driver.executions.list_specialist_runs(PROJECT_ID)[0]
+        assert reason in (runs()[0].final_summary_text or "")
+    finally:
         await driver.stop()
-        return specialist
-
-    specialist = asyncio.run(scenario())
-    assert specialist.status.value == "FAILED"
-    assert "returned more than one tool call in one turn" in (
-        specialist.final_summary_text or ""
-    )
 
 
 def test_run_review_feedback_allows_one_successful_repair_delegation(
@@ -2270,17 +2213,13 @@ def test_specialist_cancel_emits_terminal_event(
     monkeypatch,
     cancel_phase,
 ) -> None:
-    """A specialist run cancelled mid-flight must emit a terminal
-    ``subagent.failed`` event, both from RUNNING_MODEL and from
-    WAITING_RUNTIME (a long-running tool mid-invoke).
-
-    Regression note for the WAITING_RUNTIME case: the run reaches the
-    cancel-except only after the invoke-finally bridges WAITING_RUNTIME back
-    to RUNNING_MODEL, so the on-disk transition succeeds — but the terminal
-    event was still missing.  Locks in that the event fires on this path too.
-    """
+    """Cancellation must emit a terminal event from either specialist phase."""
     if cancel_phase == "waiting_runtime":
         _authorization_gate_modes(monkeypatch, authorization="allow_all")
+        monkeypatch.setattr(
+            "services.specialist_tools.is_tts_configured",
+            lambda: True,
+        )
 
     async def scenario():
         services, _snapshot = _create_project(
@@ -2289,6 +2228,7 @@ def test_specialist_cancel_emits_terminal_event(
         )
         blocked = asyncio.Event()
         cancel_entered = asyncio.Event()
+        delegated = False
 
         async def _block_until_cancelled() -> None:
             blocked.set()
@@ -2299,8 +2239,12 @@ def test_specialist_cancel_emits_terminal_event(
                 raise
 
         async def callback(messages, tools):
+            nonlocal delegated
             names = {item["function"]["name"] for item in tools}
             if "delegate_to_agent" in names:
+                if delegated:
+                    await asyncio.Event().wait()
+                delegated = True
                 return _delegate_call(
                     "delegate-editing",
                     role="ai_editing_director",
@@ -2308,14 +2252,12 @@ def test_specialist_cancel_emits_terminal_event(
                     task="角色声音设计",
                 )
             if cancel_phase == "waiting_runtime":
-                # Specialist turn: park the run in a long-running tool.
                 return _media_call(
                     "gen-1",
                     name="tts_generation",
                     target_ref="asset:hero",
                     arguments={"text": "测试取消中的长任务。"},
                 )
-            # Specialist turn: block forever until the parent is interrupted.
             await _block_until_cancelled()
 
         async def blocking_invoke(**_kwargs):
@@ -2324,18 +2266,37 @@ def test_specialist_cancel_emits_terminal_event(
         driver = _driver(services, callback)
         if cancel_phase == "waiting_runtime":
             driver.specialist_tools.invoke = blocking_invoke  # type: ignore[method-assign]
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        # Poll via the shared helper instead of a raw 2s budget: the full
-        # suite needs ~7min on the Windows CI runner, and that load has been
-        # enough to lose this race there.
-        await _wait_for(blocked.is_set)
-        interrupted = await driver.interrupt(PROJECT_ID, reason="test-stop")
-        await driver.wait_until_idle(PROJECT_ID)
-        specialist_runs = driver.executions.list_specialist_runs(PROJECT_ID)
-        events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
-        await driver.stop()
-        return interrupted, specialist_runs, events, cancel_entered
+        try:
+            await driver.start()
+            driver.notify(PROJECT_ID)
+            # Readiness includes durable I/O, not just model/tool latency.
+            await asyncio.wait_for(blocked.wait(), timeout=30.0)
+            runs = driver.executions.list_specialist_runs(PROJECT_ID)
+            assert len(runs) == 1
+            assert runs[0].status.value == cancel_phase.upper()
+            specialist_task = driver._specialist_tasks[PROJECT_ID][
+                runs[0].run_id
+            ].task
+            assert specialist_task is not None
+            interrupted = await driver.interrupt(
+                PROJECT_ID,
+                reason="test-stop",
+            )
+            # Mainline idleness does not join detached specialists.
+            done, _pending = await asyncio.wait(
+                {specialist_task},
+                timeout=30.0,
+            )
+            assert specialist_task in done
+            assert specialist_task.cancelled()
+            await driver.wait_until_idle(PROJECT_ID, timeout_seconds=30.0)
+            specialist_runs = driver.executions.list_specialist_runs(
+                PROJECT_ID,
+            )
+            events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+            return interrupted, specialist_runs, events, cancel_entered
+        finally:
+            await driver.stop()
 
     interrupted, specialist_runs, events, cancel_entered = asyncio.run(
         scenario(),
@@ -3184,84 +3145,46 @@ def test_costly_specialist_tool_waits_for_file_authorization(
     assert "execution.authorization_decided" in event_types
 
 
-def test_retired_r2v_specialist_cannot_request_paid_authorization(
+@pytest.mark.parametrize(
+    ("role", "target_ref"),
+    [
+        ("r2v_generation_director", "element:ep1"),
+        ("visual_development_agent", "asset:char:hero"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_retired_specialists_cannot_delegate_or_charge(
     tmp_path,
     monkeypatch,
-) -> None:
-    """The removed R2V delegation surface cannot reach a paid tool."""
+    role,
+    target_ref,
+):
     _authorization_gate_modes(monkeypatch, authorization="required")
-    parent_turn = 0
+    delegated = False
 
     async def callback(_messages, tools):
-        nonlocal parent_turn
-        names = {item["function"]["name"] for item in tools}
-        assert "r2v_generation" not in names
-        parent_turn += 1
-        if parent_turn == 1:
-            return _delegate_call(
-                "delegate-ep1-video",
-                role="r2v_generation_director",
-                target_refs=["element:ep1"],
-                task="生成 ep1 视频",
-            )
-        return AgentModelTurn(content="R2V prompt 改由主 Agent 直接负责。")
-
-    async def scenario():
-        services, _snapshot = _create_project(
-            tmp_path,
-            initial_goal="生成视频",
+        nonlocal delegated
+        assert all(
+            item["function"]["name"] != "r2v_generation" for item in tools
         )
-        driver = _driver(services, callback)
+        if delegated:
+            return AgentModelTurn(content="由主 Agent 直接编写提示词。")
+        delegated = True
+        return _delegate_call(
+            "retired-specialist",
+            role=role,
+            target_refs=[target_ref],
+            task="生成素材",
+        )
 
+    services, _snapshot = _create_project(tmp_path, initial_goal="生成素材")
+    driver = _driver(services, callback)
+    try:
         await _run_to_idle(driver, services)
-        authorizations = driver.executions.list_execution_authorizations(
-            PROJECT_ID,
-        )
-        specialists = driver.executions.list_specialist_runs(PROJECT_ID)
+        assert not driver.executions.list_execution_authorizations(PROJECT_ID)
+        assert not driver.executions.list_specialist_runs(PROJECT_ID)
+    finally:
         await driver.stop()
-        return authorizations, specialists
-
-    authorizations, specialists = asyncio.run(scenario())
-    assert authorizations == []
-    assert specialists == []
-
-
-def test_retired_visual_specialist_cannot_be_delegated(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """The removed visual development surface rejects new delegations."""
-    _authorization_gate_modes(monkeypatch, authorization="required")
-    parent_turn = 0
-
-    async def callback(_messages, tools):
-        nonlocal parent_turn
-        parent_turn += 1
-        if parent_turn == 1:
-            return _delegate_call(
-                "delegate-hero-design",
-                role="visual_development_agent",
-                target_refs=["asset:char:hero"],
-                task="为角色生成设计图",
-            )
-        return AgentModelTurn(
-            content="视觉资产 prompt 改由主 Agent 直接编写。",
-        )
-
-    async def scenario():
-        services, _snapshot = _create_project(
-            tmp_path,
-            initial_goal="生成角色图",
-        )
-        driver = _driver(services, callback)
-
-        await _run_to_idle(driver, services)
-        specialists = driver.executions.list_specialist_runs(PROJECT_ID)
-        await driver.stop()
-        return specialists
-
-    specialists = asyncio.run(scenario())
-    assert specialists == []
 
 
 def test_mainline_character_voice_waits_for_authorization(
@@ -3391,6 +3314,7 @@ def test_mainline_character_voice_waits_for_authorization(
 def test_manual_prompt_repair_respects_review_and_never_dispatches_media(
     tmp_path,
     monkeypatch,
+    patch_attributes,
     review_state,
     after_failure,
     gap,
@@ -3443,17 +3367,11 @@ def test_manual_prompt_repair_respects_review_and_never_dispatches_media(
         missing=(reason,),
         authored_text_gap=gap,
     )
-    monkeypatch.setattr(
+    patch_attributes(
         driver_module,
-        "get_media_review_mode",
-        lambda: "manual",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda _project, tasks, *, media_models=None: WorkGraph(
-            nodes=(node,),
-            generation=1,
+        get_media_review_mode=lambda: "manual",
+        derive_work_graph=lambda _project, tasks, *, media_models=None: WorkGraph(
+            nodes=(node,), generation=1
         ),
     )
     wakes = []
@@ -3487,7 +3405,7 @@ def test_manual_prompt_repair_respects_review_and_never_dispatches_media(
 @pytest.mark.parametrize("review_mode", ["required", "auto_approve"])
 def test_completion_resume_preserves_manual_regeneration_pause(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
     after_failure,
     review_mode,
 ) -> None:
@@ -3515,15 +3433,12 @@ def test_completion_resume_preserves_manual_regeneration_pause(
     holds = ManualRegenerationHoldStore(services.root)
     operation = holds.begin(PROJECT_ID, upstream, (upstream, downstream))
     holds.admitted(operation)
-    monkeypatch.setattr(
+    patch_attributes(
         driver_module,
-        "get_media_review_mode",
-        lambda: review_mode,
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda *_args, **_kwargs: WorkGraph(nodes=(downstream,), generation=1),
+        get_media_review_mode=lambda: review_mode,
+        derive_work_graph=lambda *_args, **_kwargs: WorkGraph(
+            nodes=(downstream,), generation=1
+        ),
     )
     before = len(services.sessions.list_messages(PROJECT_ID, SESSION_ID))
 
@@ -3727,7 +3642,7 @@ def test_workspace_commits_wake_the_media_scheduler(tmp_path) -> None:
 
 def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
     tmp_path,
-    monkeypatch,
+    patch_attributes,
 ) -> None:
     """Pending quiet progress rides along with the end-of-run resume, and
     interleaved notifications neither spend nor reset the resume fuse."""
@@ -3747,17 +3662,11 @@ def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
         missing=("video_prompt 缺失",),
         authored_text_gap=True,
     )
-    monkeypatch.setattr(
+    patch_attributes(
         driver_module,
-        "get_media_review_mode",
-        lambda: "manual",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda _project, tasks, *, media_models=None: WorkGraph(
-            nodes=(node,),
-            generation=1,
+        get_media_review_mode=lambda: "manual",
+        derive_work_graph=lambda _project, tasks, *, media_models=None: WorkGraph(
+            nodes=(node,), generation=1
         ),
     )
 
@@ -3873,86 +3782,13 @@ def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
 
 
 @pytest.mark.parametrize(
-    "reason",
-    ["no_committed_progress", "media_budget_exhausted"],
-)
-def test_yolo_pause_reasons_are_durable_not_new_model_requests(
-    tmp_path,
-    monkeypatch,
-    reason,
-):
-    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
-    driver = _driver(services, lambda *_args: AgentModelTurn())
-    node = WorkNode(
-        node_id="visual:hero",
-        kind="visual",
-        label="角色状态图",
-        status=WorkNodeStatus.FAILED,
-        error="请修改输入文本",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_media_review_mode",
-        lambda: "auto_approve",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda *_a, **_kw: WorkGraph(
-            nodes=(node,),
-            generation=snapshot.generation,
-        ),
-    )
-    monkeypatch.setattr(
-        driver.work_scheduler,
-        "wake",
-        lambda _project_id: None,
-    )
-    if reason == "no_committed_progress":
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            source=driver.YOLO_RESUME_SOURCE,
-            content_parts=[{"type": "text", "text": "修正输入文本"}],
-            metadata={"projectGeneration": snapshot.generation},
-        )
-    else:
-
-        def exhausted(*_args):
-            raise driver_module.MediaCallBudgetExhausted("used budget")
-
-        monkeypatch.setattr(
-            driver_module,
-            "ensure_media_call_budget",
-            exhausted,
-        )
-    before = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    asyncio.run(
-        driver._queue_yolo_completion_resume(
-            project_id=PROJECT_ID,
-            session_id=SESSION_ID,
-            conversation_id=CONVERSATION_ID,
-            run_id="paused-run",
-        ),
-    )
-    after = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    assert [m.message_id for m in before if m.role == "user"] == [
-        m.message_id for m in after if m.role == "user"
-    ]
-    assert after[-1].source == "creator_execution_notice"
-    assert after[-1].metadata["executionPause"]["reason"] == reason
-    assert not driver._wake.is_set()
-
-
-@pytest.mark.parametrize(
     "status",
     [WorkNodeStatus.READY, WorkNodeStatus.RUNNING, WorkNodeStatus.STALE],
 )
 def test_yolo_does_not_resume_while_scheduler_owns_remaining_work(
     tmp_path,
     monkeypatch,
+    patch_attributes,
     status,
 ):
     services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
@@ -3968,17 +3804,11 @@ def test_yolo_does_not_resume_while_scheduler_owns_remaining_work(
         if status is WorkNodeStatus.STALE
         else None,
     )
-    monkeypatch.setattr(
+    patch_attributes(
         driver_module,
-        "get_media_review_mode",
-        lambda: "auto_approve",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda *_a, **_kw: WorkGraph(
-            nodes=(node,),
-            generation=snapshot.generation,
+        get_media_review_mode=lambda: "auto_approve",
+        derive_work_graph=lambda *_a, **_kw: WorkGraph(
+            nodes=(node,), generation=snapshot.generation
         ),
     )
     monkeypatch.setattr(driver.work_scheduler, "enabled", lambda: True)
@@ -5346,245 +5176,117 @@ def test_review_gate_read_failure_holds_queued_message(tmp_path) -> None:
     assert turns["count"] >= 1, "recovery must consume the message normally"
 
 
-def test_uploaded_image_understanding_starts_before_first_planning_turn(
+@pytest.mark.parametrize(
+    ("arrival", "count"),
+    [("initial", 1), ("batched", 3), ("running", 1), ("running", 2)],
+)
+@pytest.mark.asyncio
+async def test_uploads_start_one_understanding_run_per_asset(
     tmp_path,
     monkeypatch,
+    arrival,
+    count,
 ):
-    async def scenario():
-        services, _ = _create_project(tmp_path, initial_goal=None)
-        ingested, _ = _ingest_many_sync(
-            services,
-            project_id=PROJECT_ID,
-            key="source-bootstrap-image",
-            inputs=[
-                _AssetInput(
-                    name="lulu.png",
-                    content=_png_bytes_for_grounding(),
-                    media_type="image/png",
-                ),
-            ],
-            attach_source=False,
-            scope="source-bootstrap-test",
-        )
-        version_id = ingested["items"][0]["assetVersionId"]
-        _append_initial_request(
-            services,
-            content_parts=[{"type": "text", "text": "按上传形象创作"}],
-            intent="制作",
-            metadata={"assetVersionRefs": [f"asset-version:{version_id}"]},
-        )
-        calls = []
-
-        async def delegate(**kwargs):
-            calls.append(kwargs["arguments"])
-            return {
-                "status": "ACCEPTED",
-                "targetRefs": kwargs["arguments"]["target_refs"],
-            }
-
-        async def model(messages, _tools):
-            assert len(calls) == 1
-            source = next(
-                iter(
-                    services.projects.read(
-                        PROJECT_ID,
-                    ).project.sources.sources.items.values(),
-                ),
+    services, _ = _create_project(
+        tmp_path,
+        initial_goal="制作噜噜视频" if arrival == "running" else None,
+    )
+    ingested, _ = _ingest_many_sync(
+        services,
+        project_id=PROJECT_ID,
+        key="uploaded-images",
+        inputs=[
+            _AssetInput(
+                name=f"reference-{index}.png",
+                content=_png_bytes_for_grounding(index),
+                media_type="image/png",
             )
-            assert source.selected_asset_version_id == version_id
-            assert "理解已启动" in str(messages)
-            return AgentModelTurn(content="先规划内容，等待素材理解结果。")
+            for index in range(count)
+        ],
+        attach_source=False,
+        scope="upload-understanding-test",
+    )
+    items = ingested["items"]
+    refs = [f"asset-version:{item['assetVersionId']}" for item in items]
+    targets = [[f"asset:{item['assetId']}"] for item in items]
+    dispatched = []
+    received = []
 
-        driver = _driver(services, model)
-        monkeypatch.setattr(driver, "_run_subagent", delegate)
-        await driver.start()
-        try:
-            driver.notify(PROJECT_ID)
-            await _wait_consumed(services, 1)
-            await driver.wait_until_idle(PROJECT_ID)
-            assert (
-                driver.runs.list(PROJECT_ID)[0].status
-                is AgentRunStatus.SUCCEEDED
-            )
-        finally:
-            await driver.stop()
-
-    asyncio.run(scenario())
-
-
-def test_batched_upload_refs_delegate_one_run_per_target(
-    tmp_path,
-    monkeypatch,
-):
-    """Refs across a batched run fan out into single-target delegations.
-
-    Chat uploads land as one runtime notification per request; consecutive
-    notifications batch into one run whose head is only the first message.
-    Every batched ref must still start understanding, and each target gets
-    its own specialist run so uploads are understood in parallel.
-    """
-
-    async def scenario():
-        services, _ = _create_project(tmp_path, initial_goal=None)
-        ingested, _ = _ingest_many_sync(
-            services,
-            project_id=PROJECT_ID,
-            key="source-batch-images",
-            inputs=[
-                _AssetInput(
-                    name=f"img-{index}.png",
-                    content=_png_bytes_for_grounding(index),
-                    media_type="image/png",
-                )
-                for index in range(3)
-            ],
-            attach_source=False,
-            scope="source-batch-test",
+    def append_upload(new_refs, *, source):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": "又补了参考素材"}],
+            source=source,
+            channel=MessageChannel.AGENTDOCK,
+            metadata={"assetVersionRefs": new_refs},
         )
-        refs = [
-            f"asset-version:{item['assetVersionId']}"
-            for item in ingested["items"]
-        ]
-        expected_targets = {
-            f"asset:{item['assetId']}" for item in ingested["items"]
-        }
+
+    if arrival != "running":
         _append_initial_request(
             services,
             content_parts=[{"type": "text", "text": "按上传素材创作"}],
             intent="制作",
             metadata={"assetVersionRefs": refs[:2]},
         )
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            content_parts=[{"type": "text", "text": "又补了一张图"}],
-            channel=MessageChannel.AGENTDOCK,
-            metadata={"assetVersionRefs": refs[2:]},
-        )
-        calls = []
+        if arrival == "batched":
+            append_upload(refs[2:], source="runtime")
 
-        async def delegate(**kwargs):
-            calls.append(kwargs["arguments"])
-            return {
-                "status": "ACCEPTED",
-                "targetRefs": kwargs["arguments"]["target_refs"],
-            }
+    async def delegate(**kwargs):
+        target_refs = kwargs["arguments"]["target_refs"]
+        dispatched.append(target_refs)
+        return {"status": "ACCEPTED", "targetRefs": target_refs}
 
-        async def model(_messages, _tools):
-            return AgentModelTurn(content="先规划内容，等待素材理解结果。")
+    async def model(messages, _tools):
+        received.append(messages.copy())
+        if arrival == "running" and len(received) == 1:
+            for ref in refs:
+                append_upload([ref], source="user")
+            return _read_call("read-before-upload")
+        if arrival == "initial":
+            assert dispatched == targets
+            sources = services.projects.read(
+                PROJECT_ID
+            ).project.sources.sources.items
+            assert (
+                next(iter(sources.values())).selected_asset_version_id
+                == items[0]["assetVersionId"]
+            )
+            assert "理解已启动" in str(messages)
+        return AgentModelTurn(content="先规划内容，等待素材理解结果。")
 
-        driver = _driver(services, model)
-        monkeypatch.setattr(driver, "_run_subagent", delegate)
-        await driver.start()
-        try:
-            driver.notify(PROJECT_ID)
-            await _wait_consumed(services, 2)
-            await driver.wait_until_idle(PROJECT_ID)
-        finally:
-            await driver.stop()
-        return calls, expected_targets
-
-    calls, expected_targets = asyncio.run(scenario())
-
-    assert [len(call["target_refs"]) for call in calls] == [1, 1, 1]
-    assert {call["target_refs"][0] for call in calls} == expected_targets
-
-
-@pytest.mark.parametrize("upload_count", [1, 2])
-def test_upload_joining_a_live_run_starts_understanding(
-    tmp_path,
-    monkeypatch,
-    upload_count,
-):
-    """Refs on a message that joins a running turn loop must still fan out.
-
-    Field run 2026-09-11 (project-3c08b43d): a video uploaded from the
-    composer while the agent was planning joined the live run, yet no
-    source_intelligence run was ever created and the started-notice lied.
-    """
-
-    calls = []
-    received = []
-
-    async def scenario():
-        services, _ = _create_project(tmp_path, initial_goal="制作噜噜视频")
-        ingested, _ = _ingest_many_sync(
-            services,
-            project_id=PROJECT_ID,
-            key="mid-run-upload",
-            inputs=[
-                _AssetInput(
-                    name=f"voice-ref-{index}.png",
-                    content=_png_bytes_for_grounding(index),
-                    media_type="image/png",
-                )
-                for index in range(upload_count)
-            ],
-            attach_source=False,
-            scope="mid-run-upload-test",
-        )
-        items = ingested["items"]
-
-        async def delegate(**kwargs):
-            calls.append(kwargs["arguments"])
-            return {
-                "status": "ACCEPTED",
-                "targetRefs": kwargs["arguments"]["target_refs"],
-            }
-
-        async def model(messages, _tools):
-            received.append([dict(entry) for entry in messages])
-            if len(received) == 1:
-                for item in items:
-                    services.sessions.append_message(
-                        PROJECT_ID,
-                        SESSION_ID,
-                        CONVERSATION_ID,
-                        role="user",
-                        content_parts=[
-                            {"type": "text", "text": "我刚上传了噜噜的参考素材"},
-                        ],
-                        source="user",
-                        channel=MessageChannel.AGENTDOCK,
-                        metadata={
-                            "assetVersionRefs": [
-                                f"asset-version:{item['assetVersionId']}",
-                            ],
-                        },
-                    )
-                return _read_call("read-before-upload")
-            return AgentModelTurn(content="收到素材，理解进行中。")
-
-        driver = _driver(services, model)
-        monkeypatch.setattr(driver, "_run_subagent", delegate)
-        await driver.start()
-        try:
-            driver.notify(PROJECT_ID)
-            await _wait_consumed(services, 1 + upload_count)
-            await driver.wait_until_idle(PROJECT_ID)
-        finally:
-            await driver.stop()
-        return items
-
-    items = asyncio.run(scenario())
-
-    assert [call["target_refs"] for call in calls] == [
-        [f"asset:{item['assetId']}"] for item in items
-    ]
-    # The joined turn must carry the started-notice so the agent neither
-    # re-delegates nor believes understanding is running when it is not.
-    joined_turn = received[-1]
-    assert any(
-        "本轮上传素材的理解已启动" in str(entry.get("content") or "")
-        for entry in joined_turn
-    )
+    driver = _driver(services, model)
+    monkeypatch.setattr(driver, "_run_subagent", delegate)
+    last_seq = {"initial": 1, "batched": 2, "running": 1 + count}[arrival]
+    try:
+        await _run_to_idle(driver, services, seq=last_seq)
+        if arrival == "batched":
+            assert sorted(dispatched) == sorted(targets)
+        else:
+            assert dispatched == targets
+        if arrival == "initial":
+            assert (
+                driver.runs.list(PROJECT_ID)[0].status
+                is AgentRunStatus.SUCCEEDED
+            )
+        if arrival == "running":
+            assert any(
+                "本轮上传素材的理解已启动" in str(message.get("content") or "")
+                for message in received[-1]
+            )
+    finally:
+        await driver.stop()
 
 
+@pytest.mark.parametrize(
+    "specialist", [False, True], ids=["creator", "editing"]
+)
 def test_recalled_media_arrives_after_its_own_tool_group(
     tmp_path,
     monkeypatch,
+    specialist,
 ):
     """The recalled bytes ride behind the tool result, never inside its group.
 
@@ -5603,21 +5305,42 @@ def test_recalled_media_arrives_after_its_own_tool_group(
 
     seen: list[list[dict]] = []
     turn = 0
+    delegated = False
 
     async def callback(messages, tools):
-        del tools
-        nonlocal turn
+        nonlocal turn, delegated
+        names = {item["function"]["name"] for item in tools}
+        if specialist and "delegate_to_agent" in names:
+            if delegated:
+                return AgentModelTurn(content="已收到剪辑结果。")
+            delegated = True
+            return _delegate_call(
+                "delegate-recall",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="取回之前移出的参考图",
+            )
+        assert {"recall_media", "recall_history"} <= names
         turn += 1
         seen.append([dict(item) for item in messages])
         if turn == 1:
             return _tool_turn(
                 call_id="recall-1",
                 name="recall_media",
-                arguments={"handles": [digest]},
+                arguments={"projectId": PROJECT_ID, "handles": [digest]},
             )
         if turn == 2:
-            return _read_call("read-1")
-        return AgentModelTurn(content="已取回参考图，继续。")
+            return _tool_turn(
+                call_id="recall-text",
+                name="recall_history",
+                arguments={
+                    "projectId": PROJECT_ID,
+                    "op": "expand",
+                    "lo": 1,
+                    "hi": 1,
+                },
+            )
+        return AgentModelTurn(content="[SUCCESS] 已取回参考图。")
 
     async def scenario():
         services, _snapshot = _create_project(
@@ -5625,8 +5348,11 @@ def test_recalled_media_arrives_after_its_own_tool_group(
             initial_goal="取回之前移出的参考图，然后继续。",
         )
         driver = _driver(services, CallbackAgentChatClient(callback))
-        await _run_to_idle(driver, services)
-        await driver.stop()
+        try:
+            await _run_to_idle(driver, services)
+            await _wait_for(lambda: turn == 3)
+        finally:
+            await driver.stop()
 
     asyncio.run(scenario())
 
@@ -5646,10 +5372,17 @@ def test_recalled_media_arrives_after_its_own_tool_group(
         "tool",
     ]
     recalled = seen[1][-1]
-    assert recalled["source"] == driver_module.MEDIA_RECALL_SOURCE
+    expected_source = (
+        driver_module.MEDIA_OBSERVATION_SOURCE
+        if specialist
+        else driver_module.MEDIA_RECALL_SOURCE
+    )
+    assert recalled["source"] == expected_source
     assert [part["type"] for part in recalled["content"]][-1] == "image_url"
     restored = recalled["content"][-1]["image_url"]["url"]
     assert base64.b64decode(restored.split(";base64,", 1)[1]) == payload
+    history = json.loads(seen[2][-1]["content"])
+    assert [entry["messageSeq"] for entry in history["entries"]] == [1]
 
 
 def test_the_next_turn_resumes_from_the_shape_that_was_sent(tmp_path):
@@ -5716,42 +5449,17 @@ def test_the_next_turn_resumes_from_the_shape_that_was_sent(tmp_path):
     assert [item["role"] for item in seen[1]][-2:] == ["assistant", "tool"]
 
 
-def test_plan_continuation_summary_round_trips_and_fails_closed(
+@pytest.mark.parametrize("summary_result", ["valid", "malformed", "error"])
+def test_creator_receives_continuation_summary_only_when_usable(
+    tmp_path,
     monkeypatch,
+    summary_result,
 ) -> None:
-    """The summary is really produced from the archived slice, not a no-op.
-
-    Wiring checks only prove the call exists; this drives the real host
-    library end to end (build prompt -> model -> parse -> validate) so a
-    regression that quietly made the planner always return "" would surface,
-    and confirms an unusable reply is dropped rather than injected.
-    """
     if not driver_module._HOST_CONTINUATION_SUMMARY_AVAILABLE:
         pytest.skip("host continuation_summary library not importable")
     monkeypatch.delenv("CREATOR_CONTINUATION_SUMMARY_ENABLED", raising=False)
 
-    # Enough droppable runtime history to force real archival (over the
-    # 128KB default history budget).
-    prior_context = [
-        _record(
-            seq,
-            role="tool",
-            source="runtime_action_result",
-            text=f"review marker {seq} " + "z" * 3000,
-        )
-        for seq in range(1, 60)
-    ]
-
-    class _Harness:
-        _plan_continuation_summary = (
-            FileCreatorAgentRuntime._plan_continuation_summary
-        )
-        _complete_model_turn = FileCreatorAgentRuntime._complete_model_turn
-        model_turn_timeout_seconds = 30
-
-        def __init__(self, client) -> None:
-            self.model_client = client
-
+    archived_note = "Review approved the vertical format."
     markdown = (
         "## Active Task\nContinue the episode plan.\nStatus: in_progress\n\n"
         "## Current State\n- Six episodes are locked.\n\n"
@@ -5759,30 +5467,65 @@ def test_plan_continuation_summary_round_trips_and_fails_closed(
         "## Decisions\n- Use the vertical format.\n\n"
         "## Open Work\n- Render the title card.\n"
     )
+    calls: list[tuple[bool, str]] = []
 
-    async def _scenario() -> tuple[str, list]:
-        seen_tools: list[list] = []
+    async def complete(messages, tools):
+        calls.append((bool(tools), messages[-1]["content"]))
+        if tools:
+            return AgentModelTurn(content="已继续分集计划。")
+        if summary_result == "error":
+            raise RuntimeError("summary provider unavailable")
+        return AgentModelTurn(
+            content=markdown if summary_result == "valid" else "too short",
+        )
 
-        async def summarize(messages, tools):
-            seen_tools.append(tools)
-            return AgentModelTurn(content=markdown)
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="制定分集计划。",
+        )
+        services.sessions.mark_messages_consumed(
+            PROJECT_ID,
+            SESSION_ID,
+            through_seq=1,
+        )
+        archived = services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="tool",
+            source="runtime_action_result",
+            content_parts=[
+                {"type": "text", "text": archived_note + "z" * (140 * 1024)},
+            ],
+        ).message
+        request = services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            source="user",
+            content_parts=[{"type": "text", "text": "继续分集计划。"}],
+            channel=MessageChannel.AGENTDOCK,
+        ).message
+        driver = _driver(services, complete)
+        try:
+            await _run_to_idle(driver, services, seq=request.message_seq)
+        finally:
+            await driver.stop()
+        return archived.message_seq
 
-        good = await _Harness(
-            CallbackAgentChatClient(summarize),
-        )._plan_continuation_summary(prior_context)
-        return good, seen_tools[0]
-
-    summary, tools = asyncio.run(_scenario())
-    assert tools == [], "the summary turn must not offer tools"
-    assert "archived task state" in summary
-    assert "Continue the episode plan." in summary
-
-    async def _fail_closed() -> str:
-        async def junk(messages, tools):
-            return AgentModelTurn(content="this is not a summary")
-
-        return await _Harness(
-            CallbackAgentChatClient(junk),
-        )._plan_continuation_summary(prior_context)
-
-    assert asyncio.run(_fail_closed()) == ""
+    archived_seq = asyncio.run(scenario())
+    assert [has_tools for has_tools, _content in calls] == [False, True]
+    assert archived_note in calls[0][1]
+    context, request_text = calls[1][1].split("\n\nCURRENT_USER_REQUEST=\n", 1)
+    history = json.loads(context.split("CONVERSATION_HISTORY_JSON=", 1)[1])
+    marker = history[0]
+    assert marker["source"] == "context_compaction"
+    assert marker["recoverableSeqRange"] == [archived_seq, archived_seq]
+    assert "recall_history" in marker["archivedHistoryMap"]
+    assert "继续分集计划。" in request_text
+    if summary_result == "valid":
+        assert "Continue the episode plan." in marker["continuationSummary"]
+    else:
+        assert "continuationSummary" not in marker

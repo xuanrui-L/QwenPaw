@@ -1,6 +1,17 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  cloneProject,
+  seedProject,
+  singleProject,
+} from "@/test/projectSnapshotFixtures";
+import {
+  fireEvent,
+  render,
+  screen,
+  act,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, afterEach, vi } from "vitest";
 import BlueprintPage from "@/pages/BlueprintPage";
 import { NavigationRuntime } from "@/routing/navigation";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
@@ -11,29 +22,9 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { projectDocument } from "@/test/creatorFixtures";
 import type { ProjectDocument } from "@/contracts/creator";
-
-function cloneProject(): ProjectDocument {
-  return structuredClone(projectDocument);
-}
-
-function seedProject(project: ProjectDocument) {
-  useProjectSnapshotStore.getState().reset("p1");
-  useProjectSnapshotStore.setState({
-    projectId: "p1",
-    project,
-    generation: project.generation,
-    etag: '"sha256:g3"',
-    syncStatus: "healthy",
-    syncError: null,
-  });
-}
-
-function singleProject(): ProjectDocument {
-  const project = cloneProject();
-  project.timelines.order = ["timeline:main"];
-  delete project.timelines.items["timeline:ep2"];
-  return project;
-}
+import { Modal } from "antd";
+import ProductionStageControl from "../../components/creator/ProductionStageControl";
+import { installMockFetch } from "@/test/mockFetch";
 
 function renderPage(entry = "/project/p1") {
   return render(
@@ -220,5 +211,53 @@ describe("BlueprintPage narrative shapes", () => {
       second.container.querySelectorAll("[data-roughcut-frame]"),
     ).toHaveLength(1);
     expect(screen.getByText("成片帧")).toBeInTheDocument();
+  });
+});
+
+describe("Blueprint script confirmation", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    useProjectSnapshotStore.getState().reset();
+  });
+
+  it("confirms the displayed script snapshot even when polling updates behind the dialog", async () => {
+    const project = structuredClone(projectDocument);
+    project.settings.production_stage = "script";
+    const pollOnce = vi.fn(async () => {});
+    useProjectSnapshotStore.setState({
+      projectId: "p1",
+      project,
+      etag: '"displayed"',
+      patching: false,
+      pollOnce,
+    });
+    const confirm = vi.spyOn(Modal, "confirm").mockImplementation(() => ({
+      destroy: vi.fn(),
+      update: vi.fn(),
+    }));
+    const { calls } = installMockFetch([
+      {
+        match: "/projects/p1/production-stage",
+        response: { json: { ok: true } },
+      },
+    ]);
+    render(<ProductionStageControl projectId="p1" />);
+    const confirmButton = screen.getByRole("button", {
+      name: "确认剧本并继续",
+    });
+    // F1/F2: the strongly-required confirmation uses the shared decision style.
+    expect(confirmButton).toHaveClass("btn-decision");
+    expect(confirmButton).toHaveAttribute("data-production-stage-confirm", "");
+    fireEvent.click(confirmButton);
+    expect(calls).toHaveLength(0);
+    act(() => useProjectSnapshotStore.setState({ etag: '"newer"' }));
+    await act(async () => {
+      await confirm.mock.calls[0][0].onOk?.();
+    });
+    await waitFor(() => expect(pollOnce).toHaveBeenCalledWith("p1"));
+    expect(calls[0].body).toEqual({
+      stage: "media",
+      projectEtag: '"displayed"',
+    });
   });
 });

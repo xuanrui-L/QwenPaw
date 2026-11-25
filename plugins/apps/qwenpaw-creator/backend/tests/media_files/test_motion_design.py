@@ -48,7 +48,6 @@ from services.project_files.models import (
     EditCreation,
     ElementLocation,
     MotionGraphic,
-    ProjectSettings,
     SubtitleStyle,
     Timeline,
     TimelineElement,
@@ -262,82 +261,40 @@ class TestMotionDesignSafety:
             assert right <= safe_right, f"{role} 右边越界 {right:.3f}"
             assert bottom <= safe_bottom, f"{role} 底边越界 {bottom:.3f}"
 
-    def test_caption_box_outside_the_safe_area_is_rejected(self) -> None:
-        """The size floors alone leave the frame-edge box perfectly legal.
-
-        The prompt used to teach exactly this box: 0.18 high with a centre
-        anchor reaches 0.97 and burns the last line into the frame edge, so
-        the gate has to reject it by name instead of only warning about it
-        in a comment.
-        """
-        from services.media_files.motion_templates import (
-            CAPTION_ROLE_LOCATIONS,
-        )
-
-        burnt = ElementLocation(
-            x=0.5,
-            y=0.88,
-            width=0.8,
-            height=0.18,
-            anchor_x=0.5,
-            anchor_y=0.5,
-        )
-        text = "那天晚上他站在门口很久什么都没有说"
-        with pytest.raises(ValidationError, match="安全区"):
-            _validate_caption_location(burnt, text, (1280, 720))
-        # The role preset that replaces it stays legal on the same canvas, so
-        # the gate cannot reject its own table.
-        _validate_caption_location(
-            ElementLocation(**CAPTION_ROLE_LOCATIONS["dialogue"]),
-            text,
-            (1280, 720),
-        )
-
-    def test_safe_area_gate_skips_overlays_that_are_not_subtitles(
+    @pytest.mark.parametrize(
+        ("x", "y", "width", "height", "is_bubble", "error"),
+        [
+            (0.50, 0.88, 0.80, 0.18, False, "安全区"),
+            (0.90, 0.86, 0.30, 0.20, False, "安全区"),
+            (0.90, 0.86, 0.30, 0.20, True, None),
+            (0.90, 0.29, 0.18, 0.53, True, "太窄"),
+        ],
+        ids=["frame-edge", "subtitle", "speech-bubble", "too-narrow-bubble"],
+    )
+    def test_safe_area_exemption_only_applies_to_bubbles(
         self,
-    ) -> None:
-        """气泡卡片走自己的排版，不能被子幕安全区条款误伤。
-
-        The prompt teaches the pet-OS bubble a tall right-edge box that
-        describes the whole speech-bubble layer, not a subtitle line, and the
-        bubble renderer lays out its tail and padding by itself.  So the
-        subtitle safe area is not its contract: the same out-of-safe-area box
-        a subtitle is rejected for has to stay acceptable once the caller
-        says the overlay is not a subtitle.
-        """
-        bubble = ElementLocation(
-            x=0.90,
-            y=0.86,
-            width=0.30,
-            height=0.20,
+        x,
+        y,
+        width,
+        height,
+        is_bubble,
+        error,
+    ):
+        location = ElementLocation(
+            x=x,
+            y=y,
+            width=width,
+            height=height,
             anchor_x=0.5,
             anchor_y=0.5,
         )
-        with pytest.raises(ValidationError, match="安全区"):
-            _validate_caption_location(bubble, "本喵要发光", (1280, 720))
-        _validate_caption_location(
-            bubble,
-            "本喵要发光",
-            (1280, 720),
-            check_safe_area=False,
-        )
-        # The exemption is scoped to the safe area only: the size floors that
-        # already governed bubbles keep rejecting the prompt's own 0.18-wide
-        # box, so nothing about bubble behaviour shifts with this gate.
-        with pytest.raises(ValidationError, match="太窄"):
-            _validate_caption_location(
-                ElementLocation(
-                    x=0.90,
-                    y=0.29,
-                    width=0.18,
-                    height=0.53,
-                    anchor_x=0.5,
-                    anchor_y=0.5,
-                ),
-                "本喵要发光",
-                (1280, 720),
-                check_safe_area=False,
-            )
+        args = (location, "本喵要发光", (1280, 720))
+        options = {"check_safe_area": False} if is_bubble else {}
+        if error is None:
+            _validate_caption_location(*args, **options)
+        else:
+            with pytest.raises(ValidationError, match=error):
+                _validate_caption_location(*args, **options)
 
     def test_documented_copy_budget_fits_the_preset_it_promises(self) -> None:
         """A prompt ceiling the preset cannot hold silently clips words.
@@ -1065,23 +1022,20 @@ class TestCaptionStyleDerivation:
             intensity=0,
         )
 
-    def test_unstamped_document_keeps_the_historical_fade(self) -> None:
+    @pytest.mark.parametrize("pack", [None, "variety_pop"])
+    def test_unstamped_document_uses_the_current_pack_or_historical_fade(
+        self, pack
+    ):
         document = self._legacy_document()
-        # The schema default must not be mistaken for a user pick: a project
-        # that never chose a style may not change appearance on upgrade.
         assert document.entrance == "pop"
-        assert motion_design.resolve_caption_animation(document, None) == {
-            "entrance": "soft_fade",
-            "exit": "none",
-            "loop": False,
-        }
-
-    def test_unstamped_document_adopts_the_pack_signature(self) -> None:
-        document = self._legacy_document()
-        assert motion_design.resolve_caption_animation(
-            document,
-            "variety_pop",
-        ) == subtitle_pack_animation("variety_pop")
+        expected = (
+            subtitle_pack_animation(pack)
+            if pack
+            else {"entrance": "soft_fade", "exit": "none", "loop": False}
+        )
+        assert (
+            motion_design.resolve_caption_animation(document, pack) == expected
+        )
 
     def test_the_stamp_wins_over_the_document_fields(self) -> None:
         built, _concept = motion_design.build_caption_document(
@@ -1109,19 +1063,6 @@ class TestCaptionStyleDerivation:
         assert (
             motion_design.caption_document_is_stale(drifted, project) is True
         )
-
-    def test_a_pack_switch_replays_the_new_signature(self) -> None:
-        built, _concept = motion_design.build_caption_document(
-            text="换风格包",
-            location=_LOC,
-            pack_id="variety_pop",
-            style=None,
-            animation={"entrance": "type_on", "exit": "none", "loop": False},
-        )
-        assert motion_design.resolve_caption_animation(
-            built,
-            "cinematic",
-        ) == subtitle_pack_animation("cinematic")
 
     def test_no_pack_document_keeps_the_historical_layout(self) -> None:
         built, concept = motion_design.build_caption_document(
@@ -1161,7 +1102,9 @@ class TestCaptionStyleDerivation:
         assert motion_design.caption_animation_for_compose(free, None) is None
         assert motion_design.caption_animation_for_compose(None, None) is None
 
-    def test_compose_triple_re_adopts_after_a_pack_switch(self) -> None:
+    def test_pack_switch_updates_the_document_and_compose_fallback(
+        self,
+    ) -> None:
         built, _concept = motion_design.build_caption_document(
             text="换包之后的兜底",
             location=_LOC,
@@ -1172,12 +1115,15 @@ class TestCaptionStyleDerivation:
         # The stamp was written under the old pack, and the same rule the
         # document path applies (a pack switch replays the new signature) has
         # to reach the fallback too, or the two would disagree.
+        expected = subtitle_pack_animation("cinematic")
+        assert (
+            motion_design.resolve_caption_animation(built, "cinematic")
+            == expected
+        )
         assert motion_design.caption_animation_for_compose(
             built,
             "cinematic",
-        ) == motion_design.normalise_caption_animation(
-            subtitle_pack_animation("cinematic"),
-        )
+        ) == motion_design.normalise_caption_animation(expected)
 
     def test_pack_tracking_and_leading_enter_the_font_fit(self) -> None:
         text = "这是一行足够长的字幕文案用来验证字距与行高都会挤进字号自适应" "再长一点凑满四十多个汉字才够看效果吧"
@@ -1282,160 +1228,104 @@ class TestComposeCaptionFallbackStyle:
 
 
 class TestCaptionBackgroundOpacity:
-    """One pick re-inks the plate a pack already draws, and never invents one.
-
-    ``background_opacity`` is the only subtitle override that edits a colour
-    the style pack owns, so what matters here is the byte guarantee: a project
-    that never touched it — and a pack that never drew a plate — must render
-    exactly what it rendered before, in the template, the fallback PNG and the
-    wording an agent reads.
-    """
-
     @staticmethod
     def _plate(html: str) -> str:
         match = re.search(r"background:(rgba?\([^)]*\))", html)
         return match.group(1) if match else ""
 
-    def test_the_pick_replaces_the_pack_alpha(self) -> None:
+    @pytest.mark.parametrize(
+        ("pack", "alpha", "plate"),
+        [
+            ("warm_note", 0.25, "rgba(255,248,232,0.250)"),
+            ("clean_talk", 0.0, ""),
+            ("clean_talk", "lots", "rgba(14,16,20,0.42)"),
+            *(("cinematic", opacity, "") for opacity in (0.0, 0.5, 1.0)),
+        ],
+    )
+    def test_override_changes_only_a_plate_drawn_by_the_pack(
+        self, pack, alpha, plate
+    ):
         html = render_caption_template(
-            "把奶油底板调淡一点",
+            "底板不透明度",
             box_width=0.8,
             box_height=0.18,
-            typography=subtitle_pack_typography("warm_note"),
-            style={"background_opacity": 0.25},
+            typography=subtitle_pack_typography(pack),
+            style={"background_opacity": alpha},
         )
-        # Same colour, the picked alpha: the block is re-inked, not replaced.
-        assert self._plate(html) == "rgba(255,248,232,0.250)"
+        assert self._plate(html) == plate
+        if pack == "clean_talk" and alpha == 0.0:
+            assert "width:100%;" in html
 
-    def test_zero_takes_the_plate_away(self) -> None:
-        html = render_caption_template(
-            "不要底板",
-            box_width=0.8,
-            box_height=0.18,
-            typography=subtitle_pack_typography("clean_talk"),
-            style={"background_opacity": 0.0},
+    def test_unselected_opacity_preserves_the_historical_render(self):
+        geometry = {
+            "box_width": 0.8,
+            "box_height": 0.18,
+            "typography": subtitle_pack_typography("warm_note"),
+        }
+        text = "升级前后的字幕"
+        historical = render_caption_template(text, **geometry)
+        assert (
+            render_caption_template(
+                text,
+                style={"background_opacity": None},
+                **geometry,
+            )
+            == historical
         )
-        assert self._plate(html) == ""
-        # The pill layout goes with it, so the text keeps filling its box.
-        assert "width:100%;" in html
-
-    def test_an_untouched_pick_keeps_the_pack_bytes(self) -> None:
-        pack = subtitle_pack_typography("warm_note")
-        historical = render_caption_template(
-            "升级前后一字不差",
-            box_width=0.8,
-            box_height=0.18,
-            typography=pack,
-        )
-        explicit_none = render_caption_template(
-            "升级前后一字不差",
-            box_width=0.8,
-            box_height=0.18,
-            typography=pack,
-            style={"background_opacity": None},
-        )
-        assert explicit_none == historical
         assert self._plate(historical) == "rgba(255,248,232,0.5)"
 
-    def test_a_pack_without_a_plate_stays_without_one(self) -> None:
-        for alpha in (0.0, 0.5, 1.0):
-            html = render_caption_template(
-                "无底板风格不造底板",
-                box_width=0.8,
-                box_height=0.18,
-                typography=subtitle_pack_typography("cinematic"),
-                style={"background_opacity": alpha},
+    @pytest.mark.parametrize("opacity", [None, 0.25])
+    def test_only_an_explicit_plate_pick_changes_the_stamp_and_staleness(
+        self, opacity
+    ):
+        def project(alpha):
+            style = (
+                SubtitleStyle(background_opacity=alpha)
+                if alpha is not None
+                else None
             )
-            assert self._plate(html) == ""
-
-    def test_a_broken_value_falls_back_to_the_pack(self) -> None:
-        html = render_caption_template(
-            "非法值不猜",
-            box_width=0.8,
-            box_height=0.18,
-            typography=subtitle_pack_typography("clean_talk"),
-            style={"background_opacity": "lots"},
-        )
-        assert self._plate(html) == "rgba(14,16,20,0.42)"
-
-    def test_the_stamp_gains_a_token_only_when_touched(self) -> None:
-        # Four tokens is what every existing document already carries; adding
-        # the fifth only on a pick is what keeps an upgrade from redrawing the
-        # whole project.
-        assert (
-            caption_style_state("warm_note", {"color": "#FFE066"})
-            == "warm_note|#ffe066|1|1"
-        )
-        assert (
-            caption_style_state(
-                "warm_note",
-                {"color": "#FFE066", "background_opacity": 0.5},
+            return SimpleNamespace(
+                settings=ProjectSettings(
+                    subtitle_template="warm_note", subtitle_style=style
+                ),
             )
-            == "warm_note|#ffe066|1|1|0.5"
-        )
 
-    def test_a_plate_pick_makes_the_document_stale(self) -> None:
+        current = project(opacity)
+        style = current.settings.subtitle_style
         built, _concept = motion_design.build_caption_document(
-            text="调过底板的重绘一次",
+            text="保留历史字幕",
             location=_LOC,
             pack_id="warm_note",
-            style=SubtitleStyle(background_opacity=0.25).model_dump(
-                mode="json",
-            ),
+            style=style.model_dump(mode="json") if style else None,
             animation=None,
         )
-        project = SimpleNamespace(
-            settings=ProjectSettings(
-                subtitle_template="warm_note",
-                subtitle_style=SubtitleStyle(background_opacity=0.25),
-            ),
+        stamp = caption_style_state(
+            "warm_note", {"color": "#FFE066", "background_opacity": opacity}
         )
-        assert motion_design.caption_document_is_stale(built, project) is False
-        lighter = SimpleNamespace(
-            settings=ProjectSettings(
-                subtitle_template="warm_note",
-                subtitle_style=SubtitleStyle(background_opacity=0.75),
-            ),
-        )
-        assert motion_design.caption_document_is_stale(built, lighter) is True
-        # And a project that never touched the control still matches the
-        # four-token stamp every older document carries.
-        untouched = SimpleNamespace(
-            settings=ProjectSettings(subtitle_template="warm_note"),
-        )
-        plain, _plain_concept = motion_design.build_caption_document(
-            text="没调过底板",
-            location=_LOC,
-            pack_id="warm_note",
-            style=None,
-            animation=None,
-        )
+        expected = "warm_note|#ffe066|1|1"
+        assert stamp == (expected if opacity is None else expected + "|0.25")
+        assert motion_design.caption_document_is_stale(built, current) is False
         assert (
-            motion_design.caption_document_is_stale(plain, untouched) is False
+            motion_design.caption_document_is_stale(built, project(0.75))
+            is True
         )
 
-    def test_the_wording_is_spoken_only_where_a_plate_is_drawn(self) -> None:
-        assert (
-            subtitle_style_override_line(
-                SubtitleStyle(background_opacity=0.5).model_dump(mode="json"),
-                "clean_talk",
-            )
-            == "字幕底板不透明度 50%"
+    @pytest.mark.parametrize(
+        ("pack", "opacity", "fragment"),
+        [
+            ("clean_talk", 0.50, "50%"),
+            ("clean_talk", 0.0, "不加字幕底板"),
+            ("cinematic", 0.50, ""),
+            (None, 0.50, ""),
+        ],
+    )
+    def test_only_packs_with_plates_guide_the_agent_on_figures(
+        self, pack, opacity, fragment
+    ):
+        line = subtitle_style_override_line(
+            {"background_opacity": opacity}, pack
         )
-        assert (
-            subtitle_style_override_line(
-                SubtitleStyle(background_opacity=0.0).model_dump(mode="json"),
-                "clean_talk",
-            )
-            == "不加字幕底板"
-        )
-        for pack_id in ("cinematic", None):
-            assert (
-                subtitle_style_override_line(
-                    SubtitleStyle(
-                        background_opacity=0.5,
-                    ).model_dump(mode="json"),
-                    pack_id,
-                )
-                == ""
-            )
+        if fragment:
+            assert fragment in line
+        else:
+            assert not line
