@@ -1280,6 +1280,81 @@ def test_a_forged_non_terminal_verdict_in_the_ledger_is_not_trusted(
     assert report.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
 
 
+def test_a_ledger_entry_with_an_invalid_state_enum_is_not_trusted(
+    tmp_path,
+    monkeypatch,
+):
+    """Valid JSON carrying an unknown journal-state enum must degrade, not raise.
+
+    The ledger is a cache. A stale or forged entry whose ``state_before`` is
+    not a real ``CommitJournalState`` used to raise ``ValueError`` on hit,
+    which bubbled out of ``recover_project`` and fail-closed the whole Project
+    as a single integrity error. It must instead be treated as a miss so the
+    real audit runs and the healthy Project recovers normally.
+    """
+
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
+    store = _finalized_store(tmp_path)
+    recover(store)  # build a ledger with a real fingerprint
+
+    from services.project_files.recovery import _audit_fingerprint
+
+    tx_root = transaction_root(store, "tx-ledger")
+    ledger = runtime_root(store) / AUDIT_LEDGER_FILE_NAME
+    table = json.loads(ledger.read_text(encoding="utf-8"))
+    table[tx_root.name] = {
+        "fingerprint": _audit_fingerprint(tx_root, runtime_root(store)),
+        "action": RecoveryAction.ALREADY_FINALIZED.value,
+        "transaction_id": "tx-ledger",
+        "state_before": "not_a_real_journal_state",
+        "state_after": None,
+    }
+    ledger.write_text(json.dumps(table), encoding="utf-8")
+
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+    report = recover(store)
+
+    assert report.ok, "an invalid enum must not fail-close the Project"
+    assert calls, "an invalid enum entry must fall through to a real audit"
+    assert report.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+
+
+def test_a_changed_project_json_invalidates_the_ledger(tmp_path, monkeypatch):
+    """The audit cross-checks the live project.json, so it must be fingerprinted.
+
+    ``_audit_terminal_inputs`` reads the current Project to compare its ETag
+    against the Runtime state. Before project.json joined the fingerprint, a
+    project.json that moved or corrupted on its own -- with every Runtime fact
+    untouched -- kept replaying a cached ALREADY_FINALIZED on every hot boot,
+    while a cold audit would have read the Project and surfaced the conflict.
+    """
+
+    import os
+
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
+    store = _finalized_store(tmp_path)
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+    recover(store)  # build the ledger
+    calls.clear()
+
+    # Sanity check: without damage the second boot is still a cache hit, so
+    # fingerprinting project.json does not cost the steady-state fast boot.
+    recover(store)
+    assert not calls
+    calls.clear()
+
+    # Touch project.json alone (mtime), leaving every Runtime fact intact.
+    project_json = runtime_root(store).parent / "project.json"
+    stamp = os.stat(project_json).st_atime_ns
+    os.utime(project_json, ns=(stamp, os.stat(project_json).st_mtime_ns + 5))
+
+    recover(store)
+
+    assert calls, "a touched project.json must invalidate the cached verdict"
+
+
 def test_dependency_fingerprint_rejects_an_unsafe_round_id(tmp_path):
     """round.json bytes must not steer the fingerprint outside Runtime."""
 
@@ -1292,7 +1367,7 @@ def test_dependency_fingerprint_rejects_an_unsafe_round_id(tmp_path):
 
     deps = _audit_runtime_dependencies(tx_root, tmp_path / "runtime")
 
-    assert set(deps) == {"runtime-state"}
+    assert set(deps) == {"runtime-state", "project-document"}
 
 
 def test_a_terminal_entry_is_decided_without_its_snapshots(

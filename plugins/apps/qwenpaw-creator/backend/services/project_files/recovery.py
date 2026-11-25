@@ -122,14 +122,16 @@ def _audit_fingerprint(
     boot-time audit claims to catch.
 
     ``runtime_root`` extends the fingerprint past the transaction directory
-    to the two Runtime files the light-audit path reads but the transaction
-    directory does not own: ``state.json`` and the aggregate ChangeRound at
-    ``change-rounds/{round_id}/round.json``. Missing those from the
-    fingerprint cached an ALREADY_FINALIZED outcome even after a crash
-    deleted the Runtime fact it was derived from, and every later boot hit
-    the cache instead of running the repair branch that would have
-    republished them (review #243 r4548690109). Callers that still pass
-    only ``transaction_root`` -- the fingerprint helper's old shape -- keep
+    to the files the light-audit path reads but the transaction directory
+    does not own: ``state.json``, the aggregate ChangeRound at
+    ``change-rounds/{round_id}/round.json``, and the live ``project.json``
+    whose ETag the audit cross-checks against the Runtime state. Missing
+    those from the fingerprint cached an ALREADY_FINALIZED outcome even
+    after a crash deleted the Runtime fact it was derived from -- or after
+    project.json moved on its own -- and every later boot hit the cache
+    instead of running the repair branch that would have republished them
+    (review #243 r4548690109). Callers that still pass only
+    ``transaction_root`` -- the fingerprint helper's old shape -- keep
     working byte-for-byte, they just do not see the new coverage.
     """
 
@@ -171,7 +173,16 @@ def _audit_runtime_dependencies(
     aggregate entry and the transaction-side fingerprint is what decides.
     """
 
-    deps = {"runtime-state": runtime_root / "state.json"}
+    deps = {
+        "runtime-state": runtime_root / "state.json",
+        # The light audit cross-checks the live Project's ETag against the
+        # Runtime state, so the verdict also depends on project.json. A commit
+        # rewrites it together with state.json, so fingerprinting it adds no
+        # extra invalidation in normal operation; it only catches a
+        # project.json that moved or corrupted on its own, which would
+        # otherwise replay a stale ALREADY_FINALIZED on every hot boot.
+        "project-document": runtime_root.parent / "project.json",
+    }
     try:
         raw = json.loads(
             (transaction_root / "round.json").read_text(encoding="utf-8"),
@@ -477,19 +488,29 @@ class ProjectCommitRecoveryCoordinator:
                 continue
             if action.value != entry.get("action"):
                 continue
-            return TransactionRecoveryOutcome(
-                transaction_id=str(entry.get("transaction_id", "")),
-                action=action,
-                state_before=(
+            try:
+                state_before = (
                     CommitJournalState(entry["state_before"])
                     if entry.get("state_before")
                     else None
-                ),
-                state_after=(
+                )
+                state_after = (
                     CommitJournalState(entry["state_after"])
                     if entry.get("state_after")
                     else None
-                ),
+                )
+            except ValueError:
+                # Valid JSON carrying an unknown journal-state enum is a stale
+                # or forged entry, not a verdict. Treat it as a miss so the
+                # caller runs a real audit; letting the ValueError escape
+                # would fail-close the whole Project as an integrity error,
+                # the very false alarm the corrupt-file path avoids.
+                return None
+            return TransactionRecoveryOutcome(
+                transaction_id=str(entry.get("transaction_id", "")),
+                action=action,
+                state_before=state_before,
+                state_after=state_after,
                 detail="terminal transaction (audit ledger hit)",
             )
         return None
