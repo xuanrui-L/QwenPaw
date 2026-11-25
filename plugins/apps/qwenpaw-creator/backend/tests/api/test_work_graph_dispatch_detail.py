@@ -11,32 +11,36 @@ user saw a queue label for 69 hours while nothing was queued at all.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
 
+from api.dependencies import creator_error_handler, project_file_services
+from api.project_file_routes import router
 from api.work_graph_routes import _task_admission_detail
-from domain.enums import TaskStatus
+from domain.enums import CreatorCommandType, TaskStatus
+from domain.errors import CreatorError, ValidationError
 from services.file_agent_runtime.work_scheduler import (
     _abandoned_queued_task_ids,
 )
-
-import asyncio
-
-import hashlib
-from fastapi import FastAPI
-from api.dependencies import creator_error_handler, project_file_services
-from api.project_file_routes import router
-from domain.errors import CreatorError
+from services.media_files import local_execution
 from services.project_files.facade import CreatorFileServices
-from services.project_files.models import Project
-from test_file_runtime_api import _timeline_render_prechecks
-from test_project_file_api import PROJECT_URL, _patch_payload
-
-from services.project_files.models import SceneLedgerRow
+from services.project_files.models import (
+    Project,
+    SceneLedgerRow,
+    SourceAssetVersion,
+    SourceVersionRenderSource,
+)
 from services.render_review import scene_review as scene_review_module
+
 from render_review.test_scene_review import _plan, _timeline_with_scene
+from test_file_runtime_api import _app
+from test_project_file_api import PROJECT_URL, _patch_payload
 
 pytestmark = pytest.mark.unit
 
@@ -191,55 +195,80 @@ def test_preflight_scene_review_surfaces_a_failed_repair(
     assert timeout_refusal.value.details["scenes"] == ["scene:hall"]
 
 
-def test_preflight_scene_review_refuses_when_scenes_are_still_blocked(
+def test_manual_render_routes_stale_scenes_to_repair_before_dispatch(
+    tmp_path,
     monkeypatch,
+    run_scenario,
 ) -> None:
-    """``auto_review`` returning a non-empty list is also a refusal.
-
-    The repair gathers per-scene work with ``return_exceptions=True``, so a
-    VLM outage that used to escape as an exception now lands in the returned
-    ``remaining`` list. The route used to discard that value, and the drive's
-    scene gate would still reject the compose -- leaving the user holding a
-    202 receipt for a Task id that never materialised (review #243 P1).
-    """
-
-    # pylint: disable=protected-access
-    import api.file_execution_routes as routes
-    from domain.errors import ConflictError
-    from services.render_review import scene_review
-
-    class _Projects:
-        def read(self, _project_id):
-            return SimpleNamespace(
-                project=SimpleNamespace(
-                    timelines=SimpleNamespace(items={"main": object()}),
-                ),
-            )
-
-    services = SimpleNamespace(projects=_Projects())
-    monkeypatch.setattr(
-        scene_review,
-        "collect_scene_review_targets",
-        lambda _timeline: (["scene:hall"], []),
+    app, services, snapshot, _bootstrap = _app(tmp_path)
+    scene = SceneLedgerRow(
+        scene_id="scene-1",
+        element_ids=["el-1"],
+        status="locked",
+        locked_fingerprint="sha256:stale",
     )
-
-    async def swallows_one(*_args, **_kwargs):
-        # The real auto_review gathers with return_exceptions=True and
-        # puts the still-broken scene id into its result, exactly like this.
-        return ["scene:hall"]
-
-    monkeypatch.setattr(scene_review, "auto_review_stale_scenes", swallows_one)
-
-    with pytest.raises(ConflictError) as captured:
-        asyncio.run(
-            routes._preflight_scene_review(services, "project-1", "main"),
+    _project, timeline = _timeline_with_scene(edit_plan=_plan([scene]))
+    timeline.elements_by_id["el-1"].render_source = SourceVersionRenderSource(
+        version_id="source-1",
+        source_out_tick=1000,
+    )
+    source_url = "https://cdn.test/source.mp4"
+    project = snapshot.project.model_copy(
+        deep=True, update={"generation": snapshot.generation + 1}
+    )
+    project.timelines.items["timeline:main"] = timeline
+    project.assets.source_versions_by_id["source-1"] = SourceAssetVersion(
+        version_id="source-1",
+        logical_asset_id="source",
+        name="source.mp4",
+        checksum=hashlib.sha256(source_url.encode()).hexdigest(),
+        media_kind="video",
+        media_type="video/mp4",
+        duration_seconds=1,
+        created_at=project.created_at,
+        metadata={
+            "sourceKind": "remote_url",
+            "checksumKind": "source_url_sha256",
+            "publicSourceUrl": source_url,
+        },
+    )
+    services.projects.replace("project-1", project, snapshot.etag)
+    with pytest.raises(ValidationError, match="需重审的场景: scene-1"):
+        local_execution.validate_local_media_execution(
+            services,
+            project_id="project-1",
+            command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
+            target_ref="timeline:timeline:main",
         )
 
-    assert captured.value.details == {
+    repair = AsyncMock(return_value=["scene-1"])
+    dispatch = AsyncMock()
+    monkeypatch.setattr(
+        scene_review_module,
+        "auto_review_stale_scenes",
+        repair,
+    )
+    monkeypatch.setattr(
+        local_execution,
+        "execute_file_local_media_command",
+        dispatch,
+    )
+
+    async def scenario(client):
+        return await client.post(
+            "/projects/project-1/timelines/timeline%3Amain/render",
+            headers={"Idempotency-Key": "stale-scene"},
+        )
+
+    response = run_scenario(app, scenario)
+    assert response.status_code == 409, response.text
+    assert response.json()["details"] == {
         "code": "SCENE_REVIEW_INCOMPLETE",
-        "scenes": ["scene:hall"],
+        "scenes": ["scene-1"],
     }
-    assert "scene:hall" in str(captured.value)
+    repair.assert_awaited_once()
+    assert repair.await_args.kwargs["timeline_ref"] == "timeline:timeline:main"
+    dispatch.assert_not_awaited()
 
 
 def test_delegated_compose_stays_ready_after_a_superseded_final(
@@ -372,61 +401,3 @@ def test_delegated_compose_stays_ready_after_a_superseded_final(
     # Delegated mode still auto-composes: the superseded final is READY,
     # not STALE, so the scheduler picks it up without a user press.
     assert graph.by_id["compose:timeline:main"].status.value == "ready"
-
-
-def test_manual_render_leaves_stale_scene_locks_for_auto_rereview(
-    tmp_path,
-    monkeypatch,
-    run_scenario,
-) -> None:
-    prechecks = _timeline_render_prechecks(tmp_path, monkeypatch, run_scenario)
-    assert prechecks
-    assert all(check.get("enforce_scene_gate") is False for check in prechecks)
-
-
-def test_precheck_can_skip_the_gate_that_auto_rereview_repairs(
-    monkeypatch,
-) -> None:
-    """An expired lock may only block the render itself, never the precheck.
-
-    ``auto_review_stale_scenes`` repairs stale locks inside the dispatch
-    path; a caller that runs ahead of it must resolve without the gate, or
-    every user-initiated export is rejected with 422 before the repair ever
-    gets a turn.
-    """
-    from domain.enums import CreatorCommandType
-    from services.media_files import local_execution
-
-    stale = SceneLedgerRow(
-        scene_id="scene-1",
-        element_ids=["el-1"],
-        status="locked",
-        locked_fingerprint="sha256:stale",
-    )
-    project, _timeline = _timeline_with_scene(edit_plan=_plan([stale]))
-    gated: list[str] = []
-    monkeypatch.setattr(
-        scene_review_module,
-        "validate_scene_ledger_locked",
-        lambda _timeline: gated.append("gate"),
-    )
-    monkeypatch.setattr(
-        local_execution,
-        "_timeline_execution",
-        lambda **_kwargs: "resolved",
-    )
-
-    def _resolve(**overrides):
-        return local_execution._resolve_execution(
-            snapshot=SimpleNamespace(project=project),
-            command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
-            target_ref="timeline:timeline:main",
-            arguments={},
-            **overrides,
-        )
-
-    assert _resolve() == "resolved"
-    assert gated == ["gate"]
-    gated.clear()
-    assert _resolve(enforce_scene_gate=False) == "resolved"
-    assert not gated

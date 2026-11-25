@@ -47,7 +47,16 @@ from utils.exceptions import ModelError
         ("happyhorse-1.0-r2v", ("video_edit：", "只取前 15 秒")),
         (
             "wan2.7-r2v",
-            ("不支持的 mode（video_edit）", "图1、图2", "不得使用 Wan 2.6 的 `character1`"),
+            (
+                "不支持的 mode（video_edit）",
+                "`[Image 1]`、`[Image 2]`",
+                "图1、图2",
+                "视频1、视频2",
+                "`Image 1`、`Video 1`",
+                "各自类型的出现顺序分别计数",
+                "图片与视频合计最多 5 个",
+                "不得使用 Wan 2.6 的 `character1`",
+            ),
         ),
         (
             "wan2.6-r2v",
@@ -63,6 +72,9 @@ from utils.exceptions import ModelError
                 "不支持的 mode（video_edit）",
                 "`image1`",
                 "`video1`",
+                "中文 Prompt 用“图片1、图片2",
+                "不要把 Wan 的“图1”当成统一语法",
+                "镜头 1 / 镜头 2",
                 "不写时间戳",
                 "最终视频不继承宫格、边框、编号、箭头",
             ),

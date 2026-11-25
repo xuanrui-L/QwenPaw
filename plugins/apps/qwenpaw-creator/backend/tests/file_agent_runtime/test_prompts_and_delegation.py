@@ -188,6 +188,7 @@ def test_storyboard_keeps_the_users_stage_specific_medium() -> None:
     )
     assert "`storyboard_prompt` 是中间分镜" in rule
     assert "不套用最终交付媒介" in rule
+    assert "只补足用户没有指明的目标" in rule
     assert re.search(r"粗铅笔、炭笔[^，]*绘制媒介时保留该媒介", rule)
     assert "成片仍按项目媒介生成" in rule
 
@@ -213,10 +214,15 @@ def test_video_model_guidance_uses_the_configured_duration(
 
 
 @pytest.mark.parametrize(
-    ("model", "protocol", "marker"),
+    ("model", "protocol", "marker", "constraint"),
     [
-        ("kling/kling-v3-omni-video-generation", "DashScope（百炼）", "<<<{}>>>"),
-        ("kling-3.0-omni", "Kling", "@{}"),
+        (
+            "kling/kling-v3-omni-video-generation",
+            "DashScope（百炼）",
+            "<<<{}>>>",
+            "图片最多 7 张",
+        ),
+        ("kling-3.0-omni", "Kling", "@{}", "720p/1080p/4k"),
     ],
     ids=["bailian", "direct"],
 )
@@ -225,6 +231,7 @@ def test_kling_guidance_uses_only_the_configured_channel_reference_syntax(
     model,
     protocol,
     marker,
+    constraint,
 ) -> None:
     video_settings = {"model": model, "protocol": protocol}
     monkeypatch.setattr(
@@ -241,6 +248,7 @@ def test_kling_guidance_uses_only_the_configured_channel_reference_syntax(
         project_id=_PROJECT_ID, external_skills=""
     )
 
+    assert constraint in prompt
     wire_token = r"<<<(?:image|video)_(?:N|\d+)>>>|@(?:image|video)_(?:N|\d+)"
     references = set(re.findall(wire_token, prompt))
     assert {
