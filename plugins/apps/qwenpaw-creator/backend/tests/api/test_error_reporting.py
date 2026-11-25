@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -42,7 +41,9 @@ def _restore_process_environment():
         os.environ[key] = value
 
 
-def _load_plugin_entrypoint():
+def _load_plugin_entrypoint(monkeypatch):
+    # Load a fresh plugin entrypoint with the process-wide host package.
+    monkeypatch.syspath_prepend(str(QWENPAW_SOURCE))
     spec = importlib.util.spec_from_file_location(
         "qwenpaw_creator_plugin_host_contract",
         PLUGIN_ENTRYPOINT,
@@ -53,40 +54,14 @@ def _load_plugin_entrypoint():
     return module
 
 
-@pytest.fixture
-def load_plugin_entrypoint(monkeypatch):
-    """Keep modules loaded by the fresh host import together."""
-
-    def is_host_module(name: str) -> bool:
-        return name == "qwenpaw" or name.startswith("qwenpaw.")
-
-    previous_modules = {
-        name: module
-        for name, module in sys.modules.copy().items()
-        if is_host_module(name)
-    }
-    for name in previous_modules:
-        del sys.modules[name]
-    monkeypatch.syspath_prepend(str(QWENPAW_SOURCE))
-    try:
-        yield _load_plugin_entrypoint
-    finally:
-        # New submodules must not outlive the temporary parent package.
-        for name in tuple(sys.modules):
-            if is_host_module(name):
-                del sys.modules[name]
-        sys.modules.update(previous_modules)
-
-
 def test_plugin_defaults_runtime_paths_to_qwenpaw_working_dir(
     tmp_path,
     monkeypatch,
-    load_plugin_entrypoint,
 ) -> None:
     monkeypatch.setenv("CREATOR_DATA_ROOT", "")
     monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", "")
     monkeypatch.setenv("CREATOR_BINARY_DIR", "")
-    module = load_plugin_entrypoint()
+    module = _load_plugin_entrypoint(monkeypatch)
 
     working_dir = tmp_path / "qwenpaw-home"
     (
@@ -114,7 +89,6 @@ def test_plugin_defaults_runtime_paths_to_qwenpaw_working_dir(
 def test_plugin_rejects_unsafe_runtime_path_configuration(
     tmp_path,
     monkeypatch,
-    load_plugin_entrypoint,
 ) -> None:
     # A model config path escaping the runtime root fails closed.
     monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path / "creator-runtime"))
@@ -122,7 +96,7 @@ def test_plugin_rejects_unsafe_runtime_path_configuration(
         "CREATOR_MODEL_CONFIG_PATH",
         str(tmp_path / "outside" / "model_config.json"),
     )
-    module = load_plugin_entrypoint()
+    module = _load_plugin_entrypoint(monkeypatch)
     with pytest.raises(
         module.CreatorDataRootError,
         match="inside CREATOR_DATA_ROOT",
@@ -132,9 +106,9 @@ def test_plugin_rejects_unsafe_runtime_path_configuration(
 
 def test_real_qwenpaw_host_mount_keeps_creator_errors_local_and_structured(
     api_runtime_root,
-    load_plugin_entrypoint,
+    monkeypatch,
 ) -> None:
-    module = load_plugin_entrypoint()
+    module = _load_plugin_entrypoint(monkeypatch)
     from qwenpaw.plugins.api import PluginApi
     from qwenpaw.plugins.registry import PluginRegistry
 

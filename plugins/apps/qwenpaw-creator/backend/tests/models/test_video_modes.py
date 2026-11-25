@@ -24,11 +24,107 @@ from models.video_capabilities import (
     validate_video_mode,
     video_backend_key,
     video_model_capability_payload,
+    video_model_prompt_guidance,
     video_model_supported_modes,
     video_prompt_storyboard_reference_violation,
     video_reference_capability,
 )
 from utils.exceptions import ModelError
+
+
+@pytest.mark.parametrize(
+    ("model", "rules"),
+    [
+        (
+            "happyhorse-1.1-r2v",
+            (
+                "不支持的 mode（video_edit）",
+                "1–9 张图片",
+                "3–15 秒",
+                "分辨率仅支持 720P/1080P",
+            ),
+        ),
+        ("happyhorse-1.0-r2v", ("video_edit：", "只取前 15 秒")),
+        (
+            "wan2.7-r2v",
+            ("不支持的 mode（video_edit）", "图1、图2", "不得使用 Wan 2.6 的 `character1`"),
+        ),
+        (
+            "wan2.6-r2v",
+            ("`character1`、`character2`", "图片/视频混合总顺序", "Wan 2.7 的“图1/视频1”"),
+        ),
+        ("wan3.0-video", ("图1、图2", "图片最多 10 张", "视频最多 5 个", "2–30 秒")),
+        (
+            "doubao-seedance-2-0-260128",
+            (
+                "图片最多 9 张",
+                "视频最多 3 个",
+                "合计最多 12 个",
+                "不支持的 mode（video_edit）",
+                "`image1`",
+                "`video1`",
+                "不写时间戳",
+                "最终视频不继承宫格、边框、编号、箭头",
+            ),
+        ),
+        (
+            "doubao-seedance-2-5-260628",
+            (
+                "图片最多 30 张",
+                "[4, 30] 秒",
+                "整数秒时间段",
+                "区间必须连续、无空档",
+                "不得使用小数秒",
+                "3–6 个可执行时间段",
+                "每段只写一个核心状态变化",
+            ),
+        ),
+        (
+            "veo-3.1-generate-preview",
+            (
+                "4/6/8 秒",
+                "仅支持 1–3 张图片",
+                "结构化 `referenceImages`",
+                "不要把虚构编号写进最终 Prompt",
+            ),
+        ),
+        ("veo-3.1-lite-generate-preview", ("官方不支持 r2v",)),
+        ("S2V-01", ("结构化 `subject_reference`", "没有官方图片序号标记")),
+        (
+            "vidu/viduq3-mix_reference2video",
+            (
+                "[1, 16] 秒",
+                "“图1为…；图2为…”",
+                "不发明 `视频N`",
+                "不支持的 mode（t2v, i2v, video_edit）",
+            ),
+        ),
+        (
+            "viduq3-mix",
+            (
+                "720p/1080p",
+                "结构化 `images`/`videos`",
+                "这里不会渲染出任何位置标记",
+            ),
+        ),
+    ],
+)
+def test_video_prompt_guidance_keeps_provider_authoring_constraints(
+    model, rules
+):
+    guidance = video_model_prompt_guidance(model)
+    for rule in rules:
+        assert rule in guidance
+
+
+@pytest.mark.parametrize("version", ["2.6", "2.7"])
+@pytest.mark.parametrize("mode", ["i2v", "t2v"])
+def test_wan_prompt_guidance_selects_family_for_configured_modes(
+    version, mode
+):
+    guidance = video_model_prompt_guidance(f"wan{version}-{mode}")
+    assert f"Wan {version}：" in guidance
+    assert "报告阻塞" not in guidance
 
 
 class _FakeResponse:
