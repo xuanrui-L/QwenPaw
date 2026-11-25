@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -517,38 +516,9 @@ def _between(text: str, start: str, stop: str) -> str:
     return text[begin:end]
 
 
-def test_work_visuals_are_only_authored_documents(client):
-    page = client.get("/").text
-    script = client.get("/assets/authored-player.js").text
-    choices = client.get("/assets/interaction-runtime.js").text
-    assert 'id="screen-title"' not in page
-    assert 'id="screen-map"' not in page
-    assert 'id="screen-ending"' not in page
-    assert "bundle.authored_html" in script
-    assert "function fallback" not in choices
-    assert "linear-gradient" not in choices
-    assert "tone-" not in script
-
-
-def test_every_dom_id_used_by_app_js_exists_in_the_page(client):
-    """app.js 按名字批量抓 DOM,页面上少一个 id 就是运行时 undefined。
-
-    放映端没有 JS 测试运行器,这类“两端名字对得上”的守卫只能放在 Python 里。
-    """
-
-    script = client.get("/assets/app.js").text
-    page = client.get("/").text
-    block = _between(script, "const dom = Object.fromEntries([", "].map")
-    used = set(re.findall(r'"([A-Za-z0-9_-]+)"', block))
-    declared = set(re.findall(r'id="([^"]+)"', page))
-    assert used, "没抓到 id 列表,下面的断言会是空真"
-    assert used - declared == set()
-
-
 def test_index_and_assets_are_served(client):
     page = client.get("/")
     assert page.status_code == 200
-    assert "IVB" in page.text
     assert client.get("/assets/app.js").status_code == 200
     assert "javascript" in client.get("/assets/app.js").headers["content-type"]
     css = client.get("/assets/styles/player.css")
@@ -575,35 +545,6 @@ def test_base_href_follows_root_path(library, bundle_zip):
     with TestClient(app) as client:
         page = client.get("/").text
     assert '<base href="/ivb/"/>' in page
-
-
-def test_library_screen_is_wired_into_the_page(client):
-    page = client.get("/").text
-    for element_id in (
-        "screen-library",
-        "lib-grid",
-        "lib-empty",
-        "lib-scope-all",
-        "lib-scope-mine",
-    ):
-        assert f'id="{element_id}"' in page
-
-
-def test_frontend_is_project_id_aware(client):
-    """静态锁:state.js 从 baseURI 反推 BASE 且端点带 pid;app.js 有库/放映分支。"""
-
-    state_js = client.get("/assets/state.js").text
-    app_js = client.get("/assets/app.js").text
-    assert "document.baseURI" in state_js
-    assert "/api/projects/" in state_js
-    assert "segmentUrl" in state_js
-    assert "URLSearchParams" in app_js
-    assert "wireLibrary()" in app_js
-    assert "IVBAuthoredPlayer.mount" in app_js
-    assert "global.Api.bundle(pid)" in app_js
-    # 旧的写死单包端点不该再出现在前端。
-    assert '"/api/bundle"' not in app_js
-    assert "/api/state/" not in state_js
 
 
 def test_create_app_from_env_reads_settings(

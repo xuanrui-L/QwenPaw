@@ -1,15 +1,17 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { message, Modal } from "antd";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import StorageReclaimNotice from "../StorageReclaimNotice";
-import { confirmProjectReclaim } from "@/api/creator";
-
-vi.mock("@/api/creator", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/api/creator")>();
-  return { ...actual, confirmProjectReclaim: vi.fn() };
-});
-
-const mockedReclaim = vi.mocked(confirmProjectReclaim);
+import * as creatorApi from "@/api/creator";
+import { MemoryRouter } from "react-router-dom";
+import HomePage from "@/pages/HomePage";
+import { installMockFetch } from "@/test/mockFetch";
 const awaitingConfirmation = {
   pendingReclaimBytes: 5 * 1024 * 1024 * 1024,
   historyKeptAt: null,
@@ -17,8 +19,12 @@ const awaitingConfirmation = {
 };
 
 describe("StorageReclaimNotice", () => {
+  const mockedReclaim = () => vi.mocked(creatorApi.confirmProjectReclaim);
+
+  afterEach(() => vi.restoreAllMocks());
+
   beforeEach(() => {
-    mockedReclaim.mockReset();
+    vi.spyOn(creatorApi, "confirmProjectReclaim");
     // antd caches its message holder node; emptying <body> would leave the
     // next message appended to a detached element. Imperative confirm modals
     // are portals outside the rendered tree, so cleanup cannot remove them.
@@ -55,7 +61,7 @@ describe("StorageReclaimNotice", () => {
   });
 
   it("records the confirmation and reports what the sweep freed", async () => {
-    mockedReclaim.mockResolvedValue({
+    mockedReclaim().mockResolvedValue({
       projectId: "project-a",
       historyKept: false,
       removedTransactions: 12,
@@ -99,7 +105,7 @@ describe("StorageReclaimNotice", () => {
     // answers, instead of spinning for the whole deletion.
     expect(document.querySelector("[data-storage-reclaim-notice]")).toBeNull();
     await waitFor(() =>
-      expect(mockedReclaim).toHaveBeenCalledWith("project-a"),
+      expect(mockedReclaim()).toHaveBeenCalledWith("project-a"),
     );
     await waitFor(() => expect(onConfirmed).toHaveBeenCalledTimes(1));
     expect(
@@ -138,7 +144,7 @@ describe("StorageReclaimNotice", () => {
         storage={{ ...storage, pendingTransactionCleanupBytes: 64 }}
       />,
     );
-    mockedReclaim.mockResolvedValue({
+    mockedReclaim().mockResolvedValue({
       projectId: "project-a",
       historyKept: false,
       confirmedAt: receipt,
@@ -149,7 +155,7 @@ describe("StorageReclaimNotice", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "继续清理" }));
     await waitFor(() => expect(onConfirmed).toHaveBeenCalledOnce());
-    expect(mockedReclaim).toHaveBeenCalledWith("project-a");
+    expect(mockedReclaim()).toHaveBeenCalledWith("project-a");
     rerender(
       <StorageReclaimNotice
         {...props}
@@ -160,7 +166,7 @@ describe("StorageReclaimNotice", () => {
   });
 
   it("brings the notice back when the press fails", async () => {
-    mockedReclaim.mockRejectedValue(new Error("boom"));
+    mockedReclaim().mockRejectedValue(new Error("boom"));
     // The static antd holder races Modal.destroyAll() plus the now-immediate
     // modal close, so pin the call rather than the rendered bubble.
     const errorSpy = vi.spyOn(message, "error");
@@ -197,7 +203,7 @@ describe("StorageReclaimNotice", () => {
 
     // The rejection lands in the same flush, so what this case pins is the
     // recovery: the notice comes back and the refusal is reported.
-    await waitFor(() => expect(mockedReclaim).toHaveBeenCalled());
+    await waitFor(() => expect(mockedReclaim()).toHaveBeenCalled());
     await waitFor(() => expect(errorSpy).toHaveBeenCalled());
     expect(String(errorSpy.mock.calls[0][0])).toMatch(/无法释放沉淀历史/);
     await waitFor(() =>
@@ -208,3 +214,75 @@ describe("StorageReclaimNotice", () => {
     expect(onConfirmed).toHaveBeenCalledTimes(1);
   });
 });
+
+it.each(["here", "another tab"])(
+  "keeps fresh storage when reclaim finishes in %s",
+  async (where) => {
+    const items = [
+      {
+        projectId: "sample",
+        name: "Sample",
+        description: "",
+        updatedAt: "2026-11-01",
+        createdAt: "2026-11-01",
+      },
+    ];
+    const profile = (pending: number) => ({
+      autoReclaimMaxBytes: 1,
+      projects: [
+        {
+          projectId: "sample",
+          pendingReclaimBytes: 0,
+          pendingTransactionCleanupBytes: pending,
+          reclaimConfirmedAt: "2026-10-01",
+          historyKeptAt: null,
+        },
+      ],
+    });
+    const { fetchMock } = installMockFetch([
+      { match: "/projects?", response: { json: { items } } },
+      { match: "/models/config", response: { ok: false, status: 503 } },
+      {
+        match: "/reclaim-history",
+        response: { json: { releasedBytes: 64, transactionBytes: 0 } },
+      },
+    ]);
+    let reads = 0;
+    let finishFocus!: (response: Response) => void;
+    const focusRead = new Promise<Response>((resolve) => {
+      finishFocus = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      (input: RequestInfo | URL, options?: RequestInit) => {
+        if (!String(input).includes("/storage/profile"))
+          return fetchMock(input, options);
+        reads++;
+        return reads === 2
+          ? focusRead
+          : Promise.resolve(Response.json(profile(reads === 1 ? 64 : 0)));
+      },
+    );
+    render(
+      <MemoryRouter initialEntries={["/?view=projects"]}>
+        <HomePage />
+      </MemoryRouter>,
+    );
+    const retry = await screen.findByRole("button", { name: "继续清理" });
+    fireEvent.focus(window);
+    expect(reads).toBe(2);
+    if (where === "here") {
+      fireEvent.click(retry);
+    } else {
+      fireEvent.blur(window);
+      fireEvent.focus(window);
+      document.dispatchEvent(new Event("visibilitychange"));
+    }
+    await vi.waitFor(() => expect(reads).toBe(3));
+    fireEvent.focus(window);
+    await act(async () => {
+      finishFocus(Response.json(profile(64)));
+    });
+    expect(screen.queryByRole("button", { name: "继续清理" })).toBeNull();
+  },
+);

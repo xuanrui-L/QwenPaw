@@ -14,6 +14,8 @@ import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument } from "@/contracts/creator";
 import type { WorkGraphNode } from "@/contracts/creator/workGraph";
 
+const mediaBudget = { mediaCallBudget: 20 };
+
 function cloneProject(): ProjectDocument {
   return structuredClone(projectDocument);
 }
@@ -76,6 +78,7 @@ function modelRoutes(model: string): Parameters<typeof installMockFetch>[0] {
           counts: {},
           nodes: [],
           mediaCalls: 0,
+          ...mediaBudget,
         },
       },
     },
@@ -206,6 +209,7 @@ function seedWorkGraph(...nodes: WorkGraphNode[]) {
       generation: 1,
       counts: {},
       mediaCalls: 0,
+      ...mediaBudget,
       nodes,
     },
   });

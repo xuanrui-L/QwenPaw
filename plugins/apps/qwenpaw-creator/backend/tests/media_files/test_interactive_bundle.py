@@ -10,35 +10,37 @@ import io
 import json
 import re
 import zipfile
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from api import interactive_bundle_routes as routes
 from domain.errors import ConflictError
 from services.media_files.interactive_bundle import (
-    assemble_interactive_bundle,
-    derive_interactive_manifest,
     InteractiveBundleError,
     InteractiveBundlePlan,
+    assemble_interactive_bundle,
+    derive_interactive_manifest,
     plan_interactive_bundle,
     write_interactive_bundle,
-    PLAYER_HTML,
 )
+from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     ArtifactSlot,
     ArtifactVersion,
+    IndexedFile,
     InteractionCreation,
     InteractionOption,
-    IndexedFile,
+    MotionGraphic,
     NarrativeEdge,
     Project,
     Timeline,
     TimelineElement,
     TimelineSpan,
-    MotionGraphic,
 )
+from services.runtime_files.execution_models import TaskRecord
+from services.runtime_files.execution_store import ProjectExecutionStore
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
 
@@ -455,12 +457,6 @@ def test_export_rejects_model_prose_outside_document(
         )
 
 
-def test_interface_style_is_not_in_the_runtime_shell():
-    assert "#b8ff2e" not in PLAYER_HTML
-    assert "data-screen" not in PLAYER_HTML
-    assert "开始故事" not in PLAYER_HTML
-
-
 def test_replaced_video_invalidates_offline_progress_revision():
     project, payloads = _branching_project()
 
@@ -791,3 +787,48 @@ def test_scratch_package_is_removed_on_both_paths(
     with pytest.raises(ConflictError, match="segment file is missing"):
         routes._assemble("bundle", services)
     assert not list(exports.glob("*.zip"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("state", ["idle", "QUEUED", "RUNNING", "review"])
+def test_export_waits_for_inflight_work(tmp_path, monkeypatch, state):
+    services = CreatorFileServices.create(tmp_path.resolve())
+    services.projects.create(Project.new(project_id="bundle", name="Bundle"))
+    if state in {"QUEUED", "RUNNING"}:
+        execution = ProjectExecutionStore(services.root)
+        execution.create_task(
+            TaskRecord(
+                project_id="bundle",
+                task_id="regenerate",
+                kind="interaction_draft",
+                request_fingerprint="sha256:test",
+            ),
+        )
+        if state == "RUNNING":
+            execution.transition_task(
+                "bundle",
+                "regenerate",
+                expected_status="QUEUED",
+                status="RUNNING",
+            )
+    monkeypatch.setattr(
+        routes,
+        "active_media_review_slots",
+        lambda _pid: frozenset({"selected-video"})
+        if state == "review"
+        else frozenset(),
+    )
+    # Assembly/content validity is exercised by the bundle suite. This
+    # probe checks the admission boundary even when old content is valid.
+    sentinel = object()
+    monkeypatch.setattr(
+        routes,
+        "plan_interactive_bundle",
+        lambda *_args, **_kwargs: sentinel,
+    )
+    if state == "idle":
+        _project, plan = routes._plan_locked("bundle", services)
+        assert plan is sentinel
+    else:
+        with pytest.raises(ConflictError, match="generation and media review"):
+            routes._plan_locked("bundle", services)

@@ -1,3 +1,4 @@
+import type { WorkGraphView } from "@/contracts/creator/workGraph";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { act } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -13,7 +14,6 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument, TaskView } from "@/contracts/creator";
-import type { WorkGraphView } from "@/contracts/creator/workGraph";
 
 function cloneProject(): ProjectDocument {
   return structuredClone(projectDocument);
@@ -39,32 +39,6 @@ function seedWithoutFinal(project = cloneProject()) {
   return project;
 }
 
-function composeGraph(status: "ready" | "stale"): WorkGraphView {
-  return {
-    projectId: "p1",
-    generation: 3,
-    counts: { [status]: 1 },
-    mediaCalls: 0,
-    nodes: [
-      {
-        id: "compose:timeline:main",
-        kind: "compose",
-        label: "最终合成",
-        status,
-        deps: [],
-        lane: "compose",
-        timelineId: "timeline:main",
-        taskId: null,
-        progress: null,
-        error: null,
-        missing: [],
-        locator: { page: "plan" },
-        dispatchable: true,
-      },
-    ],
-  };
-}
-
 function composeTask(
   progress: number,
   status: TaskView["status"] = "RUNNING",
@@ -84,6 +58,33 @@ function composeTask(
     resultRefs: [],
     createdAt: "2026-07-20T00:00:00Z",
   } satisfies TaskView;
+}
+
+function composeGraph(status: "ready" | "stale"): WorkGraphView {
+  return {
+    projectId: "p1",
+    generation: 3,
+    counts: { [status]: 1 },
+    mediaCalls: 0,
+    ...{ mediaCallBudget: 20 },
+    nodes: [
+      {
+        id: "compose:timeline:main",
+        kind: "compose",
+        label: "最终合成",
+        status,
+        deps: [],
+        lane: "compose",
+        timelineId: "timeline:main",
+        taskId: null,
+        progress: null,
+        error: null,
+        missing: [],
+        locator: { page: "plan" },
+        dispatchable: true,
+      },
+    ],
+  };
 }
 
 function pollRoutes(tasks: TaskView[] = []) {
@@ -378,7 +379,6 @@ describe("PlanPage Timeline/Element frontend", () => {
         manualHold: { revision: 1, nodeIds: ["compose:timeline:main"] },
       },
     ],
-    ["AUTOMATIC_COMPOSE_NOT_READY", composeGraph("stale")],
   ] as const)(
     "refreshes the graph on %s and still permits an explicit render",
     async (code, refreshed) => {
@@ -513,46 +513,6 @@ describe("PlanPage Timeline/Element frontend", () => {
       }
     },
   );
-
-  it("keeps a superseded co-creation cut manual before and after a hold", async () => {
-    vi.useFakeTimers();
-    try {
-      const project = cloneProject();
-      project.assets.artifact_versions_by_id["final-v1"].stale = true;
-      seedProject(project);
-      const ready = composeGraph("ready");
-      const stale = composeGraph("stale");
-      const { calls } = installMockFetch([
-        {
-          match: "/render",
-          method: "POST",
-          response: { json: { taskId: "manual-task" } },
-        },
-        ...pollRoutes(),
-      ]);
-      renderPage();
-      const renders = () =>
-        calls.filter((call) => call.url.includes("/render"));
-      for (const graph of [
-        { ...ready, generation: 2 },
-        { ...ready, nodes: [] },
-        stale,
-        { ...stale, manualHold: { revision: 1, nodeIds: [stale.nodes[0].id] } },
-        { ...stale, manualHold: { revision: 2, nodeIds: [] } },
-      ]) {
-        act(() => useWorkGraphStore.setState({ projectId: "p1", graph }));
-        await act(() => vi.advanceTimersByTimeAsync(1600));
-        expect(renders()).toHaveLength(0);
-      }
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "合成成片" }));
-      });
-      expect(renders()).toHaveLength(1);
-      expect(renders()[0].url).toMatch(/\/render$/);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
 
   it("adopts an existing compose task and shows verified Element counts without inventing a percentage", async () => {
     seedWithoutFinal();

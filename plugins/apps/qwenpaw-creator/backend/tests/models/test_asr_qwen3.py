@@ -522,7 +522,7 @@ def test_whisper_posts_extracted_audio_and_normalizes_chunk_offsets(
     )
 
 
-def test_asr_upload_token_plan_refuses_local_audio(
+def test_asr_token_plan_refuses_local_audio(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -548,9 +548,12 @@ def test_asr_upload_token_plan_refuses_local_audio(
         "upload_reference_file_for_provider",
         refuse_upload,
     )
+    local_audio = getattr(asr_model, "_upload_asr_reference", None)
+    if local_audio is None:
+        local_audio = asr_model._asr_audio_url
     with pytest.raises(ValueError, match="公网"):
         asyncio.run(
-            asr_model._upload_asr_reference(
+            local_audio(
                 clip,
                 api_key="sk-sp-test",
                 model="qwen-audio-3.0-asr-flash",

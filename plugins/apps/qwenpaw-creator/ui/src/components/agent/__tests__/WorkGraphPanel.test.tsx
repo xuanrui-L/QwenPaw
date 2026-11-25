@@ -21,6 +21,8 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { installMockFetch } from "@/test/mockFetch";
 import i18n from "@/i18n";
 
+const mediaBudget = { mediaCallBudget: 200 };
+
 const navigateToLocator = vi.fn();
 vi.mock("@/routing/locators", () => ({
   navigateToLocator: (...args: unknown[]) => navigateToLocator(...args),
@@ -45,6 +47,7 @@ const graph: WorkGraphView = {
   generation: 7,
   counts: { total: 4, done: 1, running: 1, failed: 1, gated: 1 },
   mediaCalls: 12,
+  ...mediaBudget,
   nodes: [
     node({
       id: "visual:char:a:var:x",

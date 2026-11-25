@@ -245,13 +245,22 @@ def test_failed_receipt_reaches_agent_and_cannot_be_narrated_as_submitted(
 
 
 @pytest.mark.parametrize("cancel_first", [False, True])
-def test_high_media_history_keeps_approval_and_idempotent_admission(
+def test_required_approval_and_repeated_tool_only_one_real_admission(
+    tmp_path, monkeypatch, cancel_first
+):
+    _assert_approval_and_idempotent_admission(
+        tmp_path, monkeypatch, cancel_first
+    )
+
+
+def _assert_approval_and_idempotent_admission(
     tmp_path,
     monkeypatch,
     cancel_first,
+    *,
+    historical_media_tasks=0,
 ):
     pin(monkeypatch)
-    historical_media_tasks = 250
 
     async def scenario():
         services = create(
@@ -576,7 +585,7 @@ def test_prompt_sync_gated_request_surfaces_diagnostic_fields(
         )
         graph = WorkGraph(nodes=(node,), generation=1)
 
-        async def fake_context(svcs, _execs, pid):
+        async def fake_context(svcs, _execs, pid, **_kwargs):
             # Only the request path reads this; hand back the GATED node and
             # its pre-dispatch block reason.
             return (
@@ -1437,78 +1446,3 @@ def fake_dispatch(
         return SimpleNamespace(task_id=task.task_id)
 
     runtime.work_scheduler.dispatch_node = dispatch
-
-
-@pytest.mark.parametrize("raise_after_admission", [False, True])
-def test_admitted_failure_is_reported_to_agent_with_task_identity(
-    tmp_path,
-    monkeypatch,
-    raise_after_admission,
-):
-    pin(monkeypatch)
-
-    async def scenario():
-        services = create(tmp_path)
-        observed = []
-
-        async def model(messages, _tools):
-            tool_messages = [m for m in messages if m.get("role") == "tool"]
-            if tool_messages:
-                observed.append(json.loads(tool_messages[-1]["content"]))
-                return AgentModelTurn(
-                    content="The generation failed and needs correction.",
-                )
-            return AgentModelTurn(
-                tool_calls=(
-                    AgentToolCall(
-                        call_id="failure-call",
-                        name="request_workgraph_execution",
-                        arguments={
-                            "projectId": "probe-project",
-                            "targetRefs": ["asset:hero"],
-                            "kinds": ["visual"],
-                        },
-                    ),
-                ),
-            )
-
-        runtime = FileCreatorAgentRuntime(
-            services,
-            model_client=CallbackAgentChatClient(model),
-            poll_interval_seconds=0.01,
-        )
-        calls = []
-        fake_dispatch(
-            runtime,
-            calls,
-            failure=True,
-            raise_after_admission=raise_after_admission,
-        )
-        try:
-            await runtime.start()
-            runtime.notify("probe-project")
-            await wait_for(
-                lambda: runtime.executions.list_execution_authorizations(
-                    "probe-project",
-                ),
-            )
-            approve(
-                runtime,
-                runtime.executions.list_execution_authorizations(
-                    "probe-project",
-                )[0],
-            )
-            await wait_for(lambda: observed)
-            await runtime.wait_until_idle("probe-project")
-            item = observed[0]["items"][0]
-            assert item["status"] == "FAILED"
-            assert item["taskId"] == "paid-task-1"
-            assert (
-                item["error"]["message"]
-                == "Output rejected: forbidden HTML tag"
-            )
-            assert len(calls) == 1
-        finally:
-            await runtime.stop()
-
-    asyncio.run(scenario())

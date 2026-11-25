@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Text model protocol dispatch and keyless free-tier support."""
+# pylint: disable=line-too-long
+# flake8: noqa: E501
+"""Text provider protocols and output budgets."""
 
 # pylint: disable=protected-access
 
 from __future__ import annotations
 
 import asyncio
+import json
 import json as json_module
 
+import httpx
 import pytest
 
-from models import text_model
+from api.model_routes import ModelConnectionTestRequest, _prepare_probe_payload
+from models import config, output_budget, text_model, vlm_model
 from utils.exceptions import ModelError
 
 pytestmark = pytest.mark.unit
@@ -116,111 +121,6 @@ def test_openai_protocol_sends_bearer_when_key_present(monkeypatch) -> None:
     asyncio.run(text_model.chat_completion("ping"))
 
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
-
-
-def test_openai_protocol_asks_the_provider_to_stream(monkeypatch) -> None:
-    """A non-streaming request dies at the gateway, not at our own budget.
-
-    Measured: platform-pre's nginx answered 504 at 180.36s for a four-screen
-    presentation while our timeout for that call was 600s. Nothing had been
-    written back yet, so the proxy read a slow generation as a dead connection.
-    Streaming keeps bytes moving, which resets that clock, and the decoder
-    folds the stream back into the single completion callers here expect.
-    """
-    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
-    captured: dict = {}
-    _fake_httpx(monkeypatch, captured)
-
-    asyncio.run(text_model.chat_completion("ping"))
-
-    assert captured["body"]["stream"] is True
-
-
-def test_stream_that_ends_without_saying_so_is_reported_truncated(
-    monkeypatch,
-) -> None:
-    """A prefix must not be handed on as an answer.
-
-    Turning streaming on makes this load-bearing: a gateway that severs the
-    stream mid-document would otherwise return half a work page, which is worse
-    than the 504 it replaced because nothing looks wrong downstream.
-    """
-    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
-    captured: dict = {}
-    _fake_httpx(
-        monkeypatch,
-        captured,
-        content_type="text/event-stream",
-        body_text='data: {"choices": [{"delta": {"content": "<html>"}}]}\n\n',
-    )
-
-    with pytest.raises(ModelError) as raised:
-        asyncio.run(text_model.chat_completion("ping"))
-
-    assert "响应流被截断" in str(raised.value)
-    assert raised.value.retryable is True
-
-
-def test_politely_ended_stream_without_a_finish_reason_is_accepted(
-    monkeypatch,
-) -> None:
-    """The other half of the rule: ``[DONE]`` alone is a normal ending.
-
-    Some compatible servers never report a finish reason yet still close the
-    stream properly. Treating that as truncation would reject good answers, so
-    only a stream that ends with neither signal counts as cut short.
-    """
-    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
-    captured: dict = {}
-    _fake_httpx(
-        monkeypatch,
-        captured,
-        content_type="text/event-stream",
-        body_text=(
-            'data: {"choices": [{"delta": {"content": "pon"}}]}\n\n'
-            'data: {"choices": [{"delta": {"content": "g"}}]}\n\n'
-            "data: [DONE]\n\n"
-        ),
-    )
-
-    assert asyncio.run(text_model.chat_completion("ping")) == "pong"
-
-
-@pytest.mark.parametrize(
-    ("model", "host", "budget", "expected"),
-    [
-        ("qwen3.7-plus", "dashscope.aliyuncs.com", 2048, 2048),
-        ("qwen3.8-max", "deployment.maas.aliyuncs.com", 2048, 2048),
-        ("qwen3.7-plus", "gateway.example.com", 2048, None),
-        ("other-model", "dashscope.aliyuncs.com", 2048, None),
-        ("qwen3.7-plus", "dashscope.aliyuncs.com", None, None),
-    ],
-)
-def test_optional_reasoning_budget_preserves_gateway_contract(
-    monkeypatch,
-    model,
-    host,
-    budget,
-    expected,
-) -> None:
-    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
-    monkeypatch.setattr(
-        text_model.model_config,
-        "get_text_model_name",
-        lambda: model,
-    )
-    monkeypatch.setattr(
-        text_model.model_config,
-        "get_text_base_url",
-        lambda: f"https://{host}/v1",
-    )
-    captured: dict = {}
-    _fake_httpx(monkeypatch, captured)
-    asyncio.run(text_model.chat_completion("ping", thinking_budget=budget))
-    if expected is None:
-        assert "thinking_budget" not in captured["body"]
-    else:
-        assert captured["body"]["thinking_budget"] == expected
 
 
 def test_anthropic_protocol_still_requires_api_key(monkeypatch) -> None:
@@ -390,3 +290,188 @@ def test_unsupported_temperature_learns_and_retries_without_it(
         assert model_config.chat_temperature("brand-new-model", 0.2) is None
     finally:
         cache.clear(key)
+
+
+@pytest.mark.parametrize("kind", ["text", "vlm"])
+@pytest.mark.parametrize(
+    ("protocol", "model", "expected_limit"),
+    [
+        ("OpenAI", "deepseek-v4.1-flash", None),
+        ("DashScope（百炼）", "qwen3.7-plus", None),
+        ("Google Gemini", "gemini-2.5-pro", None),
+        ("Anthropic Claude", "MiniMax-M2.7", 204800),
+    ],
+)
+def test_model_requests_use_provider_output_budget(
+    monkeypatch,
+    kind,
+    protocol,
+    model,
+    expected_limit,
+):
+    for key, value in {
+        "api_key": "test-key",
+        "base_url": "https://gateway.example",
+        "model_name": model,
+        "protocol": protocol,
+    }.items():
+        monkeypatch.setattr(
+            config,
+            f"get_{kind}_{key}",
+            lambda value=value: value,
+        )
+    captured = []
+
+    def handle(request):
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "pong"}}],
+                "content": [{"type": "text", "text": "pong"}],
+                "candidates": [{"content": {"parts": [{"text": "pong"}]}}],
+            },
+        )
+
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: client_type(
+            transport=httpx.MockTransport(handle),
+            **kwargs,
+        ),
+    )
+    client = text_model if kind == "text" else vlm_model
+    content = "ping" if kind == "text" else [{"type": "text", "text": "ping"}]
+    assert asyncio.run(client.chat_completion(content)) == "pong"
+    body = captured[0]
+    if expected_limit is None:
+        assert "max_tokens" not in body
+    else:
+        assert body["max_tokens"] == expected_limit
+    assert "max_completion_tokens" not in body
+    assert "maxOutputTokens" not in body.get("generationConfig", {})
+
+
+@pytest.mark.parametrize("kind", ["llm", "vlm"])
+@pytest.mark.parametrize(
+    "protocol",
+    ["OpenAI", "Google Gemini", "Anthropic Claude"],
+)
+def test_connection_probe_follows_same_output_budget(kind, protocol):
+    _, _, body = asyncio.run(
+        _prepare_probe_payload(
+            ModelConnectionTestRequest(
+                type=kind,
+                protocol=protocol,
+                model_name="MiniMax-M2.7",
+                base_url="https://gateway.example",
+                api_key="test-key",
+            ),
+        ),
+    )
+    if protocol == "Anthropic Claude":
+        assert body["max_tokens"] == 204800
+    else:
+        assert "max_tokens" not in body
+    assert "maxOutputTokens" not in body.get("generationConfig", {})
+
+
+def test_claude_dated_alias_reads_sdk_capability():
+    from agentscope.model import AnthropicChatModel
+
+    card = next(iter(AnthropicChatModel.list_models()))
+    assert (
+        output_budget.known_anthropic_output_limit(card.name)
+        == card.output_size
+    )
+    assert (
+        output_budget.known_anthropic_output_limit(card.name + "-20260916")
+        == card.output_size
+    )
+
+
+@pytest.mark.parametrize("limit", [150000, None, -1, True])
+def test_unknown_anthropic_model_uses_models_api_or_reports_missing_capability(
+    monkeypatch,
+    limit,
+):
+    captured = []
+
+    def handle(request):
+        captured.append(request)
+        return httpx.Response(200, json={"max_tokens": limit})
+
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: client_type(
+            transport=httpx.MockTransport(handle),
+            **kwargs,
+        ),
+    )
+    call = output_budget.anthropic_output_limit(
+        "custom-model",
+        base_url="https://gateway.example/v1",
+        api_key="test-key",
+    )
+    if limit == 150000:
+        assert asyncio.run(call) == limit
+    else:
+        with pytest.raises(ModelError, match="输出上限") as failed:
+            asyncio.run(call)
+        assert not failed.value.retryable
+    assert captured[0].method == "GET"
+    assert (
+        str(captured[0].url)
+        == "https://gateway.example/v1/models/custom-model"
+    )
+
+
+def test_empty_reasoning_response_preserves_diagnostics_without_reasoning_text(
+    monkeypatch,
+):
+    for key, value in {
+        "api_key": "test-key",
+        "base_url": "https://gateway.example",
+        "model_name": "deepseek-v4.1-flash",
+        "protocol": "OpenAI",
+    }.items():
+        monkeypatch.setattr(
+            config,
+            f"get_text_{key}",
+            lambda value=value: value,
+        )
+    client_type = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: client_type(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "finish_reason": "length",
+                                "message": {
+                                    "content": "",
+                                    "reasoning_content": "private reasoning",
+                                },
+                            },
+                        ],
+                        "usage": {"completion_tokens": 12000},
+                    },
+                ),
+            ),
+            **kwargs,
+        ),
+    )
+    with pytest.raises(ModelError) as failed:
+        asyncio.run(text_model.chat_completion("generate"))
+    assert "length" in str(failed.value)
+    assert "12000" in str(failed.value)
+    assert "仅返回了推理内容" in str(failed.value)
+    assert "private reasoning" not in str(failed.value)

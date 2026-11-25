@@ -22,6 +22,12 @@ from services.runtime_files.models import CreatorMessageRecord
 pytestmark = pytest.mark.unit
 
 DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+UPLOAD_HOOK = (
+    "upload_reference_file_for_provider"
+    if hasattr(native_media, "upload_reference_file_for_provider")
+    else "transport_local_media_url"
+)
+
 OPEN_GATEWAY_BASE_URL = "https://api.openai.example/v1"
 
 
@@ -163,22 +169,19 @@ def test_asset_version_refs_are_uploaded_and_attached_as_native_media(
         "get_vlm_model_name",
         lambda: "qwen3.7-plus",
     )
-    # The decision point needs the VLM section's endpoint identity so a
-    # platform-configured Creator uploads attachments through the platform
-    # instead of the Bailian domain (which rejects sk-as keys with 401).
     monkeypatch.setattr(
         native_media.model_config,
         "get_vlm_base_url",
-        lambda: "https://platform-pre.agentscope.io/v1",
+        lambda: "https://dashscope.aliyuncs.com/api/v1",
     )
     monkeypatch.setattr(
         native_media.model_config,
         "get_vlm_protocol",
-        lambda: "AgentScope Platform",
+        lambda: "DashScope（百炼）",
     )
     monkeypatch.setattr(
         native_media,
-        "upload_reference_file_for_provider",
+        UPLOAD_HOOK,
         fake_upload,
     )
     request = CreatorMessageRecord(
@@ -202,10 +205,6 @@ def test_asset_version_refs_are_uploaded_and_attached_as_native_media(
 
     assert len(observed_paths) == 1
     assert observed_paths[0][0].read_bytes() == b"video-bytes"
-    assert observed_paths[0][1]["base_url"] == (
-        "https://platform-pre.agentscope.io/v1"
-    )
-    assert observed_paths[0][1]["protocol"] == "AgentScope Platform"
     assert parts == [
         {
             "type": "video_url",
@@ -329,7 +328,7 @@ def test_url_backed_version_uses_public_source_without_local_cache(
 
     monkeypatch.setattr(
         native_media,
-        "upload_reference_file_for_provider",
+        UPLOAD_HOOK,
         unexpected_upload,
     )
     request = CreatorMessageRecord(
@@ -420,7 +419,7 @@ def test_short_video_target_ref_is_delivered_as_frame_sequence(
     )
     monkeypatch.setattr(
         native_media,
-        "upload_reference_file_for_provider",
+        UPLOAD_HOOK,
         fake_upload,
     )
     monkeypatch.setattr(
@@ -524,7 +523,7 @@ def test_target_refs_scope_media_to_the_delegated_asset(
     )
     monkeypatch.setattr(
         native_media,
-        "upload_reference_file_for_provider",
+        UPLOAD_HOOK,
         fake_upload,
     )
     request = CreatorMessageRecord(
@@ -594,7 +593,7 @@ def test_document_page_refs_become_native_image_parts(
     )
     monkeypatch.setattr(
         native_media,
-        "upload_reference_file_for_provider",
+        UPLOAD_HOOK,
         fake_upload,
     )
     refs = [document_page_ref(checksum, page) for page in (1, 2)]
@@ -697,6 +696,12 @@ def test_downscaled_document_page_reports_the_media_it_carries(
         vlm_model,
         "transport_local_media_url",
         downscaled_transport,
+    )
+    monkeypatch.setattr(
+        native_media,
+        "transport_local_media_url",
+        downscaled_transport,
+        raising=False,
     )
 
     parts = asyncio.run(

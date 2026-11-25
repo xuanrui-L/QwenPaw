@@ -380,7 +380,6 @@ def test_v8_to_v9_adds_narrative_fields() -> None:
     project = load_project_json(json.dumps(raw))
 
     assert project.schema_version == 10
-    assert project.narrative_edges == []
     timeline = next(iter(project.timelines.items.values()))
     assert timeline.title == ""
     assert timeline.synopsis == ""

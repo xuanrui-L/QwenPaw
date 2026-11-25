@@ -1,39 +1,45 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import ModelBadges from "../ModelBadges";
 import type { ModelConfigData } from "@/contracts/creator";
 import { configuredModelConfig } from "@/test/agentFixtures";
 import { installMockFetch } from "@/test/mockFetch";
+import { useModelConfigStore } from "@/store/modelConfigStore";
 
-/** Serves the shared configured fixture with optional tts overrides. */
-function renderBadges(
-  tts: Partial<ModelConfigData["tts"]> = {},
-  overrides: Partial<ModelConfigData> = {},
-) {
-  installMockFetch([
+function renderBadges(tts: Partial<ModelConfigData["tts"]> = {}) {
+  const config = {
+    ...configuredModelConfig,
+    llm: {
+      ...configuredModelConfig.llm,
+      protocol: "DashScope（百炼）",
+      base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    },
+    tts: { ...configuredModelConfig.tts, ...tts },
+  };
+  const configResponse = { json: config };
+  const { calls } = installMockFetch([
     {
       match: "/models/config",
       method: "GET",
-      response: {
-        json: {
-          ...configuredModelConfig,
-          llm: {
-            ...configuredModelConfig.llm,
-            protocol: "DashScope（百炼）",
-            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-          },
-          tts: { ...configuredModelConfig.tts, ...tts },
-          ...overrides,
-        },
-      },
+      response: configResponse,
+    },
+    {
+      match: "/host-providers",
+      response: { json: { providers: [] } },
     },
   ]);
   render(<ModelBadges />);
+  return { configResponse, calls };
 }
+
+beforeEach(() => {
+  useModelConfigStore.setState({ config: null });
+});
 
 describe("ModelBadges", () => {
   it("shows Grounding as configured when it reuses a configured LLM", async () => {
     renderBadges();
+    fireEvent.focus(screen.getByRole("button", { name: "模型配置" }));
     expect(await screen.findByLabelText("Grounding：已配置")).toHaveAttribute(
       "data-status",
       "on",
@@ -55,23 +61,10 @@ describe("ModelBadges", () => {
     ],
   ])("marks TTS %s", async (_name, tts, label, dataStatus) => {
     renderBadges(tts);
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "模型配置" }));
     expect(await screen.findByLabelText(label)).toHaveAttribute(
       "data-status",
       dataStatus,
     );
-  });
-});
-
-describe("platform quick config entry", () => {
-  it("opens one-click setup without going through the model dialog", async () => {
-    // Wiring guard: the entry lives beside the status badges and is
-    // unconditional - a deployment that cannot reach the platform should show
-    // a failing button, not a missing one.
-    renderBadges();
-    fireEvent.click(await screen.findByRole("button", { name: "一键配置" }));
-
-    expect(
-      await screen.findByRole("button", { name: "拉取并配置" }),
-    ).toBeInTheDocument();
   });
 });

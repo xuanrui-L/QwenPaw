@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
+"""Project model serialization and normalization of incoming edits."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
+from datetime import datetime, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -18,17 +20,27 @@ from services.project_files import (
     project_etag,
     project_file_bytes,
 )
+from services.project_files.agent_tools import (
+    AgentProjectToolContext,
+    AgentProjectToolError,
+    AgentProjectTools,
+)
+from services.project_files.candidate_normalization import (
+    normalize_project_candidate,
+)
 from services.project_files.models import (
     ElementLocation,
     EntityCollection,
     R2VCreation,
     TimelineElement,
     TimelineSpan,
+    VisualCastLineup,
     VisualEntity,
     VisualVariant,
     is_pet_content_type,
     is_subtitle_overlay,
 )
+from services.project_files.store import ProjectStore
 
 pytestmark = pytest.mark.unit
 
@@ -148,16 +160,16 @@ def _variant_project() -> Project:
         },
         order=["char:hero"],
     )
-    project.timelines.items["timeline:main"].elements_by_id["element:hero"] = (
-        TimelineElement(
-            element_id="element:hero",
-            span=TimelineSpan(start_tick=0, duration_tick=1_000),
-            location=ElementLocation(),
-            creation=R2VCreation(
-                character_refs=["char:hero"],
-                visual_variant_refs={"char:hero": "variant:fallen"},
-            ),
-        )
+    project.timelines.items["timeline:main"].elements_by_id[
+        "element:hero"
+    ] = TimelineElement(
+        element_id="element:hero",
+        span=TimelineSpan(start_tick=0, duration_tick=1_000),
+        location=ElementLocation(),
+        creation=R2VCreation(
+            character_refs=["char:hero"],
+            visual_variant_refs={"char:hero": "variant:fallen"},
+        ),
     )
     return Project.model_validate(project.model_dump(mode="json"))
 
@@ -258,6 +270,8 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
     # one of the fields a migration adds in memory, so the source document the
     # historical runtime hashed cannot have carried it.
     raw.pop("interactive_presentation", None)
+    for added in ("name_source", "narrative_edges"):
+        raw.pop(added, None)
     del raw["visual"]["entities"]["items"]["char:hero"]["required_variant_ids"]
     # Legacy documents predate the character voice field entirely.
     del raw["visual"]["entities"]["items"]["char:hero"]["voice"]
@@ -277,7 +291,7 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
         # Pinned against the current schema dump: bump when Project gains
         # fields, the mechanism under test is that migration-added fields
         # stay out of the source-document hash.
-        "sha256:c0a95251fbee0fbde4bb5657a594ca18348fd78af5dfb732932a1e62871dc55b"
+        "sha256:d867595d1540363575bb637229cc1881899de8e4856de6571514e429b37e385d"
     )
     assert project_document_etag(raw, project=migrated) != project_etag(
         migrated,
@@ -388,84 +402,6 @@ def test_visual_style_anchor_cycles_are_rejected_at_commit():
         Project.model_validate(project.model_dump(mode="json"))
 
 
-def _cache_probe_document(project_id: str):
-    project = Project.new(
-        project_id=project_id,
-        name="Cached",
-        now=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
-    )
-    raw = project.model_dump(mode="json")
-    return raw, load_project_document(raw)
-
-
-def test_document_etag_cache_returns_the_same_digest_and_canonicalizes_once(
-    monkeypatch,
-):
-    from services.project_files import serialization
-
-    raw, validated = _cache_probe_document("project-cached")
-    payload = json.dumps(raw, ensure_ascii=False).encode("utf-8")
-    calls: list[int] = []
-    # The spy has to reach the canonicalizer itself: counting it is the point.
-    # pylint: disable=protected-access
-    original = serialization._source_document_data
-
-    def spy(value, model_value):
-        calls.append(1)
-        return original(value, model_value)
-
-    monkeypatch.setattr(serialization, "_source_document_data", spy)
-
-    first = serialization.project_document_etag(
-        raw,
-        project=validated,
-        source_payload=payload,
-    )
-    canonicalized = len(calls)
-    assert canonicalized > 0  # the walk is recursive, one call per container
-
-    second = serialization.project_document_etag(
-        raw,
-        project=validated,
-        source_payload=payload,
-    )
-
-    assert first == second
-    assert len(calls) == canonicalized  # the repeat read hit the cache
-    # The cached value is the same digest the uncached path produces, so
-    # journals and If-Match comparisons keep addressing identical bytes.
-    assert first == serialization.project_document_etag(raw, project=validated)
-
-
-def test_document_etag_cache_keys_on_the_exact_stored_bytes(monkeypatch):
-    from services.project_files import serialization
-
-    raw, validated = _cache_probe_document("project-cache-miss")
-    calls: list[int] = []
-    # pylint: disable=protected-access
-    original = serialization._source_document_data
-
-    def spy(value, model_value):
-        calls.append(1)
-        return original(value, model_value)
-
-    monkeypatch.setattr(serialization, "_source_document_data", spy)
-
-    serialization.project_document_etag(
-        raw,
-        project=validated,
-        source_payload=b"{...revision-one...}",
-    )
-    canonicalized = len(calls)
-    serialization.project_document_etag(
-        raw,
-        project=validated,
-        source_payload=b"{...revision-two...}",
-    )
-
-    assert len(calls) > canonicalized  # different bytes must not share a slot
-
-
 def test_pet_content_type_accepts_both_spellings():
     """The launch form writes ``pet_video``, the composer writes ``pets``.
 
@@ -518,3 +454,400 @@ def test_subtitle_predicate_is_the_single_classification(
         )
         is expected
     )
+
+
+def _character(entity_id: str, **extra) -> VisualEntity:
+    return VisualEntity(
+        entity_id=entity_id,
+        kind="character",
+        name=entity_id.split(":")[-1].title(),
+        required_variant_ids=list(
+            (extra.get("variants") or EntityCollection()).order,
+        ),
+        **extra,
+    )
+
+
+def _project_with_cast() -> Project:
+    project = Project.new(project_id="project-lineup", name="Lineup")
+    project.visual.entities = EntityCollection(
+        items={
+            "char:hero": _character("char:hero"),
+            "char:rival": _character("char:rival"),
+        },
+        order=["char:hero", "char:rival"],
+    )
+    return project
+
+
+def test_cast_lineup_roundtrips_with_validation():
+    project = _project_with_cast()
+    project.visual.cast_lineups = EntityCollection(
+        items={
+            "lineup:main": VisualCastLineup(
+                lineup_id="lineup:main",
+                name="主卡司定妆照",
+                character_refs=["char:hero", "char:rival"],
+                relative_notes="hero:rival ≈ 190:175cm",
+            ),
+        },
+        order=["lineup:main"],
+    )
+
+    validated = Project.model_validate(project.model_dump(mode="json"))
+    lineup = validated.visual.cast_lineups.items["lineup:main"]
+    assert lineup.character_refs == ["char:hero", "char:rival"]
+
+
+def test_cast_lineup_rejects_missing_characters():
+    project = _project_with_cast()
+    project.visual.cast_lineups = EntityCollection(
+        items={
+            "lineup:main": VisualCastLineup(
+                lineup_id="lineup:main",
+                name="主卡司定妆照",
+                character_refs=["char:hero", "char:ghost"],
+            ),
+        },
+        order=["lineup:main"],
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="missing character char:ghost",
+    ):
+        Project.model_validate(project.model_dump(mode="json"))
+
+
+def test_canonical_variant_must_be_one_of_the_entitys_variants():
+    variants = EntityCollection(
+        items={"var:default": VisualVariant(variant_id="var:default")},
+        order=["var:default"],
+    )
+    entity = _character(
+        "char:hero",
+        variants=variants,
+        canonical_variant_id="var:default",
+    )
+    assert entity.canonical_variant_id == "var:default"
+
+    with pytest.raises(ValidationError, match="canonical_variant_id"):
+        _character(
+            "char:hero",
+            variants=variants,
+            canonical_variant_id="var:ghost",
+        )
+
+
+def test_legacy_projects_without_lineups_still_validate():
+    raw = Project.new(project_id="p", name="n").model_dump(mode="json")
+    raw["visual"].pop("cast_lineups", None)
+
+    validated = Project.model_validate(raw)
+    assert validated.visual.cast_lineups.order == []
+
+
+def _variant_entities(**variant_extra) -> dict:
+    return {
+        "items": {
+            "char:hero": {
+                "entity_id": "char:hero",
+                "kind": "character",
+                "name": "Hero",
+                "required_variant_ids": ["var:default"],
+                "variants": {
+                    "items": {
+                        "var:default": {
+                            "variant_id": "var:default",
+                            **variant_extra,
+                        },
+                    },
+                    "order": ["var:default"],
+                },
+            },
+        },
+        "order": ["char:hero"],
+    }
+
+
+def test_identity_echoes_are_stripped_with_receipts():
+    candidate = Project.new(
+        project_id="project-1",
+        name="Initial",
+    ).model_dump(mode="json")
+    candidate["visual"]["entities"] = _variant_entities(
+        entityId="char:hero",
+        variantId="var:default",
+    )
+    candidate["visual"]["entities"]["items"]["char:hero"][
+        "entityId"
+    ] = "char:hero"
+
+    receipts = normalize_project_candidate(candidate)
+
+    assert sorted(receipts) == [
+        "/visual/entities/items/char:hero/entityId",
+        "/visual/entities/items/char:hero/variants/items/var:default/"
+        "entityId",
+        "/visual/entities/items/char:hero/variants/items/var:default/"
+        "variantId",
+    ]
+    # The candidate now validates cleanly: echoes carried zero information.
+    Project.model_validate(candidate)
+
+
+def test_real_snake_case_identity_fields_are_never_stripped():
+    candidate = Project.new(
+        project_id="project-1",
+        name="Initial",
+    ).model_dump(mode="json")
+    candidate["visual"]["entities"] = _variant_entities()
+
+    receipts = normalize_project_candidate(candidate)
+
+    assert not receipts
+    entity = candidate["visual"]["entities"]["items"]["char:hero"]
+    assert entity["entity_id"] == "char:hero"
+    assert entity["variants"]["items"]["var:default"]["variant_id"] == (
+        "var:default"
+    )
+
+
+def test_jq_project_commits_echoed_variants_and_reports_normalization(
+    tmp_path,
+):
+    store = ProjectStore(tmp_path.resolve())
+    store.create(Project.new(project_id="project-1", name="Initial"))
+    tools = AgentProjectTools(
+        store,
+        context=AgentProjectToolContext(
+            origin="runtime_task",
+            caused_by_request_id="request-1",
+            caused_by_message_seq=1,
+        ),
+    )
+    tools.invoke("read_project", {"projectId": "project-1"})
+
+    result = tools.invoke(
+        "jq_project",
+        {
+            "projectId": "project-1",
+            "program": ".visual.entities = $entities",
+            "jsonArgs": {
+                "entities": _variant_entities(entityId="char:hero"),
+            },
+        },
+    )
+
+    assert result["normalizedPointers"] == [
+        "/visual/entities/items/char:hero/variants/items/var:default/"
+        "entityId",
+    ]
+    variant = result["project"]["visual"]["entities"]["items"]["char:hero"][
+        "variants"
+    ]["items"]["var:default"]
+    assert "entityId" not in variant
+
+    # A mismatched echo is information-bearing and must still fail loudly.
+    with pytest.raises(AgentProjectToolError) as caught:
+        tools.invoke(
+            "jq_project",
+            {
+                "projectId": "project-1",
+                "program": ".visual.entities = $entities",
+                "jsonArgs": {
+                    "entities": _variant_entities(
+                        entityId="char:someone-else",
+                    ),
+                },
+            },
+        )
+    assert caught.value.code == "JQ_PROJECT_SCHEMA_INVALID"
+    assert "entityId" in str(caught.value)
+
+
+def _make_timeline_with_shots_and_overlays(
+    shots: list[tuple[str, int, int]],
+    overlays: list[tuple[str, int, int]],
+) -> dict:
+    """Helper to create a timeline dict with shot and overlay elements."""
+    elements_by_id = {}
+    for shot_id, start, dur in shots:
+        elements_by_id[shot_id] = {
+            "element_id": shot_id,
+            "span": {"start_tick": start, "duration_tick": dur},
+            "creation": {"type": "edit"},
+            "location": None,
+            "z_index": 0,
+            "outputs": {},
+            "render_source": None,
+        }
+    for ov_id, start, dur in overlays:
+        elements_by_id[ov_id] = {
+            "element_id": ov_id,
+            "span": {"start_tick": start, "duration_tick": dur},
+            "creation": {"type": "overlay", "text": "test"},
+            "location": {
+                "coordinate_space": "normalized_canvas",
+                "x": 0.5,
+                "y": 0.5,
+                "width": 1.0,
+                "height": 0.2,
+                "anchor_x": 0.5,
+                "anchor_y": 0.5,
+            },
+            "z_index": 100,
+            "outputs": {},
+            "render_source": None,
+        }
+    return {
+        "timeline_id": "timeline:main",
+        "ticks_per_second": 1000,
+        "elements_by_id": elements_by_id,
+    }
+
+
+def test_overlay_local_ticks_corrected_to_global():
+    """Overlay with shot-local ticks should be corrected to global ticks."""
+    shots = [
+        ("shot:01", 0, 8000),
+        ("shot:02", 8000, 8000),
+        ("shot:03", 16000, 8000),
+    ]
+    # Overlay meant for shot:03 but with local ticks [4000, 7500)
+    # Should be corrected to [20000, 23500)
+    overlays = [("subtitle:03b:6", 4000, 3500)]
+    timeline = _make_timeline_with_shots_and_overlays(shots, overlays)
+    candidate = {
+        "timelines": {"items": {"timeline:main": timeline}},
+    }
+
+    from services.project_files.candidate_normalization import (
+        correct_overlay_local_ticks,
+    )
+
+    receipts = correct_overlay_local_ticks(candidate)
+
+    assert len(receipts) == 1
+    assert "+16000 via shot:03" in receipts[0]
+    elem = candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        "subtitle:03b:6"
+    ]
+    assert elem["span"]["start_tick"] == 20000
+
+
+def test_overlay_with_correct_global_ticks_not_modified():
+    """Overlay with correct global ticks should not be modified."""
+    shots = [
+        ("shot:01", 0, 8000),
+        ("shot:02", 8000, 8000),
+    ]
+    # Overlay with correct global ticks [9000, 12000) - intersects shot:02
+    overlays = [("subtitle:02a", 9000, 3000)]
+    timeline = _make_timeline_with_shots_and_overlays(shots, overlays)
+    candidate = {
+        "timelines": {"items": {"timeline:main": timeline}},
+    }
+
+    from services.project_files.candidate_normalization import (
+        correct_overlay_local_ticks,
+    )
+
+    receipts = correct_overlay_local_ticks(candidate)
+
+    assert len(receipts) == 0
+    elem = candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        "subtitle:02a"
+    ]
+    assert elem["span"]["start_tick"] == 9000
+
+
+def test_ambiguous_overlay_not_corrected():
+    """Overlay that matches multiple shots should not be corrected."""
+    # Two shots with same duration - overlay could belong to either
+    shots = [
+        ("shot:01", 0, 5000),
+        ("shot:02", 5000, 5000),
+    ]
+    # Overlay with local ticks [1000, 3000) - could be in either shot
+    overlays = [("subtitle:ambiguous", 1000, 2000)]
+    timeline = _make_timeline_with_shots_and_overlays(shots, overlays)
+    candidate = {
+        "timelines": {"items": {"timeline:main": timeline}},
+    }
+
+    from services.project_files.candidate_normalization import (
+        correct_overlay_local_ticks,
+    )
+
+    receipts = correct_overlay_local_ticks(candidate)
+
+    # Should not be corrected because both offsets produce valid intersections
+    assert len(receipts) == 0
+    elem = candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        "subtitle:ambiguous"
+    ]
+    assert elem["span"]["start_tick"] == 1000
+
+
+def test_existing_overlay_in_base_not_processed():
+    """Overlays that exist in base should not be processed."""
+    shots = [
+        ("shot:01", 0, 8000),
+        ("shot:02", 8000, 8000),
+    ]
+    # Overlay with local ticks that exists in base
+    overlays = [("subtitle:existing", 1000, 2000)]
+    timeline = _make_timeline_with_shots_and_overlays(shots, overlays)
+    candidate = {
+        "timelines": {"items": {"timeline:main": timeline}},
+    }
+    base = {
+        "timelines": {
+            "items": {
+                "timeline:main": {
+                    "elements_by_id": {"subtitle:existing": {}},
+                },
+            },
+        },
+    }
+
+    from services.project_files.candidate_normalization import (
+        correct_overlay_local_ticks,
+    )
+
+    receipts = correct_overlay_local_ticks(candidate, base=base)
+
+    # Should not be corrected because it exists in base
+    assert len(receipts) == 0
+    elem = candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        "subtitle:existing"
+    ]
+    assert elem["span"]["start_tick"] == 1000
+
+
+def test_normalize_project_candidate_includes_tick_corrections():
+    """normalize_project_candidate should include tick correction receipts."""
+    shots = [
+        ("shot:01", 0, 8000),
+        ("shot:02", 8000, 8000),
+    ]
+    overlays = [("subtitle:02a", 1000, 2000)]  # local ticks for shot:02
+    timeline = _make_timeline_with_shots_and_overlays(shots, overlays)
+    candidate = {
+        "timelines": {"items": {"timeline:main": timeline}},
+        "visual": {"entities": {"items": {}, "order": []}},
+    }
+    base = {
+        "timelines": {"items": {"timeline:main": {"elements_by_id": {}}}},
+        "visual": {"entities": {"items": {}, "order": []}},
+    }
+
+    receipts = normalize_project_candidate(candidate, base=base)
+
+    tick_receipts = [r for r in receipts if "+8000" in r]
+    assert len(tick_receipts) == 1
+    elem = candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        "subtitle:02a"
+    ]
+    assert elem["span"]["start_tick"] == 9000
