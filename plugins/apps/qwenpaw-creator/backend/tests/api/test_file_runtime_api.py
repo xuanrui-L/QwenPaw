@@ -15,7 +15,7 @@ from api.file_execution_routes import router as execution_router
 from api.file_session_routes import router as session_router, stream_events
 from api.project_file_routes import router as project_router
 from domain.enums import SpecialistRole, TaskKind, TaskStatus
-from domain.errors import CreatorError
+from domain.errors import BadRequestError, CreatorError
 from services.project_files import frontend_edit_hold
 from services.project_files.json_pointer import hash_json_value
 from services.project_files.facade import CreatorFileServices
@@ -510,6 +510,42 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
     run_scenario,
 ) -> None:
     assert _timeline_render_prechecks(tmp_path, monkeypatch, run_scenario)
+
+
+def test_invalid_render_plan_is_rejected_before_dispatch(
+    tmp_path,
+    monkeypatch,
+    run_scenario,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    app, _services, _snapshot, _bootstrap = _app(tmp_path)
+    dispatch = AsyncMock()
+    problem = "invalid composition plan"
+
+    def reject(_services, **_kwargs):
+        raise BadRequestError(problem)
+
+    monkeypatch.setattr(
+        "services.media_files.local_execution.validate_local_media_execution",
+        reject,
+    )
+    monkeypatch.setattr(
+        "services.media_files.local_execution.execute_file_local_media_command",
+        dispatch,
+    )
+
+    async def scenario(client):
+        return await client.post(
+            "/projects/project-1/timelines/timeline%3Amain/render",
+            headers={"Idempotency-Key": "invalid-render-plan"},
+        )
+
+    response = run_scenario(app, scenario)
+    assert response.status_code == 400
+    assert response.json()["code"] == "BAD_REQUEST"
+    assert response.json()["message"] == problem
+    dispatch.assert_not_awaited()
 
 
 def test_file_execution_authorization_can_be_polled_and_approved(

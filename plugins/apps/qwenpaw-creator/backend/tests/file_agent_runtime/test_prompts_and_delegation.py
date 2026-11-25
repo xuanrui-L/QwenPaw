@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from domain.enums import SpecialistRole
 from models import config as model_config
+from models.video_capabilities import video_model_supported_modes
 from services.file_agent_runtime.prompts import render_creator_system_prompt
 from services.file_agent_runtime.subagents import (
     DelegateToAgentInput,
@@ -165,6 +166,30 @@ def test_image_budget_guidance_blocks_paid_calls_before_exceeding_user_limit():
     assert re.search(r"超出上限时[^。]*付费调用前[^。]*\[BLOCKED\]", prompt)
     assert re.search(r"不能用共享设计 Artifact[^。]*跨 Element 复用", prompt)
     assert re.search(r"不得建立 cast lineup[^。]*第二个可调度视觉节点", prompt)
+    assert re.search(
+        r"共享角色/场景设计资产只能生成 1 张[^。]*" r"一个复合 `scene` 实体及其一个 Variant",
+        prompt,
+    )
+    assert re.search(
+        r"全部图片调用上限[^。]*不足以覆盖[^。]*storyboard[^。]*" r"不得先行占用视觉设计预算",
+        prompt,
+    )
+
+
+def test_storyboard_keeps_the_users_stage_specific_medium() -> None:
+    prompt = render_creator_system_prompt(
+        project_id=_PROJECT_ID,
+        external_skills="",
+    )
+    rule = next(
+        line
+        for line in prompt.splitlines()
+        if line.startswith("- **渲染媒介必须写进 prompt")
+    )
+    assert "`storyboard_prompt` 是中间分镜" in rule
+    assert "不套用最终交付媒介" in rule
+    assert re.search(r"粗铅笔、炭笔[^，]*绘制媒介时保留该媒介", rule)
+    assert "成片仍按项目媒介生成" in rule
 
 
 @pytest.mark.parametrize(
@@ -188,28 +213,45 @@ def test_video_model_guidance_uses_the_configured_duration(
 
 
 @pytest.mark.parametrize(
-    ("model", "marker"),
+    ("model", "protocol", "marker"),
     [
-        ("kling/kling-v3-omni-video-generation", "<<<image_{}>>>"),
-        ("kling-3.0-omni", "@image_{}"),
+        ("kling/kling-v3-omni-video-generation", "DashScope（百炼）", "<<<{}>>>"),
+        ("kling-3.0-omni", "Kling", "@{}"),
     ],
     ids=["bailian", "direct"],
 )
 def test_kling_guidance_uses_only_the_configured_channel_reference_syntax(
     monkeypatch,
     model,
+    protocol,
     marker,
 ) -> None:
-    monkeypatch.setattr(model_config, "get_video_model_name", lambda: model)
-    monkeypatch.setattr(model_config, "get_video_backend", lambda: "kling")
-    prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
-
-    references = set(
-        re.findall(r"<<<image_(?:N|\d+)>>>|@image_(?:N|\d+)", prompt)
+    video_settings = {"model": model, "protocol": protocol}
+    monkeypatch.setattr(
+        model_config,
+        "get_request_tool_config",
+        lambda tool: video_settings
+        if tool == model_config.CREATOR_VIDEO_CONFIG_TOOL
+        else {},
     )
-    assert {marker.format(1), marker.format("N")} <= references
+    assert "r2v" in video_model_supported_modes(
+        model, model_config.get_video_backend()
+    )
+    prompt = render_creator_system_prompt(
+        project_id=_PROJECT_ID, external_skills=""
+    )
+
+    wire_token = r"<<<(?:image|video)_(?:N|\d+)>>>|@(?:image|video)_(?:N|\d+)"
+    references = set(re.findall(wire_token, prompt))
+    assert {
+        marker.format(ref) for ref in ("image_1", "image_N", "video_1")
+    } <= references
     prefix = marker.split("{", 1)[0]
     assert all(reference.startswith(prefix) for reference in references)
+    storyboard_references = set(
+        re.findall(rf"storyboard\s*(?:是|为|用)\s*`({wire_token})`", prompt)
+    )
+    assert storyboard_references == {marker.format("image_1")}
 
 
 def _tts(monkeypatch, *, model: str, configured: bool = True) -> None:
@@ -282,4 +324,11 @@ def test_execution_guidance_tracks_authorization_mode(
         model_config, "get_execution_authorization_mode", lambda: mode
     )
     prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
-    assert ("promptSyncRequired" in prompt) is requires_approval
+    sync_instructions = (
+        "promptSyncRequired",
+        "并非审阅冷却",
+        "保留现有内容并生成",
+        "不要声称会自动重试",
+    )
+    for instruction in sync_instructions:
+        assert (instruction in prompt) is requires_approval, instruction

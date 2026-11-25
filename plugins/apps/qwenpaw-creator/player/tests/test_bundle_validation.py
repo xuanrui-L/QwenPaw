@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import zipfile
 from pathlib import Path
@@ -449,4 +450,40 @@ def test_legacy_choice_fragment_remains_valid():
     assert not validate_interaction_html(
         '<button data-edge-ref="a">选择这条分支</button>',
         ["a"],
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["interaction_html.py", "presentation_html.py"]
+)
+def test_html_validator_rules_match_creator(name):
+    player_root = Path(__file__).resolve().parents[1]
+    creator_backend = player_root.parent / "backend"
+    if not creator_backend.is_dir():
+        pytest.skip("Standalone player checkout has no Creator source")
+
+    def validator_rules(source: Path) -> str:
+        tree = ast.parse(
+            source.read_text(encoding="utf-8"), filename=str(source)
+        )
+        for block in ast.walk(tree):
+            if isinstance(
+                block,
+                (
+                    ast.Module,
+                    ast.ClassDef,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                ),
+            ):
+                if ast.get_docstring(block, clean=False) is not None:
+                    del block.body[0]
+        return ast.dump(tree, include_attributes=False)
+
+    # The dependency-free validators are intentional mirrors. Compare their
+    # parsed rules here so this check runs even without Creator installed.
+    assert validator_rules(
+        player_root / "ivb/format" / name
+    ) == validator_rules(
+        creator_backend / "services/project_files" / name,
     )
