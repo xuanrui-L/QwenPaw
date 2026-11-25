@@ -1129,14 +1129,10 @@ def test_a_ledger_entry_with_an_invalid_state_enum_is_not_trusted(
     tmp_path,
     monkeypatch,
 ):
-    """Valid JSON carrying an unknown journal-state enum must degrade, not raise.
-
-    The ledger is a cache. A stale or forged entry whose ``state_before`` is
-    not a real ``CommitJournalState`` used to raise ``ValueError`` on hit,
-    which bubbled out of ``recover_project`` and fail-closed the whole Project
-    as a single integrity error. It must instead be treated as a miss so the
-    real audit runs and the healthy Project recovers normally.
-    """
+    """The ledger is a cache: an entry whose ``state_before`` is not a real
+    ``CommitJournalState`` must be treated as a miss (so the real audit runs),
+    not raise ``ValueError`` and fail-close the whole Project as one integrity
+    error."""
 
     monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
     store = _finalized_store(tmp_path)
@@ -1166,14 +1162,10 @@ def test_a_ledger_entry_with_an_invalid_state_enum_is_not_trusted(
 
 
 def test_a_changed_project_json_invalidates_the_ledger(tmp_path, monkeypatch):
-    """The audit cross-checks the live project.json, so it must be fingerprinted.
-
-    ``_audit_terminal_inputs`` reads the current Project to compare its ETag
-    against the Runtime state. Before project.json joined the fingerprint, a
-    project.json that moved or corrupted on its own -- with every Runtime fact
-    untouched -- kept replaying a cached ALREADY_FINALIZED on every hot boot,
-    while a cold audit would have read the Project and surfaced the conflict.
-    """
+    """``_audit_terminal_inputs`` cross-checks the live project.json ETag, so
+    project.json must join the fingerprint: otherwise one that moved or
+    corrupted on its own -- every Runtime fact untouched -- replays a cached
+    ALREADY_FINALIZED on every hot boot instead of surfacing the conflict."""
 
     import os
 
