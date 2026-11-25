@@ -318,6 +318,7 @@ function DecisionTray({ projectId }: { projectId: string }) {
   const acceptAllReviews = async () => {
     setBatchBusy(true);
     let kept = 0;
+    let deferred = 0;
     const failures: string[] = [];
     try {
       for (const review of pendingReviews) {
@@ -326,7 +327,7 @@ function DecisionTray({ projectId }: { projectId: string }) {
         const reconciledBefore =
           useFileProjectReviewStore.getState().reconciledDecision?.at;
         try {
-          await decide(
+          const decided = await decide(
             projectId,
             review.review_id,
             operations.map((operation) => ({
@@ -335,6 +336,7 @@ function DecisionTray({ projectId }: { projectId: string }) {
             })),
           );
           kept += 1;
+          if (decided?.followupDeferred) deferred += 1;
         } catch (error) {
           // Per-item isolation: earlier keeps already committed, so report
           // exactly what landed instead of a blanket failure toast. A review
@@ -362,7 +364,13 @@ function DecisionTray({ projectId }: { projectId: string }) {
         }
       }
       if (failures.length === 0) {
-        message.success(t("decisionTray.allReviewChangesKept"));
+        if (deferred > 0) {
+          // Accepted and persisted, but some follow-up publishes were deferred;
+          // warn rather than a clean success that hides the deferral.
+          message.warning(t("fileReview.followupDeferred"), 6);
+        } else {
+          message.success(t("decisionTray.allReviewChangesKept"));
+        }
       } else {
         showBackendFeedback(
           "warning",

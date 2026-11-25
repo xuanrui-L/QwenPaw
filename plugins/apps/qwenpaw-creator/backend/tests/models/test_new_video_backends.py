@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 
+import httpx
 import pytest
 
 from models import config as model_config
@@ -1005,3 +1006,189 @@ def test_vidu_direct_check_status(monkeypatch) -> None:
     assert (
         captured["url"] == "https://api.vidu.com/ent/v2/tasks/task-3/creations"
     )
+
+
+# ── submit failure surfacing ─────────────────────────────────────────
+
+
+class _RaisingAsyncClient:
+    """Answers every submit POST by raising a caller-supplied exception."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        raise self._exc
+
+
+def _submit_with_reference():
+    """An r2v submit that reaches the POST with a non-empty media list."""
+    return video_model.submit_video_task(
+        "<<<image_1>>>中的角色向前走",
+        reference_image_url="/generated/anchor.png",
+        reference_image_url_list=["/generated/motion.mp4"],
+        ratio="16:9",
+        duration=10,
+        resolution="1080p",
+    )
+
+
+def _force_inlined_references(monkeypatch) -> None:
+    """Resolve every reference to an inline data: URL, reproducing an inline
+    backend's Base64-in-body request shape without touching the capability
+    table."""
+
+    async def fake_resolve(url: str, _backend: str):
+        name = url.rsplit("/", 1)[-1]
+        kind = "video" if name.endswith((".mp4", ".mov")) else "image"
+        return _DATA_URL, kind
+
+    monkeypatch.setattr(
+        video_model,
+        "_resolve_reference_media_url",
+        fake_resolve,
+    )
+
+
+def test_video_submit_maps_a_gateway_413_to_a_body_too_large_reason(
+    monkeypatch,
+) -> None:
+    """An explicit 413 (nginx answers an oversized body with 413 + empty
+    text) must name the real cause and stay non-retryable: resending the same
+    oversized body cannot succeed."""
+    captured: dict = {}
+    _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
+    request = httpx.Request("POST", "https://bailian.example/video-synthesis")
+    response = httpx.Response(413, request=request, text="")
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _RaisingAsyncClient(
+            httpx.HTTPStatusError("413", request=request, response=response),
+        ),
+    )
+    with pytest.raises(ModelError) as excinfo:
+        asyncio.run(_submit_with_reference())
+    error = excinfo.value
+    assert "请求体超过大小限制" in str(error)
+    assert "413" in str(error)
+    assert error.retryable is False
+
+
+def test_video_submit_never_surfaces_an_empty_failure_reason(
+    monkeypatch,
+) -> None:
+    """A send-phase WriteError carries an empty str(); it must not render a
+    bare "failed:" colon. The body never reached the provider, so this small-
+    image transmission interruption stays retryable and is not blamed on size
+    (the delivered-but-unknown case is the response-phase-drop test below)."""
+    captured: dict = {}
+    _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _RaisingAsyncClient(httpx.WriteError("")),
+    )
+    with pytest.raises(ModelError) as excinfo:
+        asyncio.run(_submit_with_reference())
+    message = str(excinfo.value)
+    assert not message.endswith("failed:")
+    assert "WriteError" in message
+    assert "413" not in message
+    assert excinfo.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    "response_drop",
+    [httpx.RemoteProtocolError(""), httpx.ReadError("")],
+)
+def test_video_submit_reports_a_response_phase_drop_as_unknown_not_oversize(
+    monkeypatch,
+    response_drop,
+) -> None:
+    """RemoteProtocolError/ReadError fire while reading the response, i.e.
+    after the body was fully sent. The provider bills on acceptance, so the
+    outcome is unknown and may already be billed: report it honestly, keep it
+    non-retryable (a blind auto-resend could mint a second billed task), and
+    never blame body size -- even for the inline shape the old code equated
+    with oversize."""
+    captured: dict = {}
+    _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
+    _force_inlined_references(monkeypatch)
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _RaisingAsyncClient(response_drop),
+    )
+    with pytest.raises(ModelError) as excinfo:
+        asyncio.run(_submit_with_reference())
+    message = str(excinfo.value)
+    assert excinfo.value.retryable is False
+    assert "413" not in message
+    assert "请求体超过大小限制" not in message
+    assert "压缩" not in message
+    assert "不会自动重发" in message
+
+
+def test_video_submit_keeps_a_pre_send_connect_error_retryable(
+    monkeypatch,
+) -> None:
+    """A ConnectError fires while dialing, before any reference bytes are
+    sent, so it cannot have been accepted/billed -- even with an inlined
+    reference. Unlike a response-phase drop it must stay retryable with no
+    oversize hint, or a transient blip is misreported and a viable retry is
+    blocked."""
+    captured: dict = {}
+    _bind(monkeypatch, "kling/kling-v3-omni-video-generation", captured)
+    _force_inlined_references(monkeypatch)
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _RaisingAsyncClient(httpx.ConnectError("")),
+    )
+    with pytest.raises(ModelError) as excinfo:
+        asyncio.run(_submit_with_reference())
+    error = excinfo.value
+    assert "413" not in str(error)
+    assert error.retryable is True
+
+
+def test_video_submit_classifies_a_response_phase_drop_by_type_not_media(
+    monkeypatch,
+) -> None:
+    """Classification is by exception type, not body content: a text-to-video
+    submit carries no inlined reference, yet a RemoteProtocolError still means
+    the body was sent and the response cut off -- unknown/non-retryable, with
+    no oversized-body hint."""
+    captured: dict = {}
+    _bind(
+        monkeypatch,
+        "kling-2.6",
+        captured,
+        backend="kling",
+        payload={"code": 0, "data": {"id": "task-1"}},
+    )
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _RaisingAsyncClient(httpx.RemoteProtocolError("")),
+    )
+    with pytest.raises(ModelError) as excinfo:
+        asyncio.run(
+            video_model.submit_video_task(
+                "一只小猫在雨夜的街头奔跑",
+                mode="t2v",
+                ratio="16:9",
+                duration=10,
+                resolution="720p",
+            ),
+        )
+    error = excinfo.value
+    assert "413" not in str(error)
+    assert error.retryable is False

@@ -161,23 +161,28 @@ export default function InlineReviewDiff({ pointer }: { pointer: string }) {
           decision,
         },
       ];
-      if (rejectionFeedback) {
-        await decide(
-          projectId,
-          match.review.review_id,
-          decisionItems,
-          rejectionFeedback,
-        );
+      const decided = rejectionFeedback
+        ? await decide(
+            projectId,
+            match.review.review_id,
+            decisionItems,
+            rejectionFeedback,
+          )
+        : await decide(projectId, match.review.review_id, decisionItems);
+      // The decision is always persisted (HTTP 200), but followupDeferred means
+      // the redo/publish was not launched. Plain success here is exactly the
+      // "undo-and-redo did nothing" false positive, so warn instead.
+      if (decided?.followupDeferred) {
+        message.warning(t("fileReview.followupDeferred"), 6);
       } else {
-        await decide(projectId, match.review.review_id, decisionItems);
+        message.success(
+          decision === "ACCEPT"
+            ? t("inlineReview.kept")
+            : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
+            ? t("inlineReview.undoneRedo")
+            : t("inlineReview.undone"),
+        );
       }
-      message.success(
-        decision === "ACCEPT"
-          ? t("inlineReview.kept")
-          : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
-          ? t("inlineReview.undoneRedo")
-          : t("inlineReview.undone"),
-      );
       return true;
     } catch {
       message.error(t("fileReview.public.decisionFailed"));

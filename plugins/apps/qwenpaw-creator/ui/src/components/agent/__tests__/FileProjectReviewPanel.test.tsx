@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { message } from "antd";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import FileProjectReviewPanel, {
   reviewPendingUnits,
@@ -191,6 +192,36 @@ describe("FileProjectReviewPanel", () => {
     expect(decide).toHaveBeenCalledTimes(1);
   });
 
+  it("warns instead of reporting success when the redo follow-up is deferred", async () => {
+    // The decision commits durably and the endpoint returns 200, but a deferred
+    // follow-up means the regeneration has not actually started. Reporting plain
+    // success here is exactly what made "undo & redo" look like it did nothing.
+    const value = review();
+    const decide = vi.fn(async () => ({ ...value, followupDeferred: true }));
+    setup(value, decide);
+    const warnSpy = vi
+      .spyOn(message, "warning")
+      .mockImplementation(() => (() => {}) as never);
+    const successSpy = vi
+      .spyOn(message, "success")
+      .mockImplementation(() => (() => {}) as never);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "撤销 当前项目 · 描述" }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "反馈与调整要求" }), {
+      target: { value: "人物状态不对" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "撤销并重做" }));
+
+    await waitFor(() => expect(decide).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(warnSpy).toHaveBeenCalledTimes(1));
+    expect(successSpy).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+    successSpy.mockRestore();
+  });
+
   it("renders a media preview and opens the generation detail locator", () => {
     setup(mediaReview());
     expect(screen.getByText("视频审阅")).toBeInTheDocument();
@@ -359,6 +390,41 @@ describe("Inline review diffs", () => {
           { action: "UNDO_ONLY" },
         ),
       );
+    });
+
+    it("warns instead of reporting success when the follow-up is deferred", async () => {
+      // The decision commits durably (HTTP 200), but a deferred follow-up means
+      // the undo/redo was not actually launched. Plain success here is exactly
+      // the "undo & redo did nothing" false positive this inline panel must not
+      // repeat.
+      const current = review([operation({})]);
+      const decide = vi.fn(async () => ({
+        ...current,
+        followupDeferred: true,
+      }));
+      useFileProjectReviewStore.setState({
+        projectId: "project-1",
+        reviews: [current],
+        decisionInFlight: false,
+        decide,
+      });
+      const warnSpy = vi
+        .spyOn(message, "warning")
+        .mockImplementation(() => (() => {}) as never);
+      const successSpy = vi
+        .spyOn(message, "success")
+        .mockImplementation(() => (() => {}) as never);
+      render(<InlineReviewDiff pointer="/strategy/creative_brief" />);
+
+      fireEvent.click(screen.getByRole("button", { name: "撤销该修改" }));
+      fireEvent.click(screen.getByRole("button", { name: "仅撤销" }));
+
+      await waitFor(() => expect(decide).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(warnSpy).toHaveBeenCalledTimes(1));
+      expect(successSpy).not.toHaveBeenCalled();
+
+      warnSpy.mockRestore();
+      successSpy.mockRestore();
     });
   });
 
