@@ -1178,7 +1178,7 @@ describe("AssetMediaPreview audio waveform", () => {
       '[data-asset-preview-kind="audio-waveform"]',
     );
     expect(waveform).toBeInTheDocument();
-    expect(waveform?.children.length).toBeGreaterThan(0);
+    expect(waveform?.querySelectorAll("i").length).toBeGreaterThan(10);
     expect(container.querySelector(".placeholder")).not.toBeInTheDocument();
   });
 
