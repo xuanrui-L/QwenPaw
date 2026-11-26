@@ -15,11 +15,7 @@ import type {
 } from "react";
 import { Button, Tooltip, message } from "antd";
 import { useShallow } from "zustand/react/shallow";
-import {
-  ArrowUpOutlined,
-  CommentOutlined,
-  MenuFoldOutlined,
-} from "@ant-design/icons";
+import { ArrowUpOutlined, MenuFoldOutlined } from "@ant-design/icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -101,7 +97,7 @@ import AgentProgressOverview from "./AgentProgressOverview";
 import AgentWaitHint from "./AgentWaitHint";
 import AgentActivityIndicator from "./AgentActivityIndicator";
 import DecisionTray from "./DecisionTray";
-import FeedbackModal from "@/components/creator/FeedbackModal";
+import FeedbackButton from "@/components/creator/FeedbackButton";
 import ReviewDecisionReconcileToast from "./ReviewDecisionReconcileToast";
 import MentionInput, {
   type MentionInputContent,
@@ -1134,9 +1130,7 @@ export default function AgentDock({
   const height = useAgentDockUiStore((state) => state.height);
   const draft = useAgentDockUiStore((state) => state.draft);
   const unsentDrafts = useAgentDockUiStore((state) => state.unsentDrafts);
-  const parkUnsentDraft = useAgentDockUiStore(
-    (state) => state.parkUnsentDraft,
-  );
+  const parkUnsentDraft = useAgentDockUiStore((state) => state.parkUnsentDraft);
   const clearUnsentDraft = useAgentDockUiStore(
     (state) => state.clearUnsentDraft,
   );
@@ -1183,9 +1177,6 @@ export default function AgentDock({
     (state) => state.loadOlderMessages,
   );
   const sendMessage = useCreatorSessionStore((state) => state.sendMessage);
-  // Feedback lives here because this is where a run is watched: the person
-  // complains about what they can see failing, and only types the reason.
-  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const stopping = useCreatorSessionStore((state) => state.stopping);
   const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const replayUntilSeq = useCreatorSessionStore(
@@ -1763,7 +1754,14 @@ export default function AgentDock({
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && mentionQuery === null) setOpen(false);
+      if (event.key !== "Escape" || mentionQuery !== null) return;
+      if (
+        event.target instanceof Element &&
+        event.target.closest('[role="dialog"]')
+      ) {
+        return;
+      }
+      setOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -2826,17 +2824,18 @@ export default function AgentDock({
                       </span>
                     </span>
                   )}
-                <Button
-                  type="text"
-                  size="small"
-                  data-agent-feedback
-                  aria-label={t("feedback.action")}
-                  icon={<CommentOutlined />}
-                  className="shrink-0 !h-6 !px-1.5 !text-[11px]"
-                  onClick={() => setFeedbackOpen(true)}
-                >
-                  {t("feedback.action")}
-                </Button>
+                <FeedbackButton
+                  key={projectId}
+                  projectId={projectId}
+                  sessionId={
+                    session?.projectId === projectId ? session.id : undefined
+                  }
+                  conversationId={
+                    sessionProjectId === projectId
+                      ? activeConversationId ?? undefined
+                      : undefined
+                  }
+                />
               </div>
               <AgentWaitHint
                 projectId={projectId}
@@ -3151,11 +3150,6 @@ export default function AgentDock({
           </>
         </div>
       )}
-      <FeedbackModal
-        open={feedbackOpen}
-        projectId={projectId}
-        onClose={() => setFeedbackOpen(false)}
-      />
     </>
   );
 }

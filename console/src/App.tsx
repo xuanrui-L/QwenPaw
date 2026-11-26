@@ -6,6 +6,7 @@ import {
 } from "@agentscope-ai/design";
 import {
   App as AntdApp,
+  Drawer,
   ConfigProvider as AntdConfigProvider,
   theme as antdTheme,
 } from "antd";
@@ -40,6 +41,9 @@ import {
 
 const LoginPage = lazyImportWithRetry("./pages/Login/index");
 const HubPage = lazyImportWithRetry("./pages/Hub/index");
+const CommunitySettings = lazyImportWithRetry(
+  "./pages/Settings/Community/index",
+);
 // Desktop OS shell. Uses React.lazy (not lazyImportWithRetry, which only
 // resolves the ./pages/** glob) so it can load from ./os/.
 const DesktopOSPage = lazy(() => import("./os/DesktopOS"));
@@ -369,6 +373,15 @@ function AppInner({
   const { isDark, previewTheme: userTheme } = useTheme();
   const uiFontSize = useSyncExternalStore(subscribeUiFontSize, getUiFontSize);
   const osActive = isOsPath(window.location.pathname);
+  const [communitySettingsOpen, setCommunitySettingsOpen] = useState(false);
+  useEffect(() => {
+    const host = window.QwenPaw?.host;
+    if (!host) return;
+    host.openCommunitySettings = () => setCommunitySettingsOpen(true);
+    return () => {
+      delete host.openCommunitySettings;
+    };
+  }, []);
   // The console font-size setting is intentionally scoped to the classic
   // web console and login page; inside the desktop OS shell we fall back to
   // the default so its fixed-px chrome stays visually consistent.
@@ -535,6 +548,18 @@ function AppInner({
                   <FontSizeProvider value={effectiveFontSize}>
                     <AuthStatusProvider value={backendInfo.authStatus}>
                       {routedContent}
+                      {communitySettingsOpen && (
+                        <Drawer
+                          open
+                          aria-label={i18n.t("community.title")}
+                          width="min(640px, 100vw)"
+                          onClose={() => setCommunitySettingsOpen(false)}
+                        >
+                          <ChunkRecoverySuspense fallback={loadingFallback}>
+                            <CommunitySettings />
+                          </ChunkRecoverySuspense>
+                        </Drawer>
+                      )}
                     </AuthStatusProvider>
                   </FontSizeProvider>
                 </ApprovalProvider>

@@ -15,7 +15,7 @@ class ImportRequest {
   static current: ImportRequest;
   upload = {
     onprogress: null as ((event: ProgressEvent) => void) | null,
-    onload: null as (() => void) | null,
+    onload: null as ((event: ProgressEvent) => void) | null,
   };
   onload: (() => void) | null = null;
   onerror: (() => void) | null = null;
@@ -111,38 +111,40 @@ describe("project archive import", () => {
       render(
         <ProjectImporter open onClose={onClose} onImported={onImported} />,
       );
+      const archiveSize = 2 * 1024 * 1024;
       fireEvent.change(screen.getByLabelText("选择项目 ZIP 文件"), {
-        target: { files: [new File(["zip"], "backup.zip")] },
+        target: {
+          files: [new File([new Uint8Array(archiveSize)], "backup.zip")],
+        },
       });
       expect(screen.getByText("正在上传文件")).toBeInTheDocument();
+      expect(screen.getByText("已上传 0 B")).toBeInTheDocument();
       const request = ImportRequest.current;
-      act(() => {
-        request.upload.onprogress?.(
-          new ProgressEvent("progress", {
-            lengthComputable,
-            loaded: 50,
-            total: 100,
-          }),
-        );
-      });
-      expect(screen.getByRole("progressbar")).toHaveAttribute(
-        "aria-valuenow",
-        lengthComputable ? "50" : "0",
-      );
-      act(() => {
-        request.upload.onprogress?.(
-          new ProgressEvent("progress", {
-            lengthComputable,
-            loaded: 100,
-            total: 100,
-          }),
-        );
-        request.upload.onload?.();
-      });
+      const event = (type: string, loaded: number) =>
+        new ProgressEvent(type, {
+          lengthComputable,
+          loaded,
+          total: lengthComputable ? archiveSize : 0,
+        });
+      const suffix = lengthComputable ? " / 2.0 MB" : "";
+      for (const [bytes, label] of [
+        [512 * 1024, "512.0 KB"],
+        [1536 * 1024, "1.5 MB"],
+      ] as const) {
+        act(() => request.upload.onprogress?.(event("progress", bytes)));
+        expect(
+          screen.getByText(`已上传 ${label}${suffix}`),
+        ).toBeInTheDocument();
+      }
+      expect(
+        screen.getByRole("progressbar").getAttribute("aria-valuenow"),
+      ).toBe(lengthComputable ? "75" : null);
+      act(() => request.upload.onload?.(event("load", archiveSize)));
       expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
       expect(screen.getByRole("status")).toHaveTextContent(
         "文件已上传，正在导入项目",
       );
+      expect(screen.getByRole("status")).toHaveTextContent("已上传 2.0 MB");
       expect(screen.queryByText("100%")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "关闭" })).toBeDisabled();
       expect(success).not.toHaveBeenCalled();
@@ -168,6 +170,7 @@ describe("project archive import", () => {
         await waitFor(() =>
           expect(screen.getByRole("button", { name: "关闭" })).toBeEnabled(),
         );
+        expect(screen.queryByText(/已上传/)).toBeNull();
       }
     },
   );

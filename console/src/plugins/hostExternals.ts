@@ -72,6 +72,7 @@ export interface HostExternals {
   getSelectedAgentId?: () => string;
   getCurrentSessionId?: () => string | null;
   openExternalLink?: (url: string) => void;
+  openCommunitySettings?: () => void;
   fetch?: (path: string, init?: RequestInit) => Promise<Response>;
 }
 
