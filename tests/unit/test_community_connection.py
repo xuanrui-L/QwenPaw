@@ -119,15 +119,33 @@ async def test_confirmed_feedback_survives_account_switch_without_exposing_recei
 
 
 @pytest.mark.asyncio
-async def test_platform_rejection_can_be_corrected():
+@pytest.mark.parametrize(
+    ("response", "code", "status"),
+    [
+        (httpx.Response(400), "feedback_rejected", 400),
+        (httpx.ConnectError("offline"), "feedback_not_sent", 503),
+        (httpx.ReadTimeout("lost receipt"), "network_unavailable", 502),
+    ],
+)
+async def test_feedback_distinguishes_rejection_from_lost_receipt(
+    response,
+    code,
+    status,
+):
     await seed_connection()
-    call = service(lambda _: httpx.Response(400)).community_request
-    with pytest.raises(
-        module.CommunityConnectionError,
-        match="feedback_rejected",
-    ) as rejected:
-        await call("POST", "/api/v1/feedback", account_id="account-a")
-    assert rejected.value.status_code == 400
+
+    def handler(_):
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    with pytest.raises(module.CommunityConnectionError, match=code) as error:
+        await service(handler).community_request(
+            "POST",
+            "/api/v1/feedback",
+            account_id="account-a",
+        )
+    assert error.value.status_code == status
 
 
 @pytest.mark.asyncio

@@ -394,6 +394,7 @@ class CommunityConnectionService:
             path=path,
         )
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        feedback_write = method == "POST" and path in FEEDBACK_PATHS
         try:
             async with httpx.AsyncClient(
                 base_url=PLATFORM,
@@ -424,11 +425,7 @@ class CommunityConnectionService:
                     retry_after=_retry_after_seconds(response),
                 )
             if not response.is_success:
-                if (
-                    method == "POST"
-                    and path in FEEDBACK_PATHS
-                    and 400 <= response.status_code < 500
-                ):
+                if feedback_write and 400 <= response.status_code < 500:
                     raise CommunityConnectionError(
                         "feedback_rejected",
                         response.status_code,
@@ -446,6 +443,15 @@ class CommunityConnectionService:
                 data["data"] = {}
             return data
         except httpx.RequestError as exc:
+            if feedback_write and isinstance(
+                exc,
+                (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+            ):
+                # The connection was never acquired, so no feedback body was sent.
+                raise CommunityConnectionError(
+                    "feedback_not_sent",
+                    503,
+                ) from exc
             raise CommunityConnectionError("network_unavailable", 502) from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise CommunityConnectionError(
