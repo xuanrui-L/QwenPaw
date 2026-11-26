@@ -11,7 +11,13 @@ import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
+from pydantic import Field
 
 from domain.errors import (
     ConflictError,
@@ -19,6 +25,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
+from schemas.common import StrictModel
 from services.media_files.ffmpeg import ffmpeg_readiness
 from services.media_files.keyframe_cache import (
     materialize_keyframe,
@@ -30,6 +37,11 @@ from services.media_files.motion_engine import (
     resolve_vendor_files,
 )
 from services.media_files.motion_overlay import render_motion_poster
+from services.media_files.whole_film import (
+    cached_whole_film,
+    materialize_whole_film,
+    plan_whole_film,
+)
 from services.project_files.assets import AssetFileError, AssetFileStore
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import IndexedFile
@@ -58,6 +70,86 @@ _STREAM_CHUNK_BYTES = 64 * 1024
 # each media request. Uniqueness is still enforced on cache misses.
 _VERSION_PROJECT_CACHE: dict[tuple[str, str], str] = {}
 _VERSION_PROJECT_CACHE_MAX = 4096
+
+
+class WholeFilmRequest(StrictModel):
+    version_ids: list[str] = Field(alias="versionIds", min_length=2)
+
+
+_WHOLE_FILM_JOBS: dict[tuple[Path, str], asyncio.Task[Path]] = {}
+
+
+@router.post("/projects/{project_id}/whole-film")
+async def prepare_whole_film(
+    project_id: str,
+    body: WholeFilmRequest,
+    services: CreatorFileServices = Depends(project_file_services),
+) -> JSONResponse:
+    project = (
+        await asyncio.to_thread(services.projects.read, project_id)
+    ).project
+    plan = plan_whole_film(project, body.version_ids)
+    root = services.projects.project_root(project_id)
+    job_key = (root, plan.key)
+    job = _WHOLE_FILM_JOBS.get(job_key)
+    if job is None:
+        job = asyncio.create_task(
+            asyncio.to_thread(materialize_whole_film, root, plan),
+        )
+        _WHOLE_FILM_JOBS[job_key] = job
+
+        # A closed tab must neither cancel another reader's export nor hold
+        # a finished job forever. Leave failures available to the next poll.
+        def forget(completed: asyncio.Task) -> None:
+            if not completed.cancelled():
+                completed.exception()
+            if _WHOLE_FILM_JOBS.get(job_key) is completed:
+                _WHOLE_FILM_JOBS.pop(job_key, None)
+
+        loop = asyncio.get_running_loop()
+        job.add_done_callback(lambda done: loop.call_later(60, forget, done))
+    done, _ = await asyncio.wait({job}, timeout=1.5)
+    if not done:
+        return JSONResponse(
+            {"status": "preparing"},
+            status_code=202,
+            headers={"Retry-After": "2"},
+        )
+    try:
+        path = job.result()
+    finally:
+        if _WHOLE_FILM_JOBS.get(job_key) is job:
+            _WHOLE_FILM_JOBS.pop(job_key)
+    latest = (
+        await asyncio.to_thread(services.projects.read, project_id)
+    ).project
+    if plan_whole_film(latest, body.version_ids).key != plan.key:
+        raise ConflictError("分集成片已变更，请重新生成整片")
+    return JSONResponse(
+        {
+            "status": "ready",
+            "key": plan.key,
+            "relativePath": path.relative_to(services.root).as_posix(),
+            "sizeBytes": path.stat().st_size,
+        },
+    )
+
+
+@router.get("/projects/{project_id}/whole-film/{key}")
+def download_whole_film(
+    project_id: str,
+    key: str,
+    services: CreatorFileServices = Depends(project_file_services),
+) -> FileResponse:
+    project = services.projects.read(project_id).project
+    path = cached_whole_film(services.projects.project_root(project_id), key)
+    if path is None:
+        raise NotFoundError("整片尚未生成")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"{project.name}-整片.mp4",
+    )
 
 
 def _response_range(

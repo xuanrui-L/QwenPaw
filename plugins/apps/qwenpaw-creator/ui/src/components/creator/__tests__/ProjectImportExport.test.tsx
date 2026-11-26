@@ -4,12 +4,15 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { message } from "antd";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectImporter } from "../ProjectImportExport";
 import ProjectExportActions from "../ProjectExportActions";
 import { projectDocument } from "@/test/creatorFixtures";
+import * as downloadApi from "@/api/creator/assetDownload";
+import { AssetDownloadProvider } from "@/components/assets/AssetDownload";
 
 class ImportRequest {
   static current: ImportRequest;
@@ -36,6 +39,41 @@ afterEach(() => {
 });
 
 describe("episode film downloads", () => {
+  it("puts scanning beside the selected file and exposes just its attachment link in the dialog", async () => {
+    const attachment = "https://files.example/episode.mp4?signature=abc";
+    const generate = vi
+      .spyOn(downloadApi, "generateAssetDownload")
+      .mockResolvedValue({
+        url: "https://platform-oss.agentscope.io/qwenpaw-creator/download/index.html#example",
+        directUrl: attachment,
+        expiresAt: Date.now() + 86_400_000,
+      });
+    render(
+      <AssetDownloadProvider
+        projectId={projectDocument.project_id}
+        review={false}
+      >
+        <ProjectExportActions project={projectDocument} />
+      </AssetDownloadProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "下载 / 导出" }));
+    const row = await screen.findByRole("row", { name: /晨光出发/ });
+    expect(within(row).getByRole("button", { name: /下载文件/ })).toBeEnabled();
+    expect(generate).not.toHaveBeenCalled();
+    fireEvent.click(within(row).getByRole("button", { name: /扫码下载/ }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(
+      await dialog.findByRole("link", { name: "下载文件" }),
+    ).toHaveAttribute("href", attachment);
+    expect(dialog.getAllByRole("link")).toHaveLength(1);
+    expect(dialog.getByText(/晨光出发/)).toBeInTheDocument();
+    expect(generate).toHaveBeenCalledWith(
+      projectDocument.project_id,
+      expect.objectContaining({ versionId: "final-v1" }),
+      expect.any(AbortSignal),
+    );
+  });
+
   it("downloads the named live episode's selected version and disables unavailable cuts", async () => {
     const project = structuredClone(projectDocument);
     const timeline = project.timelines.items["timeline:main"];
@@ -66,13 +104,13 @@ describe("episode film downloads", () => {
     });
     const { rerender } = render(<ProjectExportActions project={project} />);
     fireEvent.click(screen.getByRole("button", { name: "下载 / 导出" }));
-    const first = await screen.findByRole("menuitem", {
-      name: "第1集 · 晨光出发",
+    const first = await screen.findByRole("button", {
+      name: "下载文件 · 第1集 · 晨光出发",
     });
-    expect(first).not.toHaveAttribute("aria-disabled", "true");
+    expect(first).toBeEnabled();
     expect(
-      screen.getByRole("menuitem", { name: "第2集 · 星夜归途" }),
-    ).toHaveAttribute("aria-disabled", "true");
+      screen.getByRole("button", { name: "下载文件 · 第2集 · 星夜归途" }),
+    ).toBeDisabled();
     expect(screen.queryByText("Frozen history")).not.toBeInTheDocument();
     fireEvent.click(first);
     await waitFor(() => expect(downloads).toHaveLength(1));
@@ -90,8 +128,8 @@ describe("episode film downloads", () => {
     fireEvent.click(screen.getByRole("button", { name: "下载 / 导出" }));
     await waitFor(() =>
       expect(
-        screen.getByRole("menuitem", { name: "第1集 · 晨光出发" }),
-      ).toHaveAttribute("aria-disabled", "true"),
+        screen.getByRole("button", { name: "下载文件 · 第1集 · 晨光出发" }),
+      ).toBeDisabled(),
     );
   });
 });

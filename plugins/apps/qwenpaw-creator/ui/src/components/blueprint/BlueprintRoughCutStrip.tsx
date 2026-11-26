@@ -1,3 +1,8 @@
+import {
+  AssetDownloadButton,
+  downloadableVersion,
+  downloadableWholeFilm,
+} from "@/components/assets/AssetDownload";
 import InteractionView from "@/components/interaction/InteractionView";
 import { PresentationPreview } from "@/components/interaction/PresentationEditor";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -22,6 +27,7 @@ import {
 import {
   selectFinalFilmVersionId,
   selectRoughCutFrames,
+  selectTimelineFilmVersionId,
   hasTimelinePreviewContent,
   type RoughCutSource,
 } from "@/selectors/blueprintSelectors";
@@ -480,13 +486,11 @@ export default function BlueprintRoughCutStrip({
   const filmUrl = filmVersionId
     ? getArtifactVersionMediaUrl(filmVersionId)
     : null;
-  const hasSegment = selectLiveTimelineIds(project).some((id) => {
-    const slot = project.assets.artifact_slots_by_id[`timeline:${id}:render`];
-    const version = slot?.selected_version_id
-      ? project.assets.artifact_versions_by_id[slot.selected_version_id]
-      : null;
-    return slot?.kind === "final_video" && Boolean(version && !version.stale);
-  });
+  const wholeFilm = downloadableWholeFilm(project);
+  const liveIds = selectLiveTimelineIds(project);
+  const hasSegment = liveIds.some((id) =>
+    selectTimelineFilmVersionId(project, id),
+  );
   if (!frames.length && !filmUrl && !hasSegment) return null;
 
   const timelineLabelOf = (timelineId: string) => {
@@ -497,13 +501,8 @@ export default function BlueprintRoughCutStrip({
   };
 
   const finalCutUrlOf = (timelineId: string) => {
-    const slot =
-      project.assets.artifact_slots_by_id[`timeline:${timelineId}:render`];
-    if (slot?.kind !== "final_video" || !slot.selected_version_id) return null;
-    const version =
-      project.assets.artifact_versions_by_id[slot.selected_version_id];
-    if (!version || version.stale) return null;
-    return getArtifactVersionMediaUrl(slot.selected_version_id);
+    const versionId = selectTimelineFilmVersionId(project, timelineId);
+    return versionId ? getArtifactVersionMediaUrl(versionId) : null;
   };
 
   const canPreview = (id: string) =>
@@ -512,7 +511,7 @@ export default function BlueprintRoughCutStrip({
         (project.timelines.items[id] &&
           hasTimelinePreviewContent(project, project.timelines.items[id])),
     );
-  const entryId = selectLiveTimelineIds(project)[0];
+  const entryId = liveIds[0];
   const canPreviewEntry = Boolean(entryId && canPreview(entryId));
 
   const togglePlay = (timelineId: string) => {
@@ -538,9 +537,7 @@ export default function BlueprintRoughCutStrip({
               ? t("blueprint.previewUnavailable")
               : t("blueprint.previewAll")
           }
-          onClick={() =>
-            setPlayingId(selectLiveTimelineIds(project)[0] ?? null)
-          }
+          onClick={() => setPlayingId(entryId ?? null)}
           className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--color-text-primary)] px-2.5 py-1 text-[10px] font-bold text-[var(--color-bg-primary)] shadow-[0_2px_8px_rgba(0,0,0,.2)] transition-all enabled:hover:-translate-y-px enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Play className="h-3 w-3" />
@@ -553,9 +550,7 @@ export default function BlueprintRoughCutStrip({
           })}
         </span>
         <span className="ml-auto flex min-w-0 shrink items-center gap-1.5 overflow-x-auto py-0.5 [scrollbar-width:none]">
-          {(isBranching
-            ? selectLiveTimelineIds(project).length > 0
-            : Boolean(filmUrl)) && (
+          {(isBranching ? liveIds.length > 0 : Boolean(filmUrl)) && (
             <button
               type="button"
               data-roughcut-play-film
@@ -584,6 +579,20 @@ export default function BlueprintRoughCutStrip({
                 </span>
               )}
             </button>
+          )}
+          {!isBranching && (wholeFilm || filmVersionId) && (
+            <AssetDownloadButton
+              withLabel
+              asset={
+                wholeFilm ??
+                downloadableVersion(
+                  project,
+                  "artifact",
+                  filmVersionId,
+                  t("assetDownload.filmName", { name: project.name }),
+                )
+              }
+            />
           )}
           <button
             type="button"
@@ -654,7 +663,10 @@ export default function BlueprintRoughCutStrip({
             if (!groupFrames.length) return null;
             const timeline = project.timelines.items[timelineId];
             const groupLabel = timelineLabelOf(timelineId);
-            const finalUrl = finalCutUrlOf(timelineId);
+            const versionId = selectTimelineFilmVersionId(project, timelineId);
+            const finalUrl = versionId
+              ? getArtifactVersionMediaUrl(versionId)
+              : null;
             const ticksPerSecond = timeline?.ticks_per_second || 1000;
             return (
               <div
@@ -702,6 +714,17 @@ export default function BlueprintRoughCutStrip({
                       <Download className="h-3.5 w-3.5" />
                     </a>
                   )}
+                  {versionId &&
+                    (isBranching || versionId !== filmVersionId) && (
+                      <AssetDownloadButton
+                        asset={downloadableVersion(
+                          project,
+                          "artifact",
+                          versionId,
+                          t("assetDownload.filmName", { name: groupLabel }),
+                        )}
+                      />
+                    )}
                 </div>
                 <div className="flex items-start gap-1.5">
                   {groupFrames.map((frame) => {

@@ -26,6 +26,7 @@ import TopNav from "./TopNav";
 import WorkspaceSidebar from "./WorkspaceSidebar";
 import ReturnBanner from "@/components/creator/ReturnBanner";
 import { SelectionToolbar } from "@/components/agent";
+import { AssetDownloadProvider } from "@/components/assets/AssetDownload";
 import { ProjectTour, AssetsTour } from "@/components/onboarding";
 import PageSkeleton from "@/components/PageSkeleton";
 
@@ -146,6 +147,8 @@ export default function ProjectLayout() {
   const { t } = useTranslation();
   const { id = "" } = useParams();
   const location = useLocation();
+  const query = new URLSearchParams(location.search);
+  const reviewing = query.get("review") === "1" || query.has("reviewId");
   const pathname = location.pathname;
   const bootstrap = useCreatorSessionStore((state) => state.bootstrap);
   const refreshSession = useCreatorSessionStore(
@@ -302,7 +305,9 @@ export default function ProjectLayout() {
     // relax. It is not pushed further than 5 s because a freshly created
     // authorization is exactly what the user is waiting to see.
     const stop = startVisiblePolling(poll, () =>
-      useExecutionAuthorizationStore.getState().items.length > 0 ? 2_000 : 5_000,
+      useExecutionAuthorizationStore.getState().items.length > 0
+        ? 2_000
+        : 5_000,
     );
     return () => {
       stop();
@@ -422,13 +427,7 @@ export default function ProjectLayout() {
     // useFileProjectReviewStore.  Runtime events can refresh Session/Task
     // projections, but must never be interpreted as legacy Transaction IDs or
     // trigger requests to the removed Transaction/Review API.
-  }, [
-    events,
-    id,
-    location.key,
-    refreshSession,
-    refreshProduction,
-  ]);
+  }, [events, id, location.key, refreshSession, refreshProduction]);
 
   useEffect(() => {
     if (!pendingReviewNavigation?.ready || fileReviewSyncStatus !== "healthy")
@@ -525,7 +524,9 @@ export default function ProjectLayout() {
             key={pathname}
             className="panel-enter relative min-h-0 flex-1 overflow-hidden"
           >
-            <Outlet />
+            <AssetDownloadProvider projectId={id} review={reviewing}>
+              <Outlet />
+            </AssetDownloadProvider>
             <LaunchUploadProgressCard />
           </main>
         </div>

@@ -49,11 +49,31 @@ def _final_video_slot_id(timeline_id: str) -> str:
     return f"timeline:{timeline_id}:render"
 
 
-def _selected_final_video(project: Project, timeline_id: str) -> str | None:
+def selected_final_video(
+    project: Project,
+    timeline_id: str,
+    *,
+    allow_legacy_slots: bool = False,
+) -> str | None:
     slot = project.assets.artifact_slots_by_id.get(
         _final_video_slot_id(timeline_id),
     )
-    if slot is None or slot.kind != "final_video":
+    kinds = (
+        ("final_video", "timeline_render")
+        if allow_legacy_slots
+        else ("final_video",)
+    )
+    if allow_legacy_slots and (slot is None or slot.kind not in kinds):
+        slot = next(
+            (
+                item
+                for item in project.assets.artifact_slots_by_id.values()
+                if item.owner_ref == f"timeline:{timeline_id}"
+                and item.kind in kinds
+            ),
+            None,
+        )
+    if slot is None or slot.kind not in kinds:
         return None
     version = project.assets.artifact_versions_by_id.get(
         slot.selected_version_id or "",
@@ -250,7 +270,7 @@ def _validate_story_graph(
                     f"{tid}: interaction motion is stale; "
                     "regenerate and review it",
                 )
-            version_id = _selected_final_video(project, tid)
+            version_id = selected_final_video(project, tid)
             version = project.assets.artifact_versions_by_id.get(
                 version_id or "",
             )
@@ -291,7 +311,7 @@ def derive_interactive_manifest(project: Project) -> InteractiveManifest:
             raise InteractiveBundleError(
                 f"narrative references unknown timeline {timeline_id!r}",
             )
-        version_id = _selected_final_video(project, timeline_id)
+        version_id = selected_final_video(project, timeline_id)
         if version_id is None:
             missing.append(timeline_id)
         else:
@@ -443,7 +463,7 @@ def _segment_slug(project: Project, timeline_id: str) -> str:
     raw = unicodedata.normalize("NFKC", raw).strip()
     slug = re.sub(r"\s+", "-", _UNSAFE_SEGMENT_CHARS.sub(" ", raw))
     slug = _clip_graphemes(slug.strip("-. _"), _SEGMENT_SLUG_MAX_LEN).strip(
-        "-. _"
+        "-. _",
     )
     return slug or "segment"
 
@@ -630,8 +650,6 @@ def plan_interactive_bundle(
                 f"segment version {version_id!r} " "is not in the asset index",
             )
         segments.append((payload["segments"][timeline_id], version.file_id))
-
-    import hashlib
 
     payload["content_revision"] = hashlib.sha256(
         json.dumps(

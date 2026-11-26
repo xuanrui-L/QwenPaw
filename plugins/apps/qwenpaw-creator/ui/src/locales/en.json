@@ -1,4 +1,30 @@
 {
+  "assetDownload": {
+    "videos": "Video files",
+    "download": "Save",
+    "scan": "Scan",
+    "whole": "Full film",
+    "episode": "Episode {{n}}",
+    "episodeCount_one": "{{count}} episode",
+    "episodeCount_other": "{{count}} episodes",
+    "wholeFilmTooLarge": "This film exceeds the 500 MB limit for QR downloads. Use the download button beside Full film in Download / Export.",
+    "direct": "Download file",
+    "tooLong": "This link is too long for a QR code. Use Download file below.",
+    "filmName": "{{name}} · Final cut",
+    "wholeFilmName": "{{name}} · Full film ({{count}} episodes)",
+    "joining": "Preparing the episodes in order and creating the download link…",
+    "preparingWhole": "Preparing the full film in episode order…",
+    "waitForEpisodes": "Available when all episodes have a final cut",
+    "title": "Scan to download",
+    "uploading": "Preparing the download link…",
+    "expires": "The QR code and link expire at {{time}}",
+    "expired": "This download link has expired. Generate a new one.",
+    "retry": "Generate again",
+    "failed": "Could not generate the download QR code.",
+    "signIn": "Sign in to this deployment again and retry.",
+    "platformError": "The platform could not generate a download link (HTTP {{status}}).",
+    "invalidResponse": "The platform returned incomplete preview or download details."
+  },
   "productionStage": {
     "confirmScript": "Confirm script and continue",
     "confirmTitle": "Confirm the currently saved script?",
@@ -701,6 +727,8 @@
     "compactSummary": "Models {{ready}}/{{total}}"
   },
   "assets": {
+    "previousVersion": "Previous version",
+    "nextVersion": "Next version",
     "title": "Assets & Products",
     "description": "Source assets, generation results and visual settings in the current project; timeline content references specific versions here.",
     "addLinkOrText": "Add Link or Text",

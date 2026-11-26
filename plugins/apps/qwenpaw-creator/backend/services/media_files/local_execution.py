@@ -158,7 +158,11 @@ from services.runtime_files.execution_store import (
 )
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 from services.runtime_files.path_safety import is_link_stat, is_link_path
-from services.runtime_files.media_probe import MediaProbeError, probe_media
+from services.runtime_files.media_probe import (
+    MediaProbe,
+    MediaProbeError,
+    probe_media,
+)
 from services.runtime_files.runtime_dependencies import resolve_ffmpeg
 
 # pylint: disable=no-name-in-module
@@ -331,8 +335,10 @@ class LocalMediaRunner(Protocol):
     """Runner boundary.  Implementations write exactly ``spec.output_path``."""
 
     async def render(
-        self, spec: LocalMediaExecutionSpec
-    ) -> Mapping[str, Any]: ...
+        self,
+        spec: LocalMediaExecutionSpec,
+    ) -> Mapping[str, Any]:
+        ...
 
 
 # Unified colour-grade presets applied to the whole composited cut.
@@ -448,7 +454,7 @@ class FfmpegLocalMediaRunner:
             or item.motions
             for item in spec.inputs
         ):
-            segment_dir = _ensure_real_directory_chain(
+            segment_dir = ensure_real_directory_chain(
                 spec.work_dir,
                 "segments",
             )
@@ -713,11 +719,8 @@ class FfmpegLocalMediaRunner:
             return None
         video_filter = _COLOR_GRADE_FILTERS.get(grade)
         if video_filter is None:
-            return (
-                f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: "
-                + ", ".join(
-                    sorted(_COLOR_GRADE_FILTERS),
-                )
+            return f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: " + ", ".join(
+                sorted(_COLOR_GRADE_FILTERS),
             )
         graded = spec.work_dir / "graded.mp4"
         self._run(
@@ -1552,12 +1555,12 @@ class FfmpegLocalMediaRunner:
                 )
             ):
                 reject_informal_launch_fallback(
-                    overlay, "动效文档与当前文案不一致"
+                    overlay,
+                    "动效文档与当前文案不一致",
                 )
                 motion = None
                 styled_error = (
-                    f"{overlay['kind']} 动效文档与当前文案不一致，"
-                    "已用回退样式渲染最新文案"
+                    f"{overlay['kind']} 动效文档与当前文案不一致，" "已用回退样式渲染最新文案"
                 )
             if (
                 isinstance(motion, Mapping)
@@ -2109,18 +2112,95 @@ class FfmpegLocalMediaRunner:
                 _log_safe(str(spec.audio_plan).strip()),
             )
 
-    def _concat(
+    def join_final_cuts(
         self,
         inputs: Sequence[Path],
         output: Path,
         *,
         work_dir: Path,
     ) -> None:
-        manifest = work_dir / "concat.txt"
-        manifest.write_text(
-            "".join(f"file '{_ffconcat_path(path)}'\n" for path in inputs),
-            encoding="utf-8",
+        """Join mastered episodes in order, preserving compatible video packets."""
+
+        def probe_episode(path: Path) -> MediaProbe:
+            try:
+                info = probe_media(str(path), ffmpeg_path=self.executable)
+            except MediaProbeError as error:
+                raise ConflictError("无法读取分集成片的视频信息") from error
+            if not info.width or not info.height:
+                raise ConflictError("分集成片缺少可播放的视频轨")
+            return info
+
+        probes = [probe_episode(path) for path in inputs]
+        if not probes:
+            raise ConflictError("分集成片缺少可播放的视频轨")
+        video_key = probes[0].video_stream_key
+        copy_video = (
+            video_key
+            and video_key[0] == "h264"
+            and all(info.video_stream_key == video_key for info in probes)
         )
+        # The concat demuxer matches tracks by position. Give it exactly one
+        # video track per file, independent of the original container layout.
+        video_segments = []
+        canvas = None
+        for index, path in enumerate(inputs):
+            segment = work_dir / f"episode-{index}.mp4"
+            video_options = (
+                ["-c:v", "copy"]
+                if copy_video
+                else [
+                    "-vf",
+                    _episode_video_filter(canvas),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+            )
+            self._run(
+                [
+                    "-y",
+                    "-i",
+                    str(path),
+                    "-map",
+                    "0:V:0",
+                    *video_options,
+                    "-map_chapters",
+                    "-1",
+                    "-write_tmcd",
+                    "0",
+                    "-movie_timescale",
+                    "1000000",
+                    str(segment),
+                ],
+                cwd=work_dir,
+            )
+            video_segments.append(segment)
+            if not copy_video and canvas is None:
+                # The encoded first episode gives the displayed canvas after
+                # FFmpeg has applied its matrix and pixel aspect ratio.
+                picture = probe_episode(segment)
+                canvas = (picture.width, picture.height)
+        self._concat(
+            video_segments,
+            output,
+            work_dir=work_dir,
+            episode_audio=[
+                (path, info.has_audio) for path, info in zip(inputs, probes)
+            ],
+        )
+
+    def _concat(
+        self,
+        inputs: Sequence[Path],
+        output: Path,
+        *,
+        work_dir: Path,
+        episode_audio: Sequence[tuple[Path, bool]] | None = None,
+    ) -> None:
+        entries = [f"file '{_ffconcat_path(path)}'\n" for path in inputs]
         # Segment AAC frame grids never line up exactly with their video
         # duration, so stream-copying audio through the concat demuxer
         # leaves sub-frame gaps at every joint. The mp4 muxer stretches
@@ -2128,45 +2208,58 @@ class FfmpegLocalMediaRunner:
         # decoding on such oversized packets — every seek past the first
         # joint then hangs. Video packets are unaffected and stay copied;
         # audio is re-concatenated from the decoded segments instead.
-        audio_flags = [self._probe_has_audio(path) for path in inputs]
-        if any(audio_flags):
-            audio_labels: list[str] = []
-            filter_parts: list[str] = []
-            for index, (path, has_audio) in enumerate(
-                zip(inputs, audio_flags),
-            ):
-                if has_audio:
-                    # Adjacent generated clips carry unrelated ambiences; a
-                    # short edge fade per segment softens the step at every
-                    # hard cut without consuming timeline duration. The fade
-                    # needs the real duration: afade t=out holds zero gain
-                    # after its window, so a wrong (sentinel) duration would
-                    # mute the rest of the segment. Unknown duration or a
-                    # micro-clip (where the ramps would eat the audio)
-                    # passes through unfaded instead.
-                    duration = self._probe_duration_seconds_or_none(path)
-                    if duration is not None and duration >= 0.3:
-                        fade = min(0.04, duration / 4)
-                        filter_parts.append(
-                            f"[{index + 1}:a]afade=t=in:d={fade:.3f},"
-                            f"afade=t=out:st={max(0.0, duration - fade):.3f}"
-                            f":d={fade:.3f}[fade{index}]",
-                        )
-                        audio_labels.append(f"[fade{index}]")
-                    else:
-                        audio_labels.append(f"[{index + 1}:a]")
+        audio_tracks = (
+            episode_audio
+            if episode_audio is not None
+            else [(path, self._probe_has_audio(path)) for path in inputs]
+        )
+        audio_labels: list[str] = []
+        filter_parts: list[str] = []
+        if any(has_audio for _, has_audio in audio_tracks):
+            silence = "anullsrc=channel_layout=stereo:sample_rate=48000"
+            for index, (_, has_audio) in enumerate(audio_tracks):
+                duration = self._probe_duration_seconds_or_none(inputs[index])
+                stream = f"[{index + 1}:a]"
+                if episode_audio is not None:
+                    if duration is None:
+                        raise ConflictError("无法确定分集画面时长")
+                    # The video-only segment defines the boundary for both
+                    # streams, even if the original soundtrack was longer.
+                    entries[index] += f"duration {duration:.6f}\n"
+                    source = (
+                        f"[{index + 1}:a:0]aresample=48000:async=1:first_pts=0,apad"
+                        if has_audio
+                        else silence
+                    )
+                    chain = f"{source},atrim=duration={duration:.6f},asetpts=N/SR/TB"
+                    label = f"[episode{index}]"
+                elif not has_audio:
+                    chain = (
+                        f"{silence},atrim=duration={duration or 1 / 30:.6f}"
+                    )
+                    label = f"[silent{index}]"
+                elif duration is not None and duration >= 0.3:
+                    # Fade adjacent shot ambiences only when their actual
+                    # duration is known. Keep short clips at full gain.
+                    fade = min(0.04, duration / 4)
+                    chain = (
+                        f"{stream}afade=t=in:d={fade:.3f},"
+                        f"afade=t=out:st={duration - fade:.3f}:d={fade:.3f}"
+                    )
+                    label = f"[fade{index}]"
+                else:
+                    audio_labels.append(stream)
                     continue
-                duration = self._probe_duration_seconds(path)
-                filter_parts.append(
-                    "anullsrc=channel_layout=stereo:sample_rate=48000,"
-                    f"atrim=duration={duration:.6f}[silent{index}]",
-                )
-                audio_labels.append(f"[silent{index}]")
+                filter_parts.append(chain + label)
+                audio_labels.append(label)
             filter_parts.append(
                 "".join(audio_labels)
                 + f"concat=n={len(inputs)}:v=0:a=1,"
                 + "aresample=async=1:first_pts=0[outa]",
             )
+        manifest = work_dir / "concat.txt"
+        manifest.write_text("".join(entries), encoding="utf-8")
+        if filter_parts:
             self._run(
                 [
                     "-y",
@@ -2178,7 +2271,7 @@ class FfmpegLocalMediaRunner:
                     os.fspath(manifest),
                     *(
                         argument
-                        for path in inputs
+                        for path, _ in audio_tracks
                         for argument in ("-i", os.fspath(path))
                     ),
                     "-filter_complex",
@@ -2216,22 +2309,8 @@ class FfmpegLocalMediaRunner:
             cwd=work_dir,
         )
 
-    def _probe_duration_seconds(self, path: Path) -> float:
-        try:
-            duration = probe_media(
-                os.fspath(path),
-                ffmpeg_path=self.executable,
-                timeout=min(self.timeout_seconds, 30.0),
-            ).duration_seconds
-        except MediaProbeError:
-            duration = None
-        return duration if duration and duration > 0 else 1 / 30
-
     def _probe_duration_seconds_or_none(self, path: Path) -> float | None:
-        """Like ``_probe_duration_seconds`` but with a distinguishable
-        failure. The 1/30 sentinel is harmless when padding silence; a
-        caller that derives fades from it would mute everything after the
-        33ms fade-out window."""
+        """Return the measured duration when media timing is available."""
 
         try:
             duration = probe_media(
@@ -2564,6 +2643,24 @@ def _canvas_size(aspect_ratio: str, resolution: str) -> tuple[int, int]:
     return (max(2, width // 2 * 2), max(2, height // 2 * 2))
 
 
+def _episode_video_filter(canvas: tuple[int, int] | None) -> str:
+    # FFmpeg autorotates decoded frames before running the filter graph.
+    filters = [
+        "scale=w='max(2,round(ih*dar/2)*2)':h='max(2,round(ih/2)*2)'",
+        "setsar=1",
+    ]
+    if canvas:
+        width, height = canvas
+        filters.extend(
+            [
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                "setsar=1",
+            ],
+        )
+    return ",".join([*filters, "fps=30"])
+
+
 def _ffconcat_path(path: Path) -> str:
     return path.resolve().as_posix().replace("'", "'\\''")
 
@@ -2579,7 +2676,7 @@ def _require_real_directory(path: Path) -> None:
         raise StorageIntegrityError(f"Runtime task-work 路径不安全: {path}")
 
 
-def _ensure_real_directory_chain(root: Path, *segments: str) -> Path:
+def ensure_real_directory_chain(root: Path, *segments: str) -> Path:
     """Create one descendant chain without ever following a symlink parent."""
 
     _require_real_directory(root)
@@ -2614,7 +2711,7 @@ def _ensure_task_work_dir(project_root: Path, task_id: str) -> Path:
     so imported leftovers keep their protected-history treatment.
     """
 
-    work_dir = _ensure_real_directory_chain(
+    work_dir = ensure_real_directory_chain(
         project_root,
         "runtime",
         "task-work",
@@ -3869,7 +3966,7 @@ class FileLocalMediaExecutionService:
         command_value = CreatorCommandType(command)
         if command_value not in _LOCAL_MEDIA_COMMANDS:
             raise ValidationError(
-                f"不支持的文件本地媒体命令: {command_value.value}"
+                f"不支持的文件本地媒体命令: {command_value.value}",
             )
         ids = self._ids(project_id, idempotency_key)
         command_request_hash = _fingerprint(
@@ -4261,7 +4358,7 @@ class FileLocalMediaExecutionService:
                 project_root = self.services.projects.project_root(
                     task.project_id,
                 )
-                task_root = _ensure_real_directory_chain(
+                task_root = ensure_real_directory_chain(
                     project_root,
                     "runtime",
                     "tasks",
@@ -4360,7 +4457,7 @@ class FileLocalMediaExecutionService:
             base.project.project_id,
         )
         work_dir = _ensure_task_work_dir(project_root, task.task_id)
-        input_dir = _ensure_real_directory_chain(work_dir, "inputs")
+        input_dir = ensure_real_directory_chain(work_dir, "inputs")
         file_store = AssetFileStore(project_root)
         local_inputs: list[LocalMediaInput] = []
         prepared_paths: dict[tuple[str, str, str], Path] = {}
@@ -4493,7 +4590,7 @@ class FileLocalMediaExecutionService:
         local_audio_tracks: list[dict[str, Any]] = []
         for track_index, track in enumerate(resolved.audio_tracks):
             if audio_dir is None:
-                audio_dir = _ensure_real_directory_chain(work_dir, "audio")
+                audio_dir = ensure_real_directory_chain(work_dir, "audio")
             suffix = mimetypes.guess_extension(track.media_type) or ".wav"
             if not suffix.startswith(".") or len(suffix) > 12:
                 suffix = ".wav"
@@ -4682,7 +4779,7 @@ class FileLocalMediaExecutionService:
             file_store.abandon(staged)
             if not file_store.inspect(indexed).available:
                 raise StorageIntegrityError(
-                    "稳定本地媒体输出路径已存在但内容不同"
+                    "稳定本地媒体输出路径已存在但内容不同",
                 )
         metadata = {
             "taskId": task.task_id,
@@ -4739,7 +4836,7 @@ class FileLocalMediaExecutionService:
     ) -> FileLocalMediaExecutionResult:
         if not isinstance(task.result, dict):
             raise StorageIntegrityError(
-                "RUNNING 本地媒体 Task 缺少可重放 result"
+                "RUNNING 本地媒体 Task 缺少可重放 result",
             )
         result = dict(task.result)
 
@@ -5133,7 +5230,7 @@ class FileLocalMediaExecutionService:
             ids = self._ids(project_id, key)
             if ids["task_id"] != task.task_id:
                 raise StorageIntegrityError(
-                    "本地媒体 Task 稳定 ID 与 key 不一致"
+                    "本地媒体 Task 稳定 ID 与 key 不一致",
                 )
             if task.status is TaskStatus.RUNNING and task.result is not None:
                 try:

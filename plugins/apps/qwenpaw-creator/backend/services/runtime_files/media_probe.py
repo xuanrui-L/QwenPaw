@@ -41,6 +41,8 @@ class MediaProbe:
     channels: int | None = None
     has_audio: bool = False
     source: str = "unknown"
+    # Only streams that can retain their presentation under packet copy get a key.
+    video_stream_key: tuple[str, ...] | None = None
 
 
 def _positive_float(value: object) -> float | None:
@@ -95,13 +97,18 @@ def _probe_with_ffprobe(
         raise MediaProbeError("ffprobe returned invalid JSON") from error
     streams = payload.get("streams") if isinstance(payload, dict) else None
     streams = streams if isinstance(streams, list) else []
+    videos = [
+        item
+        for item in streams
+        if isinstance(item, dict) and item.get("codec_type") == "video"
+    ]
     video = next(
         (
             item
-            for item in streams
-            if isinstance(item, dict) and item.get("codec_type") == "video"
+            for item in videos
+            if not item.get("disposition", {}).get("attached_pic")
         ),
-        {},
+        videos[0] if videos else {},
     )
     audio = next(
         (
@@ -118,6 +125,12 @@ def _probe_with_ffprobe(
         duration = _positive_float(
             video.get("duration") or audio.get("duration"),
         )
+    # A joined MP4 has a single track matrix. Bake rotations and reflections
+    # into each episode's pixels, including files using the older rotate tag.
+    has_display_transform = any(
+        side.get("side_data_type") == "Display Matrix"
+        for side in video.get("side_data_list", [])
+    ) or video.get("tags", {}).get("rotate") not in (None, "0", 0)
     return MediaProbe(
         duration_seconds=duration,
         width=_positive_int(video.get("width")),
@@ -126,6 +139,24 @@ def _probe_with_ffprobe(
         channels=_positive_int(audio.get("channels")),
         has_audio=bool(audio),
         source="ffprobe",
+        video_stream_key=(
+            tuple(
+                str(video.get(field, ""))
+                for field in (
+                    "codec_name",
+                    "profile",
+                    "level",
+                    "width",
+                    "height",
+                    "pix_fmt",
+                    "sample_aspect_ratio",
+                    "r_frame_rate",
+                    "time_base",
+                )
+            )
+            if video.get("codec_name") and not has_display_transform
+            else None
+        ),
     )
 
 

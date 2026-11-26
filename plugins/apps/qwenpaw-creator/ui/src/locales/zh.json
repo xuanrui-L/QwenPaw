@@ -1,4 +1,29 @@
 {
+  "assetDownload": {
+    "videos": "视频文件",
+    "download": "下载",
+    "scan": "扫码",
+    "whole": "整片",
+    "episode": "第 {{n}} 集",
+    "episodeCount": "共 {{count}} 集",
+    "wholeFilmTooLarge": "整片超过 500 MB 的扫码下载上限，可在「下载 / 导出」中点击整片旁的下载按钮。",
+    "direct": "下载文件",
+    "tooLong": "此链接超出二维码容量，请点击下方的「下载文件」。",
+    "filmName": "{{name}} · 成片",
+    "wholeFilmName": "{{name}} · 整片（共 {{count}} 集）",
+    "joining": "正在按集顺序准备整片和下载链接…",
+    "preparingWhole": "正在按集顺序准备整片…",
+    "waitForEpisodes": "全部分集合成后即可下载整片",
+    "title": "扫码下载",
+    "uploading": "正在准备下载链接…",
+    "expires": "二维码和链接有效至 {{time}}",
+    "expired": "下载链接已过期，请重新生成。",
+    "retry": "重新生成",
+    "failed": "生成下载二维码失败",
+    "signIn": "请在当前部署重新登录后重试。",
+    "platformError": "平台暂时无法生成下载链接（HTTP {{status}}）",
+    "invalidResponse": "平台未返回完整的预览和下载信息。"
+  },
   "productionStage": {
     "confirmScript": "确认剧本并继续",
     "confirmTitle": "确认当前已保存的剧本？",
@@ -701,6 +726,8 @@
     "compactSummary": "模型 {{ready}}/{{total}}"
   },
   "assets": {
+    "previousVersion": "上一个版本",
+    "nextVersion": "下一个版本",
     "title": "素材与产物",
     "description": "当前项目中的来源素材、生成结果与视觉设定；时间线内容会引用这里的具体版本。",
     "addLinkOrText": "添加链接或文本",
