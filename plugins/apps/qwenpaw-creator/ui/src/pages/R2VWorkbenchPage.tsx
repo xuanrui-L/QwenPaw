@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Input, Modal, Select, message } from "antd";
 import ImageLightbox from "@/components/assets/ImageLightbox";
 import PreviewImage from "@/components/assets/PreviewImage";
+import { downloadableVersion } from "@/components/assets/AssetDownload";
 import {
   ArrowLeft,
   Loader2,
@@ -1418,6 +1419,15 @@ export function WorkbenchSurface({
                     versions={videoVersions}
                     currentId={videoSlot?.selected_version_id}
                     viewingId={effectiveVideoId}
+                    downloadAsset={
+                      reviewMode
+                        ? null
+                        : downloadableVersion(
+                            project,
+                            "artifact",
+                            viewedVideo?.version_id,
+                          )
+                    }
                     onView={(id) => viewCandidate("video", id)}
                   />
                 </div>
@@ -2184,6 +2194,15 @@ export function WorkbenchSurface({
                 versions={videoVersions}
                 currentId={videoSlot?.selected_version_id}
                 viewingId={effectiveVideoId}
+                downloadAsset={
+                  reviewMode
+                    ? null
+                    : downloadableVersion(
+                        project,
+                        "artifact",
+                        viewedVideo?.version_id,
+                      )
+                }
                 onView={(id) => viewCandidate("video", id)}
               />
             </div>
@@ -2269,6 +2288,15 @@ export function WorkbenchSurface({
                 versions={storyboardVersions}
                 currentId={storyboardSlot?.selected_version_id}
                 viewingId={effectiveSbId}
+                downloadAsset={
+                  reviewMode
+                    ? null
+                    : downloadableVersion(
+                        project,
+                        "artifact",
+                        viewedStoryboard?.version_id,
+                      )
+                }
                 onView={(id) => viewCandidate("storyboard", id)}
               />
             </div>

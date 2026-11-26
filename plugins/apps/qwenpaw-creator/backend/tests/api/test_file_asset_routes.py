@@ -205,6 +205,42 @@ def test_text_asset_is_published_indexed_attached_and_replayed(
     assert project.generation == 1
 
 
+def test_oss_source_uses_the_verified_runtime_relative_original(
+    tmp_path,
+    monkeypatch,
+    run_scenario,
+) -> None:
+    app, _ = _app(tmp_path)
+    content = b"image bytes in the project store"
+
+    async def scenario(client):
+        uploaded = await client.post(
+            "/projects/project-1/assets",
+            headers={"Idempotency-Key": "original"},
+            data={"clientRequestId": "original", "postIngestAction": "NONE"},
+            files={"file": ("窗台.png", content, "image/png")},
+        )
+        assert uploaded.status_code == 202
+        version = uploaded.json()["assetVersionId"]
+        url = f"/projects/project-1/media/source/{version}/oss-source"
+        response = await client.get(url)
+        assert response.status_code == 200
+        relative = response.json()["relativePath"]
+        assert relative.startswith("project-1/assets/")
+        path = tmp_path / relative
+        assert path.read_bytes() == content
+        wrong_kind = await client.get(url.replace("/source/", "/artifact/"))
+        assert wrong_kind.status_code == 404
+        with monkeypatch.context() as patch:
+            patch.setattr(file_asset_routes, "_MAX_OSS_MEDIA_BYTES", 1)
+            oversized = await client.get(url)
+            assert oversized.is_error and "500 MB" in oversized.text
+        path.unlink()
+        assert (await client.get(url)).is_error
+
+    run_scenario(app, scenario)
+
+
 def test_indexed_media_supports_byte_ranges_and_utf8_filenames(
     tmp_path,
     run_scenario,
@@ -319,6 +355,13 @@ def test_remote_asset_streams_to_file_and_project_json_only_indexes_it(
         cached = await client.get(
             f"/media/assets/{first.json()['assetVersionId']}",
         )
+        oss_source = await client.get(
+            f"/projects/project-1/media/source/{first.json()['assetVersionId']}/oss-source",
+        )
+        assert oss_source.status_code == 200
+        relative = oss_source.json()["relativePath"]
+        assert relative.startswith("project-1/runtime/asset-cache/")
+        assert (tmp_path / relative).read_bytes() == payload
         direct = await client.get(
             f"/projects/project-1/assets/{first.json()['assetId']}/content",
             params={"versionId": first.json()["assetVersionId"]},
@@ -709,10 +752,14 @@ _TEXT_ASSET_PAYLOAD = {
 
 
 @pytest.mark.parametrize(
-    "with_session", [False, True], ids=["no-session", "session"]
+    "with_session",
+    [False, True],
+    ids=["no-session", "session"],
 )
 @pytest.mark.parametrize(
-    "owns_run", [False, True], ids=["orphan", "live-worker"]
+    "owns_run",
+    [False, True],
+    ids=["orphan", "live-worker"],
 )
 def test_delete_asset_settles_or_defers_the_source_run(
     tmp_path,
@@ -724,7 +771,9 @@ def test_delete_asset_settles_or_defers_the_source_run(
     app, services = _app(tmp_path)
     runtime = _RecordingRuntime(owns_run=owns_run)
     monkeypatch.setattr(
-        file_asset_routes, "get_creator_agent_runtime", lambda: runtime
+        file_asset_routes,
+        "get_creator_agent_runtime",
+        lambda: runtime,
     )
     if with_session:
         session = services.sessions.create_project_runtime("project-1").session
@@ -732,7 +781,9 @@ def test_delete_asset_settles_or_defers_the_source_run(
 
     async def scenario(client):
         created = await _upload_source(
-            client, _TEXT_ASSET_PAYLOAD, "asset-del-1"
+            client,
+            _TEXT_ASSET_PAYLOAD,
+            "asset-del-1",
         )
         version_id = created.json()["assetVersionId"]
         _seed_active_source_run(services, version_id, run_id)
@@ -745,7 +796,8 @@ def test_delete_asset_settles_or_defers_the_source_run(
     assert deleted.status_code == 204
     assert runtime.calls == [("project-1", run_id, "source_asset_deleted")]
     run = ProjectExecutionStore(services.root).get_specialist_run(
-        "project-1", run_id
+        "project-1",
+        run_id,
     )
     if owns_run:
         assert run.status is SpecialistRunStatus.QUEUED
@@ -757,7 +809,8 @@ def test_delete_asset_settles_or_defers_the_source_run(
         failed = [
             event
             for event in services.sessions.list_events(
-                "project-1", session.session_id
+                "project-1",
+                session.session_id,
             )
             if event.event_type == "subagent.failed"
         ]
@@ -1175,7 +1228,10 @@ def test_renamed_reupload_reuses_bytes_and_keeps_the_original_asset(
     async def upload(client, key, filename):
         if kind == "image":
             return await _post_image(
-                client, key=key, name=filename, content=content
+                client,
+                key=key,
+                name=filename,
+                content=content,
             )
         return await _upload_source(
             client,

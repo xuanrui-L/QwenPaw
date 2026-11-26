@@ -41,6 +41,8 @@ class MediaProbe:
     channels: int | None = None
     has_audio: bool = False
     source: str = "unknown"
+    # Stream-copy requires compatible H.264 picture geometry and timestamps.
+    video_stream_key: tuple[str, ...] | None = None
 
 
 def _positive_float(value: object) -> float | None:
@@ -126,6 +128,24 @@ def _probe_with_ffprobe(
         channels=_positive_int(audio.get("channels")),
         has_audio=bool(audio),
         source="ffprobe",
+        video_stream_key=(
+            tuple(
+                str(video.get(field, ""))
+                for field in (
+                    "codec_name",
+                    "profile",
+                    "level",
+                    "width",
+                    "height",
+                    "pix_fmt",
+                    "sample_aspect_ratio",
+                    "r_frame_rate",
+                    "time_base",
+                )
+            )
+            if video.get("codec_name")
+            else None
+        ),
     )
 
 

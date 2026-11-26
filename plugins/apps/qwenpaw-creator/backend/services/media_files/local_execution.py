@@ -331,8 +331,10 @@ class LocalMediaRunner(Protocol):
     """Runner boundary.  Implementations write exactly ``spec.output_path``."""
 
     async def render(
-        self, spec: LocalMediaExecutionSpec
-    ) -> Mapping[str, Any]: ...
+        self,
+        spec: LocalMediaExecutionSpec,
+    ) -> Mapping[str, Any]:
+        ...
 
 
 # Unified colour-grade presets applied to the whole composited cut.
@@ -448,7 +450,7 @@ class FfmpegLocalMediaRunner:
             or item.motions
             for item in spec.inputs
         ):
-            segment_dir = _ensure_real_directory_chain(
+            segment_dir = ensure_real_directory_chain(
                 spec.work_dir,
                 "segments",
             )
@@ -713,11 +715,8 @@ class FfmpegLocalMediaRunner:
             return None
         video_filter = _COLOR_GRADE_FILTERS.get(grade)
         if video_filter is None:
-            return (
-                f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: "
-                + ", ".join(
-                    sorted(_COLOR_GRADE_FILTERS),
-                )
+            return f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: " + ", ".join(
+                sorted(_COLOR_GRADE_FILTERS),
             )
         graded = spec.work_dir / "graded.mp4"
         self._run(
@@ -1552,12 +1551,12 @@ class FfmpegLocalMediaRunner:
                 )
             ):
                 reject_informal_launch_fallback(
-                    overlay, "动效文档与当前文案不一致"
+                    overlay,
+                    "动效文档与当前文案不一致",
                 )
                 motion = None
                 styled_error = (
-                    f"{overlay['kind']} 动效文档与当前文案不一致，"
-                    "已用回退样式渲染最新文案"
+                    f"{overlay['kind']} 动效文档与当前文案不一致，" "已用回退样式渲染最新文案"
                 )
             if (
                 isinstance(motion, Mapping)
@@ -2109,12 +2108,77 @@ class FfmpegLocalMediaRunner:
                 _log_safe(str(spec.audio_plan).strip()),
             )
 
+    def join_final_cuts(
+        self,
+        inputs: Sequence[Path],
+        output: Path,
+        *,
+        work_dir: Path,
+    ) -> None:
+        """Join mastered episodes in order, preserving compatible video packets."""
+        try:
+            probes = [
+                probe_media(str(path), ffmpeg_path=self.executable)
+                for path in inputs
+            ]
+        except MediaProbeError as error:
+            raise ConflictError("无法读取分集成片的视频信息") from error
+        if not probes or any(
+            not info.width or not info.height for info in probes
+        ):
+            raise ConflictError("分集成片缺少可播放的视频轨")
+        video_key = probes[0].video_stream_key
+        if (
+            not video_key
+            or video_key[0] != "h264"
+            or any(info.video_stream_key != video_key for info in probes)
+        ):
+            # Older imports can differ in size, codec or time base. Preserve
+            # their aspect ratios on the first episode's canvas before joining.
+            width = max(2, probes[0].width // 2 * 2)
+            height = max(2, probes[0].height // 2 * 2)
+            normalized = []
+            for index, path in enumerate(inputs):
+                segment = work_dir / f"episode-{index}.mp4"
+                self._run(
+                    [
+                        "-y",
+                        "-i",
+                        str(path),
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "0:a:0?",
+                        "-vf",
+                        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-c:a",
+                        "aac",
+                        "-ar",
+                        "48000",
+                        "-ac",
+                        "2",
+                        str(segment),
+                    ],
+                    cwd=work_dir,
+                )
+                normalized.append(segment)
+            inputs = normalized
+        self._concat(inputs, output, work_dir=work_dir, fade_audio_edges=False)
+
     def _concat(
         self,
         inputs: Sequence[Path],
         output: Path,
         *,
         work_dir: Path,
+        fade_audio_edges: bool = True,
     ) -> None:
         manifest = work_dir / "concat.txt"
         manifest.write_text(
@@ -2144,7 +2208,11 @@ class FfmpegLocalMediaRunner:
                     # mute the rest of the segment. Unknown duration or a
                     # micro-clip (where the ramps would eat the audio)
                     # passes through unfaded instead.
-                    duration = self._probe_duration_seconds_or_none(path)
+                    duration = (
+                        self._probe_duration_seconds_or_none(path)
+                        if fade_audio_edges
+                        else None
+                    )
                     if duration is not None and duration >= 0.3:
                         fade = min(0.04, duration / 4)
                         filter_parts.append(
@@ -2579,7 +2647,7 @@ def _require_real_directory(path: Path) -> None:
         raise StorageIntegrityError(f"Runtime task-work 路径不安全: {path}")
 
 
-def _ensure_real_directory_chain(root: Path, *segments: str) -> Path:
+def ensure_real_directory_chain(root: Path, *segments: str) -> Path:
     """Create one descendant chain without ever following a symlink parent."""
 
     _require_real_directory(root)
@@ -2614,7 +2682,7 @@ def _ensure_task_work_dir(project_root: Path, task_id: str) -> Path:
     so imported leftovers keep their protected-history treatment.
     """
 
-    work_dir = _ensure_real_directory_chain(
+    work_dir = ensure_real_directory_chain(
         project_root,
         "runtime",
         "task-work",
@@ -3869,7 +3937,7 @@ class FileLocalMediaExecutionService:
         command_value = CreatorCommandType(command)
         if command_value not in _LOCAL_MEDIA_COMMANDS:
             raise ValidationError(
-                f"不支持的文件本地媒体命令: {command_value.value}"
+                f"不支持的文件本地媒体命令: {command_value.value}",
             )
         ids = self._ids(project_id, idempotency_key)
         command_request_hash = _fingerprint(
@@ -4261,7 +4329,7 @@ class FileLocalMediaExecutionService:
                 project_root = self.services.projects.project_root(
                     task.project_id,
                 )
-                task_root = _ensure_real_directory_chain(
+                task_root = ensure_real_directory_chain(
                     project_root,
                     "runtime",
                     "tasks",
@@ -4360,7 +4428,7 @@ class FileLocalMediaExecutionService:
             base.project.project_id,
         )
         work_dir = _ensure_task_work_dir(project_root, task.task_id)
-        input_dir = _ensure_real_directory_chain(work_dir, "inputs")
+        input_dir = ensure_real_directory_chain(work_dir, "inputs")
         file_store = AssetFileStore(project_root)
         local_inputs: list[LocalMediaInput] = []
         prepared_paths: dict[tuple[str, str, str], Path] = {}
@@ -4493,7 +4561,7 @@ class FileLocalMediaExecutionService:
         local_audio_tracks: list[dict[str, Any]] = []
         for track_index, track in enumerate(resolved.audio_tracks):
             if audio_dir is None:
-                audio_dir = _ensure_real_directory_chain(work_dir, "audio")
+                audio_dir = ensure_real_directory_chain(work_dir, "audio")
             suffix = mimetypes.guess_extension(track.media_type) or ".wav"
             if not suffix.startswith(".") or len(suffix) > 12:
                 suffix = ".wav"
@@ -4682,7 +4750,7 @@ class FileLocalMediaExecutionService:
             file_store.abandon(staged)
             if not file_store.inspect(indexed).available:
                 raise StorageIntegrityError(
-                    "稳定本地媒体输出路径已存在但内容不同"
+                    "稳定本地媒体输出路径已存在但内容不同",
                 )
         metadata = {
             "taskId": task.task_id,
@@ -4739,7 +4807,7 @@ class FileLocalMediaExecutionService:
     ) -> FileLocalMediaExecutionResult:
         if not isinstance(task.result, dict):
             raise StorageIntegrityError(
-                "RUNNING 本地媒体 Task 缺少可重放 result"
+                "RUNNING 本地媒体 Task 缺少可重放 result",
             )
         result = dict(task.result)
 
@@ -5133,7 +5201,7 @@ class FileLocalMediaExecutionService:
             ids = self._ids(project_id, key)
             if ids["task_id"] != task.task_id:
                 raise StorageIntegrityError(
-                    "本地媒体 Task 稳定 ID 与 key 不一致"
+                    "本地媒体 Task 稳定 ID 与 key 不一致",
                 )
             if task.status is TaskStatus.RUNNING and task.result is not None:
                 try:

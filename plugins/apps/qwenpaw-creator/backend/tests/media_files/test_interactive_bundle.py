@@ -27,9 +27,6 @@ from services.media_files.interactive_bundle import (
 )
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
-    ArtifactSlot,
-    ArtifactVersion,
-    IndexedFile,
     InteractionCreation,
     InteractionOption,
     MotionGraphic,
@@ -42,44 +39,13 @@ from services.project_files.models import (
 from services.runtime_files.execution_models import TaskRecord
 from services.runtime_files.execution_store import ProjectExecutionStore
 
+from .conftest import add_final_video
+
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
 
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def _with_final_video(project: Project, timeline_id: str, data: bytes) -> None:
-    file_id = f"file:{timeline_id}:final"
-    version_id = f"{timeline_id}:final:v1"
-    slot_id = f"timeline:{timeline_id}:render"
-    project.assets.files_by_id[file_id] = IndexedFile(
-        file_id=file_id,
-        kind="artifact_payload",
-        relative_uri=f"assets/final/{timeline_id.replace(':', '_')}.mp4",
-        sha256=_sha(data),
-        size_bytes=len(data),
-        media_type="video/mp4",
-        created_at=NOW,
-    )
-    project.assets.artifact_slots_by_id[slot_id] = ArtifactSlot(
-        slot_id=slot_id,
-        kind="final_video",
-        owner_ref=f"timeline:{timeline_id}",
-        version_ids=[version_id],
-        selected_version_id=version_id,
-    )
-    project.assets.artifact_versions_by_id[version_id] = ArtifactVersion(
-        version_id=version_id,
-        slot_id=slot_id,
-        kind="final_video",
-        owner_ref=f"timeline:{timeline_id}",
-        name=f"{timeline_id} final",
-        file_id=file_id,
-        checksum=_sha(data),
-        based_on_generation=0,
-        created_at=NOW,
-    )
 
 
 def _draft_presentation(project):
@@ -176,7 +142,7 @@ def _branching_project() -> tuple[Project, dict[str, bytes]]:
     payloads: dict[str, bytes] = {}
     for timeline_id in ("tl:ep3", "tl:ep4a", "tl:ep4b"):
         data = f"video-bytes-{timeline_id}".encode()
-        _with_final_video(project, timeline_id, data)
+        add_final_video(project, timeline_id, data)
         payloads[f"file:{timeline_id}:final"] = data
     _draft_presentation(project)
     return project, payloads
@@ -287,7 +253,8 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         assert manifest["entry_timeline_id"] == "tl:ep3"
         ep4a_name = manifest["segments"]["tl:ep4a"]
         assert re.fullmatch(
-            r"segments/第4集A-·-真相大白-[0-9a-f]{8}\.mp4", ep4a_name
+            r"segments/第4集A-·-真相大白-[0-9a-f]{8}\.mp4",
+            ep4a_name,
         )
         assert manifest["edge_index"]["edge:a"] == {
             "label": "选择A · 揭发真相",
@@ -471,7 +438,7 @@ def test_replaced_video_invalidates_offline_progress_revision():
             ]
 
     before = revision()
-    _with_final_video(project, "tl:ep4a", b"revised-video")
+    add_final_video(project, "tl:ep4a", b"revised-video")
     payloads["file:tl:ep4a:final"] = b"revised-video"
     assert revision() != before
 
@@ -647,7 +614,7 @@ def test_segment_filename_mapping_is_injective_for_valid_entity_ids():
     raw["timelines"]["order"][1] = "tl_ep3"
     raw["narrative_edges"][0]["target_timeline_id"] = "tl_ep3"
     project = Project.model_validate(raw)
-    _with_final_video(project, "tl_ep3", b"other-bytes")
+    add_final_video(project, "tl_ep3", b"other-bytes")
     manifest = _player_manifest(project, derive_interactive_manifest(project))
     assert len(set(manifest["segments"].values())) == 3
     assert manifest["segments"]["tl:ep3"] != manifest["segments"]["tl_ep3"]
@@ -708,8 +675,6 @@ def test_streamed_package_matches_the_in_memory_one() -> None:
 
 
 def _export_services(tmp_path):
-    from services.project_files.facade import CreatorFileServices
-
     services = CreatorFileServices.create(tmp_path.resolve())
     services.projects.create(Project.new(project_id="bundle", name="Bundle"))
     return services
