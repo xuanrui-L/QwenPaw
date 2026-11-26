@@ -62,7 +62,8 @@ def plan_whole_film(project: Project, version_ids: list[str]) -> WholeFilmPlan:
             raise ConflictError("找不到分集成片的视频文件")
         files.append(indexed)
     identity = list(zip(version_ids, (file.sha256 for file in files)))
-    key = sha256(json.dumps(identity).encode("utf-8")).hexdigest()
+    # Rebuild cached films produced before tracks were aligned to the picture.
+    key = sha256(json.dumps(["whole-film-v2", identity]).encode()).hexdigest()
     return WholeFilmPlan(key, tuple(files))
 
 

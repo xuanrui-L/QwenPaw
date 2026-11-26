@@ -2129,48 +2129,57 @@ class FfmpegLocalMediaRunner:
             raise ConflictError("分集成片缺少可播放的视频轨")
         video_key = probes[0].video_stream_key
         if (
-            not video_key
-            or video_key[0] != "h264"
-            or any(info.video_stream_key != video_key for info in probes)
+            video_key
+            and video_key[0] == "h264"
+            and all(info.video_stream_key == video_key for info in probes)
         ):
-            # Older imports can differ in size, codec or time base. Preserve
-            # their aspect ratios on the first episode's canvas before joining.
+            video_options = ["-c:v", "copy"]
+        else:
             width = max(2, probes[0].width // 2 * 2)
             height = max(2, probes[0].height // 2 * 2)
-            normalized = []
-            for index, path in enumerate(inputs):
-                segment = work_dir / f"episode-{index}.mp4"
-                self._run(
-                    [
-                        "-y",
-                        "-i",
-                        str(path),
-                        "-map",
-                        "0:v:0",
-                        "-map",
-                        "0:a:0?",
-                        "-vf",
-                        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-c:a",
-                        "aac",
-                        "-ar",
-                        "48000",
-                        "-ac",
-                        "2",
-                        str(segment),
-                    ],
-                    cwd=work_dir,
-                )
-                normalized.append(segment)
-            inputs = normalized
-        self._concat(inputs, output, work_dir=work_dir, fade_audio_edges=False)
+            video_options = [
+                "-vf",
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        # The concat demuxer matches tracks by position. Give it exactly one
+        # video track per file, independent of the original container layout.
+        video_segments = []
+        for index, path in enumerate(inputs):
+            segment = work_dir / f"episode-{index}.mp4"
+            self._run(
+                [
+                    "-y",
+                    "-i",
+                    str(path),
+                    "-map",
+                    "0:v:0",
+                    *video_options,
+                    "-map_chapters",
+                    "-1",
+                    "-write_tmcd",
+                    "0",
+                    "-movie_timescale",
+                    "1000000",
+                    str(segment),
+                ],
+                cwd=work_dir,
+            )
+            video_segments.append(segment)
+        self._concat(
+            video_segments,
+            output,
+            work_dir=work_dir,
+            episode_audio=[
+                (path, info.has_audio) for path, info in zip(inputs, probes)
+            ],
+        )
 
     def _concat(
         self,
@@ -2178,13 +2187,9 @@ class FfmpegLocalMediaRunner:
         output: Path,
         *,
         work_dir: Path,
-        fade_audio_edges: bool = True,
+        episode_audio: Sequence[tuple[Path, bool]] | None = None,
     ) -> None:
-        manifest = work_dir / "concat.txt"
-        manifest.write_text(
-            "".join(f"file '{_ffconcat_path(path)}'\n" for path in inputs),
-            encoding="utf-8",
-        )
+        entries = [f"file '{_ffconcat_path(path)}'\n" for path in inputs]
         # Segment AAC frame grids never line up exactly with their video
         # duration, so stream-copying audio through the concat demuxer
         # leaves sub-frame gaps at every joint. The mp4 muxer stretches
@@ -2192,49 +2197,58 @@ class FfmpegLocalMediaRunner:
         # decoding on such oversized packets — every seek past the first
         # joint then hangs. Video packets are unaffected and stay copied;
         # audio is re-concatenated from the decoded segments instead.
-        audio_flags = [self._probe_has_audio(path) for path in inputs]
-        if any(audio_flags):
-            audio_labels: list[str] = []
-            filter_parts: list[str] = []
-            for index, (path, has_audio) in enumerate(
-                zip(inputs, audio_flags),
-            ):
-                if has_audio:
-                    # Adjacent generated clips carry unrelated ambiences; a
-                    # short edge fade per segment softens the step at every
-                    # hard cut without consuming timeline duration. The fade
-                    # needs the real duration: afade t=out holds zero gain
-                    # after its window, so a wrong (sentinel) duration would
-                    # mute the rest of the segment. Unknown duration or a
-                    # micro-clip (where the ramps would eat the audio)
-                    # passes through unfaded instead.
-                    duration = (
-                        self._probe_duration_seconds_or_none(path)
-                        if fade_audio_edges
-                        else None
+        audio_tracks = (
+            episode_audio
+            if episode_audio is not None
+            else [(path, self._probe_has_audio(path)) for path in inputs]
+        )
+        audio_labels: list[str] = []
+        filter_parts: list[str] = []
+        if any(has_audio for _, has_audio in audio_tracks):
+            silence = "anullsrc=channel_layout=stereo:sample_rate=48000"
+            for index, (_, has_audio) in enumerate(audio_tracks):
+                duration = self._probe_duration_seconds_or_none(inputs[index])
+                stream = f"[{index + 1}:a]"
+                if episode_audio is not None:
+                    if duration is None:
+                        raise ConflictError("无法确定分集画面时长")
+                    # The video-only segment defines the boundary for both
+                    # streams, even if the original soundtrack was longer.
+                    entries[index] += f"duration {duration:.6f}\n"
+                    source = (
+                        f"[{index + 1}:a:0]aresample=48000:async=1:first_pts=0,apad"
+                        if has_audio
+                        else silence
                     )
-                    if duration is not None and duration >= 0.3:
-                        fade = min(0.04, duration / 4)
-                        filter_parts.append(
-                            f"[{index + 1}:a]afade=t=in:d={fade:.3f},"
-                            f"afade=t=out:st={max(0.0, duration - fade):.3f}"
-                            f":d={fade:.3f}[fade{index}]",
-                        )
-                        audio_labels.append(f"[fade{index}]")
-                    else:
-                        audio_labels.append(f"[{index + 1}:a]")
+                    chain = f"{source},atrim=duration={duration:.6f},asetpts=N/SR/TB"
+                    label = f"[episode{index}]"
+                elif not has_audio:
+                    chain = (
+                        f"{silence},atrim=duration={duration or 1 / 30:.6f}"
+                    )
+                    label = f"[silent{index}]"
+                elif duration is not None and duration >= 0.3:
+                    # Fade adjacent shot ambiences only when their actual
+                    # duration is known. Keep short clips at full gain.
+                    fade = min(0.04, duration / 4)
+                    chain = (
+                        f"{stream}afade=t=in:d={fade:.3f},"
+                        f"afade=t=out:st={duration - fade:.3f}:d={fade:.3f}"
+                    )
+                    label = f"[fade{index}]"
+                else:
+                    audio_labels.append(stream)
                     continue
-                duration = self._probe_duration_seconds(path)
-                filter_parts.append(
-                    "anullsrc=channel_layout=stereo:sample_rate=48000,"
-                    f"atrim=duration={duration:.6f}[silent{index}]",
-                )
-                audio_labels.append(f"[silent{index}]")
+                filter_parts.append(chain + label)
+                audio_labels.append(label)
             filter_parts.append(
                 "".join(audio_labels)
                 + f"concat=n={len(inputs)}:v=0:a=1,"
                 + "aresample=async=1:first_pts=0[outa]",
             )
+        manifest = work_dir / "concat.txt"
+        manifest.write_text("".join(entries), encoding="utf-8")
+        if filter_parts:
             self._run(
                 [
                     "-y",
@@ -2246,7 +2260,7 @@ class FfmpegLocalMediaRunner:
                     os.fspath(manifest),
                     *(
                         argument
-                        for path in inputs
+                        for path, _ in audio_tracks
                         for argument in ("-i", os.fspath(path))
                     ),
                     "-filter_complex",
@@ -2284,22 +2298,8 @@ class FfmpegLocalMediaRunner:
             cwd=work_dir,
         )
 
-    def _probe_duration_seconds(self, path: Path) -> float:
-        try:
-            duration = probe_media(
-                os.fspath(path),
-                ffmpeg_path=self.executable,
-                timeout=min(self.timeout_seconds, 30.0),
-            ).duration_seconds
-        except MediaProbeError:
-            duration = None
-        return duration if duration and duration > 0 else 1 / 30
-
     def _probe_duration_seconds_or_none(self, path: Path) -> float | None:
-        """Like ``_probe_duration_seconds`` but with a distinguishable
-        failure. The 1/30 sentinel is harmless when padding silence; a
-        caller that derives fades from it would mute everything after the
-        33ms fade-out window."""
+        """Return the measured duration when media timing is available."""
 
         try:
             duration = probe_media(

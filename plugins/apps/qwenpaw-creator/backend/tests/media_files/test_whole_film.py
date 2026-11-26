@@ -60,7 +60,27 @@ def test_whole_film_uses_current_episodes_in_order(tmp_path, monkeypatch):
         plan_whole_film(project, versions[::-1])
 
 
-@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg is required")
+requires_ffmpeg = pytest.mark.skipif(
+    not shutil.which("ffmpeg"),
+    reason="ffmpeg is required",
+)
+
+
+def _ffmpeg(*args):
+    return subprocess.run(
+        ["ffmpeg", "-loglevel", "error", *map(str, args)],
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+def _episode(path, streams, *, audio_first=False):
+    tracks = ("0:a", "0:v") if audio_first else ("0:v", "0:a?")
+    mapping = ["-map", tracks[0], "-map", tracks[1]]
+    _ffmpeg("-f", "lavfi", "-i", streams, *mapping, "-c:v", "libx264", path)
+
+
+@requires_ffmpeg
 def test_join_preserves_mixed_size_and_silent_episodes(tmp_path: Path):
     first, second, film = (
         tmp_path / name for name in ("first.mp4", "second.mp4", "film.mp4")
@@ -69,19 +89,7 @@ def test_join_preserves_mixed_size_and_silent_episodes(tmp_path: Path):
         (first, "color=red:s=96x64:d=1"),
         (second, "color=blue:s=64x96:d=1[out0];sine=duration=1[out1]"),
     ):
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-loglevel",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                streams,
-                str(path),
-            ],
-            check=True,
-        )
+        _episode(path, streams)
     FfmpegLocalMediaRunner().join_final_cuts(
         [first, second],
         film,
@@ -93,3 +101,71 @@ def test_join_preserves_mixed_size_and_silent_episodes(tmp_path: Path):
         2,
         abs=0.1,
     )
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize(
+    ("silence_seconds", "audio_first"),
+    [(1, False), (4, True)],
+    ids=["short-audio", "long-audio-and-reordered-tracks"],
+)
+def test_join_keeps_frames_and_sound_on_episode_boundaries(
+    tmp_path,
+    silence_seconds,
+    audio_first,
+):
+    first, second, film = (
+        tmp_path / name for name in ("a.mp4", "b.mp4", "film.mp4")
+    )
+    _episode(
+        first,
+        f"color=red:s=96x64:d=3[out0];anullsrc=d={silence_seconds}[out1]",
+    )
+    _episode(
+        second,
+        "color=blue:s=96x64:d=3[out0];sine=duration=3[out1]",
+        audio_first=audio_first,
+    )
+    FfmpegLocalMediaRunner().join_final_cuts(
+        [first, second],
+        film,
+        work_dir=tmp_path,
+    )
+    for position, channel in ((2.75, 0), (3.25, 2), (5.75, 2)):
+        pixel = _ffmpeg(
+            "-ss",
+            position,
+            "-i",
+            film,
+            "-vf",
+            "scale=1:1,format=rgb24",
+            "-frames:v",
+            1,
+            "-f",
+            "rawvideo",
+            "-",
+        )
+        assert len(pixel) == 3 and pixel[channel] > 200
+    pcm = _ffmpeg(
+        "-i",
+        film,
+        "-map",
+        "0:a:0",
+        "-ac",
+        1,
+        "-ar",
+        8000,
+        "-f",
+        "u8",
+        "-",
+    )
+    assert len(pcm) / 8000 == pytest.approx(6, abs=0.05)
+    for position, audible in (
+        (1.5, False),
+        (2.75, False),
+        (3.25, True),
+        (5.75, True),
+    ):
+        start = int(position * 8000)
+        window = pcm[start : start + 800]
+        assert (max(window) - min(window) > 10) == audible
