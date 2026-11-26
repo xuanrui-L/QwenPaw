@@ -128,6 +128,9 @@ export function feedbackErrorMessage(error: unknown): string {
       return i18n.t("feedback.unconfirmed");
     case "rate_limited":
       return i18n.t("feedback.rateLimited");
+    case "feedback_rejected":
+      return i18n.t("feedback.rejected");
+    case "feedback_not_sent":
     case "network_unavailable":
     case "platform_unavailable":
     case "invalid_platform_response":
@@ -240,10 +243,8 @@ export async function submitFeedback(
     // A definite rejection can be retried. A lost receipt could be a posted ticket.
     if (
       error instanceof CreatorHttpError &&
-      error.status >= 400 &&
-      error.status < 500 &&
-      error.status !== 408 &&
-      error.code !== "connection_changed"
+      (error.code === "feedback_not_sent" ||
+        (error.status >= 400 && error.status < 500 && error.status !== 408))
     )
       throw error;
   }

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { ClipboardEvent, FormEvent, ReactNode } from "react";
-import { CreatorHttpError, openHostExternalLink } from "@/api/creator/client";
+import { CreatorHttpError, openHostLink } from "@/api/creator/client";
 import { Button, Image, Modal } from "antd";
 import { Check, Plus, Send, X } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
@@ -39,7 +39,7 @@ function PlatformLink({
           !event.ctrlKey &&
           !event.shiftKey &&
           !event.altKey &&
-          openHostExternalLink(href)
+          openHostLink(href)
         ) {
           event.preventDefault();
         }
@@ -317,16 +317,15 @@ export default function FeedbackModal({
                     e.target.value = "";
                   }}
                 />
-                {imageError ? (
+                {imageError && (
                   <p className="creator-feedback-error" role="alert">
                     {imageError}
                   </p>
-                ) : (
-                  screenshotNote && (
-                    <p className="creator-feedback-note" role="status">
-                      {screenshotNote}
-                    </p>
-                  )
+                )}
+                {screenshotNote && (
+                  <p className="creator-feedback-note" role="status">
+                    {screenshotNote}
+                  </p>
                 )}
               </div>
               <div className="creator-feedback-field">
@@ -357,13 +356,9 @@ export default function FeedbackModal({
                     </PlatformLink>
                   )}
                   {needsFeedbackAccount(sendError) && (
-                    <a
-                      href="/settings/community"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
+                    <PlatformLink href="/settings/community">
                       {t("feedback.connectAccount")}
-                    </a>
+                    </PlatformLink>
                   )}
                 </p>
               )}

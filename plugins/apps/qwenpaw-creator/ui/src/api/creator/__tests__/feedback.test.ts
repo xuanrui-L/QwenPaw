@@ -91,13 +91,13 @@ it("retains uploads after a rejection and keeps retries on the original account"
   platform({
     "/platform": {
       ok: false,
-      status: 429,
-      json: { message: "Too many requests" },
+      status: 400,
+      json: { code: "feedback_rejected" },
     },
   });
-  await expect(submitFeedback(feedback, attempt)).rejects.toThrow(
-    "Too many requests",
-  );
+  await expect(submitFeedback(feedback, attempt)).rejects.toMatchObject({
+    code: "feedback_rejected",
+  });
   const switched = platform({ "/platform/account": { json: { id: "bob" } } });
   await expect(submitFeedback(feedback, attempt)).rejects.toMatchObject({
     code: "FEEDBACK_ACCOUNT_CHANGED",

@@ -11,6 +11,7 @@ type HostWindow = Window & {
   QwenPaw?: {
     host?: {
       openExternalLink?: (url: string) => void;
+      openCommunitySettings?: () => void;
       getApiToken?: () => string;
       usesBrowserSession?: (appId: string) => boolean;
     };
@@ -81,12 +82,16 @@ export function newClientId(prefix = "client"): string {
   return `${prefix}-${id}`;
 }
 
-/** Let a desktop host open the system browser; standalone links use their native action. */
-export function openHostExternalLink(url: string): boolean {
+/** Open account settings within the host or hand a Platform link to its browser. */
+export function openHostLink(url: string): boolean {
   try {
-    const open = (window.parent as HostWindow).QwenPaw?.host?.openExternalLink;
-    if (!open) return false;
-    open(url);
+    const host = (window.parent as HostWindow).QwenPaw?.host;
+    if (url === "/settings/community" && host?.openCommunitySettings) {
+      host.openCommunitySettings();
+      return true;
+    }
+    if (!host?.openExternalLink) return false;
+    host.openExternalLink(url);
     return true;
   } catch {
     return false;

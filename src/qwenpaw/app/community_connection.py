@@ -29,6 +29,7 @@ from . import community_credentials as credentials
 from ..utils.io_utils import run_sync_io
 
 PLATFORM = "https://platform.agentscope.io"
+FEEDBACK_PATHS = {"/api/v1/feedback", "/api/v1/feedback/screenshots"}
 AUTH_TTL = 300
 PAGE_SIZE = 50
 PAGES_PER_SYNC = 5
@@ -351,6 +352,9 @@ def _page_events(
 class CommunityConnectionService:
     """Own one runtime's ephemeral authorization and durable connection."""
 
+    # Plugin packages may be updated independently of this host.
+    supports_feedback_delivery = True
+
     def __init__(
         self,
         config: ConnectionConfig | None = None,
@@ -420,6 +424,15 @@ class CommunityConnectionService:
                     retry_after=_retry_after_seconds(response),
                 )
             if not response.is_success:
+                if (
+                    method == "POST"
+                    and path in FEEDBACK_PATHS
+                    and 400 <= response.status_code < 500
+                ):
+                    raise CommunityConnectionError(
+                        "feedback_rejected",
+                        response.status_code,
+                    )
                 raise CommunityConnectionError("platform_unavailable", 502)
             if method == "DELETE" and response.status_code == 204:
                 return {"data": {}}
@@ -1119,6 +1132,7 @@ class CommunityConnectionService:
         **kwargs,
     ) -> dict:
         """Proxy community routes without exposing credentials."""
+        feedback_write = method == "POST" and path in FEEDBACK_PATHS
         if method == "GET" and not personalized and account_id is None:
             data = await self._request(method, path, **kwargs)
             payload = data.get("data")
@@ -1132,13 +1146,26 @@ class CommunityConnectionService:
         if (method != "GET" or account_id is not None) and (
             not connection or connection["account_id"] != account_id
         ):
-            raise CommunityConnectionError("connection_changed", 409)
+            raise CommunityConnectionError(
+                "account_changed" if feedback_write else "connection_changed",
+                409,
+            )
         if connection:
             try:
                 connection = await self._fresh_connection(
                     expected_connection_id=connection["connection_id"],
                 )
-            except CommunityConnectionError:
+            except CommunityConnectionError as exc:
+                if feedback_write and exc.code == "connection_changed":
+                    raise CommunityConnectionError(
+                        "account_changed",
+                        409,
+                    ) from exc
+                if feedback_write and exc.status_code >= 500:
+                    raise CommunityConnectionError(
+                        "feedback_not_sent",
+                        503,
+                    ) from exc
                 if method != "GET" or account_id is not None:
                     raise
                 # Public posts remain readable when authorization expires.
@@ -1151,10 +1178,6 @@ class CommunityConnectionService:
                 **kwargs,
             )
         except CommunityConnectionError as exc:
-            feedback_write = method == "POST" and path in {
-                "/api/v1/feedback",
-                "/api/v1/feedback/screenshots",
-            }
             if (
                 (method != "GET" and not feedback_write)
                 or not connection

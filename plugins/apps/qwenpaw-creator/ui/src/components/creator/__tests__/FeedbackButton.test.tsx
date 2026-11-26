@@ -117,7 +117,10 @@ describe("Creator feedback", () => {
     fireEvent.click(button("发送反馈"));
     const settings = await screen.findByRole("link", { name: "打开账号设置" });
     expect(settings).toHaveAttribute("href", "/settings/community");
-    expect(settings).toHaveAttribute("target", "_blank");
+    const openCommunitySettings = vi.fn();
+    vi.stubGlobal("QwenPaw", { host: { openCommunitySettings } });
+    fireEvent.click(settings);
+    expect(openCommunitySettings).toHaveBeenCalledOnce();
     expect(input).toHaveValue("草稿内容");
     expect(screen.queryByRole("link", { name: /^这里$/ })).toBeNull();
     fireEvent.click(button("发送反馈"));

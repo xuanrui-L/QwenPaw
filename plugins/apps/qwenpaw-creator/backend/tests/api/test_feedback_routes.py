@@ -154,7 +154,7 @@ PLATFORM = "/feedbacks/platform"
 @pytest.fixture
 def platform_host():
     app = FastAPI()
-    service = AsyncMock()
+    service = AsyncMock(supports_feedback_delivery=True)
     app.state.community_connection_service = service
     app.include_router(feedback_routes.router)
     with TestClient(app, headers={"X-Platform-Account": "alice"}) as client:
@@ -193,17 +193,19 @@ def test_platform_attachment_and_creator_feedback(platform_host):
     )
 
 
-@pytest.mark.parametrize("has_service", [False, True])
-def test_host_capability_and_account_errors(platform_host, has_service):
+@pytest.mark.parametrize("host", ["missing", "legacy", "current"])
+def test_host_capability_and_account_errors(platform_host, host):
     client, service = platform_host
     service.status.return_value = {"account": None}
-    if not has_service:
+    if host == "missing":
         del client.app.state.community_connection_service
+    elif host == "legacy":
+        del service.supports_feedback_delivery
     response = client.get(f"{PLATFORM}/account")
     assert response.status_code == 409
     expected = (
         "PLATFORM_ACCOUNT_REQUIRED"
-        if has_service
+        if host == "current"
         else "PLATFORM_HOST_UNSUPPORTED"
     )
     assert response.json()["code"] == expected

@@ -112,10 +112,22 @@ async def test_confirmed_feedback_survives_account_switch_without_exposing_recei
     assert await call("POST", "/api/v1/feedback", account_id="account-a") == {}
     with pytest.raises(
         module.CommunityConnectionError,
-        match="connection_changed",
+        match="account_changed",
     ):
         await call("POST", "/api/v1/feedback", account_id="account-a")
     assert writes == ["Bearer access-secret"]
+
+
+@pytest.mark.asyncio
+async def test_platform_rejection_can_be_corrected():
+    await seed_connection()
+    call = service(lambda _: httpx.Response(400)).community_request
+    with pytest.raises(
+        module.CommunityConnectionError,
+        match="feedback_rejected",
+    ) as rejected:
+        await call("POST", "/api/v1/feedback", account_id="account-a")
+    assert rejected.value.status_code == 400
 
 
 @pytest.mark.asyncio

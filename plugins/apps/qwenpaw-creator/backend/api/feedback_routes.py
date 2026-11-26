@@ -164,7 +164,7 @@ class _HostUnsupported(ConflictError):
 def _platform_connection(request: Request):
     # The QwenPaw host owns login, refresh and account-change checks.
     service = getattr(request.app.state, "community_connection_service", None)
-    if not callable(getattr(service, "community_request", None)):
+    if getattr(service, "supports_feedback_delivery", False) is not True:
         raise _HostUnsupported("当前宿主不支持直接提交 Platform 反馈")
     return service
 

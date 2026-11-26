@@ -94,6 +94,15 @@ def test_feedback_identifies_partial_motion_screenshot(page, project):
     expect(dialog.get_by_role("img", name="截图 1", exact=True)).to_be_visible()
     note = dialog.get_by_text("动效的当前帧", exact=False)
     expect(note).to_be_visible()
+    dialog.locator("input[type=file]").set_input_files(
+        {
+            "name": "invalid.svg",
+            "mimeType": "image/svg+xml",
+            "buffer": b"<svg/>",
+        },
+    )
+    expect(dialog.get_by_role("alert")).to_be_visible()
+    expect(note).to_be_visible()
     dialog.get_by_role("button", name="移除截图 1").click()
     expect(note).to_have_count(0)
 
