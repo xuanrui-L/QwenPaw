@@ -158,7 +158,11 @@ from services.runtime_files.execution_store import (
 )
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 from services.runtime_files.path_safety import is_link_stat, is_link_path
-from services.runtime_files.media_probe import MediaProbeError, probe_media
+from services.runtime_files.media_probe import (
+    MediaProbe,
+    MediaProbeError,
+    probe_media,
+)
 from services.runtime_files.runtime_dependencies import resolve_ffmpeg
 
 # pylint: disable=no-name-in-module
@@ -2116,50 +2120,52 @@ class FfmpegLocalMediaRunner:
         work_dir: Path,
     ) -> None:
         """Join mastered episodes in order, preserving compatible video packets."""
-        try:
-            probes = [
-                probe_media(str(path), ffmpeg_path=self.executable)
-                for path in inputs
-            ]
-        except MediaProbeError as error:
-            raise ConflictError("无法读取分集成片的视频信息") from error
-        if not probes or any(
-            not info.width or not info.height for info in probes
-        ):
+
+        def probe_episode(path: Path) -> MediaProbe:
+            try:
+                info = probe_media(str(path), ffmpeg_path=self.executable)
+            except MediaProbeError as error:
+                raise ConflictError("无法读取分集成片的视频信息") from error
+            if not info.width or not info.height:
+                raise ConflictError("分集成片缺少可播放的视频轨")
+            return info
+
+        probes = [probe_episode(path) for path in inputs]
+        if not probes:
             raise ConflictError("分集成片缺少可播放的视频轨")
         video_key = probes[0].video_stream_key
-        if (
+        copy_video = (
             video_key
             and video_key[0] == "h264"
             and all(info.video_stream_key == video_key for info in probes)
-        ):
-            video_options = ["-c:v", "copy"]
-        else:
-            width = max(2, probes[0].width // 2 * 2)
-            height = max(2, probes[0].height // 2 * 2)
-            video_options = [
-                "-vf",
-                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-pix_fmt",
-                "yuv420p",
-            ]
+        )
         # The concat demuxer matches tracks by position. Give it exactly one
         # video track per file, independent of the original container layout.
         video_segments = []
+        canvas = None
         for index, path in enumerate(inputs):
             segment = work_dir / f"episode-{index}.mp4"
+            video_options = (
+                ["-c:v", "copy"]
+                if copy_video
+                else [
+                    "-vf",
+                    _episode_video_filter(canvas),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+            )
             self._run(
                 [
                     "-y",
                     "-i",
                     str(path),
                     "-map",
-                    "0:v:0",
+                    "0:V:0",
                     *video_options,
                     "-map_chapters",
                     "-1",
@@ -2172,6 +2178,11 @@ class FfmpegLocalMediaRunner:
                 cwd=work_dir,
             )
             video_segments.append(segment)
+            if not copy_video and canvas is None:
+                # The encoded first episode gives the displayed canvas after
+                # FFmpeg has applied its matrix and pixel aspect ratio.
+                picture = probe_episode(segment)
+                canvas = (picture.width, picture.height)
         self._concat(
             video_segments,
             output,
@@ -2630,6 +2641,24 @@ def _canvas_size(aspect_ratio: str, resolution: str) -> tuple[int, int]:
         width = base
         height = round(width / ratio)
     return (max(2, width // 2 * 2), max(2, height // 2 * 2))
+
+
+def _episode_video_filter(canvas: tuple[int, int] | None) -> str:
+    # FFmpeg autorotates decoded frames before running the filter graph.
+    filters = [
+        "scale=w='max(2,round(ih*dar/2)*2)':h='max(2,round(ih/2)*2)'",
+        "setsar=1",
+    ]
+    if canvas:
+        width, height = canvas
+        filters.extend(
+            [
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2",
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                "setsar=1",
+            ],
+        )
+    return ",".join([*filters, "fps=30"])
 
 
 def _ffconcat_path(path: Path) -> str:

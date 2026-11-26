@@ -80,6 +80,22 @@ def _episode(path, streams, *, audio_first=False):
     _ffmpeg("-f", "lavfi", "-i", streams, *mapping, "-c:v", "libx264", path)
 
 
+def _frame(path, position, filters):
+    return _ffmpeg(
+        "-ss",
+        position,
+        "-i",
+        path,
+        "-vf",
+        filters,
+        "-frames:v",
+        1,
+        "-f",
+        "rawvideo",
+        "-",
+    )
+
+
 @requires_ffmpeg
 def test_join_preserves_mixed_size_and_silent_episodes(tmp_path: Path):
     first, second, film = (
@@ -132,19 +148,7 @@ def test_join_keeps_frames_and_sound_on_episode_boundaries(
         work_dir=tmp_path,
     )
     for position, channel in ((2.75, 0), (3.25, 2), (5.75, 2)):
-        pixel = _ffmpeg(
-            "-ss",
-            position,
-            "-i",
-            film,
-            "-vf",
-            "scale=1:1,format=rgb24",
-            "-frames:v",
-            1,
-            "-f",
-            "rawvideo",
-            "-",
-        )
+        pixel = _frame(film, position, "scale=1:1,format=rgb24")
         assert len(pixel) == 3 and pixel[channel] > 200
     pcm = _ffmpeg(
         "-i",
@@ -169,3 +173,48 @@ def test_join_keeps_frames_and_sound_on_episode_boundaries(
         start = int(position * 8000)
         window = pcm[start : start + 800]
         assert (max(window) - min(window) > 10) == audible
+
+
+@requires_ffmpeg
+@pytest.mark.parametrize("rotated_first", [False, True])
+def test_join_preserves_each_episodes_display_rotation(
+    tmp_path,
+    rotated_first,
+):
+    normal, rotated, film = (
+        tmp_path / name for name in ("normal.mp4", "rotated.mp4", "film.mp4")
+    )
+    _episode(
+        normal,
+        "color=white:s=96x64:d=1,drawbox=x=0:y=0:w=24:h=ih:color=black:t=fill",
+    )
+    if b"-display_rotation" in _ffmpeg("-h", "full"):
+        _ffmpeg("-display_rotation", 90, "-i", normal, "-c", "copy", rotated)
+    else:  # FFmpeg before 6 writes the track matrix from the rotate tag.
+        _ffmpeg(
+            "-i",
+            normal,
+            "-c",
+            "copy",
+            "-metadata:s:v:0",
+            "rotate=90",
+            rotated,
+        )
+    episodes = [rotated, normal] if rotated_first else [normal, rotated]
+    width, height = (64, 96) if rotated_first else (96, 64)
+    FfmpegLocalMediaRunner().join_final_cuts(episodes, film, work_dir=tmp_path)
+    info = probe_media(str(film))
+    assert (info.width, info.height) == (width, height)
+    fit = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+    )
+    thumb = "scale=12:12,format=gray"
+    for index, episode in enumerate(episodes):
+        reference = _frame(episode, 0.5, fit + thumb)
+        joined = _frame(film, index + 0.5, thumb)
+        assert len(joined) == len(reference) == 144
+        assert (
+            sum(abs(a - b) for a, b in zip(reference, joined)) / len(joined)
+            < 6
+        )
