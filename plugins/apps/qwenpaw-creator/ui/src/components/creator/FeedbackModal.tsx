@@ -1,87 +1,345 @@
-import { useState } from "react";
-import { useTranslation } from "react-i18next";
-import { Alert, Input, Modal } from "antd";
-import { submitFeedback } from "@/api/creator/feedback";
-import { FEEDBACK_LIMIT } from "@/api/creator/feedback";
+import { useEffect, useId, useRef, useState } from "react";
+import type { ClipboardEvent, FormEvent } from "react";
+import { Button, Image, Modal } from "antd";
+import { Check, Plus, Send, X } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
+import {
+  FEEDBACK_IMAGE_ACCEPT,
+  FEEDBACK_LIMIT,
+  MAX_FEEDBACK_SCREENSHOTS,
+  PLATFORM_NOTIFICATIONS_URL,
+  feedbackErrorMessage,
+  formatFeedbackText,
+  makeFeedbackScreenshot,
+  needsFeedbackAccount,
+  submitFeedback,
+  type FeedbackContext,
+  type FeedbackScreenshot,
+} from "@/api/creator/feedback";
+import creatorGlyph from "@/assets/design/logo-glyph-orange.png";
+import "./FeedbackModal.css";
 
-/**
- * Ask the person what went wrong, and only that.
- *
- * The record's other fields - project, stage, trace pointer - are completed by
- * Creator's `/feedbacks/draft`, so no question here is one the application
- * could already answer. The submit goes from this browser to the platform
- * because the platform reads the console cookie and ignores every bearer.
- */
+function ScreenshotTile({
+  screenshot,
+  index,
+  onRemove,
+}: {
+  screenshot: FeedbackScreenshot;
+  index: number;
+  onRemove: () => void;
+}) {
+  const { t } = useTranslation();
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    const preview = URL.createObjectURL(screenshot.file);
+    setUrl(preview);
+    return () => URL.revokeObjectURL(preview);
+  }, [screenshot.file]);
+
+  return (
+    <div className="creator-feedback-tile">
+      {url && (
+        <Image
+          src={url}
+          alt={t("feedback.image", { index })}
+          width="100%"
+          height="100%"
+        />
+      )}
+      <button
+        type="button"
+        className="creator-feedback-remove"
+        aria-label={t("feedback.removeImage", { index })}
+        onClick={onRemove}
+      >
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
 export default function FeedbackModal({
-  open,
-  projectId,
+  context,
+  initialScreenshot,
   onClose,
 }: {
-  open: boolean;
-  projectId: string;
+  context: FeedbackContext;
+  initialScreenshot: FeedbackScreenshot | null;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
+  const id = useId();
+  const description = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(true);
   const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [sent, setSent] = useState(false);
+  const [email, setEmail] = useState("");
+  const [screenshots, setScreenshots] = useState(
+    initialScreenshot ? [initialScreenshot] : [],
+  );
+  const [imageError, setImageError] = useState("");
+  const [sendError, setSendError] = useState<Error | null>(null);
+  const [status, setStatus] = useState<"editing" | "sending" | "sent">(
+    "editing",
+  );
+  const busy = status === "sending";
+  const sent = status === "sent";
+  const receiptTitle = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (sent) receiptTitle.current?.focus();
+  }, [sent]);
+  const excessLength =
+    formatFeedbackText(text, email, context).length - FEEDBACK_LIMIT;
+  const tooLong = excessLength > 0;
 
-  const reset = () => {
-    setText("");
-    setError("");
-    setSent(false);
-    onClose();
-  };
-
-  const send = async () => {
-    const feedback = text.trim();
-    if (!feedback || busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      await submitFeedback({ projectId, feedback });
-      setText("");
-      setSent(true);
-    } catch (exc) {
-      setError((exc as Error).message || t("feedback.failed"));
-    } finally {
-      setBusy(false);
+  function addImages(files: File[]) {
+    if (busy || !files.length) return;
+    const added: FeedbackScreenshot[] = [];
+    let error = "";
+    for (const file of files) {
+      if (screenshots.length + added.length >= MAX_FEEDBACK_SCREENSHOTS) {
+        error = t("feedback.imageLimit", { count: MAX_FEEDBACK_SCREENSHOTS });
+        break;
+      }
+      try {
+        added.push(makeFeedbackScreenshot(file));
+      } catch {
+        error = t("feedback.invalidImage");
+      }
     }
-  };
+    setScreenshots((current) => [...current, ...added]);
+    setImageError(error);
+  }
+
+  function paste(event: ClipboardEvent) {
+    const files = Array.from(event.clipboardData.files);
+    if (!files.length) {
+      for (const item of Array.from(event.clipboardData.items)) {
+        const file = item.kind === "file" ? item.getAsFile() : null;
+        if (file) files.push(file);
+      }
+    }
+    if (files.some((file) => file.type.startsWith("image/"))) {
+      event.preventDefault();
+      addImages(files);
+    }
+  }
+
+  async function send(event: FormEvent) {
+    event.preventDefault();
+    if (!text.trim() || tooLong || busy) return;
+    setStatus("sending");
+    setSendError(null);
+    try {
+      await submitFeedback({
+        ...context,
+        feedback: text,
+        contactEmail: email,
+        screenshots,
+      });
+      setStatus("sent");
+    } catch (exc) {
+      setStatus("editing");
+      setSendError(
+        exc instanceof Error ? exc : new Error(t("feedback.failed")),
+      );
+    }
+  }
 
   return (
     <Modal
       open={open}
-      title={t("feedback.title")}
-      okText={t("feedback.submit")}
-      cancelText={t("common.cancel")}
-      confirmLoading={busy}
-      okButtonProps={{ disabled: sent || !text.trim() }}
-      onOk={() => void send()}
-      onCancel={reset}
-      destroyOnClose
+      centered
+      width={sent ? 384 : 504}
+      className={
+        sent
+          ? "creator-feedback-modal creator-feedback-success"
+          : "creator-feedback-modal"
+      }
+      footer={null}
+      title={
+        sent ? (
+          <div className="creator-feedback-success-heading">
+            <span className="creator-feedback-success-icon" aria-hidden="true">
+              <Check size={26} strokeWidth={2.5} />
+            </span>
+            <h2 ref={receiptTitle} tabIndex={-1}>
+              {t("feedback.sent")}
+            </h2>
+          </div>
+        ) : (
+          <div className="creator-feedback-heading">
+            <h2>{t("feedback.title")}</h2>
+            <p>{t("feedback.intro")}</p>
+            <span aria-hidden="true" className="creator-feedback-mark">
+              <img src={creatorGlyph} alt="" />
+            </span>
+          </div>
+        )
+      }
+      closeIcon={<X size={18} />}
+      closable={{ disabled: busy, "aria-label": t("common.close") }}
+      mask={{ closable: false }}
+      keyboard={!busy}
+      onCancel={() => {
+        if (!busy) setOpen(false);
+      }}
+      afterOpenChange={(visible) => {
+        if (visible) description.current?.focus();
+      }}
+      focusable={{ focusTriggerAfterClose: false }}
+      afterClose={onClose}
     >
       {sent ? (
-        <Alert type="success" showIcon message={t("feedback.sent")} />
-      ) : (
-        <>
-          <Input.TextArea
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            placeholder={t("feedback.placeholder")}
-            autoSize={{ minRows: 4, maxRows: 10 }}
-            maxLength={FEEDBACK_LIMIT}
+        <p className="creator-feedback-receipt">
+          <Trans
+            i18nKey="feedback.viewReplies"
+            components={{
+              replies: (
+                <a
+                  href={PLATFORM_NOTIFICATIONS_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                />
+              ),
+            }}
           />
-          {error && (
-            <Alert
-              type="error"
-              showIcon
-              message={error}
-              style={{ marginTop: 12 }}
-            />
-          )}
-        </>
+        </p>
+      ) : (
+        <form className="creator-feedback-form" onSubmit={send} onPaste={paste}>
+          <div className="creator-feedback-sheet">
+            <fieldset disabled={busy}>
+              <div className="creator-feedback-field">
+                <label htmlFor={id + "-description"}>
+                  {t("feedback.description")}{" "}
+                  <span>{t("feedback.requiredMark")}</span>
+                </label>
+                <textarea
+                  ref={description}
+                  id={id + "-description"}
+                  required
+                  rows={4}
+                  maxLength={FEEDBACK_LIMIT}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder={t("feedback.placeholder")}
+                  aria-invalid={tooLong || undefined}
+                />
+                {tooLong && (
+                  <p className="creator-feedback-error" role="alert">
+                    {t("feedback.tooLong", { count: excessLength })}
+                  </p>
+                )}
+              </div>
+              <div
+                className="creator-feedback-field"
+                role="group"
+                aria-labelledby={id + "-screenshots"}
+              >
+                <div className="creator-feedback-label-row">
+                  <span id={id + "-screenshots"}>
+                    {t("feedback.screenshots")}
+                  </span>
+                  <small>
+                    {screenshots.length} / {MAX_FEEDBACK_SCREENSHOTS}
+                  </small>
+                </div>
+                <div className="creator-feedback-images">
+                  {screenshots.map((screenshot, index) => (
+                    <ScreenshotTile
+                      key={screenshot.key}
+                      screenshot={screenshot}
+                      index={index + 1}
+                      onRemove={() => {
+                        setScreenshots((current) =>
+                          current.filter((item) => item.key !== screenshot.key),
+                        );
+                        setImageError("");
+                      }}
+                    />
+                  ))}
+                  {screenshots.length < MAX_FEEDBACK_SCREENSHOTS && (
+                    <button
+                      type="button"
+                      className="creator-feedback-add"
+                      onClick={() => fileInput.current?.click()}
+                    >
+                      <Plus size={19} strokeWidth={1.7} />
+                      <span>{t("feedback.addImage")}</span>
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="file"
+                  multiple
+                  hidden
+                  ref={fileInput}
+                  accept={FEEDBACK_IMAGE_ACCEPT}
+                  aria-label={t("feedback.addImage")}
+                  onChange={(e) => {
+                    addImages(Array.from(e.target.files ?? []));
+                    e.target.value = "";
+                  }}
+                />
+                {imageError ? (
+                  <p className="creator-feedback-error" role="alert">
+                    {imageError}
+                  </p>
+                ) : (
+                  !initialScreenshot &&
+                  !screenshots.length && (
+                    <p className="creator-feedback-note" role="status">
+                      {t("feedback.captureFailed")}
+                    </p>
+                  )
+                )}
+              </div>
+              <div className="creator-feedback-field">
+                <label htmlFor={id + "-email"}>
+                  {t("feedback.email")} <span>{t("common.optional")}</span>
+                </label>
+                <input
+                  type="email"
+                  autoComplete="email"
+                  id={id + "-email"}
+                  maxLength={254}
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                />
+              </div>
+              {sendError && (
+                <p className="creator-feedback-error" role="alert">
+                  {feedbackErrorMessage(sendError)}
+                  {needsFeedbackAccount(sendError) && (
+                    <>
+                      {" "}
+                      <a
+                        className="creator-feedback-link"
+                        href="/settings/community"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {t("feedback.connectAccount")}
+                      </a>
+                    </>
+                  )}
+                </p>
+              )}
+            </fieldset>
+          </div>
+          <div className="creator-feedback-footer">
+            <Button
+              type="primary"
+              htmlType="submit"
+              icon={<Send size={14} />}
+              loading={busy}
+              disabled={!text.trim() || tooLong || busy}
+            >
+              {t("feedback.submit")}
+            </Button>
+          </div>
+        </form>
       )}
     </Modal>
   );

@@ -1,24 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Assemble a platform feedback record on the server side.
-
-The person types one thing: why they are unhappy. Everything else in the
-platform's contract is Creator's own context - the project, the stage, and
-above all the trace pointer, whose line number only something reading the
-jsonl can know. So this endpoint turns a short body into a complete draft.
-
-It stops short of the submit. The platform authenticates with the
-``qwenpaw_console_token`` cookie that lives in the browser and ignores every
-bearer, so the Creator backend cannot post there; the draft goes back to the
-page, which forwards it same-origin.
-"""
+"""Send Creator feedback with diagnostics using the host's Platform account."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Header, Request, UploadFile
+from pydantic import BaseModel, Field, HttpUrl
 
-from domain.errors import ValidationError
+from domain.errors import ConflictError, ValidationError
 from services.observability import read_trace_records
 
 from .dependencies import CreatorErrorRoute
@@ -29,10 +19,17 @@ router = APIRouter(
     route_class=CreatorErrorRoute,
 )
 
-# Mirrors the platform contract; enforced here so an over-long body fails with
-# a readable message instead of a 400 from a third party.
 PROJECT_ID_LIMIT = 128
-FEEDBACK_LIMIT = 4000
+FEEDBACK_LIMIT = 65_536
+SCREENSHOT_BYTE_LIMIT = 5 * 1024 * 1024
+_IMAGE_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+_PLATFORM_FEEDBACK = "/api/v1/feedback"
+
 
 # How far back to scan for a stage signal. The newest failure is frequently a
 # generic api/CONFLICT, so a single record too often reads as "unknown".
@@ -147,13 +144,86 @@ async def build_feedback_draft(
     errors = _records(project_id, "error", STAGE_SCAN)
     recent = errors or _records(project_id, None, STAGE_SCAN)
     record = recent[-1] if recent else None
-    stage = stage or _stage_of_records(errors) or _stage_of_records(recent)
+    stage = stage or _stage_of_records(recent)
     return {
         "project_id": project_id,
         "stage": stage or "unknown",
         "feedback": feedback,
         **_pointer(record),
     }
+
+
+class _AccountRequired(ConflictError):
+    code = "PLATFORM_ACCOUNT_REQUIRED"
+
+
+def _platform_connection(request: Request):
+    # The QwenPaw host owns login, refresh and account-change checks.
+    service = getattr(request.app.state, "community_connection_service", None)
+    if service is None:
+        raise _AccountRequired("请在 QwenPaw 设置中连接 Platform 账号")
+    return service
+
+
+@router.get("/platform/account")
+async def feedback_account(request: Request) -> dict[str, str]:
+    status = await _platform_connection(request).status(local=False)
+    account = status.get("account") or {}
+    if not account.get("id"):
+        raise _AccountRequired("请在 QwenPaw 设置中连接 Platform 账号")
+    return {"id": str(account["id"])}
+
+
+@router.post("/platform/screenshots")
+async def upload_platform_screenshot(
+    request: Request,
+    file: UploadFile,
+    x_platform_account: str = Header(min_length=1, max_length=128),
+) -> dict:
+    extension = _IMAGE_EXTENSIONS.get(file.content_type or "")
+    if not extension:
+        raise ValidationError("截图格式无效")
+    content = await file.read(SCREENSHOT_BYTE_LIMIT + 1)
+    if not content or len(content) > SCREENSHOT_BYTE_LIMIT:
+        raise ValidationError("截图必须为 5 MB 以内的图片")
+    return await _platform_connection(request).community_request(
+        "POST",
+        _PLATFORM_FEEDBACK + "/screenshots",
+        account_id=x_platform_account,
+        files={
+            "file": (f"screenshot.{extension}", content, file.content_type)
+        },
+        timeout=60,
+    )
+
+
+class PlatformFeedback(BaseModel):
+    description: str = Field(min_length=1, max_length=FEEDBACK_LIMIT)
+    screenshot_urls: list[HttpUrl] = Field(default_factory=list, max_length=8)
+
+
+@router.post("/platform")
+async def submit_platform_feedback(
+    body: PlatformFeedback,
+    request: Request,
+    x_platform_account: str = Header(min_length=1, max_length=128),
+) -> dict:
+    if not body.description.strip():
+        raise ValidationError("反馈内容为空")
+    payload = {
+        "modules": ["qwenpaw_usage"],
+        "qwenpaw_version_tag": "qwenpaw_creator",
+        "description": body.description,
+    }
+    if body.screenshot_urls:
+        payload["screenshot_urls"] = [str(url) for url in body.screenshot_urls]
+    await _platform_connection(request).community_request(
+        "POST",
+        _PLATFORM_FEEDBACK,
+        account_id=x_platform_account,
+        json=payload,
+    )
+    return {"submitted": True}
 
 
 __all__ = ["router"]

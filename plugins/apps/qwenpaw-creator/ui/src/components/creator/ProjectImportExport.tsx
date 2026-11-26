@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
@@ -15,10 +15,16 @@ interface ProjectImportResponse {
   projectId: string;
 }
 
+interface ImportTransfer {
+  fileName: string;
+  phase: "uploading" | "processing";
+  uploadedBytes: number;
+  totalBytes: number | null;
+}
+
 function importProject(
   file: File,
-  onProgress?: (uploadedBytes: number, totalBytes: number) => void,
-  onUploaded?: () => void,
+  onTransfer: (transfer: ImportTransfer) => void,
 ): Promise<ProjectImportResponse> {
   const form = new FormData();
   const requestId = newClientId("import-project");
@@ -33,14 +39,33 @@ function importProject(
     const headers = creatorHeaders({ "Idempotency-Key": requestId });
     headers.forEach((value, key) => xhr.setRequestHeader(key, value));
 
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) {
-        onProgress?.(event.loaded, event.total);
-      }
+    let transfer: ImportTransfer = {
+      fileName: file.name,
+      phase: "uploading",
+      uploadedBytes: 0,
+      totalBytes: null,
     };
-    // Upload completion is only the end of transmission. The response
-    // arrives after the server has unpacked and validated the Project.
-    xhr.upload.onload = () => onUploaded?.();
+    onTransfer(transfer);
+    xhr.upload.onprogress = ({ loaded, total, lengthComputable }) => {
+      transfer = {
+        ...transfer,
+        uploadedBytes: loaded,
+        totalBytes: lengthComputable && total > 0 ? total : null,
+      };
+      onTransfer(transfer);
+    };
+    // The server still needs to unpack and validate a fully uploaded archive.
+    xhr.upload.onload = ({ loaded }) =>
+      onTransfer({
+        ...transfer,
+        phase: "processing",
+        uploadedBytes: Math.max(
+          loaded,
+          transfer.uploadedBytes,
+          transfer.totalBytes ?? file.size,
+        ),
+        totalBytes: null,
+      });
 
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -84,67 +109,52 @@ export function ProjectImporter({
   onImported,
 }: ProjectImporterProps) {
   const { t } = useTranslation();
-  const [phase, setPhase] = useState<"idle" | "uploading" | "processing">(
-    "idle",
-  );
-  const busy = phase !== "idle";
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [percent, setPercent] = useState(0);
+  const [transfer, setTransfer] = useState<ImportTransfer | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const busy = transfer !== null;
+  const percent = transfer?.totalBytes
+    ? Math.min(
+        100,
+        Math.floor((transfer.uploadedBytes / transfer.totalBytes) * 100),
+      )
+    : null;
+  const uploadedAmount = transfer
+    ? t("importExport.uploadedAmount", {
+        size: formatTransferSize(transfer.uploadedBytes, transfer.totalBytes),
+      })
+    : undefined;
 
-  const reset = useCallback(() => {
-    setPhase("idle");
-    setFileName(null);
-    setPercent(0);
+  function reset() {
+    setTransfer(null);
     setDragOver(false);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }, []);
+  }
 
-  const handleClose = useCallback(() => {
+  function handleClose() {
     if (busy) return;
     reset();
     onClose();
-  }, [busy, reset, onClose]);
+  }
 
-  const upload = useCallback(
-    async (file: File) => {
-      if (file.name.split(".").pop()?.toUpperCase() !== "ZIP") {
-        message.error(t("importExport.zipOnly"));
-        return;
-      }
-      setFileName(file.name);
-      setPercent(0);
-      setPhase("uploading");
-      try {
-        const response = await importProject(
-          file,
-          (loaded, total) => {
-            setPercent(
-              total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
-            );
-          },
-          () => setPhase("processing"),
-        );
-        message.success(
-          t("importExport.importSuccess", { projectId: response.projectId }),
-          10,
-        );
-        reset();
-        onClose();
-        onImported?.();
-      } catch (error) {
-        message.error(
-          error instanceof Error
-            ? error.message
-            : t("importExport.importFailed"),
-          10,
-        );
-        reset();
-      }
-    },
-    [reset, onClose, onImported],
-  );
+  async function upload(file: File) {
+    if (!/\.zip$/i.test(file.name)) {
+      message.error(t("importExport.zipOnly"));
+      return;
+    }
+    try {
+      const { projectId } = await importProject(file, setTransfer);
+      message.success(t("importExport.importSuccess", { projectId }), 10);
+      onClose();
+      onImported?.();
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : t("importExport.importFailed"),
+        10,
+      );
+    } finally {
+      reset();
+    }
+  }
 
   return (
     <Modal
@@ -174,12 +184,12 @@ export function ProjectImporter({
       </div>
 
       <div className="p-5">
-        {fileName ? (
+        {transfer ? (
           <div className="flex min-h-[160px] flex-col items-center justify-center gap-3 rounded-md bg-white px-4 py-4 dark:bg-[var(--color-bg-card)]">
             <span className="max-w-full truncate text-base font-medium leading-7 text-[var(--color-text-primary)]">
-              {fileName}
+              {transfer.fileName}
             </span>
-            {phase === "processing" ? (
+            {transfer.phase === "processing" ? (
               <div role="status" className="flex flex-col items-center gap-2">
                 <div className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
                   <LoaderCircle aria-hidden className="h-4 w-4 animate-spin" />
@@ -188,17 +198,36 @@ export function ProjectImporter({
                 <p className="text-center text-xs leading-5 text-[var(--color-text-secondary)]">
                   {t("importExport.processingHint")}
                 </p>
+                <span className="text-xs tabular-nums text-[var(--color-text-secondary)]">
+                  {uploadedAmount}
+                </span>
               </div>
             ) : (
               <div className="w-[400px] max-w-full">
-                <p className="mb-1 text-sm text-[var(--color-text-secondary)]">
-                  {t("importExport.uploading")}
-                </p>
-                <Progress
-                  percent={percent}
-                  status="active"
-                  strokeColor="var(--color-accent)"
-                />
+                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                  <span className="text-sm font-medium text-[var(--color-text-primary)]">
+                    {t("importExport.uploading")}
+                  </span>
+                  <span className="text-xs tabular-nums text-[var(--color-text-secondary)]">
+                    {uploadedAmount}
+                  </span>
+                </div>
+                {percent === null ? (
+                  <div
+                    role="progressbar"
+                    aria-label={t("importExport.uploading")}
+                    aria-valuetext={uploadedAmount}
+                    className="h-2 rounded-full bg-[var(--color-accent-soft)] motion-safe:animate-pulse"
+                  />
+                ) : (
+                  <Progress
+                    aria-label={t("importExport.uploading")}
+                    aria-valuetext={uploadedAmount}
+                    percent={percent}
+                    status="active"
+                    strokeColor="var(--color-accent)"
+                  />
+                )}
               </div>
             )}
           </div>
@@ -235,6 +264,7 @@ export function ProjectImporter({
           ref={fileInputRef}
           type="file"
           accept=".zip"
+          disabled={busy}
           aria-label={t("importExport.chooseArchive")}
           hidden
           onChange={(e) => {
@@ -328,41 +358,23 @@ export function formatBytes(bytes: number): string {
   }`;
 }
 
+function formatTransferSize(bytes: number, totalBytes: number | null): string {
+  const size = formatBytes(bytes);
+  return totalBytes ? `${size} / ${formatBytes(totalBytes)}` : size;
+}
+
 interface ExportProgressCardProps {
   projectName: string;
   progress: ExportProgressState;
   onDismiss: () => void;
 }
 
-/**
- * Floating card reporting export percent and byte size while the archive
- * streams down. Pinned bottom-left so it never fights the AgentDock capsule.
- */
 export function ExportProgressCard({
   projectName,
   progress,
   onDismiss,
 }: ExportProgressCardProps) {
   const { t } = useTranslation();
-  const [left, setLeft] = useState(20);
-  useEffect(() => {
-    const workspace = document.querySelector("[data-creator-workspace-root]");
-    const position = () => {
-      const start = (workspace?.getBoundingClientRect().left ?? 0) + 20;
-      setLeft(Math.max(20, Math.min(start, window.innerWidth - 340)));
-    };
-    position();
-    const observer =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(position);
-    if (workspace) observer?.observe(workspace);
-    window.addEventListener("resize", position);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", position);
-    };
-  }, []);
   const done = progress.status === "done";
   const packaging = !done && progress.phase === "packaging";
   const percent = done
@@ -373,17 +385,15 @@ export function ExportProgressCard({
         Math.floor((progress.receivedBytes / progress.totalBytes) * 100),
       )
     : null;
-  const sizeText = progress.totalBytes
-    ? `${formatBytes(progress.receivedBytes)} / ${formatBytes(
-        progress.totalBytes,
-      )}`
-    : formatBytes(progress.receivedBytes);
+  const sizeText = formatTransferSize(
+    progress.receivedBytes,
+    progress.totalBytes,
+  );
   return createPortal(
     <div
       data-export-progress
       role="status"
-      style={{ left }}
-      className="fixed bottom-5 z-50 w-[320px] max-w-[calc(100vw-40px)] rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-4 py-3 shadow-xl"
+      className="fixed left-1/2 top-1/2 z-50 w-[320px] max-w-[calc(100vw-40px)] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-4 py-3 shadow-xl"
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-medium text-[var(--color-text-primary)]">

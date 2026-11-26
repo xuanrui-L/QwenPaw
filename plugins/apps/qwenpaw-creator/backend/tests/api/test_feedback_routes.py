@@ -9,8 +9,11 @@ platform a feedback row.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from api import feedback_routes
 from domain.errors import ValidationError
@@ -41,7 +44,9 @@ def test_a_short_body_comes_back_with_the_platform_fields(
         ],
     )
 
-    assert _draft({"project_id": PROJECT, "feedback": "  生成失败看不懂  "}) == {
+    assert _draft(
+        {"project_id": PROJECT, "feedback": "  生成失败看不懂  "}
+    ) == {
         "project_id": PROJECT,
         "stage": "media_generation",
         "feedback": "生成失败看不懂",
@@ -52,7 +57,7 @@ def test_a_short_body_comes_back_with_the_platform_fields(
     }
 
 
-def test_the_pointer_prefers_the_newest_error(
+def test_draft_uses_recent_activity_when_no_errors_exist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[dict] = []
@@ -68,6 +73,7 @@ def test_the_pointer_prefers_the_newest_error(
             if filters.get("status")
             else [
                 {
+                    "name": "creator.export",
                     "traceId": "trace-2",
                     "traceLine": 3,
                     "traceFile": "creator-trace-2026-09-17.jsonl",
@@ -82,7 +88,7 @@ def test_the_pointer_prefers_the_newest_error(
     assert seen[0]["status"] == "error"
     assert seen[0]["projectId"] == PROJECT
     assert draft["trace_line"] == 3
-    assert draft["stage"] == "unknown"
+    assert draft["stage"] == "exported"
 
 
 def test_the_stage_walks_back_past_a_generic_newest_error(
@@ -157,7 +163,10 @@ def test_an_unreadable_trace_never_eats_the_feedback(
         {"project_id": "", "feedback": "x"},
         {"project_id": "p" * 129, "feedback": "x"},
         {"project_id": PROJECT, "feedback": "   "},
-        {"project_id": PROJECT, "feedback": "字" * 4001},
+        {
+            "project_id": PROJECT,
+            "feedback": "字" * (feedback_routes.FEEDBACK_LIMIT + 1),
+        },
     ],
 )
 def test_bodies_the_platform_would_refuse_are_refused_first(
@@ -188,3 +197,72 @@ def test_feedback_pointer_resolves_to_the_durable_trace(tmp_path, monkeypatch):
     log = tmp_path / "observability" / "traces" / draft["trace_file"]
     record = json.loads(log.read_text().splitlines()[draft["trace_line"] - 1])
     assert record["traceId"] == draft["trace_id"]
+
+
+PLATFORM = "/feedbacks/platform"
+
+
+@pytest.fixture
+def platform_host():
+    app = FastAPI()
+    service = AsyncMock()
+    app.state.community_connection_service = service
+    app.include_router(feedback_routes.router)
+    with TestClient(app, headers={"X-Platform-Account": "alice"}) as client:
+        yield client, service
+
+
+def test_platform_attachment_and_creator_feedback(platform_host):
+    client, service = platform_host
+    service.status.return_value = {"account": {"id": "alice"}}
+    assert client.get(f"{PLATFORM}/account").json() == {"id": "alice"}
+
+    url = "https://example.org/shot.png"
+    service.community_request.return_value = {"url": url}
+    image = ("screenshot.png", b"image bytes", "image/png")
+    result = client.post(f"{PLATFORM}/screenshots", files={"file": image})
+    assert result.json() == {"url": url}
+    service.community_request.assert_awaited_once_with(
+        "POST",
+        "/api/v1/feedback/screenshots",
+        account_id="alice",
+        files={"file": image},
+        timeout=60,
+    )
+
+    body = {"description": "预览卡住", "screenshot_urls": [url]}
+    assert client.post(PLATFORM, json=body).json() == {"submitted": True}
+    service.community_request.assert_awaited_with(
+        "POST",
+        "/api/v1/feedback",
+        account_id="alice",
+        json={
+            **body,
+            "modules": ["qwenpaw_usage"],
+            "qwenpaw_version_tag": "qwenpaw_creator",
+        },
+    )
+
+
+@pytest.mark.parametrize("has_service", [False, True])
+def test_unconnected_host_offers_account_setup(platform_host, has_service):
+    client, service = platform_host
+    service.status.return_value = {"account": None}
+    if not has_service:
+        del client.app.state.community_connection_service
+    response = client.get(f"{PLATFORM}/account")
+    assert response.status_code == 409
+    assert response.json()["code"] == "PLATFORM_ACCOUNT_REQUIRED"
+
+
+def test_invalid_feedback_stays_local(platform_host, monkeypatch):
+    client, service = platform_host
+    monkeypatch.setattr(feedback_routes, "SCREENSHOT_BYTE_LIMIT", 4)
+    for mime, content in [("text/plain", b"x"), ("image/png", b"12345")]:
+        response = client.post(
+            f"{PLATFORM}/screenshots",
+            files={"file": ("file", content, mime)},
+        )
+        assert response.status_code == 422
+    assert client.post(PLATFORM, json={"description": "  "}).status_code == 422
+    service.community_request.assert_not_awaited()
