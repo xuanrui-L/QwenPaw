@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type { ClipboardEvent, FormEvent } from "react";
+import type { ClipboardEvent, FormEvent, ReactNode } from "react";
+import { CreatorHttpError, openHostExternalLink } from "@/api/creator/client";
 import { Button, Image, Modal } from "antd";
 import { Check, Plus, Send, X } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
@@ -13,11 +14,41 @@ import {
   makeFeedbackScreenshot,
   needsFeedbackAccount,
   submitFeedback,
+  type FeedbackAttempt,
   type FeedbackContext,
   type FeedbackScreenshot,
 } from "@/api/creator/feedback";
 import creatorGlyph from "@/assets/design/logo-glyph-orange.png";
 import "./FeedbackModal.css";
+
+function PlatformLink({
+  href,
+  children,
+}: {
+  href: string;
+  children?: ReactNode;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(event) => {
+        if (
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.shiftKey &&
+          !event.altKey &&
+          openHostExternalLink(href)
+        ) {
+          event.preventDefault();
+        }
+      }}
+    >
+      {children}
+    </a>
+  );
+}
 
 function ScreenshotTile({
   screenshot,
@@ -78,12 +109,20 @@ export default function FeedbackModal({
     initialScreenshot ? [initialScreenshot] : [],
   );
   const [imageError, setImageError] = useState("");
+  const attempt = useRef<FeedbackAttempt>({});
   const [sendError, setSendError] = useState<Error | null>(null);
   const [status, setStatus] = useState<"editing" | "sending" | "sent">(
     "editing",
   );
   const busy = status === "sending";
   const sent = status === "sent";
+  const errorCode = sendError instanceof CreatorHttpError ? sendError.code : "";
+  const unconfirmed = errorCode === "FEEDBACK_UNCONFIRMED";
+  const screenshotNote = screenshots.some((shot) => shot.partialPreview)
+    ? t("feedback.partialPreview")
+    : !initialScreenshot && !screenshots.length
+    ? t("feedback.captureFailed")
+    : "";
   const receiptTitle = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
     if (sent) receiptTitle.current?.focus();
@@ -93,7 +132,7 @@ export default function FeedbackModal({
   const tooLong = excessLength > 0;
 
   function addImages(files: File[]) {
-    if (busy || !files.length) return;
+    if (busy || unconfirmed || !files.length) return;
     const added: FeedbackScreenshot[] = [];
     let error = "";
     for (const file of files) {
@@ -127,16 +166,19 @@ export default function FeedbackModal({
 
   async function send(event: FormEvent) {
     event.preventDefault();
-    if (!text.trim() || tooLong || busy) return;
+    if (!text.trim() || tooLong || busy || unconfirmed) return;
     setStatus("sending");
     setSendError(null);
     try {
-      await submitFeedback({
-        ...context,
-        feedback: text,
-        contactEmail: email,
-        screenshots,
-      });
+      await submitFeedback(
+        {
+          ...context,
+          feedback: text,
+          contactEmail: email,
+          screenshots,
+        },
+        attempt.current,
+      );
       setStatus("sent");
     } catch (exc) {
       setStatus("editing");
@@ -195,20 +237,14 @@ export default function FeedbackModal({
           <Trans
             i18nKey="feedback.viewReplies"
             components={{
-              replies: (
-                <a
-                  href={PLATFORM_NOTIFICATIONS_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                />
-              ),
+              replies: <PlatformLink href={PLATFORM_NOTIFICATIONS_URL} />,
             }}
           />
         </p>
       ) : (
         <form className="creator-feedback-form" onSubmit={send} onPaste={paste}>
           <div className="creator-feedback-sheet">
-            <fieldset disabled={busy}>
+            <fieldset disabled={busy || unconfirmed}>
               <div className="creator-feedback-field">
                 <label htmlFor={id + "-description"}>
                   {t("feedback.description")}{" "}
@@ -286,10 +322,9 @@ export default function FeedbackModal({
                     {imageError}
                   </p>
                 ) : (
-                  !initialScreenshot &&
-                  !screenshots.length && (
+                  screenshotNote && (
                     <p className="creator-feedback-note" role="status">
-                      {t("feedback.captureFailed")}
+                      {screenshotNote}
                     </p>
                   )
                 )}
@@ -310,19 +345,25 @@ export default function FeedbackModal({
               </div>
               {sendError && (
                 <p className="creator-feedback-error" role="alert">
-                  {feedbackErrorMessage(sendError)}
+                  {feedbackErrorMessage(sendError)}{" "}
+                  {unconfirmed && (
+                    <PlatformLink href={PLATFORM_NOTIFICATIONS_URL}>
+                      {t("feedback.checkNotifications")}
+                    </PlatformLink>
+                  )}
+                  {errorCode === "PLATFORM_HOST_UNSUPPORTED" && (
+                    <PlatformLink href="https://platform.agentscope.io/feedback">
+                      {t("feedback.webForm")}
+                    </PlatformLink>
+                  )}
                   {needsFeedbackAccount(sendError) && (
-                    <>
-                      {" "}
-                      <a
-                        className="creator-feedback-link"
-                        href="/settings/community"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        {t("feedback.connectAccount")}
-                      </a>
-                    </>
+                    <a
+                      href="/settings/community"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {t("feedback.connectAccount")}
+                    </a>
                   )}
                 </p>
               )}
@@ -334,7 +375,7 @@ export default function FeedbackModal({
               htmlType="submit"
               icon={<Send size={14} />}
               loading={busy}
-              disabled={!text.trim() || tooLong || busy}
+              disabled={!text.trim() || tooLong || busy || unconfirmed}
             >
               {t("feedback.submit")}
             </Button>

@@ -1151,9 +1151,12 @@ class CommunityConnectionService:
                 **kwargs,
             )
         except CommunityConnectionError as exc:
-            # A failed write may have posted already; never retry it.
+            feedback_write = method == "POST" and path in {
+                "/api/v1/feedback",
+                "/api/v1/feedback/screenshots",
+            }
             if (
-                method != "GET"
+                (method != "GET" and not feedback_write)
                 or not connection
                 or exc.code != "authorization_expired"
             ):
@@ -1163,24 +1166,38 @@ class CommunityConnectionService:
                     force_refresh=True,
                     expected_connection_id=connection["connection_id"],
                 )
-                data = await self._request(
-                    method,
-                    path,
-                    token=connection["access_token"],
-                    **kwargs,
-                )
-            except CommunityConnectionError:
+                if not feedback_write:
+                    data = await self._request(
+                        method,
+                        path,
+                        token=connection["access_token"],
+                        **kwargs,
+                    )
+            except CommunityConnectionError as refresh_error:
+                if feedback_write:
+                    raise exc from refresh_error
                 if account_id is not None:
                     raise
                 return await self.community_request("GET", path, **kwargs)
+            # The credential is ready for an explicit retry. Never replay a write.
+            if feedback_write:
+                raise CommunityConnectionError("authorization_refreshed", 409)
+        payload = data.get("data")
         if connection:
             current = await store.get_connection()
             if (
                 not current
                 or current["connection_id"] != connection["connection_id"]
             ):
+                # The ticket already exists under the submitting account. An
+                # empty acknowledgement exposes none of that account's data.
+                if (
+                    method == "POST"
+                    and path == "/api/v1/feedback"
+                    and isinstance(payload, dict)
+                ):
+                    return {}
                 raise CommunityConnectionError("connection_changed", 409)
-        payload = data.get("data")
         if not isinstance(payload, dict):
             raise CommunityConnectionError("invalid_platform_response", 502)
         return payload

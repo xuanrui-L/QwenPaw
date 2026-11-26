@@ -60,6 +60,65 @@ def token_reply():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    ["/api/v1/feedback", "/api/v1/feedback/screenshots"],
+)
+async def test_feedback_refreshes_a_rejected_token_without_replaying(path):
+    await seed_connection()
+    writes = []
+
+    def handler(request):
+        if request.url.path.endswith("/auth/refresh"):
+            return token_reply()
+        if request.url.path.endswith("/me"):
+            return httpx.Response(200, json={"user": {"id": "account-a"}})
+        assert request.url.path == path
+        writes.append(request.headers["authorization"])
+        if len(writes) == 1:
+            return httpx.Response(401)
+        return httpx.Response(201, json={"data": {"id": "receipt"}})
+
+    call = service(handler).community_request
+    with pytest.raises(
+        module.CommunityConnectionError,
+        match="authorization_refreshed",
+    ):
+        await call("POST", path, account_id="account-a")
+    assert writes == ["Bearer access-secret"]
+    assert await call("POST", path, account_id="account-a") == {
+        "id": "receipt",
+    }
+    assert writes == ["Bearer access-secret", "Bearer new-access-secret"]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_feedback_survives_account_switch_without_exposing_receipt():
+    await seed_connection()
+    writes = []
+
+    async def handler(request):
+        writes.append(request.headers["authorization"])
+        await seed_connection(
+            account_id="account-b",
+            connection_id="connection-b",
+        )
+        return httpx.Response(
+            201,
+            json={"data": {"id": "account-a-private-ticket"}},
+        )
+
+    call = service(handler).community_request
+    assert await call("POST", "/api/v1/feedback", account_id="account-a") == {}
+    with pytest.raises(
+        module.CommunityConnectionError,
+        match="connection_changed",
+    ):
+        await call("POST", "/api/v1/feedback", account_id="account-a")
+    assert writes == ["Bearer access-secret"]
+
+
+@pytest.mark.asyncio
 async def test_connection_exposes_account_avatar_url():
     avatar = "https://oss.example.com/avatar/alice.png"
 

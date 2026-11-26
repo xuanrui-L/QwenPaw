@@ -33,13 +33,16 @@ afterEach(() => vi.unstubAllGlobals());
 it("sends the selected file separately from the user's description and diagnostics", async () => {
   const image = shot();
   const calls = platform();
-  await submitFeedback({
-    ...body,
-    sessionId: "s1",
-    conversationId: "c1",
-    contactEmail: " editor@example.com ",
-    screenshots: [image],
-  });
+  await submitFeedback(
+    {
+      ...body,
+      sessionId: "s1",
+      conversationId: "c1",
+      contactEmail: " editor@example.com ",
+      screenshots: [image],
+    },
+    {},
+  );
   expect(calls.map((c) => c.url.slice(root.length))).toEqual([
     "/draft",
     "/platform/account",
@@ -73,7 +76,7 @@ it("omits unavailable diagnostics and attachments for text-only feedback", async
     new URL("https://demo.qwenpaw.platform.agentscope.io"),
   );
   const calls = platform({ "/draft": { json: { stage: "unknown" } } });
-  await submitFeedback(body);
+  await submitFeedback(body, {});
   const payload = calls.at(-1)?.body as { description: string };
   expect(payload).not.toHaveProperty("screenshot_urls");
   expect(payload.description).toContain("deployment_id: demo");
@@ -82,19 +85,31 @@ it("omits unavailable diagnostics and attachments for text-only feedback", async
   );
 });
 
-it("reuses successful uploads on retry only for the same account", async () => {
+it("retains uploads after a rejection and keeps retries on the original account", async () => {
   const feedback = { ...body, screenshots: [shot()] };
+  const attempt = {};
   platform({
-    "/platform": { ok: false, status: 503, json: { message: "Unavailable" } },
+    "/platform": {
+      ok: false,
+      status: 429,
+      json: { message: "Too many requests" },
+    },
   });
-  await expect(submitFeedback(feedback)).rejects.toThrow("Unavailable");
-  const retry = platform();
-  await submitFeedback(feedback);
-  expect(retry.map((c) => c.url)).not.toContain(root + "/platform/screenshots");
+  await expect(submitFeedback(feedback, attempt)).rejects.toThrow(
+    "Too many requests",
+  );
   const switched = platform({ "/platform/account": { json: { id: "bob" } } });
-  await submitFeedback(feedback);
+  await expect(submitFeedback(feedback, attempt)).rejects.toMatchObject({
+    code: "FEEDBACK_ACCOUNT_CHANGED",
+  });
+  expect(switched.at(-1)?.url).toBe(root + "/platform/account");
+  const retry = platform();
+  await submitFeedback(feedback, attempt);
+  expect(retry.map((c) => c.url)).not.toContain(root + "/platform/screenshots");
+  const fresh = platform({ "/platform/account": { json: { id: "bob" } } });
+  await submitFeedback(feedback, {});
   expect(
-    switched.find((c) => c.url.endsWith("/screenshots"))?.headers[
+    fresh.find((c) => c.url.endsWith("/screenshots"))?.headers[
       "x-platform-account"
     ],
   ).toBe("bob");
@@ -107,11 +122,10 @@ it.each([
     "账号未连接",
   ],
   ["/platform/screenshots", { json: {} }, "截图地址"],
-  ["/platform", { json: {} }, "反馈提交失败"],
 ] as const)("stops at %s on failure", async (path, response, error) => {
   const calls = platform({ [path]: response });
   await expect(
-    submitFeedback({ ...body, screenshots: [shot()] }),
+    submitFeedback({ ...body, screenshots: [shot()] }, {}),
   ).rejects.toThrow(error);
   expect(calls.at(-1)?.url).toBe(root + path);
 });
@@ -119,11 +133,28 @@ it.each([
 it("checks the final description length before uploading", async () => {
   const calls = platform();
   await expect(
-    submitFeedback({
-      ...body,
-      feedback: "x".repeat(FEEDBACK_LIMIT),
-      screenshots: [shot()],
-    }),
+    submitFeedback(
+      {
+        ...body,
+        feedback: "x".repeat(FEEDBACK_LIMIT),
+        screenshots: [shot()],
+      },
+      {},
+    ),
   ).rejects.toThrow("超出");
   expect(calls.map((c) => c.url)).toEqual([root + "/draft"]);
 });
+
+it.each([{ json: {} }, { ok: false, status: 502 }])(
+  "does not replay a final POST with an unknown outcome",
+  async (response) => {
+    const calls = platform({ "/platform": response });
+    const attempt = {};
+    for (let click = 0; click < 2; click++) {
+      await expect(submitFeedback(body, attempt)).rejects.toMatchObject({
+        code: "FEEDBACK_UNCONFIRMED",
+      });
+    }
+    expect(calls.filter((c) => c.url === root + "/platform")).toHaveLength(1);
+  },
+);

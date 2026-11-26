@@ -6,7 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { ConfigProvider } from "antd";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/api/creator/feedback";
 import { CreatorHttpError } from "@/api/creator/client";
 import { captureFeedbackScreenshot } from "@/lib/feedbackScreenshot";
@@ -31,6 +31,8 @@ function feedbackUi(conversationId = context.conversationId) {
 }
 
 describe("Creator feedback", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("captures once before opening and sends only the selected images with the original context", async () => {
     const automatic = api.makeFeedbackScreenshot(
       new File(["shot"], "workspace.png", { type: "image/png" }),
@@ -72,12 +74,15 @@ describe("Creator feedback", () => {
       target: { value: "editor@example.com" },
     });
     fireEvent.click(submit);
-    expect(send).toHaveBeenLastCalledWith({
-      ...context,
-      feedback: "预览卡住",
-      contactEmail: "editor@example.com",
-      screenshots: [{ key: expect.any(String), file: pasted }],
-    });
+    expect(send).toHaveBeenLastCalledWith(
+      {
+        ...context,
+        feedback: "预览卡住",
+        contactEmail: "editor@example.com",
+        screenshots: [{ key: expect.any(String), file: pasted }],
+      },
+      expect.any(Object),
+    );
     const link = await screen.findByRole("link", { name: /^这里$/ });
     expect(link.closest("p")).toHaveTextContent(/^后续可以在这里查看回复。$/);
     expect(screen.getByRole("heading", { name: "反馈已发送" })).toHaveFocus();
@@ -86,6 +91,10 @@ describe("Creator feedback", () => {
       "https://platform.agentscope.io/notifications",
     );
     expect(link).toHaveAttribute("target", "_blank");
+    const openExternalLink = vi.fn();
+    vi.stubGlobal("QwenPaw", { host: { openExternalLink } });
+    fireEvent.click(link);
+    expect(openExternalLink).toHaveBeenCalledWith(link.getAttribute("href"));
     fireEvent.click(button("关闭"));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
@@ -115,12 +124,15 @@ describe("Creator feedback", () => {
     expect(
       await screen.findByRole("link", { name: /^这里$/ }),
     ).toBeInTheDocument();
-    expect(send).toHaveBeenLastCalledWith({
-      ...context,
-      feedback: "草稿内容",
-      contactEmail: "",
-      screenshots: [],
-    });
+    expect(send).toHaveBeenLastCalledWith(
+      {
+        ...context,
+        feedback: "草稿内容",
+        contactEmail: "",
+        screenshots: [],
+      },
+      expect.any(Object),
+    );
     expect(send.mock.calls[0]).toEqual(send.mock.calls[1]);
   });
 });

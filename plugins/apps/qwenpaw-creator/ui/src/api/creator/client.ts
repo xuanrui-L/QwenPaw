@@ -10,6 +10,7 @@ export const CREATOR_API_BASE = "/api/qwenpaw-creator";
 type HostWindow = Window & {
   QwenPaw?: {
     host?: {
+      openExternalLink?: (url: string) => void;
       getApiToken?: () => string;
       usesBrowserSession?: (appId: string) => boolean;
     };
@@ -78,6 +79,18 @@ export function newClientId(prefix = "client"): string {
   const id =
     globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${secureRandomHex()}`;
   return `${prefix}-${id}`;
+}
+
+/** Let a desktop host open the system browser; standalone links use their native action. */
+export function openHostExternalLink(url: string): boolean {
+  try {
+    const open = (window.parent as HostWindow).QwenPaw?.host?.openExternalLink;
+    if (!open) return false;
+    open(url);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function hostToken(): string | null {

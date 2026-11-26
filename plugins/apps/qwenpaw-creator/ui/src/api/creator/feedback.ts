@@ -15,7 +15,13 @@ const requestOptions = { timeoutMs: 60_000 };
 const imageTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 export const FEEDBACK_IMAGE_ACCEPT = imageTypes.join(",");
 
+export interface FeedbackAttempt {
+  accountId?: string;
+  unconfirmed?: boolean;
+}
+
 export interface FeedbackScreenshot {
+  partialPreview?: boolean;
   key: string;
   file: File;
 }
@@ -86,6 +92,7 @@ export function needsFeedbackAccount(error: unknown): boolean {
       "authorization_expired",
       "not_connected",
       "connection_changed",
+      "FEEDBACK_ACCOUNT_CHANGED",
       "account_changed",
       "permission_not_granted",
     ].includes(error.code)
@@ -96,6 +103,15 @@ export function feedbackErrorMessage(error: unknown): string {
   if (!(error instanceof CreatorHttpError)) {
     return error instanceof Error ? error.message : i18n.t("feedback.failed");
   }
+  if (
+    [
+      "FEEDBACK_ACCOUNT_CHANGED",
+      "connection_changed",
+      "account_changed",
+    ].includes(error.code)
+  ) {
+    return i18n.t("feedback.accountChanged");
+  }
   if (needsFeedbackAccount(error)) {
     return i18n.t(
       error.code === "permission_not_granted"
@@ -104,12 +120,18 @@ export function feedbackErrorMessage(error: unknown): string {
     );
   }
   switch (error.code) {
+    case "authorization_refreshed":
+      return i18n.t("feedback.accountRefreshed");
+    case "PLATFORM_HOST_UNSUPPORTED":
+      return i18n.t("feedback.hostUnsupported");
+    case "FEEDBACK_UNCONFIRMED":
+      return i18n.t("feedback.unconfirmed");
     case "rate_limited":
       return i18n.t("feedback.rateLimited");
     case "network_unavailable":
     case "platform_unavailable":
     case "invalid_platform_response":
-      return i18n.t("feedback.unconfirmed");
+      return i18n.t("feedback.retry");
     default:
       return error.message;
   }
@@ -151,7 +173,10 @@ export async function submitFeedback(
     contactEmail?: string;
     screenshots?: readonly FeedbackScreenshot[];
   },
+  attempt: FeedbackAttempt,
 ): Promise<void> {
+  if (attempt.unconfirmed)
+    throw new CreatorHttpError(409, { code: "FEEDBACK_UNCONFIRMED" });
   if (!body.feedback.trim()) throw new Error(i18n.t("feedback.required"));
   const screenshots = body.screenshots ?? [];
   if (screenshots.length > MAX_FEEDBACK_SCREENSHOTS) {
@@ -189,21 +214,42 @@ export async function submitFeedback(
     { ...requestOptions, dedupe: false },
   );
   if (!accountId) throw new Error(i18n.t("feedback.failed"));
+  if (attempt.accountId && attempt.accountId !== accountId) {
+    throw new CreatorHttpError(409, { code: "FEEDBACK_ACCOUNT_CHANGED" });
+  }
+  attempt.accountId = accountId;
   const urls: string[] = [];
   for (const { file } of screenshots) {
     urls.push(await uploadScreenshot(file, accountId));
   }
-  const result = await creatorRequest<{ submitted: boolean }>(
-    "/feedbacks/platform",
-    {
-      method: "POST",
-      headers: { "X-Platform-Account": accountId },
-      body: jsonBody({
-        description,
-        ...(urls.length ? { screenshot_urls: urls } : {}),
-      }),
-    },
-    requestOptions,
-  );
-  if (result?.submitted !== true) throw new Error(i18n.t("feedback.failed"));
+  try {
+    const result = await creatorRequest<{ submitted: boolean }>(
+      "/feedbacks/platform",
+      {
+        method: "POST",
+        headers: { "X-Platform-Account": accountId },
+        body: jsonBody({
+          description,
+          ...(urls.length ? { screenshot_urls: urls } : {}),
+        }),
+      },
+      requestOptions,
+    );
+    if (result?.submitted === true) return;
+  } catch (error) {
+    // A definite rejection can be retried. A lost receipt could be a posted ticket.
+    if (
+      error instanceof CreatorHttpError &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      error.status !== 408 &&
+      error.code !== "connection_changed"
+    )
+      throw error;
+  }
+  attempt.unconfirmed = true;
+  throw new CreatorHttpError(409, {
+    code: "FEEDBACK_UNCONFIRMED",
+    message: i18n.t("feedback.unconfirmed"),
+  });
 }

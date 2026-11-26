@@ -270,13 +270,13 @@
 .creator-feedback-receipt a:is(:hover, :focus-visible) {
   color: var(--color-text-primary);
 }
-.creator-feedback-link {
+.creator-feedback-error a {
   color: var(--color-text-primary);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 .creator-feedback-receipt a:focus-visible,
-.creator-feedback-link:focus-visible {
+.creator-feedback-error a:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 3px;
 }

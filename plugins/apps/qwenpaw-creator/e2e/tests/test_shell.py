@@ -75,6 +75,29 @@ def test_project_export_progress_stays_centered_on_resize(page, project):
     expect(card).to_contain_text("已交给浏览器保存")
 
 
+def test_feedback_identifies_partial_motion_screenshot(page, project):
+    page.goto(f"/#/project/{project['projectId']}")
+    trigger = page.locator("[data-agent-feedback]")
+    expect(trigger).to_be_visible()
+    page.evaluate(
+        """() => {
+        const frame = document.createElement('iframe');
+        frame.setAttribute('sandbox', 'allow-scripts');
+        frame.dataset.liveMotionPlayer = '';
+        frame.srcdoc = '<body style="background: green">Motion</body>';
+        frame.style.cssText = 'position:fixed;top:150px;left:20px;width:80px;height:60px';
+        document.body.append(frame);
+    }""",
+    )
+    trigger.click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog.get_by_role("img", name="截图 1", exact=True)).to_be_visible()
+    note = dialog.get_by_text("动效的当前帧", exact=False)
+    expect(note).to_be_visible()
+    dialog.get_by_role("button", name="移除截图 1").click()
+    expect(note).to_have_count(0)
+
+
 def test_create_snapshot_and_delete_project(api):
     created = api.create_project(f"E2E contract {uuid4().hex[:8]}")
     project_id = created["projectId"]

@@ -157,11 +157,15 @@ class _AccountRequired(ConflictError):
     code = "PLATFORM_ACCOUNT_REQUIRED"
 
 
+class _HostUnsupported(ConflictError):
+    code = "PLATFORM_HOST_UNSUPPORTED"
+
+
 def _platform_connection(request: Request):
     # The QwenPaw host owns login, refresh and account-change checks.
     service = getattr(request.app.state, "community_connection_service", None)
-    if service is None:
-        raise _AccountRequired("请在 QwenPaw 设置中连接 Platform 账号")
+    if not callable(getattr(service, "community_request", None)):
+        raise _HostUnsupported("当前宿主不支持直接提交 Platform 反馈")
     return service
 
 
@@ -191,7 +195,7 @@ async def upload_platform_screenshot(
         _PLATFORM_FEEDBACK + "/screenshots",
         account_id=x_platform_account,
         files={
-            "file": (f"screenshot.{extension}", content, file.content_type)
+            "file": (f"screenshot.{extension}", content, file.content_type),
         },
         timeout=60,
     )

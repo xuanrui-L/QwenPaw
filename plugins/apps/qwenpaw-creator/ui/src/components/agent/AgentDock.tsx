@@ -1130,9 +1130,7 @@ export default function AgentDock({
   const height = useAgentDockUiStore((state) => state.height);
   const draft = useAgentDockUiStore((state) => state.draft);
   const unsentDrafts = useAgentDockUiStore((state) => state.unsentDrafts);
-  const parkUnsentDraft = useAgentDockUiStore(
-    (state) => state.parkUnsentDraft,
-  );
+  const parkUnsentDraft = useAgentDockUiStore((state) => state.parkUnsentDraft);
   const clearUnsentDraft = useAgentDockUiStore(
     (state) => state.clearUnsentDraft,
   );
