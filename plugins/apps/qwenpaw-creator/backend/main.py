@@ -12,11 +12,13 @@ router prefix contract.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import logging
 import os
 import sys
+from functools import partial
 from pathlib import Path
 
 from qwenpaw.pawapp import PawApp
@@ -84,6 +86,7 @@ from utils.env import load_project_env  # noqa: E402
 load_project_env()
 
 try:
+    from utils.io_pool import configure_io_thread_pool  # noqa: E402
     from api.router import router as creator_router  # noqa: E402
     from api.file_asset_routes import (  # noqa: E402
         drain_remote_ingest_tasks,
@@ -100,22 +103,30 @@ try:
         shutdown_file_media_execution_services,
         start_file_media_execution_services,
     )
-    from services.media_files.motion_engine import (
+    from services.media_files.motion_engine import (  # noqa: E402
         ensure_vendor_libs,
-    )  # noqa: E402
-    from services.media_files.task_scratch import (
+    )
+    from services.media_files.task_scratch import (  # noqa: E402
+        budget_from_environment,
         release_orphaned_scratch,
-    )  # noqa: E402
-    from services.observability import trace_event  # noqa: E402
+    )
+    from services.observability import mem_probe, trace_event  # noqa: E402
     from services.project_files.facade import (  # noqa: E402
         CreatorFileServices,
         clear_creator_file_service_registry,
         creator_file_services,
+        mark_runtime_preparing,
         preparing_file_services,
+    )
+    from services.project_files.transaction_gc import (  # noqa: E402
+        collect_terminal_transactions,
     )
     from services.runtime_files.runtime_dependencies import (  # noqa: E402
         CreatorBinaryDependencyError,
         ensure_creator_runtime_dependencies,
+    )
+    from services.runtime_files.session_elision import (  # noqa: E402
+        elide_stored_conversations,
     )
     from services.storage_root import (  # noqa: E402
         CreatorDataRootError,
@@ -126,7 +137,7 @@ try:
         shutdown_source_analysis_services,
     )
     from services.media.source_memory import (  # noqa: E402
-        recover_interrupted_source_memory,
+        source_memory_service,
     )
     from services.media.source_observation import (  # noqa: E402
         drain_source_observation_services,
@@ -137,11 +148,11 @@ try:
         recover_interrupted_source_video_reads,
     )
     from utils.logger import configure_creator_file_logging  # noqa: E402
-except ModuleNotFoundError as exc:
+except ModuleNotFoundError as load_exc:
     # 依赖缺失时后端模块无法导入，宿主只会看到一句
     # "No module named ..."；补上缺失清单与修复路径后再抛出，
     # PluginLoader 会将 str(exc) 原样写入 record.diagnostics。
-    raise RuntimeError(_load_failure_message(exc)) from exc
+    raise RuntimeError(_load_failure_message(load_exc)) from load_exc
 
 
 def configure_creator_runtime_environment(
@@ -216,8 +227,19 @@ app.include_router(creator_router)
 # Creator file runtime handle kept for the lifetime of the app.
 _file_services: CreatorFileServices | None = None
 
+# A background maintenance pass has to be referenced or the loop may collect it
+# mid-sweep.
+_maintenance_task: "asyncio.Task[None] | None" = None
 
-async def _sweep_orphaned_scratch(services: CreatorFileServices) -> None:
+# Long enough for recovery and the first page to settle, short enough that a
+# customer's reclaimed space arrives while they are still looking at the list.
+_MAINTENANCE_DELAY_SECONDS = 20.0
+
+
+async def _sweep_orphaned_scratch(
+    services: CreatorFileServices,
+    budget,
+) -> None:
     """Collect scratch a killed process left behind, without gating startup.
 
     A finished Task releases its own scratch through the execution store the
@@ -226,27 +248,137 @@ async def _sweep_orphaned_scratch(services: CreatorFileServices) -> None:
     """
 
     try:
-        sweep = await run_sync_io(release_orphaned_scratch, services)
+        sweep = await asyncio.to_thread(
+            partial(release_orphaned_scratch, services, budget=budget),
+        )
     except Exception:  # noqa: BLE001 - cleanup must never gate startup
         logger.warning("orphaned task scratch sweep failed", exc_info=True)
         return
     if sweep.released_directories:
         logger.info(
-            "orphaned task scratch released: projects=%s dirs=%s files=%s bytes=%s",
+            "orphaned task scratch released: projects=%s dirs=%s files=%s "
+            "bytes=%s stoppedEarly=%s",
             sweep.projects,
             sweep.released_directories,
             sweep.removed_files,
             sweep.removed_bytes,
+            sweep.stopped_early,
+        )
+
+
+async def _collect_settled_transactions(
+    services: CreatorFileServices,
+    budget,
+) -> None:
+    """Drop commit history no reader can use, without gating startup.
+
+    Runs after the scratch sweep, which stamps the reclaim baseline this sweep
+    measures against. Recovery has already reconciled every journal by now, so
+    anything still non-terminal is a transaction the next commit must see.
+    """
+
+    try:
+        sweep = await asyncio.to_thread(
+            partial(collect_terminal_transactions, services, budget=budget),
+        )
+    except Exception:  # noqa: BLE001 - cleanup must never gate startup
+        logger.warning("terminal transaction sweep failed", exc_info=True)
+        return
+    if sweep.removed_transactions:
+        logger.info(
+            "terminal transactions released: projects=%s swept=%s "
+            "transactions=%s bytes=%s stoppedEarly=%s",
+            sweep.projects,
+            sweep.swept_projects,
+            sweep.removed_transactions,
+            sweep.removed_bytes,
+            sweep.stopped_early,
+        )
+
+
+async def _run_storage_maintenance(
+    services: CreatorFileServices,
+) -> None:
+    """Free settled history and collapse stale echoes, after the first paint.
+
+    None of this is awaited by the startup hook any more.  Deleting a tree that
+    arrived with 24 GB of receipts and scratch is measured in minutes, and a
+    boot that waits those minutes looks exactly like a hang to the person who
+    just upgraded -- so the pass runs later, on one budget shared by both
+    sweeps, and whatever it could not reach is left for the next boot.  The
+    conversation collapse reads whole streams and is therefore handed its own
+    child process.
+    """
+
+    await asyncio.sleep(_MAINTENANCE_DELAY_SECONDS)
+    budget = budget_from_environment()
+
+    async def sweep() -> None:
+        await _sweep_orphaned_scratch(services, budget)
+        if not budget.stop_requested.is_set():
+            await _collect_settled_transactions(services, budget)
+
+    # Cancelling asyncio.to_thread only cancels its awaiter. Signal and join
+    # the actual sweeper before shutting down the services that own its data.
+    worker = asyncio.create_task(sweep())
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        budget.stop_requested.set()
+        await worker
+        raise
+    await _elide_stored_conversations(services)
+
+
+async def _elide_stored_conversations(
+    services: CreatorFileServices,
+) -> None:
+    """Collapse legacy project echoes inside stored conversations.
+
+    Where the two sweeps above walk directories, this one reads whole session
+    streams, so it hands each stream to a child process: a 606 MB stream costs
+    its reader about four times its size, and that bill belongs to a process the
+    app can lose without dying with it.  Each pass records where it left every
+    file, so the next boot pays a stat instead of a re-read.
+    """
+
+    try:
+        summary = await elide_stored_conversations(services)
+    except Exception:  # noqa: BLE001 - cleanup must never gate the app
+        logger.warning("stored conversation elision failed", exc_info=True)
+        return
+    for failure in summary.failures:
+        logger.warning("stored conversation elision failed: %s", failure)
+    if summary.oversize_files:
+        logger.warning(
+            "stored conversations left uncollapsed as too large to risk: "
+            "files=%s bytes=%s (raise %s only on an install with the room)",
+            summary.oversize_files,
+            summary.oversize_bytes,
+            "CREATOR_MESSAGE_ELISION_MAX_BYTES",
+        )
+    if summary.saved_bytes:
+        logger.info(
+            "stored conversation echoes collapsed: projects=%s files=%s "
+            "bytes=%s",
+            summary.projects,
+            summary.files,
+            summary.saved_bytes,
         )
 
 
 @app.hook("startup", priority=90)
-async def _startup() -> None:
-    global _file_services
+async def _startup() -> None:  # pylint: disable=too-many-statements
+    global _file_services, _maintenance_task
     try:
+        # First thing: every later await in this hook hands control back to the
+        # loop, and any to_thread call made before the pool is resized queues
+        # against the eight-thread default.
+        configure_io_thread_pool()
         configure_creator_runtime_environment()
         data_root = require_creator_data_root()
         log_path = configure_creator_file_logging(data_root)
+        mem_probe.start_probe(data_root)
         trace_event(
             "creator.runtime.starting",
             component="pawapp",
@@ -259,10 +391,19 @@ async def _startup() -> None:
             ensure_creator_runtime_dependencies,
         )
         await asyncio.to_thread(ensure_vendor_libs)
+        # Recovery scans every Project and takes minutes on a large tree.  The
+        # event loop has to keep answering while it runs, and requests that
+        # arrive in that window get a 503 instead of queueing behind the same
+        # registry lock the recovery holds.
         with preparing_file_services(data_root):
-            services = await run_sync_io(creator_file_services, data_root)
+            mark_runtime_preparing(True)
+            try:
+                services = await run_sync_io(creator_file_services, data_root)
+            finally:
+                mark_runtime_preparing(False)
             await run_sync_io(recover_interrupted_source_analysis, services)
         reset_remote_ingest_admission()
+        mem_probe.stage("runtime.prepared")
     except (CreatorDataRootError, CreatorBinaryDependencyError) as exc:
         trace_event(
             "creator.runtime.startup_failed",
@@ -282,7 +423,6 @@ async def _startup() -> None:
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
-        recover_interrupted_source_memory(services)
         # Observation/read workers live only in process memory: fail their
         # orphaned QUEUED/RUNNING Tasks closed so waiters see a retryable
         # error instead of polling a record no worker will ever finish.
@@ -294,6 +434,7 @@ async def _startup() -> None:
             recover_interrupted_source_video_reads,
             services,
         )
+        await source_memory_service(services).resume_interrupted()
     except BaseException as exc:
         trace_event(
             "creator.runtime.startup_failed",
@@ -304,17 +445,11 @@ async def _startup() -> None:
                 "error": str(exc),
             },
         )
-        try:
-            await shutdown_file_media_execution_services()
-        finally:
-            try:
-                await stop_creator_agent_runtime()
-            finally:
-                clear_creator_file_service_registry()
+        await _shutdown_file_runtime(services)
         raise
     _file_services = services
     logger.info("QwenPaw Creator file runtime ready at %s", data_root)
-    await _sweep_orphaned_scratch(services)
+    _maintenance_task = asyncio.create_task(_run_storage_maintenance(services))
     # Loud, not silent: explicitly set review env vars take full control
     # and the settings-center toggles are ignored — a field incident had
     # review running with the UI switched off because a stale env stayed
@@ -388,26 +523,40 @@ async def _startup() -> None:
 
 @app.hook("shutdown", priority=90)
 async def _shutdown() -> None:
-    global _file_services
+    global _file_services, _maintenance_task
     trace_event(
         "creator.runtime.stopping",
         component="pawapp",
     )
+    services = _file_services
     _file_services = None
+    if services is not None:
+        source_memory_service(services).stop()
+    if _maintenance_task is not None:
+        # A sweep -- or a collapse child holding a rewritten session file --
+        # must not outlive the app that owns the data root.  Cancelling the
+        # task kills the child too; see _run_one.
+        _maintenance_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await _maintenance_task
+        _maintenance_task = None
     try:
         await drain_remote_ingest_tasks()
     finally:
         try:
             await drain_timeline_render_jobs()
         finally:
-            await _shutdown_file_runtime()
+            try:
+                await _shutdown_file_runtime(services)
+            finally:
+                mem_probe.stop_probe()
 
 
-async def _shutdown_file_runtime() -> None:
+async def _shutdown_file_runtime(services: CreatorFileServices | None) -> None:
     """Stop the media/agent runtime layers in dependency order."""
 
     try:
-        await _drain_source_media_services()
+        await _drain_source_media_services(services)
     finally:
         try:
             await shutdown_file_media_execution_services()
@@ -425,13 +574,18 @@ async def _shutdown_file_runtime() -> None:
                     )
 
 
-async def _drain_source_media_services() -> None:
+async def _drain_source_media_services(  # pylint: disable=unused-argument
+    services: CreatorFileServices | None,
+) -> None:
     """Terminalize in-flight observation/read Tasks before shutdown."""
 
     try:
         await drain_source_observation_services()
     finally:
-        await drain_source_video_reader_services()
+        try:
+            await drain_source_video_reader_services()
+        finally:
+            pass
 
 
 # The 'plugin' variable is what PluginLoader looks for.
