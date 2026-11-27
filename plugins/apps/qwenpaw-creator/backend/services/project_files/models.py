@@ -31,7 +31,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_PROJECT_SCHEMA_VERSION = 10
+CURRENT_PROJECT_SCHEMA_VERSION = 11
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 
@@ -1706,7 +1706,7 @@ class InteractivePresentation(StrictModel):
 
 
 class Project(StrictModel):
-    schema_version: Literal[10] = CURRENT_PROJECT_SCHEMA_VERSION
+    schema_version: Literal[10, 11] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
     generation: int = Field(default=0, ge=0)
     created_at: UtcDateTime

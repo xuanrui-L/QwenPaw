@@ -516,6 +516,7 @@ class _ResolvedR2V:
     first_frame_url: str = ""
     last_frame_version_id: str = ""
     last_frame_url: str = ""
+    authored_last_frame_version_id: str = ""
     video_version_id: str = ""
     video_url: str = ""
     # "video" (default) drives the configured video model; "s2v" drives the
@@ -1598,6 +1599,32 @@ def _matches_submission_inputs(
     mode: str = "r2v",
     payload_refs: Sequence[str] | None = None,
 ) -> bool:
+    # Claim-time truth: the roles ACTUALLY frozen in the dispatched
+    # payload. A synthetic last-frame anchor must still resolve to the
+    # same predecessor version — a reroll fails the claim no matter
+    # how today's budget rules would re-derive. The publish policy
+    # for already-paid artifacts stays separate (the frozen-inputs
+    # gate keeps its no-paid-cascade exception).
+    if payload_refs and any(
+        str(item).startswith("continuity:last_frame:") for item in payload_refs
+    ):
+        _claim_timeline, _claim_element = find_timeline_element(
+            project,
+            element_id,
+        )
+        _current_anchors = set(
+            continuity_reference_ids(
+                project,
+                _claim_timeline,
+                _claim_element,
+            ),
+        )
+        if any(
+            str(item).startswith("continuity:last_frame:")
+            and str(item) not in _current_anchors
+            for item in payload_refs
+        ):
+            return False
     if frozen == _submission_input_fingerprint(
         project,
         element_id,
@@ -2992,8 +3019,13 @@ def _resolve_request(
         bgm_reference_url=bgm_reference_url,
         first_frame_version_id=first_frame_ref if mode == "i2v" else "",
         first_frame_url=first_frame_url,
-        last_frame_version_id=last_frame_ref if mode == "i2v" else "",
+        last_frame_version_id=(
+            last_frame_ref if mode == "i2v" and last_frame_url else ""
+        ),
         last_frame_url=(last_frame_url if mode == "i2v" else ""),
+        authored_last_frame_version_id=(
+            last_frame_ref if mode == "i2v" else ""
+        ),
         video_version_id=video_ref if mode == "video_edit" else "",
         video_url=video_url,
     )
@@ -3805,6 +3837,9 @@ class FileR2VExecutionService:
                     "firstFrameUrl": resolved.first_frame_url,
                     "lastFrameVersionId": resolved.last_frame_version_id,
                     "lastFrameUrl": resolved.last_frame_url,
+                    "lastFrameAuthoredVersionId": (
+                        resolved.authored_last_frame_version_id
+                    ),
                     "videoVersionId": resolved.video_version_id,
                     "videoUrl": resolved.video_url,
                 },
@@ -6465,11 +6500,16 @@ class FileR2VExecutionService:
             current_refs = (
                 [resolved_first_frame] if resolved_first_frame else []
             )
-            current_last = str(
-                getattr(creation, "last_frame_version_id", "") or "",
-            )
-            if current_last:
-                current_refs.append(current_last)
+            # Only the frames the payload ACTUALLY shipped are part
+            # of the comparison: an authored tail frame the model
+            # could not receive was never sent and must not make a
+            # good finished clip look stale.
+            if str(raw.get("lastFrameUrl") or ""):
+                current_last = str(
+                    getattr(creation, "last_frame_version_id", "") or "",
+                )
+                if current_last:
+                    current_refs.append(current_last)
             return current_refs == [str(item) for item in frozen_refs]
         elif creation_type == "s2v":
             if not isinstance(creation, S2VCreation):

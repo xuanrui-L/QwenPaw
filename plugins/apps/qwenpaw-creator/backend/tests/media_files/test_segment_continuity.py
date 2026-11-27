@@ -3593,3 +3593,84 @@ def test_two_frame_i2v_publish_gate() -> None:
         project,
         frozen,
     )
+
+
+def test_first_frame_only_fallback_publishes_despite_authored_tail() -> None:
+    """CR round-13 P2-1: when the model cannot receive a native tail
+    frame the payload ships first-frame only — the authored-but-
+    unsent tail must not make the finished clip fail the publish
+    gate on an unchanged project."""
+
+    from services.media_files.r2v_execution import (
+        FileR2VExecutionService,
+    )
+    from services.project_files.models import I2VCreation
+
+    first = _element("e1", start=0)
+    second = _element("e2", start=4000)
+    second.creation = I2VCreation(
+        video_prompt="男孩走进走廊。",
+        first_frame_version_id="frame-a",
+        last_frame_version_id="frame-b",
+    )
+    project, _timeline = _project([first, second])
+    frozen = _frozen_task(
+        {
+            "elementId": "e2",
+            "mode": "i2v",
+            "firstFrameVersionId": "frame-a",
+            "firstFrameUrl": "file:///a.png",
+            "lastFrameVersionId": "",
+            "lastFrameUrl": "",
+            "lastFrameAuthoredVersionId": "frame-b",
+            "referenceVersionIds": ["frame-a"],
+        },
+    )
+    assert FileR2VExecutionService._frozen_inputs_still_current(
+        project,
+        frozen,
+    )
+
+
+def test_auto_first_frame_publishes_despite_authored_tail() -> None:
+    """CR round-13 P2-1 (auto-first shape): the predecessor reroll
+    still publishes the paid clip, and an authored unsent tail never
+    quarantines it."""
+
+    from services.media_files.r2v_execution import (
+        FileR2VExecutionService,
+    )
+    from services.project_files.models import I2VCreation
+
+    first = _element("e1", start=0)
+    second = _element("e2", start=4000)
+    second.creation = I2VCreation(
+        video_prompt="男孩走进走廊。",
+        last_frame_version_id="frame-b",
+    )
+    project, _timeline = _project([first, second])
+    _select_prev_video(project, "e1", "prev-v1")
+    frozen = _frozen_task(
+        {
+            "elementId": "e2",
+            "mode": "i2v",
+            "firstFrameVersionId": "continuity:last_frame:prev-v1",
+            "firstFrameUrl": "file:///prev.png",
+            "lastFrameVersionId": "",
+            "lastFrameUrl": "",
+            "lastFrameAuthoredVersionId": "frame-b",
+            "referenceVersionIds": ["continuity:last_frame:prev-v1"],
+        },
+    )
+    assert FileR2VExecutionService._frozen_inputs_still_current(
+        project,
+        frozen,
+    )
+    # The tail was re-authored but never shipped: still publishable.
+    second.creation = second.creation.model_copy(
+        update={"last_frame_version_id": "frame-c"},
+    )
+    assert FileR2VExecutionService._frozen_inputs_still_current(
+        project,
+        frozen,
+    )
