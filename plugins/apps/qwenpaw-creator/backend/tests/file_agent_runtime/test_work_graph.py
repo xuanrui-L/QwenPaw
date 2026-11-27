@@ -103,7 +103,7 @@ def _adopt_historical_video(project: Project):
     return Project.model_validate(updated), impact
 
 
-@pytest.mark.parametrize("schema_version", [10, 11])
+@pytest.mark.parametrize("schema_version", [9, 10, 11])
 @pytest.mark.parametrize("creation_type", ["r2v", "i2v"])
 def test_legacy_video_acceptance_survives_the_upgrade(creation_type, schema_version):
     from services.project_files.migrations import migrate_project_document
@@ -126,13 +126,15 @@ def test_legacy_video_acceptance_survives_the_upgrade(creation_type, schema_vers
     creation.pop(
         "generation_plan" if creation_type == "r2v" else "predecessor_element_id"
     )
-    if schema_version == 10:
+    if schema_version <= 10:
         for field in (
             ("force_storyboard", "transition_intent", "storyboard_intent")
             if creation_type == "r2v"
             else ("last_frame_version_id",)
         ):
             del creation[field]
+    if schema_version == 9:
+        del creation["generate_audio"]
     slot = legacy["assets"]["artifact_slots_by_id"]["element:clip-history:main"]
     slot["metadata"]["selectionAcceptance"]["inputFingerprint"] = "sha256:" + digest(
         {
@@ -146,9 +148,13 @@ def test_legacy_video_acceptance_survives_the_upgrade(creation_type, schema_vers
     graph = derive_work_graph(upgraded)
     assert graph.by_id["video:clip-history"].status is WorkNodeStatus.DONE
     assert graph.by_id["compose:timeline:main"].status is WorkNodeStatus.READY
-    upgraded.timelines.items["timeline:main"].elements_by_id[
+    creation = upgraded.timelines.items["timeline:main"].elements_by_id[
         "clip-history"
-    ].creation.video_prompt = "修改过的动作"
+    ].creation
+    if schema_version == 9:
+        creation.generate_audio = False
+    else:
+        creation.video_prompt = "修改过的动作"
     graph = derive_work_graph(upgraded)
     assert graph.by_id["video:clip-history"].status is WorkNodeStatus.STALE
 
