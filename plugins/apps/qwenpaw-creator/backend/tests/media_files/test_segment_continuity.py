@@ -2062,96 +2062,6 @@ def _bind_bgm_config(monkeypatch, model="wan3.0-video"):
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
 
 
-def test_bgm_reference_skips_without_bgm_element(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    from services.media_files import r2v_execution as rx
-
-    project, timeline, _second = _bgm_project(tmp_path, with_bgm=False)
-    _bind_bgm_config(monkeypatch)
-    assert (
-        rx._resolve_bgm_reference(
-            project,
-            timeline,
-            tmp_path,
-            voice_count=0,
-            element_id="e2",
-        )
-        == ""
-    )
-
-
-def test_bgm_reference_respects_voice_slot_budget(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    from services.media_files import r2v_execution as rx
-
-    project, timeline, _second = _bgm_project(tmp_path)
-    _bind_bgm_config(monkeypatch)
-    monkeypatch.setattr(
-        rx,
-        "_bgm_excerpt",
-        lambda *_a, **_k: "file:///bed.mp3",
-    )
-    reported: list = []
-    monkeypatch.setattr(
-        rx,
-        "report_error",
-        lambda **kw: reported.append(kw),
-    )
-    assert (
-        rx._resolve_bgm_reference(
-            project,
-            timeline,
-            tmp_path,
-            voice_count=4,
-            element_id="e2",
-        )
-        == "file:///bed.mp3"
-    )
-    assert not reported
-    # wan3.0 documents five audio slots; 5 voices + bgm does not fit.
-    assert (
-        rx._resolve_bgm_reference(
-            project,
-            timeline,
-            tmp_path,
-            voice_count=5,
-            element_id="e2",
-        )
-        == ""
-    )
-    assert reported and reported[0]["code"] == "BGM_SKIPPED_BUDGET"
-
-
-def test_bgm_reference_skips_for_models_without_standalone_audio(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    from services.media_files import r2v_execution as rx
-
-    project, timeline, _second = _bgm_project(tmp_path)
-    # wan2.6 documents no audio reference input at all.
-    _bind_bgm_config(monkeypatch, model="wan2.6-r2v")
-    monkeypatch.setattr(
-        rx,
-        "report_error",
-        lambda **kw: None,
-    )
-    assert (
-        rx._resolve_bgm_reference(
-            project,
-            timeline,
-            tmp_path,
-            voice_count=0,
-            element_id="e2",
-        )
-        == ""
-    )
-
-
 def test_ledger_continuity_digests_reads_frozen_task_snapshots(
     tmp_path,
 ) -> None:
@@ -2654,31 +2564,6 @@ def test_bgm_excerpt_tmp_keeps_audio_suffix_and_verified_length(
         raise AssertionError("over-budget excerpt must raise")
     assert not list(
         (tmp_path / "runtime" / "media-cache" / "bgm").glob("*head15*"),
-    )
-
-
-def test_bgm_skipped_when_voices_consume_audio_budget(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """CR P2-4: with enrolled voices the bgm excerpt must fit the
-    REMAINING 15s audio budget; when nothing is left, skip bgm
-    (native audio) instead of shipping an over-budget pair."""
-
-    from services.media_files import r2v_execution as rx
-
-    project, timeline, _second = _bgm_project(tmp_path)
-    _bind_bgm_config(monkeypatch)
-    assert (
-        rx._resolve_bgm_reference(
-            project,
-            timeline,
-            tmp_path,
-            voice_count=2,
-            voice_seconds=14.5,
-            element_id="e2",
-        )
-        == ""
     )
 
 
@@ -3511,3 +3396,37 @@ def test_legacy_prefix_with_zero_images_still_hands_back(
         pass
     else:
         raise AssertionError("zero-image legacy prompt must hand back")
+
+
+def test_bgm_reference_budget_matrix(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """One matrix for the shared-bgm resolve rules: no bgm element,
+    voice slot overflow, models without standalone audio, and voices
+    consuming the 15s time budget all resolve to no bgm reference."""
+
+    from services.media_files import r2v_execution as rx
+
+    def resolve(project, timeline, **kw):
+        return rx._resolve_bgm_reference(
+            project,
+            timeline,
+            tmp_path,
+            element_id="e2",
+            **kw,
+        )
+
+    _bind_bgm_config(monkeypatch)
+    bare, bare_tl, _ = _bgm_project(tmp_path, with_bgm=False)
+    assert resolve(bare, bare_tl, voice_count=0) == ""
+
+    with_bgm, bgm_tl, _ = _bgm_project(tmp_path)
+    assert resolve(with_bgm, bgm_tl, voice_count=5) == ""
+    assert resolve(with_bgm, bgm_tl, voice_count=2, voice_seconds=14.5) == ""
+
+    monkeypatch.setattr(
+        "models.config.get_video_model_name",
+        lambda: "some-other-model",
+    )
+    assert resolve(with_bgm, bgm_tl, voice_count=0) == ""

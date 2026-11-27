@@ -750,6 +750,22 @@ def is_wan3_video_model(model_name: str) -> bool:
     return _WAN_30_REFERENCE_PATTERN.fullmatch(model_name.strip()) is not None
 
 
+def supports_last_frame(
+    model_name: str,
+    protocol_backend: str = "",
+) -> bool:
+    """True when the configured model documents a NATIVE last-frame
+    input on the i2v request (media type ``last_frame`` on the Wan3.0
+    all-in-one contract). Plain reference images that merely hint at an
+    ending composition do NOT count — the executor must not pretend a
+    tail frame was constrained when the provider has no such parameter.
+    """
+
+    del protocol_backend  # reserved: gateway aliases keep the contract.
+
+    return _WAN_30_REFERENCE_PATTERN.fullmatch(model_name.strip()) is not None
+
+
 def supports_video_continuation(
     model_name: str,
     protocol_backend: str = "",

@@ -314,6 +314,7 @@ class R2VProvider(Protocol):
         generate_audio: bool,
         mode: str = "r2v",
         first_frame_url: str | None = None,
+        last_frame_url: str | None = None,
         video_url: str | None = None,
         reference_voice_urls: Sequence[str] = (),
     ) -> str:
@@ -355,6 +356,7 @@ class ExistingR2VProvider:
         generate_audio: bool,
         mode: str = "r2v",
         first_frame_url: str | None = None,
+        last_frame_url: str | None = None,
         video_url: str | None = None,
         reference_voice_urls: Sequence[str] = (),
         reference_bgm_url: str | None = None,
@@ -372,6 +374,7 @@ class ExistingR2VProvider:
             generate_audio=generate_audio,
             mode=mode,
             first_frame_url=first_frame_url,
+            last_frame_url=last_frame_url,
             video_url=video_url,
             reference_voice_urls=(
                 list(reference_voice_urls) if reference_voice_urls else None
@@ -511,6 +514,8 @@ class _ResolvedR2V:
     bgm_reference_url: str = ""
     first_frame_version_id: str = ""
     first_frame_url: str = ""
+    last_frame_version_id: str = ""
+    last_frame_url: str = ""
     video_version_id: str = ""
     video_url: str = ""
     # "video" (default) drives the configured video model; "s2v" drives the
@@ -1687,18 +1692,9 @@ def _r2v_strong_continuity(
         # authored intent) never anchors, so graph and wire can never
         # disagree about the predecessor material.
         return False
-    if getattr(prev.creation, "scene_ref", None) != getattr(
-        element.creation,
-        "scene_ref",
-        None,
-    ):
-        return False
-    prev_refs = set(getattr(prev.creation, "character_refs", []) or [])
-    prev_refs |= set(getattr(prev.creation, "prop_refs", []) or [])
-    cur_refs = set(getattr(element.creation, "character_refs", []) or [])
-    cur_refs |= set(getattr(element.creation, "prop_refs", []) or [])
-    if cur_refs - prev_refs:
-        return False
+    # Scene identity and newly introduced elements are creative clues
+    # the Agent weighed when writing transition_intent; they do not
+    # veto the anchored shape here (same predicate as the scheduler).
     if one_take:
         from models import config as model_config
         from models.video_capabilities import supports_video_continuation
@@ -2736,22 +2732,6 @@ def _resolve_request(
                         *version_ids,
                     )
                     prompt = _shift_authored_image_refs(prompt, 1)
-        if mode == "i2v" and last_frame_ref:
-            # The model-selected target end frame rides as a
-            # reference image with an explicit role sentence:
-            # providers without a native last-frame parameter still
-            # receive the target through the prompt, and the
-            # persistable version ref keeps claim and recovery honest.
-            version_ids = (*version_ids, last_frame_ref)
-            image_ordinal = sum(
-                1
-                for _id, kind, _ordinal in number_references_by_media(
-                    project,
-                    version_ids,
-                )
-                if kind == "image"
-            )
-            prompt += f"\n最后一帧严格对齐图{image_ordinal}（本段目标尾帧），" "请让本段收尾构图落于该帧。"
         if mode == "r2v" and strong_anchor_entry is None:
             # Off/weak/plain and failed-extraction paths all ship
             # without an anchor: rebuild the prompt against the stack
@@ -2888,6 +2868,43 @@ def _resolve_request(
         checksums = [checksum]
         provenance = [ref]
         read_set = [entry]
+        last_frame_url = ""
+        if last_frame_ref:
+            from models import config as _model_config
+            from models.video_capabilities import supports_last_frame
+
+            if supports_last_frame(
+                _model_config.get_video_model_name(),
+                _model_config.get_video_backend(),
+            ):
+                (
+                    last_frame_url,
+                    last_checksum,
+                    last_ref,
+                    last_entry,
+                ) = _resolve_single_media_version(
+                    project=project,
+                    project_root=project_root,
+                    version_id=last_frame_ref,
+                    media_prefix="image/",
+                    label="lastFrameRef",
+                )
+                version_ids = (*version_ids, last_frame_ref)
+                checksums.append(last_checksum)
+                provenance.append(last_ref)
+                read_set.append(last_entry)
+            else:
+                # No native last-frame parameter on this model: fall
+                # back to the explicit first-frame contract and say so
+                # loudly — never fake a constrained tail frame through
+                # a plain reference image.
+                report_error(
+                    component="i2v.last_frame",
+                    code="I2V_LAST_FRAME_UNSUPPORTED",
+                    message=("当前视频模型不支持原生目标尾帧参数，" "本段沿用首帧回退继续生成。"),
+                    project_id=str(project.project_id),
+                    element_id=element_id,
+                )
     elif mode == "video_edit":
         video_url, checksum, ref, entry = _resolve_single_media_version(
             project=project,
@@ -2928,6 +2945,8 @@ def _resolve_request(
         bgm_reference_url=bgm_reference_url,
         first_frame_version_id=first_frame_ref if mode == "i2v" else "",
         first_frame_url=first_frame_url,
+        last_frame_version_id=last_frame_ref if mode == "i2v" else "",
+        last_frame_url=(last_frame_url if mode == "i2v" else ""),
         video_version_id=video_ref if mode == "video_edit" else "",
         video_url=video_url,
     )
@@ -3737,6 +3756,8 @@ class FileR2VExecutionService:
                     "mode": resolved.mode,
                     "firstFrameVersionId": resolved.first_frame_version_id,
                     "firstFrameUrl": resolved.first_frame_url,
+                    "lastFrameVersionId": resolved.last_frame_version_id,
+                    "lastFrameUrl": resolved.last_frame_url,
                     "videoVersionId": resolved.video_version_id,
                     "videoUrl": resolved.video_url,
                 },
@@ -4777,6 +4798,11 @@ class FileR2VExecutionService:
                             "first_frame_url": (
                                 str(request["firstFrameUrl"])
                                 if request.get("firstFrameUrl")
+                                else None
+                            ),
+                            "last_frame_url": (
+                                str(request["lastFrameUrl"])
+                                if request.get("lastFrameUrl")
                                 else None
                             ),
                             "video_url": (

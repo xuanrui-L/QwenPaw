@@ -695,6 +695,7 @@ async def submit_video_task(
     generate_audio: bool = True,
     mode: str = "r2v",
     first_frame_url: Optional[str] = None,
+    last_frame_url: Optional[str] = None,
     video_url: Optional[str] = None,
     reference_voice_urls: Optional[list[str]] = None,
     reference_bgm_url: Optional[str] = None,
@@ -909,6 +910,25 @@ async def submit_video_task(
                 model_name=effective_model,
             )
         media.append({"type": "first_frame", "url": resolved_first_frame})
+        if last_frame_url:
+            # Native target end frame on the i2v media contract. The
+            # resolver only passes it when the model's capability says
+            # the provider documents this parameter; here it is mapped
+            # verbatim, never approximated by a reference image.
+            (
+                resolved_last_frame,
+                last_kind,
+            ) = await _resolve_reference_media_url(
+                last_frame_url,
+                upload_backend,
+            )
+            if last_kind != "image":
+                raise ModelError(
+                    "i2v last frame must be an image: "
+                    f"{last_frame_url[:120]}",
+                    model_name=effective_model,
+                )
+            media.append({"type": "last_frame", "url": resolved_last_frame})
     elif normalized_mode == "video_edit":
         resolved_video, video_kind = await _resolve_reference_media_url(
             video_url,

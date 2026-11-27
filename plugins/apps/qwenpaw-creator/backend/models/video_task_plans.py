@@ -362,8 +362,10 @@ def select_video_task_kind(
         return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
     if facts.transition_kind != "none" or facts.continuity_intent == "cut":
         return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
-    if not facts.same_scene or facts.new_elements:
-        return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
+    # same_scene / new_elements are model-facing context, not vetoes:
+    # an authored continue/one_take declaration routes onto the
+    # anchored shape even across scenes. Hard facts (published
+    # predecessor, capability, budget, ffmpeg) gate below.
     if facts.continuity_intent not in ("continue", "one_take"):
         # The submit path shares the scheduler's missing-field
         # default: neutral never anchors, so graph, wire and
