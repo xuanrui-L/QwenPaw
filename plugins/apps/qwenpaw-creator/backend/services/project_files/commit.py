@@ -564,7 +564,13 @@ class ProjectCommitBoundary:
             # that blocks startup recovery or later commits.
             transactions_root = transaction_root.parent
             transactions_root.mkdir(parents=True, exist_ok=True)
-            staging_root = runtime_root / "temp" / "transactions"
+            staging_parent = runtime_root / "temp"
+            staging_parent.mkdir(mode=0o700, exist_ok=True)
+            if is_link_path(staging_parent) or not staging_parent.is_dir():
+                raise ProjectCommitError(
+                    "Project runtime temp path must be a real directory",
+                )
+            staging_root = staging_parent / "transactions"
             staging_root.mkdir(mode=0o700, exist_ok=True)
             if is_link_path(staging_root) or not staging_root.is_dir():
                 raise ProjectCommitError(

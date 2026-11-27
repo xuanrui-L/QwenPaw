@@ -359,30 +359,15 @@ def preview_r2v_reference_order(
     image_model_name: str = "",
     project_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Authoritative ``[Image N]`` order preview for one r2v Element.
-
-    Video mirrors the submit path's PLAN (storyboard first, then the
-    resolved visual reference chain, deduplicated in order) so the
-    frontend can label each reference with the index the video prompt
-    will cite. It intentionally covers the pre-continuity plan only:
-    runtime-injected anchors (segment continuity's last frame / tail
-    clip) are not authorable and join at submit, which is also why the
-    pre-submit bounds check sizes itself against this list, never the
-    extended one. Each row additionally carries per-type wire ordinals
-    (``imageIndex`` for the 图N sequence, ``videoIndex`` for 视频N,
-    from ``number_references_by_media`` — the same helper the role block
-    and the continuity suffix use), so an authored marker can be labeled
-    exactly where the provider will resolve it. Entity binding and
-    deduplication reorder references, which makes the order impossible
-    to reconstruct client-side from the raw creation fields.
-    """
+    """Preview authored media in the same order used in the request."""
+    from models.video_task_plans import uses_storyboard
 
     from services.media_files.element_adapter import (
         find_timeline_element,
         selected_element_output,
     )
 
-    _, element = find_timeline_element(project, element_id)
+    timeline, element = find_timeline_element(project, element_id)
     creation = element.creation
     if not isinstance(creation, R2VCreation):
         raise ValidationError(
@@ -408,14 +393,45 @@ def preview_r2v_reference_order(
     else:
         version_ids = video_reference_plan(project, element)
     references: list[dict[str, Any]] = []
-    if stage == "video" and storyboard_id is None:
+    plan = creation.generation_plan if stage == "video" else None
+    if plan is not None and plan.predecessor_element_id is not None:
+        predecessor = timeline.elements_by_id.get(plan.predecessor_element_id)
+        prev_slot = project.assets.artifact_slots_by_id.get(
+            f"element:{plan.predecessor_element_id}:main",
+        )
+        version_id = (
+            prev_slot.selected_version_id if prev_slot is not None else None
+        )
+        extending = plan.method == "video_extend"
+        references.append(
+            {
+                "index": 1,
+                "imageIndex": None if extending else 1,
+                "videoIndex": 1 if extending else None,
+                "versionId": (version_id or "") if extending else "",
+                "kind": "artifact",
+                "available": bool(version_id),
+                "name": (
+                    f"{predecessor.label or predecessor.element_id} · 前段视频"
+                    if extending and predecessor is not None
+                    else f"{plan.predecessor_element_id} · 前段末帧"
+                ),
+            }
+        )
+        if extending:
+            version_ids = ()
+    if (
+        stage == "video"
+        and storyboard_id is None
+        and uses_storyboard(creation)
+    ):
         # Video execution requires this element's selected storyboard. Keep
         # its semantic position while authoring, without inventing a version
         # ID or allowing an identity reference to impersonate [Image 1].
         references.append(
             {
-                "index": 1,
-                "imageIndex": 1,
+                "index": len(references) + 1,
+                "imageIndex": len(references) + 1,
                 "videoIndex": None,
                 "versionId": "",
                 "kind": "storyboard",
@@ -423,26 +439,17 @@ def preview_r2v_reference_order(
                 "name": "分镜图（待生成）",
             },
         )
-    # When the storyboard slot is still a placeholder it will become 图1
-    # the moment it is generated, so every plan image behind it shifts by
-    # one — the preview must show the future-real ordinal, not the
-    # storyboard-less numbering.
-    storyboard_reserved = bool(references)
+    reserved_images = sum(row["imageIndex"] is not None for row in references)
     wire_ordinals = {
-        version_id: (media_kind, ordinal)
+        version_id: (
+            media_kind,
+            ordinal + reserved_images if media_kind == "image" else ordinal,
+        )
         for version_id, media_kind, ordinal in number_references_by_media(
             project,
             version_ids,
         )
     }
-    if storyboard_reserved:
-        wire_ordinals = {
-            version_id: (
-                media_kind,
-                ordinal + 1 if media_kind == "image" else ordinal,
-            )
-            for version_id, (media_kind, ordinal) in wire_ordinals.items()
-        }
     for index, version_id in enumerate(version_ids, start=len(references) + 1):
         source = project.assets.source_versions_by_id.get(version_id)
         artifact = project.assets.artifact_versions_by_id.get(version_id)
