@@ -58,10 +58,10 @@ Project
 - 禁止使用 `pending-render`、`todo`、`placeholder` 等虚构 ID。
 - R2V Creation 用 `creation.narrative` 保存生成单元的完整叙述，包括动作、运镜、节奏、衔接、对白和旁白。`creation.storyboard_prompt` 和 `creation.video_prompt` 分别描述实际图像和视频生成要求；`creation.storyboard_reference_version_ids` 和 `creation.video_reference_version_ids` 是同级的有序图片版本引用字段。以上字段都在 `creation` 内，不能放到 Element 顶层；例如视频提示词的 patch 路径是 `/timelines/items/<timelineId>/elements_by_id/<elementId>/creation/video_prompt`。
 - 视频生成按 creation 类型区分，每个类型只包含其模型真正消费的字段：
-  - `type=r2v`（参考生视频）：完整片段叙述、分镜图提示词、视频提示词及图片引用。
+  - `type=r2v`（参考生视频）：新建或重新规划时写 `generation_plan`，由模型选择普通参考、指定前段末帧或视频延长；按 `use_storyboard` 决定是否写分镜提示词。
   - `type=t2v`（纯文本生视频）：只有 intent/narrative/continuity/video_prompt/generate_audio/recipe，无分镜、无参考。
   - r2v/t2v/i2v 的 `creation.generate_audio` 控制视频原生声音，默认 true。用户要求完全静音、无声画面时必须写 false；只在提示词中写“静音”不能关闭供应商的声音生成。该字段会进入制作授权和执行参数，修改后需明确重新生成并审阅视频。
-  - `type=i2v`（首帧生视频）：在 t2v 字段基础上增加 `first_frame_version_id`（exact 图片 version id）。
+  - `type=i2v`（首帧生视频）：在 t2v 字段基础上增加 `first_frame_version_id`（exact 图片 version id）或 `predecessor_element_id`（指定前段末帧），二选一；模型支持时可声明 `last_frame_version_id`。
   - `type=s2v`（数字人口播）：`character_ref`（角色实体）、`portrait_version_id`（人物图 exact version，s2v 的 reference）、`script`（台词，经 TTS 变成驱动音频）、`audio_version_id`（驱动音频 exact version）、recipe；无分镜 prompt。
   类型声明即生成模式：提交工具的 mode 必须与 creation 类型一致，不得在提交时替换。
 - `type=audio`（音频）：`source_asset_version_id`（exact 音频 version）、`role`（**必填**，混音角色枚举：`narration` 旁白压低画面原声 / `bgm` 音乐床 -12dB 并在人声区间自动闪避 / `sfx` 音效原样混入；无默认值，缺失会被校验拒绝）、`script`（合成旁白的文稿；上传素材音频留空）、`speech_rate`（语速倍率 0.5–2.0，默认 1.0，仅 CosyVoice 系列模型生效）、`gain_db`、`pan`、`fade_in_seconds`/`fade_out_seconds`（0–10 秒边缘淡化；留空 null 表示自适应默认：bgm 为 min(2s, span/4)，其余角色硬边）。合成的旁白必须把最终文稿写入 `script`，用户编辑 script 后会触发重新合成。

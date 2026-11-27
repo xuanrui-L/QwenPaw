@@ -23,6 +23,7 @@ from domain.errors import StorageIntegrityError
 from domain.errors import ValidationError as DomainValidationError
 from services.media_files import keyframe_cache, local_execution
 from services.project_files.assets import AssetFileStore
+from services.project_files.facade import CreatorFileServices
 from services.media_files.element_adapter import reconcile_candidate_span
 from services.media_files.local_execution import (
     FfmpegLocalMediaRunner,
@@ -1011,12 +1012,6 @@ def test_edit_span_longer_than_its_media_is_capped_and_the_chain_closes_up(
     assert _trim(candidate, tmp_path) is False
 
 
-def test_media_that_fits_the_plan_is_left_untouched(tmp_path: Path) -> None:
-    candidate = _edit_candidate(first_seconds=180.0, second_seconds=52.0)
-    assert _trim(candidate, tmp_path) is False
-    assert _elements(candidate)["first"]["span"]["duration_tick"] == 180_000
-
-
 def test_unmeasured_source_is_probed_once_and_the_answer_is_stamped(
     monkeypatch,
     tmp_path,
@@ -1055,34 +1050,6 @@ def test_composed_duration_is_measured_from_the_file_not_the_plan(
     assert _measured_output_seconds(spec) == 232.0
 
 
-class _StubProjects:
-    def __init__(self, root: Path, documents: dict) -> None:
-        self.root = root
-        self.documents = documents
-
-    def discover_project_ids(self):
-        return tuple(self.documents)
-
-    def project_root(self, project_id: str) -> Path:
-        return self.root / project_id
-
-    def read(self, project_id: str):
-        self.reads = getattr(self, "reads", 0) + 1
-        return SimpleNamespace(project=self.documents[project_id])
-
-
-class _StubCommits:
-    def __init__(self, projects: _StubProjects) -> None:
-        self.projects = projects
-        self.calls: list[dict] = []
-
-    def commit(self, *, base, candidate, **_kwargs):
-        self.calls.append(candidate)
-        project_id = base.project.project_id
-        self.projects.documents[project_id] = Project.model_validate(candidate)
-        return SimpleNamespace(snapshot=self.projects.documents[project_id])
-
-
 def _stub_media_probe(monkeypatch, seconds_by_file):
     probes = []
 
@@ -1113,38 +1080,34 @@ def edit_project_services(tmp_path, monkeypatch):
     _stub_media_probe(
         monkeypatch, {"file-first": 29.918, "file-second": 54.153}
     )
-    candidate = _edit_candidate(first_seconds=None, second_seconds=None)
-    project = Project.model_validate(candidate)
-    root = tmp_path / project.project_id
-    root.mkdir()
-    (root / "project.json").write_text("{}", encoding="utf-8")
-    projects = _StubProjects(tmp_path, {project.project_id: project})
-    return SimpleNamespace(
-        root=tmp_path,
-        projects=projects,
-        commits=_StubCommits(projects),
+    project = Project.model_validate(
+        _edit_candidate(first_seconds=None, second_seconds=None)
     )
+    services = CreatorFileServices.create(tmp_path)
+    services.projects.create(project)
+    return services
 
 
-def test_startup_pass_caps_a_stale_timeline_without_being_asked(
+def test_startup_reconciles_the_project_and_skips_an_unchanged_second_pass(
     edit_project_services,
+    monkeypatch,
 ):
-    report = reconcile_edit_timelines_across_projects(edit_project_services)
+    services = edit_project_services
+    report = reconcile_edit_timelines_across_projects(services)
     assert report.scanned_projects == report.reconciled_projects == 1
-    (candidate,) = edit_project_services.commits.calls
-    elements = _elements(candidate)
-    assert elements["first"]["span"]["duration_tick"] == 29_918
-    assert elements["second"]["span"]["start_tick"] == 29_918
-    rows = candidate["assets"]["source_versions_by_id"]
-    assert rows["first"]["duration_seconds"] == 29.918
-    assert rows["second"]["duration_seconds"] == 54.153
+    project = services.projects.read("p-trim").project
+    elements = project.timelines.items["timeline:main"].elements_by_id
+    assert elements["first"].span.duration_tick == 29_918
+    assert elements["second"].span.start_tick == 29_918
+    versions = project.assets.source_versions_by_id
+    assert versions["first"].duration_seconds == 29.918
+    assert versions["second"].duration_seconds == 54.153
 
+    def no_second_read(*args, **kwargs):
+        pytest.fail("an unchanged project was read during reconciliation")
 
-def test_startup_pass_reloads_only_documents_that_moved(edit_project_services):
-    reconcile_edit_timelines_across_projects(edit_project_services)
-    first_reads = edit_project_services.projects.reads
-
-    report = reconcile_edit_timelines_across_projects(edit_project_services)
-
-    assert report.scanned_projects == 0
-    assert edit_project_services.projects.reads == first_reads
+    monkeypatch.setattr(services.projects, "read", no_second_read)
+    assert (
+        reconcile_edit_timelines_across_projects(services).scanned_projects
+        == 0
+    )

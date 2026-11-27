@@ -1365,6 +1365,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             )
 
             tail_frame = None
+            last_frame_error = ""
             if (
                 isinstance(creation, I2VCreation)
                 and creation.last_frame_version_id
@@ -1384,14 +1385,17 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     fingerprint = _fingerprint(
                         fingerprint, "last_frame", tail_frame
                     )
+                else:
+                    last_frame_error = "当前视频模型不支持生成方案指定的 I2V 尾帧"
 
+            plan_error = predecessor_error or last_frame_error
             video_missing: tuple[str, ...] = ()
             video_text_gap = False
             if task is not None:
                 status = WorkNodeStatus.RUNNING
-            elif not video_slot and predecessor_error:
+            elif not video_slot and plan_error:
                 status = WorkNodeStatus.GATED
-                video_missing = (predecessor_error,)
+                video_missing = (plan_error,)
             elif (
                 creation_type in {"i2v", "s2v"}
                 and (
@@ -1498,9 +1502,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         )
                     )
                 )
-                if predecessor_error:
+                if plan_error:
                     status = WorkNodeStatus.GATED
-                    video_missing = (*video_missing, predecessor_error)
+                    video_missing = (*video_missing, plan_error)
                 elif (
                     creation_type != "s2v"
                     and not (creation.video_prompt or "").strip()
