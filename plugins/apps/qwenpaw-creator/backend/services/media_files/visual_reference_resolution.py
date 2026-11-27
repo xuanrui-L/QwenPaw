@@ -383,8 +383,12 @@ def preview_r2v_reference_order(
     storyboard_id = (
         selected_storyboard[1] if selected_storyboard is not None else None
     )
+    plan = creation.generation_plan if stage == "video" else None
+    extending = plan is not None and plan.method == "video_extend"
     dropped: tuple[str, ...] = ()
-    if stage == "storyboard":
+    if extending:
+        version_ids = ()
+    elif stage == "storyboard":
         version_ids, dropped = storyboard_reference_plan(
             project,
             creation,
@@ -393,7 +397,6 @@ def preview_r2v_reference_order(
     else:
         version_ids = video_reference_plan(project, element)
     references: list[dict[str, Any]] = []
-    plan = creation.generation_plan if stage == "video" else None
     supports_plan = True
     if plan is not None and plan.predecessor_element_id is not None:
         from models.video_task_plans import planned_predecessor
@@ -413,7 +416,6 @@ def preview_r2v_reference_order(
         available = bool(
             version_id and project_ref_media_kind(project, version_id) == "video"
         )
-        extending = plan.method == "video_extend"
         predecessor_label = (
             (predecessor.label if predecessor else "")
             or plan.predecessor_element_id
@@ -437,7 +439,6 @@ def preview_r2v_reference_order(
             supports_plan = supports_video_continuation(
                 get_video_model_name(), get_video_backend()
             )
-            version_ids = ()
     if (
         stage == "video"
         and storyboard_id is None

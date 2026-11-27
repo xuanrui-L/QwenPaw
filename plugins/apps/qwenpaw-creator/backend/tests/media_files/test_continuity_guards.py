@@ -512,6 +512,50 @@ def test_reference_preview_marks_a_disabled_predecessor_unavailable(method):
     assert not available()
 
 
+def test_v10_frozen_i2v_claim_survives_the_upgrade():
+    shot = _element(
+        "e2",
+        0,
+        creation=I2VCreation(
+            video_prompt="镜头推进", first_frame_version_id="first"
+        ),
+    )
+    project, timeline = _project(shot)
+    creation = shot.creation.model_dump(mode="json")
+    for field in (
+        "last_frame_version_id",
+        "predecessor_element_id",
+        "generate_audio",
+    ):
+        creation.pop(field)
+    digest = rx._fingerprint(
+        {
+            "creation": creation,
+            "span": shot.span.model_dump(mode="json"),
+            "ticksPerSecond": timeline.ticks_per_second,
+            "ratio": project.settings.aspect_ratio,
+            "resolution": project.settings.resolution,
+            "references": (),
+        }
+    )
+    refs = ["first"]
+    assert rx._matches_submission_inputs(
+        project,
+        "e2",
+        digest,
+        mode="i2v",
+        payload_refs=refs,
+    )
+    shot.creation.last_frame_version_id = "new-tail"
+    assert not rx._matches_submission_inputs(
+        project,
+        "e2",
+        digest,
+        mode="i2v",
+        payload_refs=refs,
+    )
+
+
 def test_extension_authorization_uses_the_same_inputs_as_submission(
     tmp_path, monkeypatch
 ):
@@ -554,6 +598,23 @@ def test_extension_authorization_uses_the_same_inputs_as_submission(
                 tool_arguments=request.parameters,
             )
         )
+
+    from services.media_files import visual_reference_resolution
+    from services.prompt_sync_service import _references
+
+    def unused(*args, **kwargs):
+        pytest.fail("video extension must only resolve the predecessor video")
+
+    with monkeypatch.context() as refs_only:
+        refs_only.setattr(
+            visual_reference_resolution, "video_reference_plan", unused
+        )
+        refs_only.setattr(
+            visual_reference_resolution, "storyboard_reference_plan", unused
+        )
+        preview = _references(project, "e2")
+        assert preview["storyboard"] == []
+        assert [row["versionId"] for row in preview["video"]] == ["prev-v1"]
 
     assert request.parameters["mode"] == "video_extend"
     approved = terms()

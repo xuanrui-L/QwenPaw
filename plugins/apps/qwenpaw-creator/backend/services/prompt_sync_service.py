@@ -87,24 +87,28 @@ def _model_fingerprint() -> str:
 
 
 def _references(project: Project, element_id: str) -> dict:
-    storyboard = preview_r2v_reference_order(
-        project,
-        element_id,
-        stage="storyboard",
-        image_model_name=model_config.get_image_model_name(),
-    )
     video = preview_r2v_reference_order(project, element_id, stage="video")
     include_storyboard = any(
         row["kind"] == "storyboard" for row in video["references"]
     )
+    storyboard = (
+        preview_r2v_reference_order(
+            project,
+            element_id,
+            stage="storyboard",
+            image_model_name=model_config.get_image_model_name(),
+        )
+        if include_storyboard
+        else {}
+    )
     return {
-        "storyboard": storyboard["references"] if include_storyboard else [],
+        "storyboard": storyboard.get("references", []),
         "video": video["references"],
         "useStoryboard": include_storyboard,
-        "storyboardBudgetDroppedVersionIds": (
-            storyboard["budgetDroppedVersionIds"] if include_storyboard else []
+        "storyboardBudgetDroppedVersionIds": storyboard.get(
+            "budgetDroppedVersionIds", []
         ),
-        "storyboardReferenceLimit": storyboard["referenceLimit"],
+        "storyboardReferenceLimit": storyboard.get("referenceLimit"),
     }
 
 
