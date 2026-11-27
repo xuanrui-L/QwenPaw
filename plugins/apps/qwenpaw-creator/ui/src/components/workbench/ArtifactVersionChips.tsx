@@ -1,5 +1,7 @@
 import type { ArtifactVersionDocument } from "@/contracts/creator";
 import { useTranslation } from "react-i18next";
+import type { DownloadAsset } from "@/api/creator/assetDownload";
+import { AssetDownloadButton } from "@/components/assets/AssetDownload";
 
 /**
  * Keeps the same DOM and styling as the origin/main Workbench VersionChips.
@@ -12,11 +14,13 @@ export default function ArtifactVersionChips({
   currentId,
   viewingId,
   onView,
+  downloadAsset,
 }: {
   versions: ArtifactVersionDocument[];
   currentId?: string | null;
   viewingId: string | null;
   onView: (id: string) => void;
+  downloadAsset?: DownloadAsset | null;
 }) {
   const { t } = useTranslation();
   if (versions.length === 0) return null;
@@ -56,6 +60,7 @@ export default function ArtifactVersionChips({
           </button>
         );
       })}
+      {downloadAsset && <AssetDownloadButton asset={downloadAsset} />}
     </div>
   );
 }

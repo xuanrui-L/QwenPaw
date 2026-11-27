@@ -117,6 +117,7 @@ router = APIRouter(
 _DEFAULT_MAX_REMOTE_ASSET_BYTES = 2 * 1024 * 1024 * 1024
 _DEFAULT_REMOTE_ASSET_TIMEOUT_SECONDS = 60 * 60
 _MAX_LOCAL_VIDEO_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_OSS_MEDIA_BYTES = 500 * 1024 * 1024
 _DEFAULT_MAX_LOCAL_UPLOAD_BYTES = 100 * 1024 * 1024
 _DEFAULT_IMPORT_MAX_FILES = 200
 _DEFAULT_IMPORT_MAX_TOTAL_BYTES = 1024 * 1024 * 1024
@@ -1739,6 +1740,56 @@ def _source_cache_version_view(
         "cached": cached,
         "expectedSizeBytes": expected_size,
     }
+
+
+@router.get("/media/{kind}/{version_id}/oss-source")
+def get_oss_media_source(
+    project_id: str,
+    kind: Literal["source", "artifact"],
+    version_id: str,
+    services: CreatorFileServices = Depends(project_file_services),
+) -> dict[str, str]:
+    """Resolve the clicked original version inside this Creator runtime."""
+    assets = services.projects.read(project_id).project.assets
+    versions = (
+        assets.source_versions_by_id
+        if kind == "source"
+        else assets.artifact_versions_by_id
+    )
+    version = versions.get(version_id)
+    if version is None:
+        raise NotFoundError("该项目中找不到此素材版本")
+    project_root = services.projects.project_root(project_id)
+    if isinstance(version, SourceAssetVersion) and version.file_id is None:
+        file = resolve_remote_cache(
+            project_root,
+            version,
+            ProjectExecutionStore(services.root).list_tasks(project_id),
+        )
+        if file is None:
+            raise NotFoundError("原片尚未缓存，请先下载原片")
+    else:
+        file = assets.files_by_id.get(version.file_id)
+        if file is None:
+            raise NotFoundError("找不到该版本的本地文件")
+    if file.size_bytes > _MAX_OSS_MEDIA_BYTES:
+        raise ValidationError("扫码下载支持的单个文件最大为 500 MB")
+    if _media_kind(file.media_type, file.relative_uri) not in {
+        "image",
+        "video",
+        "audio",
+    }:
+        raise ValidationError("扫码下载仅支持图片、视频或音频文件")
+    if isinstance(file, IndexedFile):
+        try:
+            path = AssetFileStore(project_root).resolve_verified_path(file)
+        except AssetFileError as exc:
+            raise StorageIntegrityError("素材原文件缺失或与索引不符") from exc
+    else:
+        path = file.path
+    # The project store owns the directory layout. The platform maps this
+    # runtime-relative name to its mount; no host path leaves Creator.
+    return {"relativePath": path.relative_to(services.root).as_posix()}
 
 
 @router.get("/source-cache")

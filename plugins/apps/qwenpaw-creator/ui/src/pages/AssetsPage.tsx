@@ -67,6 +67,10 @@ import type { ProjectEditOperation } from "@/store/projectSnapshotStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import { useNarrowWorkspace, useDetailRail } from "@/lib/useNarrowWorkspace";
 import AssetMediaPreview from "@/components/assets/AssetMediaPreview";
+import {
+  AssetDownloadButton,
+  downloadableVersion,
+} from "@/components/assets/AssetDownload";
 import DocumentUnderstanding from "@/components/assets/DocumentUnderstanding";
 import SourceCacheGate from "@/components/creator/SourceCacheGate";
 import { useSourceCache } from "@/lib/sourceCache";
@@ -1790,7 +1794,34 @@ export default function AssetsPage() {
     }
     return groups;
   }, [filter, items, project]);
-  const selected =
+  // Per-slot version preview choice; defaults to the selected version.
+  const [versionPick, setVersionPick] = useState<Record<string, number>>({});
+  const displayedItem = (item: AssetItem): AssetItem => {
+    if (!item.versions) return item;
+    const fallback = item.versions.findIndex((version) => version.selected);
+    const index = Math.min(
+      Math.max(versionPick[item.id] ?? Math.max(fallback, 0), 0),
+      item.versions.length - 1,
+    );
+    const version = item.versions[index];
+    if (!version || version.raw === item.raw) return item;
+    return {
+      ...item,
+      ref: `artifact-version:${version.id}`,
+      name: version.name,
+      mediaKind: version.mediaKind,
+      mediaType: version.mediaType,
+      previewUrl: version.previewUrl,
+      createdAt: version.createdAt,
+      stale: version.raw.stale,
+      checksum: version.raw.checksum,
+      durationSeconds: version.raw.duration_seconds,
+      provenanceRefs: version.raw.provenance_refs,
+      metadata: version.raw.metadata,
+      raw: version.raw,
+    };
+  };
+  const selectedCard =
     (requestedVariantId
       ? allItems.find(
           (item) =>
@@ -1810,6 +1841,42 @@ export default function AssetsPage() {
           (item) => item.kind === "visual" && item.entityId === selectedId,
         ))) ||
     null;
+  const selected = selectedCard ? displayedItem(selectedCard) : null;
+  const downloadFor = (item: AssetItem) => {
+    if (item.kind === "visual") {
+      const versionId = item.metadata.selected_artifact_version_id;
+      if (typeof versionId === "string") {
+        return downloadableVersion(
+          project,
+          "artifact",
+          versionId,
+          item.cardName || item.name,
+        );
+      }
+      return downloadableVersion(
+        project,
+        "source",
+        characterVoice(item)?.sample_source_version_id,
+        item.name,
+      );
+    }
+    if (
+      item.kind === "source" &&
+      sourceCache.versions.some(
+        (version) => version.assetVersionId === item.id && !version.cached,
+      )
+    )
+      return null;
+    const version = item.raw as
+      | SourceAssetVersionDocument
+      | ArtifactVersionDocument;
+    return downloadableVersion(
+      project,
+      item.kind,
+      version.version_id,
+      item.name,
+    );
+  };
   const reviewedVisualField = (() => {
     if (
       !reviewMode ||
@@ -1917,38 +1984,12 @@ export default function AssetsPage() {
   }, [selected?.ref]);
 
   const selectItem = (item: AssetItem | null) => {
-    navigate(
-      item
-        ? `/project/${id}/assets?asset=${encodeURIComponent(item.id)}`
-        : `/project/${id}/assets`,
-    );
-  };
-  // Per-slot version preview choice; defaults to the selected version.
-  const [versionPick, setVersionPick] = useState<Record<string, number>>({});
-  const displayedItem = (item: AssetItem): AssetItem => {
-    if (!item.versions) return item;
-    const fallback = item.versions.findIndex((version) => version.selected);
-    const index = Math.min(
-      Math.max(versionPick[item.id] ?? Math.max(fallback, 0), 0),
-      item.versions.length - 1,
-    );
-    const version = item.versions[index];
-    if (!version || version.raw === item.raw) return item;
-    return {
-      ...item,
-      ref: `artifact-version:${version.id}`,
-      name: version.name,
-      mediaKind: version.mediaKind,
-      mediaType: version.mediaType,
-      previewUrl: version.previewUrl,
-      createdAt: version.createdAt,
-      stale: version.raw.stale,
-      checksum: version.raw.checksum,
-      durationSeconds: version.raw.duration_seconds,
-      provenanceRefs: version.raw.provenance_refs,
-      metadata: version.raw.metadata,
-      raw: version.raw,
-    };
+    const next = new URLSearchParams();
+    if (item) next.set("asset", item.id);
+    if (reviewMode) next.set("review", "1");
+    const reviewId = query.get("reviewId");
+    if (reviewId) next.set("reviewId", reviewId);
+    navigate(`/project/${id}/assets${next.size ? `?${next}` : ""}`);
   };
   const stepVersion = (item: AssetItem, delta: number) => {
     if (!item.versions) return;
@@ -2308,13 +2349,12 @@ export default function AssetsPage() {
                       const Icon = mediaIcon(display.mediaKind);
                       const failureReason = failureReasonFor(item);
                       return (
-                        <button
+                        <article
                           key={`${item.kind}:${item.id}`}
-                          type="button"
                           data-creator-module="asset-card"
                           data-creator-module-id={item.id}
                           onClick={() => selectItem(display)}
-                          className={`group overflow-hidden rounded-xl border bg-[var(--color-bg-card)] text-left transition ${
+                          className={`group cursor-pointer overflow-hidden rounded-xl border bg-[var(--color-bg-card)] text-left transition ${
                             selected?.id === item.id
                               ? "border-[var(--color-accent)] shadow-[0_0_0_1px_var(--color-accent)]"
                               : "border-[var(--color-border)] hover:border-[var(--color-border-strong)] hover:shadow-sm"
@@ -2344,14 +2384,14 @@ export default function AssetsPage() {
                                 className="absolute bottom-2 right-2 z-10 flex items-center gap-1 rounded-full bg-black/60 px-1.5 py-0.5 text-[10px] font-bold text-white backdrop-blur-md"
                                 onClick={(event) => event.stopPropagation()}
                               >
-                                <span
-                                  role="button"
-                                  tabIndex={0}
+                                <button
+                                  type="button"
+                                  aria-label={t("assets.previousVersion")}
                                   className="cursor-pointer px-0.5 transition-transform hover:scale-125"
                                   onClick={() => stepVersion(item, -1)}
                                 >
                                   ‹
-                                </span>
+                                </button>
                                 <span className="tabular-nums">
                                   {(versionPick[item.id] ??
                                     Math.max(
@@ -2362,14 +2402,14 @@ export default function AssetsPage() {
                                     )) + 1}
                                   /{item.versions.length}
                                 </span>
-                                <span
-                                  role="button"
-                                  tabIndex={0}
+                                <button
+                                  type="button"
+                                  aria-label={t("assets.nextVersion")}
                                   className="cursor-pointer px-0.5 transition-transform hover:scale-125"
                                   onClick={() => stepVersion(item, 1)}
                                 >
                                   ›
-                                </span>
+                                </button>
                               </span>
                             )}
                             <span className="absolute left-2 top-2 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white">
@@ -2446,9 +2486,14 @@ export default function AssetsPage() {
                           </div>
                           <div className="p-3">
                             <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-                              {item.kind === "visual"
-                                ? item.cardName || item.name
-                                : display.name}
+                              <button
+                                type="button"
+                                className="block max-w-full truncate text-left focus-visible:outline-[var(--color-accent)]"
+                              >
+                                {item.kind === "visual"
+                                  ? item.cardName || item.name
+                                  : display.name}
+                              </button>
                             </h3>
                             <p className="mt-1 line-clamp-2 min-h-8 text-[11px] leading-4 text-[var(--color-text-secondary)]">
                               {item.description}
@@ -2458,11 +2503,16 @@ export default function AssetsPage() {
                                 {item.variantLabel}
                               </p>
                             )}
-                            <p className="mt-2 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
-                              {item.id}
-                            </p>
+                            <div className="mt-2 flex items-center justify-between gap-2">
+                              <p className="min-w-0 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                                {item.id}
+                              </p>
+                              <AssetDownloadButton
+                                asset={downloadFor(display)}
+                              />
+                            </div>
                           </div>
-                        </button>
+                        </article>
                       );
                     })}
                   </Fragment>
@@ -2557,6 +2607,12 @@ export default function AssetsPage() {
                         <h3 className="mt-2 text-base font-semibold text-[var(--color-text-primary)]">
                           {selected.name}
                         </h3>
+                        <div className="my-2 empty:hidden">
+                          <AssetDownloadButton
+                            asset={downloadFor(selected)}
+                            withLabel
+                          />
+                        </div>
                         <p
                           data-creator-field={`${selected.ref}/description`}
                           data-creator-field-label={selected.name}

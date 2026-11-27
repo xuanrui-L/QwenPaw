@@ -13,13 +13,51 @@ from services.media_files import motion_engine
 from services.media_files.motion_engine import VendorLib
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
+    ArtifactSlot,
+    ArtifactVersion,
     ElementLocation,
+    IndexedFile,
     Project,
     R2VCreation,
     TimelineElement,
     TimelineSpan,
 )
 from services.project_files.review import ReviewDecisionItem
+
+
+def add_final_video(project: Project, timeline_id: str, data: bytes) -> str:
+    checksum = hashlib.sha256(data).hexdigest()
+    file_id = f"file:{timeline_id}:final"
+    version_id = f"{timeline_id}:final:v1"
+    slot_id = f"timeline:{timeline_id}:render"
+    project.assets.files_by_id[file_id] = IndexedFile(
+        file_id=file_id,
+        kind="artifact_payload",
+        relative_uri=f"assets/final/{timeline_id.replace(':', '_')}.mp4",
+        sha256=checksum,
+        size_bytes=len(data),
+        media_type="video/mp4",
+        created_at=project.created_at,
+    )
+    project.assets.artifact_slots_by_id[slot_id] = ArtifactSlot(
+        slot_id=slot_id,
+        kind="final_video",
+        owner_ref=f"timeline:{timeline_id}",
+        version_ids=[version_id],
+        selected_version_id=version_id,
+    )
+    project.assets.artifact_versions_by_id[version_id] = ArtifactVersion(
+        version_id=version_id,
+        slot_id=slot_id,
+        kind="final_video",
+        owner_ref=f"timeline:{timeline_id}",
+        name=f"{timeline_id} final",
+        file_id=file_id,
+        checksum=checksum,
+        based_on_generation=0,
+        created_at=project.created_at,
+    )
+    return version_id
 
 
 def make_r2v_element(

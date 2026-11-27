@@ -1,165 +1,160 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { installMockFetch } from "@/test/mockFetch";
+import { afterEach, expect, it, vi } from "vitest";
+import { installMockFetch, type MockRoute } from "@/test/mockFetch";
 import {
-  CREATOR_FEEDBACK_PATH,
   FEEDBACK_LIMIT,
-  fetchTracePointer,
-  submitCreatorFeedback,
-} from "@/api/creator/feedback";
+  makeFeedbackScreenshot,
+  submitFeedback,
+} from "../feedback";
 
-const FEEDBACK_ROUTE = "creator/feedbacks";
-const TRACES_ROUTE = "observability/traces";
+const root = "/api/qwenpaw-creator/feedbacks";
+const imageUrl = "https://cdn.example.org/shot.png";
+const body = { projectId: "project-1", feedback: "切换镜头后预览卡住" };
+const shot = () =>
+  makeFeedbackScreenshot(new File(["shot"], "shot.png", { type: "image/png" }));
 
-const DRAFT = {
-  project_id: "project-c0d79742eca95833a25d7db621abe73e",
-  stage: "media_generation",
-  feedback: "镜头生成失败只提示生成失败，看不出是模型报错还是 Credits 不够。",
+const routes = {
+  "/draft": { json: { stage: "media_generation", trace_id: "trace-1" } },
+  "/platform/account": { json: { id: "alice" } },
+  "/platform/screenshots": { json: { url: imageUrl } },
+  "/platform": { json: { submitted: true } },
 };
 
-function accepted(overrides: Record<string, unknown> = {}) {
-  return {
-    request_id: "req-1",
-    data: {
-      id: "fb-uuid-1",
-      user_id: "u-1",
-      deployment_id: "d-1",
-      created_at: "2026-09-17T10:24:31",
-      ...overrides,
-    },
-  };
+function platform(
+  overrides: Partial<Record<keyof typeof routes, MockRoute>> = {},
+) {
+  const responses = { ...routes, ...overrides };
+  return installMockFetch(
+    Object.entries(responses).map(([match, response]) => ({ match, response })),
+  ).calls;
 }
 
-describe("creator feedback submission", () => {
-  afterEach(() => vi.unstubAllGlobals());
+afterEach(() => vi.unstubAllGlobals());
 
-  it("posts to the platform on a relative path with the console cookie", async () => {
-    const { calls, fetchMock } = installMockFetch([
-      { match: FEEDBACK_ROUTE, response: { json: accepted() } },
-    ]);
-
-    const record = await submitCreatorFeedback(DRAFT);
-
-    expect(record.id).toBe("fb-uuid-1");
-    // Relative because the endpoint only exists behind this deployment's
-    // subdomain; an absolute platform URL would carry no console_token.
-    expect(CREATOR_FEEDBACK_PATH).toBe("/api/v1/qwenpaw/creator/feedbacks");
-    expect(calls[0]).toMatchObject({
-      url: CREATOR_FEEDBACK_PATH,
-      method: "POST",
-    });
-    // The platform's only credential is the cookie, and it ignores the
-    // bearer Creator's own client would add.
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({
-      credentials: "include",
-    });
-  });
-
-  it("sends the three required fields and no identity of its own", async () => {
-    const { calls } = installMockFetch([
-      { match: FEEDBACK_ROUTE, response: { json: accepted() } },
-    ]);
-
-    await submitCreatorFeedback({ ...DRAFT, trace_line: 137 });
-
-    expect(calls[0].body).toEqual({
-      project_id: DRAFT.project_id,
-      stage: "media_generation",
-      feedback: DRAFT.feedback,
-      trace_line: 137,
-    });
-    // user_id belongs to the body of a broken contract: the server writes the
-    // identity it authenticated from the cookie and trusts nothing else.
-    expect(calls[0].body).not.toHaveProperty("user_id");
-  });
-
-  it("drops an absent trace pointer instead of sending empty strings", async () => {
-    const { calls } = installMockFetch([
-      { match: FEEDBACK_ROUTE, response: { json: accepted() } },
-    ]);
-
-    await submitCreatorFeedback({
-      ...DRAFT,
-      trace_id: "",
-      trace_file: "creator-trace-2026-09-17.jsonl",
-    });
-
-    expect(calls[0].body).not.toHaveProperty("trace_id");
-    expect(calls[0].body).toHaveProperty(
-      "trace_file",
-      "creator-trace-2026-09-17.jsonl",
-    );
-  });
-
-  it("refuses locally before spending a request on an empty or oversized body", async () => {
-    const { calls } = installMockFetch([
-      { match: FEEDBACK_ROUTE, response: { json: accepted() } },
-    ]);
-
-    await expect(
-      submitCreatorFeedback({ ...DRAFT, stage: "  " }),
-    ).rejects.toThrow("阶段");
-    await expect(
-      submitCreatorFeedback({
-        ...DRAFT,
-        feedback: "字".repeat(FEEDBACK_LIMIT + 1),
-      }),
-    ).rejects.toThrow(String(FEEDBACK_LIMIT));
-    expect(calls).toHaveLength(0);
-  });
-
-  it("names the cookie when the platform does not recognise the session", async () => {
-    installMockFetch([
-      { match: FEEDBACK_ROUTE, response: { status: 401, ok: false } },
-    ]);
-
-    await expect(submitCreatorFeedback(DRAFT)).rejects.toThrow("console_token");
-  });
+it("sends the selected file separately from the user's description and diagnostics", async () => {
+  const image = shot();
+  const calls = platform();
+  await submitFeedback(
+    {
+      ...body,
+      sessionId: "s1",
+      conversationId: "c1",
+      contactEmail: " editor@example.com ",
+      screenshots: [image],
+    },
+    {},
+  );
+  expect(calls.map((c) => c.url.slice(root.length))).toEqual([
+    "/draft",
+    "/platform/account",
+    "/platform/screenshots",
+    "/platform",
+  ]);
+  expect(calls[2].body).toEqual({ file: image.file });
+  expect(calls[3].headers["x-platform-account"]).toBe("alice");
+  const { description, screenshot_urls } = calls[3].body as {
+    description: string;
+    screenshot_urls: string[];
+  };
+  expect(description.split("\n\n")[0]).toBe(body.feedback);
+  for (const field of [
+    "editor@example.com",
+    "project_id: project-1",
+    "session_id: s1",
+    "conversation_id: c1",
+    "stage: media_generation",
+    "trace_id: trace-1",
+  ]) {
+    expect(description).toContain(field);
+  }
+  expect(description).not.toContain(imageUrl);
+  expect(screenshot_urls).toEqual([imageUrl]);
 });
 
-describe("trace pointer lookup", () => {
-  afterEach(() => vi.unstubAllGlobals());
+it("omits unavailable diagnostics and attachments for text-only feedback", async () => {
+  vi.stubGlobal(
+    "location",
+    new URL("https://demo.qwenpaw.platform.agentscope.io"),
+  );
+  const calls = platform({ "/draft": { json: { stage: "unknown" } } });
+  await submitFeedback(body, {});
+  const payload = calls.at(-1)?.body as { description: string };
+  expect(payload).not.toHaveProperty("screenshot_urls");
+  expect(payload.description).toContain("deployment_id: demo");
+  expect(payload.description).not.toMatch(
+    /session_id|conversation_id|stage:|undefined/,
+  );
+});
 
-  it("maps the newest record onto the platform's field names", async () => {
-    installMockFetch([
+it("retains uploads after a rejection and keeps retries on the original account", async () => {
+  const feedback = { ...body, screenshots: [shot()] };
+  const attempt = {};
+  platform({
+    "/platform": {
+      ok: false,
+      status: 400,
+      json: { code: "feedback_rejected" },
+    },
+  });
+  await expect(submitFeedback(feedback, attempt)).rejects.toMatchObject({
+    code: "feedback_rejected",
+  });
+  const switched = platform({ "/platform/account": { json: { id: "bob" } } });
+  await expect(submitFeedback(feedback, attempt)).rejects.toMatchObject({
+    code: "FEEDBACK_ACCOUNT_CHANGED",
+  });
+  expect(switched.at(-1)?.url).toBe(root + "/platform/account");
+  const retry = platform();
+  await submitFeedback(feedback, attempt);
+  expect(retry.map((c) => c.url)).not.toContain(root + "/platform/screenshots");
+  const fresh = platform({ "/platform/account": { json: { id: "bob" } } });
+  await submitFeedback(feedback, {});
+  expect(
+    fresh.find((c) => c.url.endsWith("/screenshots"))?.headers[
+      "x-platform-account"
+    ],
+  ).toBe("bob");
+});
+
+it.each([
+  [
+    "/platform/account",
+    { ok: false, status: 409, json: { message: "账号未连接" } },
+    "账号未连接",
+  ],
+  ["/platform/screenshots", { json: {} }, "截图地址"],
+] as const)("stops at %s on failure", async (path, response, error) => {
+  const calls = platform({ [path]: response });
+  await expect(
+    submitFeedback({ ...body, screenshots: [shot()] }, {}),
+  ).rejects.toThrow(error);
+  expect(calls.at(-1)?.url).toBe(root + path);
+});
+
+it("checks the final description length before uploading", async () => {
+  const calls = platform();
+  await expect(
+    submitFeedback(
       {
-        match: TRACES_ROUTE,
-        response: {
-          json: {
-            // Ascending by timestamp: the last row is the one to cite.
-            items: [
-              {
-                traceId: "trace-old",
-                traceFile: "creator-trace-2026-09-16.jsonl",
-                traceLine: 12,
-                timestamp: "2026-09-16T09:45:21.642273+00:00",
-              },
-              {
-                traceId: "trace-new",
-                traceFile: "creator-trace-2026-09-17.jsonl",
-                traceLine: 137,
-                timestamp: "2026-09-17T02:45:06.871221+00:00",
-              },
-            ],
-          },
-        },
+        ...body,
+        feedback: "x".repeat(FEEDBACK_LIMIT),
+        screenshots: [shot()],
       },
-    ]);
-
-    expect(await fetchTracePointer({ projectId: DRAFT.project_id })).toEqual({
-      trace_id: "trace-new",
-      trace_file: "creator-trace-2026-09-17.jsonl",
-      trace_line: 137,
-      trace_ts: "2026-09-17T02:45:06.871221+00:00",
-    });
-  });
-
-  it("keeps the feedback when observability is switched off", async () => {
-    installMockFetch([
-      { match: TRACES_ROUTE, response: { status: 503, ok: false } },
-    ]);
-
-    expect(await fetchTracePointer({ projectId: DRAFT.project_id })).toEqual(
       {},
-    );
-  });
+    ),
+  ).rejects.toThrow("超出");
+  expect(calls.map((c) => c.url)).toEqual([root + "/draft"]);
 });
+
+it.each([{ json: {} }, { ok: false, status: 502 }])(
+  "does not replay a final POST with an unknown outcome",
+  async (response) => {
+    const calls = platform({ "/platform": response });
+    const attempt = {};
+    for (let click = 0; click < 2; click++) {
+      await expect(submitFeedback(body, attempt)).rejects.toMatchObject({
+        code: "FEEDBACK_UNCONFIRMED",
+      });
+    }
+    expect(calls.filter((c) => c.url === root + "/platform")).toHaveLength(1);
+  },
+);

@@ -37,6 +37,10 @@ import { useNarrowWorkspace } from "@/lib/useNarrowWorkspace";
 import TimelineCanvas from "@/components/timeline/TimelineCanvas";
 import TimelineSnapshotPanel from "@/components/timeline/TimelineSnapshotPanel";
 import ElementDetail from "@/components/timeline/ElementDetail";
+import {
+  AssetDownloadButton,
+  downloadableVersion,
+} from "@/components/assets/AssetDownload";
 import WorkbenchModal from "@/components/workbench/WorkbenchModal";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
@@ -336,6 +340,17 @@ function TimelinePlan({
   const base = timelineIdParam
     ? `/project/${id}/t/${encodeURIComponent(timelineIdParam)}/plan`
     : `/project/${id}/plan`;
+  const reviewId = query.get("reviewId");
+  const elementUrl = useCallback(
+    (elementId?: string) => {
+      const params = new URLSearchParams();
+      if (elementId) params.set("element", elementId);
+      if (reviewMode) params.set("review", "1");
+      if (reviewId) params.set("reviewId", reviewId);
+      return `${base}${params.size ? `?${params}` : ""}`;
+    },
+    [base, reviewMode, reviewId],
+  );
   useReviewFieldFocus({
     path: base,
     field: reviewField,
@@ -418,13 +433,11 @@ function TimelinePlan({
           setExplicitActiveIds(null);
         }
         navigate(
-          selectedElementId === elementId
-            ? base
-            : `${base}?element=${encodeURIComponent(elementId)}`,
+          elementUrl(selectedElementId === elementId ? undefined : elementId),
         );
       });
     },
-    [base, leaveDraft, selectedElementId, timeline],
+    [elementUrl, leaveDraft, selectedElementId, timeline],
   );
 
   // Readiness criteria: main-track visuals and motion/media overlays that depend
@@ -851,7 +864,7 @@ function TimelinePlan({
       );
     }
   };
-  const closeElementDetail = () => leaveDraft(() => navigate(base));
+  const closeElementDetail = () => leaveDraft(() => navigate(elementUrl()));
   // 制作台改为方案页原地悬浮窗打开（毛玻璃 Modal），不再跳转独立页面；
   // 旧路由 /plan/element/:id 仍然保留用于深链。
   const [workbenchElementId, setWorkbenchElementId] = useState<string | null>(
@@ -1022,6 +1035,18 @@ function TimelinePlan({
                 {isComposing ? composeLabel : t("lib.composeFinalCut")}
               </span>
             </button>
+            {!isComposing && freshRenderVersionId && (
+              <AssetDownloadButton
+                asset={downloadableVersion(
+                  project,
+                  "artifact",
+                  freshRenderVersionId,
+                  t("assetDownload.filmName", {
+                    name: timeline.title || project.name,
+                  }),
+                )}
+              />
+            )}
             <button
               type="button"
               data-save-template

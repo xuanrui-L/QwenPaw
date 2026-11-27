@@ -29,6 +29,7 @@ from . import community_credentials as credentials
 from ..utils.io_utils import run_sync_io
 
 PLATFORM = "https://platform.agentscope.io"
+FEEDBACK_PATHS = {"/api/v1/feedback", "/api/v1/feedback/screenshots"}
 AUTH_TTL = 300
 PAGE_SIZE = 50
 PAGES_PER_SYNC = 5
@@ -351,6 +352,9 @@ def _page_events(
 class CommunityConnectionService:
     """Own one runtime's ephemeral authorization and durable connection."""
 
+    # Plugin packages may be updated independently of this host.
+    supports_feedback_delivery = True
+
     def __init__(
         self,
         config: ConnectionConfig | None = None,
@@ -390,6 +394,7 @@ class CommunityConnectionService:
             path=path,
         )
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        feedback_write = method == "POST" and path in FEEDBACK_PATHS
         try:
             async with httpx.AsyncClient(
                 base_url=PLATFORM,
@@ -420,6 +425,11 @@ class CommunityConnectionService:
                     retry_after=_retry_after_seconds(response),
                 )
             if not response.is_success:
+                if feedback_write and 400 <= response.status_code < 500:
+                    raise CommunityConnectionError(
+                        "feedback_rejected",
+                        response.status_code,
+                    )
                 raise CommunityConnectionError("platform_unavailable", 502)
             if method == "DELETE" and response.status_code == 204:
                 return {"data": {}}
@@ -433,6 +443,15 @@ class CommunityConnectionService:
                 data["data"] = {}
             return data
         except httpx.RequestError as exc:
+            if feedback_write and isinstance(
+                exc,
+                (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout),
+            ):
+                # The connection was never acquired, so no feedback body was sent.
+                raise CommunityConnectionError(
+                    "feedback_not_sent",
+                    503,
+                ) from exc
             raise CommunityConnectionError("network_unavailable", 502) from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise CommunityConnectionError(
@@ -1119,6 +1138,7 @@ class CommunityConnectionService:
         **kwargs,
     ) -> dict:
         """Proxy community routes without exposing credentials."""
+        feedback_write = method == "POST" and path in FEEDBACK_PATHS
         if method == "GET" and not personalized and account_id is None:
             data = await self._request(method, path, **kwargs)
             payload = data.get("data")
@@ -1132,13 +1152,26 @@ class CommunityConnectionService:
         if (method != "GET" or account_id is not None) and (
             not connection or connection["account_id"] != account_id
         ):
-            raise CommunityConnectionError("connection_changed", 409)
+            raise CommunityConnectionError(
+                "account_changed" if feedback_write else "connection_changed",
+                409,
+            )
         if connection:
             try:
                 connection = await self._fresh_connection(
                     expected_connection_id=connection["connection_id"],
                 )
-            except CommunityConnectionError:
+            except CommunityConnectionError as exc:
+                if feedback_write and exc.code == "connection_changed":
+                    raise CommunityConnectionError(
+                        "account_changed",
+                        409,
+                    ) from exc
+                if feedback_write and exc.status_code >= 500:
+                    raise CommunityConnectionError(
+                        "feedback_not_sent",
+                        503,
+                    ) from exc
                 if method != "GET" or account_id is not None:
                     raise
                 # Public posts remain readable when authorization expires.
@@ -1151,9 +1184,8 @@ class CommunityConnectionService:
                 **kwargs,
             )
         except CommunityConnectionError as exc:
-            # A failed write may have posted already; never retry it.
             if (
-                method != "GET"
+                (method != "GET" and not feedback_write)
                 or not connection
                 or exc.code != "authorization_expired"
             ):
@@ -1163,24 +1195,38 @@ class CommunityConnectionService:
                     force_refresh=True,
                     expected_connection_id=connection["connection_id"],
                 )
-                data = await self._request(
-                    method,
-                    path,
-                    token=connection["access_token"],
-                    **kwargs,
-                )
-            except CommunityConnectionError:
+                if not feedback_write:
+                    data = await self._request(
+                        method,
+                        path,
+                        token=connection["access_token"],
+                        **kwargs,
+                    )
+            except CommunityConnectionError as refresh_error:
+                if feedback_write:
+                    raise exc from refresh_error
                 if account_id is not None:
                     raise
                 return await self.community_request("GET", path, **kwargs)
+            # The credential is ready for an explicit retry. Never replay a write.
+            if feedback_write:
+                raise CommunityConnectionError("authorization_refreshed", 409)
+        payload = data.get("data")
         if connection:
             current = await store.get_connection()
             if (
                 not current
                 or current["connection_id"] != connection["connection_id"]
             ):
+                # The ticket already exists under the submitting account. An
+                # empty acknowledgement exposes none of that account's data.
+                if (
+                    method == "POST"
+                    and path == "/api/v1/feedback"
+                    and isinstance(payload, dict)
+                ):
+                    return {}
                 raise CommunityConnectionError("connection_changed", 409)
-        payload = data.get("data")
         if not isinstance(payload, dict):
             raise CommunityConnectionError("invalid_platform_response", 502)
         return payload

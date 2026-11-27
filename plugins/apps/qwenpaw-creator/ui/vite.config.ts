@@ -34,6 +34,8 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          if (id.includes("node_modules/html2canvas-pro/"))
+            return "feedback-capture";
           if (id.includes("node_modules/lucide-react/")) return "icons-vendor";
           return id.includes("node_modules") ? "vendor" : undefined;
         },

@@ -4,10 +4,8 @@ import { useParams } from "@/routing/navigation";
 import { useLaunchUploadStore } from "@/store/launchUploadStore";
 
 /**
- * Floating launch-upload progress card (bottom-left, mirroring the export
- * progress card): the composer navigates to the project page immediately,
- * so this card is how the user sees their attachments still uploading and
- * the first Agent message being prepared.
+ * The composer navigates to the project page immediately. This card shows
+ * the remaining attachment uploads and preparation of the first Agent message.
  */
 export default function LaunchUploadProgressCard() {
   const { t } = useTranslation();

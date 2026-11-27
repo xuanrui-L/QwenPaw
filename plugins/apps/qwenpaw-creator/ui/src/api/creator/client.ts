@@ -10,6 +10,8 @@ export const CREATOR_API_BASE = "/api/qwenpaw-creator";
 type HostWindow = Window & {
   QwenPaw?: {
     host?: {
+      openExternalLink?: (url: string) => void;
+      openCommunitySettings?: () => void;
       getApiToken?: () => string;
       usesBrowserSession?: (appId: string) => boolean;
     };
@@ -78,6 +80,22 @@ export function newClientId(prefix = "client"): string {
   const id =
     globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${secureRandomHex()}`;
   return `${prefix}-${id}`;
+}
+
+/** Open account settings within the host or hand a Platform link to its browser. */
+export function openHostLink(url: string): boolean {
+  try {
+    const host = (window.parent as HostWindow).QwenPaw?.host;
+    if (url === "/settings/community" && host?.openCommunitySettings) {
+      host.openCommunitySettings();
+      return true;
+    }
+    if (!host?.openExternalLink) return false;
+    host.openExternalLink(url);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function hostToken(): string | null {

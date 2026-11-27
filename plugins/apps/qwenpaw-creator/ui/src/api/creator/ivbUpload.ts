@@ -4,7 +4,7 @@
  * The bundle is produced by Creator's own export endpoint, but the upload
  * leaves from this browser straight to the platform: its only credential is
  * the `qwenpaw_console_token` cookie the subdomain gateway checks, and it
- * ignores every bearer - the same reason the feedback POST is same-origin.
+ * authenticates this upload independently of Creator's local API.
  *
  * The platform runs a synchronous content check (绿网 / CSI) on intake, then
  * unpacks and publishes asynchronously. It hands back a `progress_url` to

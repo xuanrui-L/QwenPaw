@@ -14,6 +14,7 @@
   "dependencies": {
     "@ant-design/icons": "^6.2.5",
     "antd": "^6.4.5",
+    "html2canvas-pro": "2.5.0",
     "i18next": "^26.3.6",
     "lucide-react": "^0.562.0",
     "react": "^18",
