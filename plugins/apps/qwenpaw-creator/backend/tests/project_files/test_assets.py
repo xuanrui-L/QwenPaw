@@ -852,7 +852,14 @@ def test_force_delete_detaches_live_and_snapshot_references(tmp_path):
     # input the graph would happily reuse for another render.
     node = derive_work_graph(after).by_id["video:el-i2v-1"]
     assert node.status is WorkNodeStatus.GATED
-    assert node.missing == ("first_frame_version_id 缺失",)
+    # Segment-continuity adds a second hint explaining that publishing a
+    # predecessor video would auto-supply the first frame. Asserted as
+    # the exact tuple so the reasons stay precisely these two — neither
+    # a lost primary reason nor gate-message sprawl slips through.
+    assert node.missing == (
+        "first_frame_version_id 缺失",
+        "上一段末帧也不可用：请先发布前一段视频，或在本 Element 上显式声明首帧",
+    )
 
 
 def test_force_delete_refuses_required_audio_reference(tmp_path):

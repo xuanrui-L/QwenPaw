@@ -1124,7 +1124,20 @@
     "shotsLabel": "Shots",
     "refsLabel": "Related assets",
     "advancedSettings": "More settings",
-    "refsPill": "{{count}} refs"
+    "refsPill": "{{count}} refs",
+    "intentPlaceholder": "Creative intent not set — one sentence on what this segment must achieve; type here",
+    "wirePreview": "Actually sent (this render)",
+    "wireMode": {
+      "r2v": "plain r2v reference generation",
+      "video_extend": "video extension (predecessor as material)",
+      "i2v": "image-to-video (first-frame continuation)",
+      "video_edit": "video edit",
+      "t2v": "text-to-video"
+    },
+    "wireAnchorNote": "Image 1 is the predecessor's last frame (extracted at runtime)",
+    "wireAnchorPruned": "anchor pruned",
+    "wireBgmOn": "shared BGM attached",
+    "wireBgmOff": "no BGM (native audio)"
   },
   "agent": {
     "assistant": "Creative Assistant",
@@ -2349,7 +2362,8 @@
       "final": "Final",
       "storyboard": "Storyboard",
       "design": "Design",
-      "none": "Pending"
+      "none": "Pending",
+      "anchor": "Anchored"
     },
     "columns": {
       "understanding": "Understanding",

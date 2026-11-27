@@ -106,6 +106,12 @@ try:
     from services.media_files.motion_engine import (  # noqa: E402
         ensure_vendor_libs,
     )
+    from services.media_files.local_execution import (  # noqa: E402
+        reconcile_edit_timelines_across_projects,
+    )
+    from services.media_files.segment_continuity import (  # noqa: E402
+        sweep_orphaned_continuity,
+    )
     from services.media_files.task_scratch import (  # noqa: E402
         budget_from_environment,
         release_orphaned_scratch,
@@ -266,6 +272,32 @@ async def _sweep_orphaned_scratch(
         )
 
 
+async def _sweep_orphaned_continuity(
+    services: CreatorFileServices,
+    budget,
+) -> None:
+    """Collect segment-continuity extracts idle Projects left behind.
+
+    Active Projects prune their own continuity scratch on every extract;
+    this is the safety net for Projects that stopped generating, so their
+    last/tail anchors do not linger indefinitely. Best-effort and budget-
+    shared with the other sweeps; never gates startup.
+    """
+
+    try:
+        removed = await asyncio.to_thread(
+            partial(sweep_orphaned_continuity, services, budget=budget),
+        )
+    except Exception:  # noqa: BLE001 - cleanup must never gate startup
+        logger.warning("orphaned continuity sweep failed", exc_info=True)
+        return
+    if removed:
+        logger.info(
+            "orphaned continuity extracts released: dirs=%s",
+            removed,
+        )
+
+
 async def _collect_settled_transactions(
     services: CreatorFileServices,
     budget,
@@ -296,6 +328,44 @@ async def _collect_settled_transactions(
         )
 
 
+async def _reconcile_edit_timelines(
+    services: CreatorFileServices,
+    budget,
+) -> None:
+    """Cap stale Edit timelines at their media, without waiting for a compose.
+
+    First in the maintenance pass on purpose: it is the one step that fixes
+    what the person sees rather than what the disk holds, and it costs a
+    ``stat`` per Project once the documents have been through once. A pass
+    that cannot finish inside the shared budget simply leaves the rest for
+    the next start.
+
+    Takes the registry handle as an argument rather than reading the module
+    global: shutdown clears that global while this sweep may still be
+    walking Projects, and a half-run pass on ``None`` would be a crash
+    instead of the skipped pass it should be.
+    """
+
+    try:
+        report = await asyncio.to_thread(
+            reconcile_edit_timelines_across_projects,
+            services,
+            budget=budget,
+        )
+    except Exception:  # noqa: BLE001 - a sweep must never gate the app
+        logger.warning("edit timeline reconciliation failed", exc_info=True)
+        return
+    for failure in report.failures:
+        logger.warning("edit timeline reconciliation skipped: %s", failure)
+    if report.reconciled_projects:
+        logger.info(
+            "edit timelines capped to measured media: projects=%s "
+            "scanned=%s",
+            report.reconciled_projects,
+            report.scanned_projects,
+        )
+
+
 async def _run_storage_maintenance(
     services: CreatorFileServices,
 ) -> None:
@@ -314,7 +384,9 @@ async def _run_storage_maintenance(
     budget = budget_from_environment()
 
     async def sweep() -> None:
+        await _reconcile_edit_timelines(services, budget)
         await _sweep_orphaned_scratch(services, budget)
+        await _sweep_orphaned_continuity(services, budget)
         if not budget.stop_requested.is_set():
             await _collect_settled_transactions(services, budget)
 

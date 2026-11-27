@@ -25,6 +25,79 @@ def _owner_entity_id(owner_ref: str | None) -> str | None:
     return owner_ref
 
 
+def project_ref_media_kind(project: Project, version_id: str) -> str:
+    """``"video"`` only when the reference verifiably resolves to a video.
+
+    Unresolvable ids (e.g. synthetic ``continuity:*`` markers) report
+    ``"image"``: the caller's continuity bookkeeping decides their real
+    kind, and anything the index does not call a video has always been
+    addressed through the image sequence.
+    """
+
+    source = project.assets.source_versions_by_id.get(version_id)
+    if source is not None:
+        media_type = source.media_type
+    else:
+        artifact = project.assets.artifact_versions_by_id.get(version_id)
+        if artifact is None:
+            return "image"
+        indexed = project.assets.files_by_id.get(artifact.file_id)
+        if indexed is None:
+            return "image"
+        media_type = indexed.media_type
+    return "video" if media_type.casefold().startswith("video/") else "image"
+
+
+def number_references_by_media(
+    project: Project,
+    version_ids: Iterable[str],
+    *,
+    force_video: Iterable[str] = (),
+) -> list[tuple[str, str, int]]:
+    """``(version_id, kind, ordinal)`` in send order, per-type sequences.
+
+    Providers address references in two independent sequences counted per
+    media type (``图N`` / ``视频N`` on the Wan family; the canonical
+    ``[Image N]`` authoring form renders into the image one), so ordinals
+    are tallied separately for images and videos. An all-image sequence
+    numbers exactly like the old positional one, so only plans carrying
+    video references observe any difference — and there positional
+    numbering pointed markers at the wrong or nonexistent reference.
+    Single source of truth for the runtime role block, the continuity
+    suffix indices, and the preview's ``imageIndex``/``videoIndex``; the
+    three must never re-implement this independently or they drift into
+    colliding ``[Image N]`` markers inside the paid request.
+
+    ``force_video`` names ids the Asset Index cannot resolve but whose
+    submit-time media type is known — the synthetic continuity tail clip
+    — so they tally into the video sequence instead of the fallback.
+    """
+
+    forced = set(force_video)
+    numbered: list[tuple[str, str, int]] = []
+    image_ordinal = 0
+    video_ordinal = 0
+    # Deduplicate first: the submit resolver sends each id once, so the
+    # ordinals here must follow the same unique sequence or a repeated
+    # reference would inflate both counts.
+    for raw_id in dict.fromkeys(str(item) for item in version_ids):
+        version_id = str(raw_id)
+        if (
+            version_id in forced
+            or project_ref_media_kind(
+                project,
+                version_id,
+            )
+            == "video"
+        ):
+            video_ordinal += 1
+            numbered.append((version_id, "video", video_ordinal))
+        else:
+            image_ordinal += 1
+            numbered.append((version_id, "image", image_ordinal))
+    return numbered
+
+
 def _entity_ids(creation: R2VCreation) -> list[str]:
     """Return the stable semantic order used by prompt reference mappings.
 
@@ -285,11 +358,20 @@ def preview_r2v_reference_order(
 ) -> dict[str, Any]:
     """Authoritative ``[Image N]`` order preview for one r2v Element.
 
-    Video mirrors the submit path (storyboard first, then the resolved
-    visual reference chain, deduplicated in order) so the frontend can label
-    each reference with the index the video prompt will cite.  Entity
-    binding and deduplication reorder references, which makes the order
-    impossible to reconstruct client-side from the raw creation fields.
+    Video mirrors the submit path's PLAN (storyboard first, then the
+    resolved visual reference chain, deduplicated in order) so the
+    frontend can label each reference with the index the video prompt
+    will cite. It intentionally covers the pre-continuity plan only:
+    runtime-injected anchors (segment continuity's last frame / tail
+    clip) are not authorable and join at submit, which is also why the
+    pre-submit bounds check sizes itself against this list, never the
+    extended one. Each row additionally carries per-type wire ordinals
+    (``imageIndex`` for the 图N sequence, ``videoIndex`` for 视频N,
+    from ``number_references_by_media`` — the same helper the role block
+    and the continuity suffix use), so an authored marker can be labeled
+    exactly where the provider will resolve it. Entity binding and
+    deduplication reorder references, which makes the order impossible
+    to reconstruct client-side from the raw creation fields.
     """
 
     from services.media_files.element_adapter import (
@@ -330,12 +412,34 @@ def preview_r2v_reference_order(
         references.append(
             {
                 "index": 1,
+                "imageIndex": 1,
+                "videoIndex": None,
                 "versionId": "",
                 "kind": "storyboard",
                 "available": False,
                 "name": "分镜图（待生成）",
             },
         )
+    # When the storyboard slot is still a placeholder it will become 图1
+    # the moment it is generated, so every plan image behind it shifts by
+    # one — the preview must show the future-real ordinal, not the
+    # storyboard-less numbering.
+    storyboard_reserved = bool(references)
+    wire_ordinals = {
+        version_id: (media_kind, ordinal)
+        for version_id, media_kind, ordinal in number_references_by_media(
+            project,
+            version_ids,
+        )
+    }
+    if storyboard_reserved:
+        wire_ordinals = {
+            version_id: (
+                media_kind,
+                ordinal + 1 if media_kind == "image" else ordinal,
+            )
+            for version_id, (media_kind, ordinal) in wire_ordinals.items()
+        }
     for index, version_id in enumerate(version_ids, start=len(references) + 1):
         source = project.assets.source_versions_by_id.get(version_id)
         artifact = project.assets.artifact_versions_by_id.get(version_id)
@@ -364,9 +468,15 @@ def preview_r2v_reference_order(
                 )
             except (CreatorError, KeyError):
                 available = False
+        wire_kind, wire_ordinal = wire_ordinals.get(
+            version_id,
+            ("image", None),
+        )
         references.append(
             {
                 "index": index,
+                "imageIndex": (wire_ordinal if wire_kind == "image" else None),
+                "videoIndex": (wire_ordinal if wire_kind == "video" else None),
                 "versionId": version_id,
                 "kind": kind,
                 "available": available,

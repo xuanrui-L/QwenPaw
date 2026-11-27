@@ -332,8 +332,11 @@ _VIDU_DIRECT_Q2_PRO_REFERENCE_CAPABILITY = VideoReferenceCapability(
 
 # Generation modes exposed on the r2v_generation tool. ``r2v`` keeps the
 # historical behaviour; the others map onto the upstream model families
-# (happyhorse-*-t2v/-i2v/-video-edit, wan*-t2v/-i2v).
-VIDEO_MODES = ("r2v", "t2v", "i2v", "video_edit")
+# (happyhorse-*-t2v/-i2v/-video-edit, wan*-t2v/-i2v). ``video_extend`` is
+# the first-class continuation task (reference_video + extend intent);
+# the planning layer routes same-scene segments onto it, and only
+# extension-capable models declare it.
+VIDEO_MODES = ("r2v", "t2v", "i2v", "video_edit", "video_extend")
 
 _DASHSCOPE_VIDEO_DOCUMENTATION = (
     "https://help.aliyun.com/zh/model-studio/video-generation-api-reference"
@@ -747,6 +750,44 @@ def is_wan3_video_model(model_name: str) -> bool:
     return _WAN_30_REFERENCE_PATTERN.fullmatch(model_name.strip()) is not None
 
 
+def supports_last_frame(
+    model_name: str,
+    protocol_backend: str = "",
+) -> bool:
+    """True when the configured model documents a NATIVE last-frame
+    input on the i2v request (media type ``last_frame`` on the Wan3.0
+    all-in-one contract). Plain reference images that merely hint at an
+    ending composition do NOT count — the executor must not pretend a
+    tail frame was constrained when the provider has no such parameter.
+    """
+
+    del protocol_backend  # reserved: gateway aliases keep the contract.
+
+    return _WAN_30_REFERENCE_PATTERN.fullmatch(model_name.strip()) is not None
+
+
+def supports_video_continuation(
+    model_name: str,
+    protocol_backend: str = "",
+) -> bool:
+    """True when the configured model officially documents a video-extension
+    task that the R2V submit path can drive by adding a ``reference_video``
+    alongside the regular image references.
+
+    Wan3.0 All-in-One is currently the only family with an explicit
+    "视频延长" contract reachable through the r2v request route. Wan2.7
+    documents video continuation via ``first_clip`` on the i2v endpoint,
+    which is a different request shape not wired here. HappyHorse, Veo,
+    Seedance, Kling and Vidu either forbid video references or use them
+    only as style/subject anchors, so the executor must fall back to
+    last-frame image continuity for those models.
+    """
+
+    del protocol_backend  # reserved: any Wan3-compatible gateway alias keeps
+    # the same model_id contract, so backend key never overrides the answer.
+    return is_wan3_video_model(model_name)
+
+
 def is_vidu_model(model_name: str) -> bool:
     """True when the configured video model is a Bailian-hosted Vidu model."""
 
@@ -850,7 +891,7 @@ def video_model_capability(
         documentation_url = _HAPPYHORSE_REFERENCE_DOCUMENTATION
     elif backend == "wan":
         if is_wan3_video_model(model):
-            modes = frozenset({"r2v", "t2v", "i2v"})
+            modes = frozenset({"r2v", "t2v", "i2v", "video_extend"})
             documentation_url = _WAN_30_REFERENCE_DOCUMENTATION
         elif _WAN_27_MODEL_PATTERN.fullmatch(
             model,
@@ -1922,6 +1963,7 @@ __all__ = [
     "is_vidu_model",
     "is_wan3_video_model",
     "seedance_video_generation",
+    "supports_video_continuation",
     "validate_video_mode",
     "video_backend_key",
     "video_model_capability",

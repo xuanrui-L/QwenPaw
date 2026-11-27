@@ -695,8 +695,10 @@ async def submit_video_task(
     generate_audio: bool = True,
     mode: str = "r2v",
     first_frame_url: Optional[str] = None,
+    last_frame_url: Optional[str] = None,
     video_url: Optional[str] = None,
     reference_voice_urls: Optional[list[str]] = None,
+    reference_bgm_url: Optional[str] = None,
     preserve_reference_slots: bool = False,
 ) -> str:
     """Submit a video generation task and return its task_id.
@@ -908,6 +910,25 @@ async def submit_video_task(
                 model_name=effective_model,
             )
         media.append({"type": "first_frame", "url": resolved_first_frame})
+        if last_frame_url:
+            # Native target end frame on the i2v media contract. The
+            # resolver only passes it when the model's capability says
+            # the provider documents this parameter; here it is mapped
+            # verbatim, never approximated by a reference image.
+            (
+                resolved_last_frame,
+                last_kind,
+            ) = await _resolve_reference_media_url(
+                last_frame_url,
+                upload_backend,
+            )
+            if last_kind != "image":
+                raise ModelError(
+                    "i2v last frame must be an image: "
+                    f"{last_frame_url[:120]}",
+                    model_name=effective_model,
+                )
+            media.append({"type": "last_frame", "url": resolved_last_frame})
     elif normalized_mode == "video_edit":
         resolved_video, video_kind = await _resolve_reference_media_url(
             video_url,
@@ -936,6 +957,31 @@ async def submit_video_task(
                     model_name=effective_model,
                 )
             media.append({"type": "reference_image", "url": resolved_url})
+    elif normalized_mode == "video_extend":
+        # First-class continuation: the predecessor's published video is
+        # the ONLY media entry, sent as reference_video with extend
+        # intent carried by the prompt. No reference stack, so there is
+        # no image/video ordinal mapping to maintain.
+        if len(unique_references) != 1:
+            raise ModelError(
+                "video_extend expects exactly one predecessor video "
+                f"reference, got {len(unique_references)}",
+                model_name=effective_model,
+                retryable=False,
+            )
+        resolved_references = await _resolve_reference_media_urls(
+            unique_references,
+            upload_backend,
+        )
+        resolved_url, media_kind = resolved_references[0]
+        if media_kind != "video":
+            raise ModelError(
+                "video_extend material must be a video: "
+                f"{unique_references[0][:120]}",
+                model_name=effective_model,
+                retryable=False,
+            )
+        media.append({"type": "reference_video", "url": resolved_url})
     elif normalized_mode == "r2v":
         voice_support = video_reference_voice_support(
             effective_model,
@@ -1065,6 +1111,42 @@ async def submit_video_task(
                     + "；".join(mappings)
                     + "。音频只提供对应角色的声音身份；台词与演唱内容遵循本段"
                     "剧本，不复述试听样本，不让其他角色使用该声音。"
+                )
+        bgm_url = (reference_bgm_url or "").strip()
+        if bgm_url:
+            # Shared project BGM ships as the LAST reference_audio entry so
+            # its 音频N ordinal is voice count + 1; the planning layer only
+            # sends it for models whose standalone audio-reference slots
+            # still have room (voices + 1 within the documented budget).
+            if not is_wan3_video_model(effective_model):
+                logger.info(
+                    "BGM reference skipped: model %s has no wan3 "
+                    "reference_audio contract",
+                    effective_model,
+                )
+            else:
+                resolved_bgm, bgm_kind = await _resolve_reference_media_url(
+                    bgm_url,
+                    upload_backend,
+                )
+                if bgm_kind != "audio":
+                    raise ModelError(
+                        "bgm reference must be an audio file: "
+                        f"{bgm_url[:120]}",
+                        model_name=effective_model,
+                        retryable=False,
+                    )
+                media.append(
+                    {"type": "reference_audio", "url": resolved_bgm},
+                )
+                audio_count = sum(
+                    1
+                    for item in media
+                    if item.get("type") == "reference_audio"
+                )
+                prompt += (
+                    f"\n音频{audio_count} 为本片段背景音乐参考：生成配乐"
+                    "与其风格、调性和节奏保持一致并全段连续，不另起新配乐。"
                 )
 
     url = ""

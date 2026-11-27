@@ -1835,8 +1835,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           } else {
             message.success(t("modelConfig.connectionTestSuccess"));
           }
+          // Testing only probes connectivity now; enabling is the toggle's
+          // job (see handleEnableToggle), so a passing test no longer
+          // switches the card on behind the user's back.
           setTested((prev) => ({ ...prev, [type]: true }));
-          updateItem(type, "enabled", true);
           return true;
         } else {
           message.warning(data.error || t("modelConfig.connectionTestFailed"));
@@ -1853,12 +1855,14 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         setTesting((prev) => ({ ...prev, [type]: false }));
       }
     },
-    [config, updateItem],
+    [config],
   );
 
   // Enabling a model runs the connectivity probe first and only switches
   // the card on after a passing test, so an enabled card is never left in
   // the red "untested" state; a failed or incomplete probe keeps it off.
+  // Testing and enabling are deliberately decoupled: the standalone
+  // “测试连通性” button only probes and must not flip enabled.
   const handleEnableToggle = useCallback(
     async (type: ModelType, checked: boolean): Promise<void> => {
       if (type === "vlm") {
@@ -1870,10 +1874,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         setTested((prev) => ({ ...prev, [type]: false }));
         return;
       }
-      // handleTest itself validates the fields (warning toast when
-      // incomplete) and only enables the card after a passing probe, so no
-      // pre-check is needed here.
-      await handleTest(type);
+      // handleTest validates the fields (warning toast when incomplete) and
+      // returns whether the probe passed, but no longer enables the card
+      // itself, so switch it on here only after a passing probe.
+      const ok = await handleTest(type);
+      if (ok) updateItem(type, "enabled", true);
     },
     [handleTest, handleVlmToggle, updateItem],
   );
@@ -2375,29 +2380,30 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             )}
           </div>
         </div>
-        {(type === "image" || type === "video") &&
-          (item.protocol.toLowerCase().includes("dashscope") ||
-            item.protocol.includes("百炼") ||
-            item.protocol.toLowerCase().includes("token plan")) && (
-            <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
-              <Checkbox
-                checked={
-                  type === "image"
-                    ? config.image.reuse_llm_key
-                    : config.video.reuse_llm_key
+        {/* Always offer the reuse switch for image/video, whatever the
+            protocol: gating it on DashScope/百炼/token plan left a
+            non-Bailian image/video model stuck on the default reuse flag with
+            no way to uncheck it, so its own API Key field stayed disabled. */}
+        {(type === "image" || type === "video") && (
+          <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+            <Checkbox
+              checked={
+                type === "image"
+                  ? config.image.reuse_llm_key
+                  : config.video.reuse_llm_key
+              }
+              onChange={(e) => {
+                const checked = e.target.checked;
+                updateItem(type, "reuse_llm_key", checked);
+                if (checked) {
+                  updateItem(type, "api_key", "");
                 }
-                onChange={(e) => {
-                  const checked = e.target.checked;
-                  updateItem(type, "reuse_llm_key", checked);
-                  if (checked) {
-                    updateItem(type, "api_key", "");
-                  }
-                }}
-              >
-                {t("modelConfig.reuseLlmApiKey")}
-              </Checkbox>
-            </div>
-          )}
+              }}
+            >
+              {t("modelConfig.reuseLlmApiKey")}
+            </Checkbox>
+          </div>
+        )}
         {type === "asr" && (
           <>
             <div style={{ display: "flex", alignItems: "center", gap: 18 }}>

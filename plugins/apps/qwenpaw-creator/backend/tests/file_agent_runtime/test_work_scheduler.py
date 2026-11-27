@@ -1072,8 +1072,9 @@ def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
         *,
         media_models=None,
         pending_reviews=(),
+        ffmpeg_ready=None,
     ):
-        del tasks
+        del tasks, ffmpeg_ready
         index = min(state["index"], len(graphs) - 1)
         state["index"] += 1
         return graphs[index]
@@ -1097,7 +1098,12 @@ def test_done_edge_emits_milestone_once_across_ticks(
     milestone,
 ):
     _check_done_edge_milestone(
-        tmp_path, monkeypatch, node_kind, node_id, label, milestone
+        tmp_path,
+        monkeypatch,
+        node_kind,
+        node_id,
+        label,
+        milestone,
     )
 
 
