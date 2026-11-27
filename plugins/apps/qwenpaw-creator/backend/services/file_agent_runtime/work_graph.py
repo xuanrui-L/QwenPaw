@@ -1076,6 +1076,12 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             lane = f"element:{element_id}"
             label = element.label or element_id
             creation_type = getattr(creation, "type", "r2v")
+            video_plan = (
+                creation.generation_plan
+                if isinstance(creation, R2VCreation)
+                else None
+            )
+            video_slot = _slot_selected(project, f"element:{element_id}:main")
             prompt_sync_gap = None
             storyboard_sync_gap = None
             if creation_type == "r2v" and not element_id.startswith(
@@ -1137,8 +1143,18 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 )
                 task = active.get(key)
                 failure = failed.get(key)
-                skip_storyboard = (
-                    not uses_storyboard(creation) and task is None
+                # A settled legacy video without a selected storyboard did
+                # not need one to compose. Do not create a new paid job merely
+                # because it was opened after the schema upgrade.
+                has_legacy_video_without_storyboard = (
+                    video_plan is None
+                    and storyboard_slot is None
+                    and video_slot in project.assets.artifact_versions_by_id
+                    and not _artifact_is_stale(project, video_slot, ())
+                )
+                skip_storyboard = task is None and (
+                    not uses_storyboard(creation)
+                    or has_legacy_video_without_storyboard
                 )
                 missing = (*_upstream_missing(deps, statuses), *gate_missing)
                 authored_text_gap = False
@@ -1266,7 +1282,6 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
 
             # Video node for all types
             video_id = f"video:{element_id}"
-            video_slot = _slot_selected(project, f"element:{element_id}:main")
             key = (
                 TaskKind.R2V_GENERATION.value,
                 f"element:{element_id}",
@@ -1290,11 +1305,13 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
 
             visual_video_deps: tuple[str, ...] = ()
             visual_video_gaps: tuple[str, ...] = ()
+            video_uses_direct_visual_refs = (
+                video_plan is not None
+                and video_plan.method != "video_extend"
+                and not video_plan.use_storyboard
+            )
             if (
-                isinstance(creation, R2VCreation)
-                and creation.generation_plan is not None
-                and creation.generation_plan.method != "video_extend"
-                and not uses_storyboard(creation)
+                video_uses_direct_visual_refs
                 and not creation.video_reference_version_ids
             ):
                 # With no exact references or storyboard, the resolved video
@@ -1388,7 +1405,24 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 else:
                     last_frame_error = "当前视频模型不支持生成方案指定的 I2V 尾帧"
 
-            plan_error = predecessor_error or last_frame_error
+            extension_error = ""
+            if video_plan is not None and video_plan.method == "video_extend":
+                from models.config import (
+                    get_video_backend,
+                    get_video_model_name,
+                )
+                from models.video_capabilities import (
+                    supports_video_continuation,
+                )
+
+                model = (
+                    media_models[1] if media_models else get_video_model_name()
+                )
+                if not supports_video_continuation(model, get_video_backend()):
+                    extension_error = "当前视频模型不支持视频延长；请重选生成方案"
+            plan_error = (
+                predecessor_error or last_frame_error or extension_error
+            )
             video_missing: tuple[str, ...] = ()
             video_text_gap = False
             if task is not None:
@@ -1428,15 +1462,19 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # so _artifact_is_stale always returns False for T2V.
                 # Prompt-only changes are caught by the dispatch fingerprint
                 # for failure-parking, but do NOT trigger STALE re-generation.
-                upstream_for_stale = (
-                    (
-                        [storyboard_slot]
-                        if storyboard_slot and uses_storyboard(creation)
-                        else []
+                upstream_for_stale = upstream_selected
+                if video_uses_direct_visual_refs:
+                    from services.media_files.visual_reference_resolution import (
+                        video_reference_plan,
                     )
-                    if creation_type == "r2v"
-                    else upstream_selected
-                )
+
+                    # Compare the actual visual references, without including
+                    # the predecessor whose reroll must not cascade paid work.
+                    upstream_for_stale = video_reference_plan(project, element)
+                elif creation_type == "r2v":
+                    upstream_for_stale = (
+                        [storyboard_slot] if storyboard_dep else []
+                    )
                 status = (
                     WorkNodeStatus.STALE
                     if _artifact_is_stale(

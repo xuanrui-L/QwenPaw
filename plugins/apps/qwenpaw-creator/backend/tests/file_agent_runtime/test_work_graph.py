@@ -103,6 +103,48 @@ def _adopt_historical_video(project: Project):
     return Project.model_validate(updated), impact
 
 
+@pytest.mark.parametrize("creation_type", ["r2v", "i2v"])
+def test_v11_video_acceptance_survives_the_upgrade(creation_type):
+    from services.project_files.migrations import migrate_project_document
+    from services.project_files.models import I2VCreation
+    from services.project_files.prompt_sync import digest
+
+    project, _ = _adopt_historical_video(_historical_video_project())
+    element = project.timelines.items["timeline:main"].elements_by_id[
+        "clip-history"
+    ]
+    if creation_type == "i2v":
+        element.creation = I2VCreation(
+            video_prompt="动作", first_frame_version_id="board-new",
+        )
+    legacy = project.model_dump(mode="json")
+    legacy["schema_version"] = 11
+    creation = legacy["timelines"]["items"]["timeline:main"][
+        "elements_by_id"
+    ]["clip-history"]["creation"]
+    creation.pop(
+        "generation_plan" if creation_type == "r2v" else "predecessor_element_id"
+    )
+    slot = legacy["assets"]["artifact_slots_by_id"]["element:clip-history:main"]
+    slot["metadata"]["selectionAcceptance"]["inputFingerprint"] = "sha256:" + digest(
+        {
+            "creation": creation,
+            "duration_tick": element.span.duration_tick,
+            "storyboard_version_id": "board-new",
+        },
+    )
+
+    upgraded = Project.model_validate(migrate_project_document(legacy))
+    graph = derive_work_graph(upgraded)
+    assert graph.by_id["video:clip-history"].status is WorkNodeStatus.DONE
+    assert graph.by_id["compose:timeline:main"].status is WorkNodeStatus.READY
+    upgraded.timelines.items["timeline:main"].elements_by_id[
+        "clip-history"
+    ].creation.video_prompt = "修改过的动作"
+    graph = derive_work_graph(upgraded)
+    assert graph.by_id["video:clip-history"].status is WorkNodeStatus.STALE
+
+
 @pytest.mark.parametrize("explicit_stale", [True, False])
 def test_adopting_historical_video_allows_compose_with_its_exact_version(
     explicit_stale,
@@ -1695,8 +1737,12 @@ def test_only_the_plan_controls_storyboard_use(use_storyboard):
     assert "video:g1" in graph.by_id["video:g2"].deps
 
 
-def test_anchored_video_can_publish_without_storyboard():
-    project = _pair_project(generation_plan=_anchor_plan())
+@pytest.mark.parametrize("legacy", [True, False])
+def test_anchored_video_can_publish_without_storyboard(legacy):
+    project = _pair_project(
+        generation_plan=None if legacy else _anchor_plan(),
+        storyboard_intent="none" if legacy else None,
+    )
     _select_slot(
         project,
         slot_id="element:g1:main",
@@ -1714,6 +1760,66 @@ def test_anchored_video_can_publish_without_storyboard():
     )
     graph = derive_work_graph(project, ffmpeg_ready=True)
     assert graph.by_id["video:g2"].status is WorkNodeStatus.DONE
+    assert "storyboard:g2" not in graph.by_id
+
+
+def test_video_without_storyboard_gets_stale_when_its_visual_reference_changes():
+    project = _project()
+    scene = _entity("scene:station", {"var:night": "asset-old"})
+    project.visual.entities.items[scene.entity_id] = scene
+    project.visual.entities.order.append(scene.entity_id)
+    shot = _element(
+        "shot",
+        scene_ref=scene.entity_id,
+        visual_variant_refs={scene.entity_id: "var:night"},
+        generation_plan=R2VGenerationPlan(method="r2v", use_storyboard=False),
+    )
+    _add_element(project, shot)
+    _select_slot(
+        project,
+        slot_id="element:shot:main",
+        kind="element_video",
+        owner_ref="element:shot",
+        version_id="video-old",
+        provenance=["artifact-version:asset-old"],
+    )
+
+    def select_scene_version(version_id):
+        _select_slot(
+            project,
+            slot_id="asset:scene:station:variant:var:night:image",
+            kind="visual_asset_image",
+            owner_ref="asset:scene:station",
+            version_id=version_id,
+        )
+        scene.variants.items["var:night"].generated_artifact_version_ids = [version_id]
+        scene.variants.items["var:night"].selected_artifact_version_id = version_id
+
+    select_scene_version("asset-old")
+    assert derive_work_graph(project).by_id["video:shot"].status is WorkNodeStatus.DONE
+    select_scene_version("asset-new")
+    assert derive_work_graph(project).by_id["video:shot"].status is WorkNodeStatus.STALE
+
+
+@pytest.mark.parametrize("can_extend", [False, True])
+def test_work_graph_checks_video_extension_capability(monkeypatch, can_extend):
+    monkeypatch.setattr("models.config.get_video_backend", lambda: "wan")
+    model = "wan3.0-video-prime" if can_extend else "wan2.7-r2v"
+    project = _pair_project(generation_plan=R2VGenerationPlan(
+        method="video_extend", use_storyboard=False, predecessor_element_id="g1",
+    ))
+    _select_slot(
+        project,
+        slot_id="element:g1:main",
+        kind="element_video",
+        owner_ref="element:g1",
+        version_id="prev",
+    )
+    graph = derive_work_graph(project, media_models=("", model), ffmpeg_ready=True)
+    node = graph.by_id["video:g2"]
+    assert node.status is (WorkNodeStatus.READY if can_extend else WorkNodeStatus.GATED)
+    if not can_extend:
+        assert "不支持视频延长" in node.missing[0]
 
 
 def test_invalid_declared_predecessor_is_reported_without_using_closest_shot():
