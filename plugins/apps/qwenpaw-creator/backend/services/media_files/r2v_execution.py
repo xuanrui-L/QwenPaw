@@ -60,7 +60,7 @@ from domain.errors import (
 from models.config import is_media_review_enabled
 from models.reference_markers import canonical_marker_indices
 from models.video_task_plans import (
-    continuity_signals,
+    legacy_continuity_signals,
     VideoTaskKind,
     VideoTaskPlan,
     planned_predecessor,
@@ -1693,22 +1693,6 @@ def _matches_submission_inputs(
     )
 
 
-def _continuity_signals(
-    timeline: Timeline,
-    element: TimelineElement,
-    prev: TimelineElement | None,
-) -> tuple[str, str, bool]:
-    """Project-data author-intent signals (shared with the work graph).
-
-    Thin timeline-shaped wrapper over ``models.video_task_plans.
-    continuity_signals`` so the executor, the fingerprint and the
-    dependency graph can never drift apart on keyword tables or
-    Transition lookup rules.
-    """
-
-    return continuity_signals(timeline.elements_by_id, element, prev)
-
-
 def _r2v_strong_continuity(
     project: Project,
     timeline: Timeline,
@@ -1725,8 +1709,8 @@ def _r2v_strong_continuity(
     prev = find_predecessor_video_element(timeline, element)
     if prev is None or not resolve_predecessor_video_version(project, prev):
         return False
-    transition_kind, intent, one_take = _continuity_signals(
-        timeline,
+    transition_kind, intent, one_take = legacy_continuity_signals(
+        timeline.elements_by_id,
         element,
         prev,
     )
@@ -6374,14 +6358,17 @@ class FileR2VExecutionService:
                     != "none"
                 ):
                     return False
-            current_refs = list(
-                _reference_ids_with_continuity(
-                    project,
-                    timeline,
-                    element,
-                    mode=str(raw.get("mode") or "r2v"),
-                ),
-            )
+            try:
+                current_refs = list(
+                    _reference_ids_with_continuity(
+                        project,
+                        timeline,
+                        element,
+                        mode=str(raw.get("mode") or "r2v"),
+                    ),
+                )
+            except ValidationError:
+                return False
             if current_refs == [str(item) for item in frozen_refs]:
                 return True
             if "generationPlan" in raw and raw.get("mode") == "video_extend":
