@@ -614,6 +614,7 @@
     "videoModeT2v": "t2v text-to-video",
     "videoModeI2v": "i2v image-to-video",
     "videoModeEdit": "video_edit editing",
+    "videoModeExtend": "Video extension (previous clip)",
     "ttsFamilyNoteQwen": "Qwen-TTS family: system voices synthesize directly; cloning/design binds to family companion models and created voices are picked up automatically. Voices never cross families.",
     "ttsFamilyNoteCosy": "CosyVoice family: no system voices — clone or design a voice before synthesis; voices cannot be shared with the Qwen-TTS family.",
     "leaveBlankKeep": "Leave blank to keep current key",

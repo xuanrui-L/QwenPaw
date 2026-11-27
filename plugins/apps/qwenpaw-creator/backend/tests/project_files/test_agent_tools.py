@@ -690,3 +690,23 @@ def test_element_text_pointer_carries_pointer_as_field() -> None:
 def test_unknown_pointer_returns_empty() -> None:
     assert not derive_ui_locator(None, _project())
     assert not derive_ui_locator("", _project())
+
+
+def test_model_authored_r2v_requires_a_generation_plan():
+    project = Project.new(project_id="project-plan", name="Plan")
+    candidate = project.model_dump(mode="json")
+    timeline = candidate["timelines"]["items"]["timeline:main"]
+    timeline["elements_by_id"]["new-shot"] = {
+        "element_id": "new-shot",
+        "span": {"start_tick": 0, "duration_tick": 4000},
+        "location": {},
+        "creation": {"type": "r2v", "continuity": "接续上一个动作"},
+    }
+    with pytest.raises(AgentProjectToolError, match="generation_plan"):
+        AgentProjectTools._require_authored_video_plans(project, candidate)
+    timeline["elements_by_id"]["new-shot"]["creation"]["generation_plan"] = {
+        "method": "r2v",
+        "use_storyboard": False,
+    }
+    AgentProjectTools._require_authored_video_plans(project, candidate)
+    Project.model_validate(candidate)

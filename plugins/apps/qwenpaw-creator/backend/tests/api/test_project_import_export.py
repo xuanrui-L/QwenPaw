@@ -240,18 +240,20 @@ def test_export_omits_only_published_compose_scratch(
         if task_state == "missing":
             (root / indexed.relative_uri).unlink()
         task.write_text(
-            "broken json"
-            if task_state == "corrupt"
-            else json.dumps(
-                {
-                    "status": (
-                        task_state
-                        if task_state in {"FAILED", "RUNNING"}
-                        else "SUCCEEDED"
-                    ),
-                    "kind": "compose",
-                    "result": {"indexedFile": result_file},
-                },
+            (
+                "broken json"
+                if task_state == "corrupt"
+                else json.dumps(
+                    {
+                        "status": (
+                            task_state
+                            if task_state in {"FAILED", "RUNNING"}
+                            else "SUCCEEDED"
+                        ),
+                        "kind": "compose",
+                        "result": {"indexedFile": result_file},
+                    },
+                )
             ),
         )
         scratch = root / "runtime/task-work/render/intermediate.mp4"
@@ -941,3 +943,56 @@ def test_windows_uri_rewrite_preserves_archived_transaction(
     tmp_path, monkeypatch, interrupted
 ):
     _assert_windows_archive_recovery(tmp_path, monkeypatch, interrupted)
+
+
+@pytest.mark.parametrize("old_schema", [9, 10, 11])
+def test_old_project_archive_imports_and_allows_editing(
+    app,
+    api_runtime_root,
+    run_scenario,
+    old_schema,
+):
+    from services.project_files.commit import ProjectCommitBoundary
+
+    project_id = f"project-legacy-{old_schema}"
+    legacy = Project.new(project_id=project_id, name="旧版短片").model_dump(
+        mode="json",
+    )
+    legacy["schema_version"] = old_schema
+    timeline = legacy["timelines"]["items"]["timeline:main"]
+    timeline["elements_by_id"]["old-shot"] = {
+        "element_id": "old-shot",
+        "label": "原镜头",
+        "span": {"start_tick": 0, "duration_tick": 4000},
+        "location": {},
+        "creation": {"type": "r2v", "narrative": "雨中相遇"},
+    }
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(f"{project_id}/project.json", json.dumps(legacy))
+
+    async def scenario(client):
+        response = await _import(client, "legacy.zip", payload.getvalue())
+        assert response.status_code == 200, response.text
+        store = ProjectStore(api_runtime_root)
+        base = store.read(project_id)
+        assert base.project.schema_version == 12
+        candidate = base.project.model_dump(mode="json")
+        clip = candidate["timelines"]["items"]["timeline:main"][
+            "elements_by_id"
+        ]["old-shot"]
+        assert clip["creation"]["generation_plan"] is None
+        clip["label"] = "编辑后的旧镜头"
+        ProjectCommitBoundary(store).commit(
+            base=base,
+            candidate=candidate,
+            origin="frontend_edit",
+        )
+        reread = store.read(project_id)
+        shot = reread.project.timelines.items["timeline:main"].elements_by_id[
+            "old-shot"
+        ]
+        assert shot.label == "编辑后的旧镜头"
+        assert shot.creation.narrative == "雨中相遇"
+
+    run_scenario(app, scenario)

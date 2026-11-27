@@ -814,6 +814,16 @@ def _migrate_v10_to_v11(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[10] = _migrate_v10_to_v11
 
 
+def _migrate_v11_to_v12(document: dict[str, Any]) -> dict[str, Any]:
+    # Older projects keep their authored creation type and references.
+    # The new generation plan is optional on read and may be added on edit.
+    document["schema_version"] = 12
+    return document
+
+
+PROJECT_MIGRATIONS[11] = _migrate_v11_to_v12
+
+
 def _repair_v9_missing_audio_roles(document: dict[str, Any]) -> dict[str, Any]:
     """Same-version repair: stamp audio roles on pre-merge v9 documents.
 

@@ -614,6 +614,7 @@
     "videoModeT2v": "t2v 文生视频",
     "videoModeI2v": "i2v 图生视频",
     "videoModeEdit": "video_edit 视频编辑",
+    "videoModeExtend": "视频延长（前段视频）",
     "ttsFamilyNoteQwen": "Qwen-TTS 家族：系统音色可直接合成；声音复刻/设计绑定同家族伴随模型，创建后自动选用。两家族音色互不通用。",
     "ttsFamilyNoteCosy": "CosyVoice 家族：无系统音色，需先复刻或设计音色后才能合成；音色不能与 Qwen-TTS 家族混用。",
     "leaveBlankKeep": "留空以保持当前密钥",

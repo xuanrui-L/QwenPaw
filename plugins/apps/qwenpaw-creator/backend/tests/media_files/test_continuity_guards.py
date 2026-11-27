@@ -36,6 +36,7 @@ from services.project_files.models import (
     I2VCreation,
     Project,
     R2VCreation,
+    R2VGenerationPlan,
     T2VCreation,
     Timeline,
     TimelineElement,
@@ -91,14 +92,14 @@ def _select_prev_video(
     prev_element_id: str,
     version: str,
 ) -> None:
-    project.assets.artifact_slots_by_id[
-        f"element:{prev_element_id}:main"
-    ] = ArtifactSlot(
-        slot_id=f"element:{prev_element_id}:main",
-        owner_ref=f"element:{prev_element_id}",
-        kind="element_video",
-        version_ids=[version],
-        selected_version_id=version,
+    project.assets.artifact_slots_by_id[f"element:{prev_element_id}:main"] = (
+        ArtifactSlot(
+            slot_id=f"element:{prev_element_id}:main",
+            owner_ref=f"element:{prev_element_id}",
+            kind="element_video",
+            version_ids=[version],
+            selected_version_id=version,
+        )
     )
 
 
@@ -162,8 +163,12 @@ def _two_segment_project(prev_version: str | None = None):
     # the intent explicitly.
     second.creation = second.creation.model_copy(
         update={
-            "transition_intent": "continue",
-            "storyboard_intent": "none",
+            "generation_plan": R2VGenerationPlan(
+                method="r2v_last_frame",
+                use_storyboard=False,
+                predecessor_element_id="e1",
+                anchor_instruction="保留上一动作",
+            ),
         },
     )
     project, timeline = _project([first, second])
@@ -321,14 +326,14 @@ def test_frozen_r2v_publishes_after_prev_reroll() -> None:
     second.outputs["storyboard"] = ElementOutput(
         slot_id="element:e2:storyboard",
     )
-    project.assets.artifact_slots_by_id[
-        "element:e2:storyboard"
-    ] = ArtifactSlot(
-        slot_id="element:e2:storyboard",
-        owner_ref="element:e2",
-        kind="r2v_storyboard_image",
-        version_ids=["sb-v1"],
-        selected_version_id="sb-v1",
+    project.assets.artifact_slots_by_id["element:e2:storyboard"] = (
+        ArtifactSlot(
+            slot_id="element:e2:storyboard",
+            owner_ref="element:e2",
+            kind="r2v_storyboard_image",
+            version_ids=["sb-v1"],
+            selected_version_id="sb-v1",
+        )
     )
     # Prev published as V1 when the task was admitted.
     _select_prev_video(project, "e1", "prevV1")
@@ -368,14 +373,14 @@ def test_frozen_r2v_quarantines_when_storyboard_changes() -> None:
     second.outputs["storyboard"] = ElementOutput(
         slot_id="element:e2:storyboard",
     )
-    project.assets.artifact_slots_by_id[
-        "element:e2:storyboard"
-    ] = ArtifactSlot(
-        slot_id="element:e2:storyboard",
-        owner_ref="element:e2",
-        kind="r2v_storyboard_image",
-        version_ids=["sb-v2"],
-        selected_version_id="sb-v2",
+    project.assets.artifact_slots_by_id["element:e2:storyboard"] = (
+        ArtifactSlot(
+            slot_id="element:e2:storyboard",
+            owner_ref="element:e2",
+            kind="r2v_storyboard_image",
+            version_ids=["sb-v2"],
+            selected_version_id="sb-v2",
+        )
     )
     _select_prev_video(project, "e1", "prevV1")
     frozen = _frozen_task(
@@ -446,8 +451,12 @@ def test_frozen_none_tier_publishes_without_storyboard() -> None:
     second = _element("e2", start=4000)
     second.creation = second.creation.model_copy(
         update={
-            "transition_intent": "continue",
-            "storyboard_intent": "none",
+            "generation_plan": R2VGenerationPlan(
+                method="r2v_last_frame",
+                use_storyboard=False,
+                predecessor_element_id="e1",
+                anchor_instruction="保留上一动作",
+            ),
         },
     )
     project, _timeline = _project([first, second])
@@ -525,39 +534,14 @@ def test_extract_registers_inflight_anchor(tmp_path, monkeypatch) -> None:
     assert sc._digest_for("v1") in inflight
 
 
-def test_missing_ffmpeg_drops_prev_chain_from_r2v_nodes() -> None:
-    """Minor-2 (graph side): when ffmpeg cannot run, anchors never
-    ship — r2v nodes must not chain on prev, and their fingerprint must
-    match the prev-less shape so a prev reroll cannot re-qualify parked
-    FAILED nodes for an unchanged-wire paid rerun. The optimistic
-    default still chains."""
-
+def test_missing_ffmpeg_blocks_the_selected_method():
     from services.file_agent_runtime.work_graph import derive_work_graph
 
-    def _anchored_pair():
-        pair_first = _element("e1", start=0)
-        pair_second = _element("e2", start=4000)
-        pair_second.creation = pair_second.creation.model_copy(
-            update={
-                "transition_intent": "continue",
-                "storyboard_intent": "none",
-            },
-        )
-        return _project([pair_first, pair_second])
-
-    project, _timeline = _anchored_pair()
-    _select_prev_video(project, "e1", "prev-version-1")
-    solo_project = _anchored_pair()[0]
-
+    project, _timeline, _first, _second = _two_segment_project("prev-v1")
     missing = derive_work_graph(project, ffmpeg_ready=False).by_id["video:e2"]
-    solo = derive_work_graph(solo_project, ffmpeg_ready=False).by_id[
-        "video:e2"
-    ]
-    assert "video:e1" not in missing.deps
-    assert missing.dispatch_fingerprint == solo.dispatch_fingerprint
-
-    optimistic = derive_work_graph(project).by_id["video:e2"]
-    assert "video:e1" in optimistic.deps
+    assert "video:e1" in missing.deps
+    assert missing.status.value == "gated"
+    assert "ffmpeg" in missing.missing[0]
 
 
 def test_bgm_excerpt_parallel_same_source_budget(
@@ -745,52 +729,47 @@ def test_bgm_reference_budget_matrix(
     assert resolve(with_bgm, bgm_tl, voice_count=0) == ""
 
 
-def test_over_budget_one_take_claim_rejects_prev_reroll() -> None:
-    """CR round-12 P2-1: an over-budget one_take falls back to the
-    ANCHORED r2v shape — the fingerprint must then carry the anchor,
-    so a predecessor reroll between ADMIT and SUBMIT fails the claim
-    instead of paying for a stale opening."""
-
+def test_over_budget_extension_cannot_fall_back_to_an_anchor(
+    tmp_path, monkeypatch
+):
+    from domain.errors import ValidationError
     from services.media_files import r2v_execution as rx
-    from services.project_files.models import ArtifactVersion
+    from services.media_files import segment_continuity as sc
 
-    project, timeline, first, second = _two_segment_project()
-    second.creation = second.creation.model_copy(
-        update={"transition_intent": "one_take"},
+    project, timeline, _first, second = _two_segment_project("prev-v1")
+    second.creation.generation_plan = R2VGenerationPlan(
+        method="video_extend",
+        use_storyboard=False,
+        predecessor_element_id="e1",
     )
-    _select_prev_video(project, "e1", "prev-v1")
-    project.assets.artifact_versions_by_id["prev-v1"] = ArtifactVersion(
-        version_id="prev-v1",
-        name="prev-v1",
-        slot_id="element:e1:video",
-        kind="artifact_video",
-        owner_ref="element:e1",
-        file_id="file-prev-v1",
-        checksum="5" * 64,
-        based_on_generation=1,
-        provenance_refs=[],
-        stale=False,
-        created_at="2026-08-05T00:00:00Z",
-        duration_seconds=31.0,
+    source = tmp_path / "prev.mp4"
+    source.touch()
+    _mock_ffmpeg_paths(monkeypatch)
+    monkeypatch.setattr(sc, "_resolve_prev_video_path", lambda *_: source)
+    monkeypatch.setattr(sc, "_probe_duration", lambda *_: 31.0)
+    monkeypatch.setattr(
+        "models.config.get_video_model_name", lambda: "wan3.0-video-prime"
     )
-    # 31s material + 4s segment busts the extend budget: the plan
-    # anchors instead of extending, and the mirror must agree.
-    refs = rx._reference_ids_with_continuity(
-        project,
-        timeline,
-        second,
-        mode="r2v",
+    with pytest.raises(ValidationError, match="时长超过模型限制"):
+        rx._build_task_plan(
+            project,
+            tmp_path,
+            timeline,
+            second,
+            base_mode="r2v",
+            duration_seconds=4,
+            ratio="16:9",
+        )
+    frozen = rx._submission_input_fingerprint(
+        project, "e2", mode="video_extend"
     )
-    assert refs[0] == "continuity:last_frame:prev-v1"
-
-    frozen = rx._submission_input_fingerprint(project, "e2", mode="r2v")
     _select_prev_video(project, "e1", "prev-v2")
     assert not rx._matches_submission_inputs(
         project,
         "e2",
         frozen,
-        mode="r2v",
-        payload_refs=["continuity:last_frame:prev-v1"],
+        mode="video_extend",
+        payload_refs=["prev-v1"],
     )
 
 
@@ -917,101 +896,61 @@ def test_auto_first_frame_publishes_despite_authored_tail() -> None:
     )
 
 
-def test_default_continuous_and_authored_cut_agree_across_layers() -> None:
-    """CR round-11: the DEFAULT is continuous — missing intent anchors
-    on the same scene across scheduler, executor gate, fingerprint
-    mirror and work graph; an authored cut turns all layers off
-    together, and an authored continue anchors even across scenes."""
-
+def test_explicit_plan_controls_reference_identity_when_prose_suggests_a_cut():
     from services.file_agent_runtime.work_graph import derive_work_graph
     from services.media_files import r2v_execution as rx
 
     project, timeline, _first, second = _two_segment_project("prev-v")
     _storyboard_selected(project, second)
-    second.creation = second.creation.model_copy(
-        update={
-            "transition_intent": None,
-            "storyboard_intent": None,
-        },
+    second.creation.continuity = "切去几年以后"
+    refs = rx._reference_ids_with_continuity(project, timeline, second)
+    assert refs == ("continuity:last_frame:prev-v",)
+    assert derive_work_graph(project, ffmpeg_ready=True).by_id[
+        "video:e2"
+    ].deps == ("video:e1",)
+    second.creation.generation_plan = R2VGenerationPlan(
+        method="r2v", use_storyboard=True
     )
-
-    assert rx._r2v_strong_continuity(project, timeline, second) is True
-    refs = rx._reference_ids_with_continuity(
-        project,
-        timeline,
-        second,
-        mode="r2v",
+    second.creation.continuity = "接上前一帧"
+    assert rx._reference_ids_with_continuity(project, timeline, second) == (
+        "sb-v1",
     )
-    assert refs[0].startswith("continuity:last_frame:")
-    graph = derive_work_graph(project, ffmpeg_ready=True)
-    deps = graph.by_id["video:e2"].deps
-    assert "video:e1" in deps
-    assert "storyboard:e2" in deps
-
-    # Authored cut switches every layer off together.
-    second.creation = second.creation.model_copy(
-        update={"transition_intent": "cut"},
-    )
-    assert rx._r2v_strong_continuity(project, timeline, second) is False
-    refs = rx._reference_ids_with_continuity(
-        project,
-        timeline,
-        second,
-        mode="r2v",
-    )
-    assert refs == ("sb-v1",)
-    graph = derive_work_graph(project, ffmpeg_ready=True)
-    assert "video:e1" not in graph.by_id["video:e2"].deps
-
-    # Authored continue anchors even across scenes.
-    second.creation = second.creation.model_copy(
-        update={
-            "transition_intent": "continue",
-            "scene_ref": "scene:elsewhere",
-        },
-    )
-    assert rx._r2v_strong_continuity(project, timeline, second) is True
+    assert derive_work_graph(project, ffmpeg_ready=True).by_id[
+        "video:e2"
+    ].deps == ("storyboard:e2",)
 
 
-def test_missing_intent_fields_default_to_continuous() -> None:
-    """Product default: continuity is ON. Absent intent fields fall
-    back to the scene/cast hard default (same scene anchors, scene
-    change does not) — prose is never consulted."""
+def test_legacy_projects_do_not_infer_a_new_generation_method():
+    from services.file_agent_runtime.work_graph import derive_work_graph
+    from services.media_files import r2v_execution as rx
 
-    from models.video_task_plans import (
-        r2v_continuity_storyboard_need,
-        r2v_may_consume_predecessor,
+    project, timeline, _first, second = _two_segment_project("prev-v")
+    second.creation.generation_plan = None
+    second.creation.transition_intent = "one_take"
+    second.creation.storyboard_intent = "none"
+    assert not rx._r2v_strong_continuity(project, timeline, second)
+    assert derive_work_graph(project).by_id["video:e2"].deps == (
+        "storyboard:e2",
     )
 
-    project, timeline, first, second = _two_segment_project("prev-v")
-    second.creation = second.creation.model_copy(
-        update={
-            "transition_intent": None,
-            "storyboard_intent": None,
-            "video_prompt": "镜头环绕人物一周。",
-        },
-    )
-    assert (
-        r2v_may_consume_predecessor(
-            timeline.elements_by_id,
-            second,
-            first,
+
+def test_extend_rejects_a_prompt_referencing_an_unsent_image(tmp_path):
+    from domain.errors import ValidationError
+    from models.video_task_plans import VideoTaskKind, VideoTaskPlan
+    from services.media_files import r2v_execution as rx
+
+    project, _timeline, _first, second = _two_segment_project("prev-v")
+    with pytest.raises(ValidationError, match="不能引用未发送的图片"):
+        rx._resolve_extend_request(
+            project=project,
+            project_root=tmp_path,
+            element=second,
+            element_id=second.element_id,
+            target_ref="element:e2",
+            plan=VideoTaskPlan(kind=VideoTaskKind.VIDEO_EXTEND),
+            prompt="参考 [Image 1] 的服装。",
+            resolution="720P",
+            watermark=False,
+            generate_audio=True,
+            duration_seconds=4,
         )
-        is True
-    )
-    assert (
-        r2v_continuity_storyboard_need(project, timeline, second) == "combined"
-    )
-
-    second.creation = second.creation.model_copy(
-        update={"scene_ref": "scene:elsewhere"},
-    )
-    assert (
-        r2v_may_consume_predecessor(
-            timeline.elements_by_id,
-            second,
-            first,
-        )
-        is False
-    )
-    assert r2v_continuity_storyboard_need(project, timeline, second) == "plain"

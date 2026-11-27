@@ -1305,7 +1305,8 @@ def _family_constraint_guidance(
             ]
             if is_kling_omni_model(model_name):
                 lines += [
-                    "- 时长 duration 为 3–15 秒的整数；分辨率仅支持" + " 720p/1080p/4k。",
+                    "- 时长 duration 为 3–15 秒的整数；分辨率仅支持"
+                    + " 720p/1080p/4k。",
                     "- r2v 参考图最多 7 张；可额外携带 1 个特征参考视频，"
                     + "此时参考图最多 4 张且 audio 必须为 off。video prompt"
                     + " 用 @image_N 按参考顺序引用图片（视频用 @video_1）。",
@@ -1529,9 +1530,11 @@ def _image_reference_marker_spec(
         backend == "wan" and _WAN_27_MODEL_PATTERN.fullmatch(normalized)
     ):
         return (
-            re.compile(r"图\s*(\d+)")
-            if is_chinese
-            else re.compile(r"\bImage\s+(\d+)\b", re.IGNORECASE),
+            (
+                re.compile(r"图\s*(\d+)")
+                if is_chinese
+                else re.compile(r"\bImage\s+(\d+)\b", re.IGNORECASE)
+            ),
             "图{index}" if is_chinese else "Image {index}",
         )
     if backend == "wan" and _WAN_26_MODEL_PATTERN.fullmatch(normalized):
@@ -1541,9 +1544,11 @@ def _image_reference_marker_spec(
         )
     if backend == "seedance2":
         return (
-            re.compile(r"图片\s*(\d+)")
-            if is_chinese
-            else re.compile(r"\bimage\s*(\d+)\b", re.IGNORECASE),
+            (
+                re.compile(r"图片\s*(\d+)")
+                if is_chinese
+                else re.compile(r"\bimage\s*(\d+)\b", re.IGNORECASE)
+            ),
             "图片{index}" if is_chinese else "image{index}",
         )
     if backend == "kling":
@@ -1815,7 +1820,10 @@ def video_model_duration_guidance(
         )
     if backend == "kling":
         if is_kling_omni_model(normalized):
-            return f"当前视频模型 `{normalized}` 支持 3–15 秒整数；携带特征" "参考视频时上限降为 10 秒。"
+            return (
+                f"当前视频模型 `{normalized}` 支持 3–15 秒整数；携带特征"
+                "参考视频时上限降为 10 秒。"
+            )
         return f"当前视频模型 `{normalized}` 只支持 5 或 10 秒。"
     if backend == "minimax":
         return (
@@ -1871,12 +1879,24 @@ def video_model_delegator_guidance(
         else "该模型是单模型能力声明，提交时保持原模型 ID。"
     )
     rejected_note = (
-        " 不得创建这些视频类型：" + "、".join(rejected) + "。" if rejected else ""
+        " 不得创建这些视频类型：" + "、".join(rejected) + "。"
+        if rejected
+        else ""
     )
     constraints = _family_constraint_guidance(normalized, protocol_backend)
+    creation_types = [
+        mode for mode in supported if mode in {"r2v", "t2v", "i2v"}
+    ]
+    extension_note = (
+        " 支持视频延长：以 creation.type=r2v 保存镜头，并在 generation_plan"
+        " 中明确选 video_extend。"
+        if "video_extend" in supported
+        else " 当前不支持 generation_plan.method=video_extend。"
+    )
     guidance = (
-        f"当前精确视频模型 `{normalized}` 仅允许 creation.type="
-        f"{','.join(supported)}（{mapping}）。{suffix_note}{rejected_note}"
+        f"当前视频模型 `{normalized}` 支持的生成型 creation.type="
+        f"{','.join(creation_types)}。执行能力：{mapping}。{suffix_note}{rejected_note}"
+        f"{extension_note}"
         " r2v 可由工作图在依赖就绪后自动生成；t2v/i2v 并不因此自动"
         "调度，只有用户目标确实需要且模型支持时才创建对应 Element。"
     )

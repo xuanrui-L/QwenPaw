@@ -262,6 +262,7 @@ def _prune_artifact_references(
             # the storyboard slot), so a single value is pruned like a list.
             for field in (
                 "first_frame_version_id",
+                "last_frame_version_id",
                 "portrait_version_id",
                 "audio_version_id",
             ):
@@ -646,7 +647,8 @@ def _render_rejection_feedback(
     else:
         lines = [
             "【系统记录 · 用户审阅反馈】",
-            "用户已移除以下产出，但没有要求重做。不要自行重新生成这些目标；" + "只有用户后续明确提出时才能重做。",
+            "用户已移除以下产出，但没有要求重做。不要自行重新生成这些目标；"
+            + "只有用户后续明确提出时才能重做。",
             "目标：",
             *target_lines,
         ]

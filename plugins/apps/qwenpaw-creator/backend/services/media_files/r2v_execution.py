@@ -20,6 +20,7 @@ provider task id is never submitted again after its safety lease expires.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -59,11 +60,14 @@ from domain.errors import (
 from models.config import is_media_review_enabled
 from models.reference_markers import canonical_marker_indices
 from models.video_task_plans import (
-    ContinuityFacts,
     continuity_signals,
     VideoTaskKind,
     VideoTaskPlan,
-    select_video_task_kind,
+    planned_predecessor,
+    uses_storyboard,
+    WAN_30_EXTEND_HEADROOM_SECONDS,
+    WAN_30_MAX_INPUT_PLUS_OUTPUT_SECONDS,
+    WAN_30_MAX_REFERENCE_VIDEO_SECONDS,
 )
 from schemas.common import StrictModel
 from services.prompt_text import (
@@ -315,11 +319,9 @@ class R2VProvider(Protocol):
         last_frame_url: str | None = None,
         video_url: str | None = None,
         reference_voice_urls: Sequence[str] = (),
-    ) -> str:
-        ...
+    ) -> str: ...
 
-    async def poll(self, provider_task_id: str) -> Mapping[str, Any]:
-        ...
+    async def poll(self, provider_task_id: str) -> Mapping[str, Any]: ...
 
     async def submit_s2v(
         self,
@@ -327,11 +329,9 @@ class R2VProvider(Protocol):
         image_url: str,
         audio_url: str,
         resolution: str,
-    ) -> str:
-        ...
+    ) -> str: ...
 
-    async def poll_s2v(self, provider_task_id: str) -> Mapping[str, Any]:
-        ...
+    async def poll_s2v(self, provider_task_id: str) -> Mapping[str, Any]: ...
 
 
 class ExistingR2VProvider:
@@ -1420,7 +1420,9 @@ def _reference_ids_with_continuity(
         # The extension's only continuity input is the predecessor's real
         # published artifact; a reroll changes this version and drifts
         # the fingerprint naturally (no synthetic ids needed).
-        prev = find_predecessor_video_element(timeline, element)
+        prev = planned_predecessor(timeline, element)
+        if prev is None and legacy_intent_rule:
+            prev = find_predecessor_video_element(timeline, element)
         ver = (
             resolve_predecessor_video_version(project, prev) if prev else None
         )
@@ -1438,10 +1440,16 @@ def _reference_ids_with_continuity(
             # predecessor rerolls (claim fails, parked FAILED re-
             # qualifies) exactly like the old injected anchors did.
             # Share the resolver's swap decision via _storyboard_swap_for.
-            anchors = continuity_reference_ids(project, timeline, element)
+            predecessor = planned_predecessor(timeline, element)
+            anchors = continuity_reference_ids(
+                project,
+                timeline,
+                element,
+                predecessor=predecessor,
+            )
             if not anchors:
                 return base
-            if (
+            if creation.generation_plan is None and (
                 _storyboard_swap_for(
                     str(getattr(creation, "video_prompt", "") or ""),
                     project,
@@ -1464,7 +1472,15 @@ def _reference_ids_with_continuity(
             # Explicit input already lives inside ``creation`` in the
             # fingerprint payload; nothing to add.
             return ()
-        continuity = continuity_reference_ids(project, timeline, element)
+        predecessor = planned_predecessor(timeline, element)
+        if predecessor is None and not legacy_intent_rule:
+            return ()
+        continuity = continuity_reference_ids(
+            project,
+            timeline,
+            element,
+            predecessor=predecessor,
+        )
         # Only the last-frame ID actually flows into the first-frame
         # slot; the tail clip is not consumed in I2V mode.
         return (continuity[0],) if continuity else ()
@@ -1482,6 +1498,9 @@ def _submission_input_fingerprint(
     timeline, element = find_timeline_element(project, element_id)
     creation = element.creation.model_dump(mode="json")
     creation.pop("prompt_sync", None)
+    for field in ("generation_plan", "predecessor_element_id"):
+        if creation.get(field) is None:
+            creation.pop(field, None)
     if not include_default_audio and creation.get("generate_audio") is True:
         del creation["generate_audio"]
     references = _reference_ids_with_continuity(
@@ -1545,6 +1564,9 @@ def _submission_input_fingerprint_legacy(
     timeline, element = find_timeline_element(project, element_id)
     creation = element.creation.model_dump(mode="json")
     creation.pop("prompt_sync", None)
+    for field in ("generation_plan", "predecessor_element_id"):
+        if creation.get(field) is None:
+            creation.pop(field, None)
     # Pre-force_storyboard builds serialized without the field at all.
     # The default (False) collapses to that historical shape so old
     # frozen digests still validate; an explicit True is a real input
@@ -1610,11 +1632,16 @@ def _matches_submission_inputs(
             project,
             element_id,
         )
+        try:
+            predecessor = planned_predecessor(_claim_timeline, _claim_element)
+        except ValidationError:
+            return False
         _current_anchors = set(
             continuity_reference_ids(
                 project,
                 _claim_timeline,
                 _claim_element,
+                predecessor=predecessor,
             ),
         )
         if any(
@@ -1687,14 +1714,12 @@ def _r2v_strong_continuity(
     *,
     legacy_intent_rule: bool = False,
 ) -> bool:
-    """Whether the r2v submit path will (did) promote a last-frame anchor.
-
-    Mirrors the planner's rules 1-4 and 6 from durable project data plus
-    the ffmpeg probe. Rule 5 (one-take extension) counts as "not strong"
-    whenever the model could extend: that dispatch ships as VIDEO_EXTEND
-    with its own fingerprint mode.
-    """
-
+    """Read the authored method, or reconstruct a frozen legacy digest."""
+    plan = getattr(element.creation, "generation_plan", None)
+    if plan is not None:
+        return plan.method == "r2v_last_frame"
+    if not legacy_intent_rule:
+        return False
     prev = find_predecessor_video_element(timeline, element)
     if prev is None or not resolve_predecessor_video_version(project, prev):
         return False
@@ -1703,16 +1728,7 @@ def _r2v_strong_continuity(
         element,
         prev,
     )
-    if legacy_intent_rule:
-        # Historical builds anchored on "not cut": replaying their
-        # frozen digests must reproduce THAT rule, never the current
-        # conservative default.
-        if transition_kind != "none" or intent == "cut":
-            return False
-    elif transition_kind != "none" or intent == "cut":
-        # Authored cut (or an explicit transition) switches the
-        # anchored shape off; missing intent falls through to the
-        # default-continuous scene gate below.
+    if transition_kind != "none" or intent == "cut":
         return False
     authored = getattr(element.creation, "transition_intent", None)
     if authored not in ("continue", "one_take"):
@@ -1807,7 +1823,9 @@ def _shift_authored_image_refs(prompt: str, delta: int) -> str:
 _STORYBOARD_CLAUSE_RE = re.compile(
     r"\[Image 1\][^；。\n]*?(?:分镜图|上一片段末帧)[^；。\n]*?[；。]",
 )
-_ANCHOR_CLAUSE = "[Image 1] 为上一片段末帧（本段起始画面），第一帧严格对齐该图；"
+_ANCHOR_CLAUSE = (
+    "[Image 1] 为上一片段末帧（本段起始画面），第一帧严格对齐该图；"
+)
 
 
 def _storyboard_anchor_swap(prompt: str) -> str | None:
@@ -1969,7 +1987,11 @@ def _rebuild_prompt_without_anchor(
             "猜测删除。",
         )
     if cancelled or has_lastframe or opening_dangles:
-        note = "\n[衔接说明] 本段不发送上一段末帧引用；" + "叙述中关于上一段末帧的指令作废，" + "参考职责以职责表为准。"
+        note = (
+            "\n[衔接说明] 本段不发送上一段末帧引用；"
+            + "叙述中关于上一段末帧的指令作废，"
+            + "参考职责以职责表为准。"
+        )
         if opening_dangles:
             note += "本段未发送任何参考图，开场对齐指令亦作废。"
         prompt += note
@@ -2128,7 +2150,8 @@ def _resolve_bgm_reference(
             component="r2v.bgm",
             code="BGM_SKIPPED_BUDGET",
             message=(
-                "reference_audio 槽位预算不足以同时装角色音色与配乐，" "本段跳过 bgm 参考音频（音乐退回原生生成）"
+                "reference_audio 槽位预算不足以同时装角色音色与配乐，"
+                "本段跳过 bgm 参考音频（音乐退回原生生成）"
             ),
             project_id=str(project.project_id),
             element_id=element_id,
@@ -2141,7 +2164,10 @@ def _resolve_bgm_reference(
         report_error(
             component="r2v.bgm",
             code="BGM_SKIPPED_AUDIO_BUDGET",
-            message=("角色音色参考音频已占满 15s 总时长预算，" "本段跳过 bgm 参考音频（音乐退回原生生成）"),
+            message=(
+                "角色音色参考音频已占满 15s 总时长预算，"
+                "本段跳过 bgm 参考音频（音乐退回原生生成）"
+            ),
             project_id=str(project.project_id),
             element_id=element_id,
             voice_count=voice_count,
@@ -2309,18 +2335,7 @@ def _build_task_plan(
     duration_seconds: int,
     ratio: str,
 ) -> VideoTaskPlan:
-    """Route one segment submission onto a first-class task kind.
-
-    Gathers only durable published facts (predecessor resolution and
-    version, probed material duration, scene identity, newly introduced
-    characters/props, ffmpeg availability, model extension contract) so
-    the same project state always routes the same way and a claim/replay
-    on a later dispatch re-derives honestly. Non-r2v base modes pass
-    through unchanged; for r2v the planner applies the continuity rules
-    (same scene + no new elements + budget → VIDEO_EXTEND, else I2V
-    auto-first-frame, else pure R2V).
-    """
-
+    """Prepare the model-authored method and validate its concrete inputs."""
     from models import config as model_config
     from models.video_capabilities import supports_video_continuation
     from services.file_agent_runtime.work_graph import probe_ffmpeg_ready
@@ -2328,77 +2343,67 @@ def _build_task_plan(
         _probe_duration,
         _resolve_prev_video_path,
     )
-
-    creation = element.creation
-    prev = find_predecessor_video_element(timeline, element)
-    prev_version = ""
-    prev_duration = 0.0
-    same_scene = False
-    new_elements = False
-    has_prev = False
-    transition_kind, continuity_intent, one_take = _continuity_signals(
-        timeline,
-        element,
-        prev,
+    from services.runtime_files.runtime_dependencies import (
+        resolve_ffmpeg,
+        resolve_ffprobe,
     )
-    if prev is not None:
-        resolved = resolve_predecessor_video_version(project, prev)
-        if resolved:
-            has_prev = True
-            prev_version = resolved
-            prev_scene = getattr(prev.creation, "scene_ref", None)
-            cur_scene = getattr(creation, "scene_ref", None)
-            same_scene = bool(prev_scene) and prev_scene == cur_scene
-            prev_refs = set(getattr(prev.creation, "character_refs", []) or [])
-            prev_refs |= set(getattr(prev.creation, "prop_refs", []) or [])
-            cur_refs = set(getattr(creation, "character_refs", []) or [])
-            cur_refs |= set(getattr(creation, "prop_refs", []) or [])
-            new_elements = bool(cur_refs - prev_refs)
-            try:
-                source = _resolve_prev_video_path(
-                    project,
-                    project_root,
-                    prev_version,
-                )
-                from services.runtime_files.runtime_dependencies import (
-                    resolve_ffmpeg,
-                    resolve_ffprobe,
-                )
 
-                ffprobe_path = resolve_ffprobe(
-                    ffmpeg_path=resolve_ffmpeg(),
-                )
-                if ffprobe_path and source.exists():
-                    prev_duration = _probe_duration(source, ffprobe_path)
-            except (RuntimeError, ValidationError, OSError):
-                # Unknown material length: the planner's budget check
-                # then declines VIDEO_EXTEND and falls back safely.
-                prev_duration = 0.0
-    facts = ContinuityFacts(
-        creation_type=str(getattr(creation, "type", base_mode)),
-        has_published_predecessor=has_prev,
-        predecessor_version_id=prev_version,
-        predecessor_duration_seconds=prev_duration,
-        same_scene=same_scene,
-        cross_episode=prev is None,
-        new_elements=new_elements,
-        explicit_first_frame=bool(
-            getattr(creation, "first_frame_version_id", ""),
-        ),
-        segment_duration_seconds=duration_seconds,
-        ffmpeg_ready=bool(probe_ffmpeg_ready()),
-        video_extension_supported=supports_video_continuation(
-            model_config.get_video_model_name(),
-            model_config.get_video_backend(),
-        ),
-        transition_kind=transition_kind,
-        continuity_intent=continuity_intent,
-        one_take=one_take,
+    plan = element.creation.generation_plan
+    if plan is None or plan.method == "r2v":
+        return VideoTaskPlan(
+            kind=VideoTaskKind(base_mode),
+            ratio=ratio,
+            submit_duration_seconds=duration_seconds,
+        )
+
+    predecessor = planned_predecessor(timeline, element)
+    version = (
+        resolve_predecessor_video_version(project, predecessor)
+        if predecessor is not None
+        else None
     )
-    return select_video_task_kind(
-        base_mode,
-        facts,
-        project_ratio=ratio,
+    if not version:
+        raise ValidationError("生成方案引用的前段视频尚未发布")
+    if not probe_ffmpeg_ready():
+        raise ValidationError(
+            "当前生成方案需要 ffmpeg/ffprobe；修复依赖或重选生成方案"
+        )
+    if plan.method == "r2v_last_frame":
+        return VideoTaskPlan(
+            kind=VideoTaskKind.R2V,
+            predecessor_version_id=version,
+            ratio=ratio,
+            submit_duration_seconds=duration_seconds,
+            strong_continuity=True,
+        )
+
+    if not supports_video_continuation(
+        model_config.get_video_model_name(),
+        model_config.get_video_backend(),
+    ):
+        raise ValidationError("当前视频模型不支持视频延长；请重选生成方案")
+    source = _resolve_prev_video_path(project, project_root, version)
+    ffprobe = resolve_ffprobe(ffmpeg_path=resolve_ffmpeg())
+    if not ffprobe or not source.exists():
+        raise ValidationError(
+            "无法读取延长素材时长；请检查前段视频或重选生成方案"
+        )
+    material_seconds = _probe_duration(source, ffprobe)
+    budget = (
+        WAN_30_MAX_INPUT_PLUS_OUTPUT_SECONDS - WAN_30_EXTEND_HEADROOM_SECONDS
+    )
+    if (
+        not 0 < material_seconds <= WAN_30_MAX_REFERENCE_VIDEO_SECONDS
+        or math.ceil(material_seconds + duration_seconds) > budget
+    ):
+        raise ValidationError("延长素材或总时长超过模型限制；请重选生成方案")
+    return VideoTaskPlan(
+        kind=VideoTaskKind.VIDEO_EXTEND,
+        predecessor_version_id=version,
+        material_duration_seconds=material_seconds,
+        ratio="adaptive",
+        submit_duration_seconds=math.ceil(material_seconds + duration_seconds),
+        trim_offset_seconds=material_seconds,
     )
 
 
@@ -2428,6 +2433,12 @@ def _resolve_extend_request(
     so the segment artifact never duplicates its predecessor.
     """
 
+    from models.reference_markers import CANONICAL_MARKER_PATTERN
+
+    if CANONICAL_MARKER_PATTERN.search(prompt):
+        raise ValidationError(
+            "视频延长只发送前段视频，提示词不能引用未发送的图片"
+        )
     prev_version = plan.predecessor_version_id
     video_url, checksum, ref, entry = _resolve_single_media_version(
         project=project,
@@ -2436,24 +2447,7 @@ def _resolve_extend_request(
         media_prefix="video/",
         label="extendMaterial",
     )
-    # The r2v video node's staleness check requires the Element's
-    # storyboard selection to appear in the artifact provenance. Extend
-    # does not *send* the storyboard, but it is still the authored visual
-    # plan for this segment; recording it keeps a published extend
-    # artifact from reading as perpetually STALE (which would auto-
-    # regenerate it in a loop) while still re-opening on storyboard edits.
-    provenance = [ref]
-    storyboard_slot = project.assets.artifact_slots_by_id.get(
-        f"element:{element.element_id}:storyboard",
-    )
-    storyboard_selected = getattr(
-        storyboard_slot,
-        "selected_version_id",
-        None,
-    )
-    if storyboard_selected:
-        provenance.append(f"artifact-version:{storyboard_selected}")
-    extend_prompt = "将视频1向后延长，保持人物、场景、运镜与环境声与前段连贯，" "随后展开本段新内容：\n" + prompt
+    extend_prompt = "以上一段视频为延长素材，随后展开本段内容：\n" + prompt
     return _ResolvedR2V(
         target_ref=target_ref,
         element_id=element_id,
@@ -2467,7 +2461,7 @@ def _resolve_extend_request(
         reference_version_ids=(prev_version,),
         reference_urls=(video_url,),
         reference_checksums=(checksum,),
-        provenance_refs=tuple(provenance),
+        provenance_refs=(ref,),
         read_set=(entry,),
         reference_voice_urls=(),
         slot_id=f"element:{element_id}:main",
@@ -2498,7 +2492,7 @@ def _i2v_auto_first_frame_entry(
     ``CONTINUITY_LAST_FRAME_MISSING``.
     """
 
-    prev = find_predecessor_video_element(timeline, element)
+    prev = planned_predecessor(timeline, element)
     if prev is None:
         return None
     if not resolve_predecessor_video_version(project, prev):
@@ -2509,6 +2503,7 @@ def _i2v_auto_first_frame_entry(
             project_root=project_root,
             timeline=timeline,
             element=element,
+            predecessor=prev,
         )
     except (RuntimeError, ValidationError) as error:
         report_error(
@@ -2527,7 +2522,7 @@ def _i2v_auto_first_frame_entry(
         report_error(
             component="i2v.continuity",
             code="CONTINUITY_LAST_FRAME_MISSING",
-            message="段间衔接 bundle 缺少 last_frame，I2V 自动首帧兜底不可用",
+            message="段间衔接 bundle 缺少 last_frame，所选的前段末帧不可用",
             project_id=str(project.project_id),
             element_id=element.element_id,
             prev_element_id=prev.element_id,
@@ -2543,10 +2538,8 @@ def _validate_authored_marker_bounds(
 ) -> None:
     """Reject ``[Image N]`` markers past the plan's IMAGE sequence.
 
-    The bound is the PRE-CONTINUITY plan's image count (anchors are not
-    authorable; video references consume no image ordinal), so a
-    mis-counted marker fails here instead of shipping inside a paid
-    request.
+    The bound comes from the actual image sequence, including an explicitly
+    selected anchor. Video references use separate ordinals.
     """
 
     plan_kinds = [
@@ -2618,12 +2611,7 @@ def _resolve_request(
         ).strip()
     i2v_continuity_entry = None
     if mode == "i2v" and not first_frame_ref:
-        # Neither the tool argument nor the Element declares a first
-        # frame: fall back to the previous segment's last frame so
-        # short-drama I2V chains stitch visually without the Agent
-        # having to author the version id per element. Preparing the
-        # extract here keeps the resolution branch below unchanged
-        # for the explicit case.
+        # The only alternate source is an explicitly selected predecessor.
         i2v_continuity_entry = _i2v_auto_first_frame_entry(
             project=project,
             project_root=project_root,
@@ -2635,14 +2623,21 @@ def _resolve_request(
     video_ref = str(arguments.get("videoRef") or "").strip()
     if mode == "i2v" and not first_frame_ref:
         raise ValidationError(
-            "i2v 模式必须提供 firstFrameRef（exact 图片 version id）或在 "
-            "creation.first_frame_version_id 声明首帧。自动抽取上一段末帧"
-            "不可用：或前一段视频尚未发布，或 ffmpeg/ffprobe 未就绪、抽取"
-            "失败（详见 CONTINUITY_EXTRACTION_FAILED 诊断记录）。",
+            "i2v 模式必须提供 firstFrameRef（exact 图片 version id）或填写 "
+            "creation.first_frame_version_id / predecessor_element_id。若已指定前段，"
+            "请确认视频已发布且 FFmpeg 可提取末帧。",
         )
     if mode == "video_edit" and not video_ref:
         raise ValidationError(
             "video_edit 模式必须提供 videoRef（exact 视频 version id）",
+        )
+    if (
+        mode == "i2v"
+        and arguments.get("firstFrameRef")
+        and creation.predecessor_element_id
+    ):
+        raise ValidationError(
+            "请求首帧与项目指定的前段冲突；请先修改项目生成方案"
         )
     if first_frame_ref and mode != "i2v":
         raise ValidationError("firstFrameRef 仅用于 i2v 模式")
@@ -2650,49 +2645,20 @@ def _resolve_request(
         raise ValidationError("videoRef 仅用于 video_edit 模式")
 
     storyboard_id: str | None = None
-    if mode == "r2v":
-        # Only r2v consumes the storyboard + reference stack; the other
-        # modes take their exact inputs from firstFrameRef / videoRef.
-        selected_storyboard = selected_element_output(
-            project,
-            element,
-            "storyboard",
-        )
-        storyboard_id = (
-            selected_storyboard[1] if selected_storyboard is not None else None
-        )
-        if not storyboard_id:
-            # Storyboard tiers: an anchored simple segment (``none``)
-            # ships on the last-frame anchor alone — no storyboard was
-            # ever generated, so the classic requirement does not
-            # apply. Every other shape still needs the visual plan.
-            from models.video_task_plans import (
-                r2v_continuity_storyboard_need,
+    if mode == "r2v" and uses_storyboard(creation):
+        selected = selected_element_output(project, element, "storyboard")
+        if selected is None:
+            raise ValidationError("R2V 生成方案尚未选择分镜产物")
+        storyboard_id = selected[1]
+        storyboard = project.assets.artifact_versions_by_id.get(storyboard_id)
+        if storyboard is None:
+            raise StorageIntegrityError(
+                "selected storyboard ArtifactVersion 不存在"
             )
-
-            if (
-                r2v_continuity_storyboard_need(
-                    project,
-                    timeline,
-                    element,
-                )
-                != "none"
-            ):
-                raise ValidationError(
-                    "R2V Element 尚未选择 storyboard ArtifactVersion",
-                )
-        else:
-            storyboard = project.assets.artifact_versions_by_id.get(
-                storyboard_id,
+        if storyboard.owner_ref != f"element:{element_id}":
+            raise StorageIntegrityError(
+                "selected storyboard 不属于目标 Element"
             )
-            if storyboard is None:
-                raise StorageIntegrityError(
-                    "selected storyboard ArtifactVersion 不存在",
-                )
-            if storyboard.owner_ref != f"element:{element_id}":
-                raise StorageIntegrityError(
-                    "selected storyboard 不属于目标 Element",
-                )
 
     prompt = str(arguments.get("prompt") or creation.video_prompt).strip()
     if not prompt:
@@ -2762,9 +2728,6 @@ def _resolve_request(
         version_ids = video_reference_plan(project, element)
         strong_anchor_entry = None
         if task_plan is not None and task_plan.strong_continuity:
-            # Promoted last-frame anchor leads at 图1; the author's
-            # [Image N] sentences shift +1. Stack order is the point
-            # (A/B numbers live in the video_task_plans module header).
             strong_anchor_entry = _i2v_auto_first_frame_entry(
                 project=project,
                 project_root=project_root,
@@ -2772,39 +2735,11 @@ def _resolve_request(
                 element=element,
             )
             if strong_anchor_entry is None:
-                # Extraction failed (already reported); plain r2v is
-                # the documented degradation, never a blocked segment.
-                task_plan = None
-            else:
-                swapped = _storyboard_swap_for(
-                    prompt,
-                    project,
-                    timeline,
-                    element,
+                raise ValidationError(
+                    "无法提取生成方案指定的末帧；请修复素材或重选方案"
                 )
-                if swapped is not None:
-                    # Swap shape: the storyboard leaves the stack and
-                    # the anchor inherits its 图1 slot, so every other
-                    # authored ordinal stays intact.
-                    prompt = swapped
-                    version_ids = (
-                        strong_anchor_entry.reference_id,
-                        *(
-                            item
-                            for item in version_ids
-                            if item != storyboard_id
-                        ),
-                    )
-                else:
-                    # Anchor leads and authored ordinals shift +1: the
-                    # combined tier (anchor AND storyboard) and the
-                    # non-rewritable fallback share this one shape.
-                    version_ids = (
-                        strong_anchor_entry.reference_id,
-                        *version_ids,
-                    )
-                    prompt = _shift_authored_image_refs(prompt, 1)
-        if mode == "r2v" and strong_anchor_entry is None:
+            version_ids = (strong_anchor_entry.reference_id, *version_ids)
+        if creation.generation_plan is None and strong_anchor_entry is None:
             # Off/weak/plain and failed-extraction paths all ship
             # without an anchor: rebuild the prompt against the stack
             # that actually rides (storyboard clause renamed to its
@@ -2872,18 +2807,14 @@ def _resolve_request(
             storyboard_id=storyboard_id,
             continuity_labels=(
                 {
-                    strong_anchor_entry.reference_id: ("上一片段末帧（本段起始画面）"),
+                    strong_anchor_entry.reference_id: "生成方案指定的前段末帧",
                 }
                 if strong_anchor_entry is not None
                 else None
             ),
         )
         if strong_anchor_entry is not None:
-            # Spec §2 wording: the first-frame imperative is the FIRST
-            # sentence, matching the controlled A/B shape that measured
-            # 0.786 ("图1 为本段起始状态，第一帧对齐图1，随后：…"), not a
-            # trailing afterthought competing with the role block.
-            prompt = _INJECTED_ANCHOR_PREFIX + prompt
+            prompt = f"图1是所选前段末帧，参考要求：{creation.generation_plan.anchor_instruction}\n{prompt}"
         bgm_reference_url = _resolve_bgm_reference(
             project,
             timeline,
@@ -2973,7 +2904,10 @@ def _resolve_request(
                 report_error(
                     component="i2v.last_frame",
                     code="I2V_LAST_FRAME_UNSUPPORTED",
-                    message=("当前视频模型不支持原生目标尾帧参数，" "本段沿用首帧回退继续生成。"),
+                    message=(
+                        "当前视频模型不支持原生目标尾帧参数，"
+                        "本段沿用首帧回退继续生成。"
+                    ),
                     project_id=str(project.project_id),
                     element_id=element_id,
                 )
@@ -3349,13 +3283,17 @@ class FileR2VExecutionService:
             else run.request_fingerprint
         )
         if not expected or fingerprint != expected:
-            raise StorageIntegrityError("R2V frozen request fingerprint 不一致")
+            raise StorageIntegrityError(
+                "R2V frozen request fingerprint 不一致"
+            )
         if (
             request.get("inputGeneration") != run.input_generation
             or request.get("inputEtag") != run.input_etag
             or request.get("targetRef") not in run.target_refs
         ):
-            raise StorageIntegrityError("R2V frozen request 与 Run input 不一致")
+            raise StorageIntegrityError(
+                "R2V frozen request 与 Run input 不一致"
+            )
         if task is not None and (
             task.run_id != run.run_id
             or task.input_generation != run.input_generation
@@ -3800,6 +3738,12 @@ class FileR2VExecutionService:
         }
         _, element = find_timeline_element(base.project, resolved.element_id)
         project_audio = getattr(element.creation, "generate_audio", True)
+        authored_plan = getattr(element.creation, "generation_plan", None)
+        if authored_plan is not None:
+            payload["generationPlan"] = authored_plan.model_dump(mode="json")
+        predecessor = getattr(element.creation, "predecessor_element_id", None)
+        if predecessor is not None:
+            payload["predecessorElementId"] = predecessor
         if project_audio != resolved.generate_audio:
             # An explicit command override can differ from the project intent.
             payload["projectGenerateAudio"] = project_audio
@@ -3818,13 +3762,13 @@ class FileR2VExecutionService:
             # same fingerprint-identity rule as the voice field.
             payload["continuityShape"] = resolved.continuity_shape
             if resolved.continuity_trim_offset:
-                payload[
-                    "continuityTrimOffset"
-                ] = resolved.continuity_trim_offset
+                payload["continuityTrimOffset"] = (
+                    resolved.continuity_trim_offset
+                )
         if resolved.provider_duration_seconds:
-            payload[
-                "providerDurationSeconds"
-            ] = resolved.provider_duration_seconds
+            payload["providerDurationSeconds"] = (
+                resolved.provider_duration_seconds
+            )
         if resolved.mode != "r2v":
             # Only non-default modes join the frozen request so legacy r2v
             # tasks keep their fingerprint identity across the upgrade.
@@ -4777,7 +4721,9 @@ class FileR2VExecutionService:
                 and current.request.get("inputEtag")
                 and snapshot.etag != current.request["inputEtag"]
             ):
-                raise ValidationError("视频输入已改变，请按最新分镜重新确认生成。")
+                raise ValidationError(
+                    "视频输入已改变，请按最新分镜重新确认生成。"
+                )
             dumped = current.model_dump(mode="python")
             dumped.update(
                 {
@@ -5693,7 +5639,9 @@ class FileR2VExecutionService:
                 )
             )
         except (TypeError, ValueError) as error:
-            raise ValidationError("R2V provider durationSeconds 非法") from error
+            raise ValidationError(
+                "R2V provider durationSeconds 非法"
+            ) from error
         if duration <= 0:
             raise ValidationError("R2V provider durationSeconds 必须为正数")
         return duration
@@ -6393,6 +6341,12 @@ class FileR2VExecutionService:
         if creation_type == "r2v":
             if not isinstance(creation, R2VCreation):
                 return False
+            if "generationPlan" in raw and (
+                creation.generation_plan is None
+                or creation.generation_plan.model_dump(mode="json")
+                != raw["generationPlan"]
+            ):
+                return False
             selected = selected_element_output(project, element, "storyboard")
             storyboard_id = selected[1] if selected is not None else None
             if not storyboard_id:
@@ -6405,12 +6359,16 @@ class FileR2VExecutionService:
                     r2v_continuity_storyboard_need,
                 )
 
-                if (
-                    r2v_continuity_storyboard_need(
-                        project,
-                        timeline,
-                        element,
+                legacy_anchor_without_storyboard = (
+                    creation.generation_plan is None
+                    and creation.storyboard_intent == "none"
+                    and any(
+                        str(ref).startswith("continuity:last_frame:")
+                        for ref in frozen_refs
                     )
+                )
+                if not legacy_anchor_without_storyboard and (
+                    r2v_continuity_storyboard_need(project, timeline, element)
                     != "none"
                 ):
                     return False
@@ -6424,6 +6382,8 @@ class FileR2VExecutionService:
             )
             if current_refs == [str(item) for item in frozen_refs]:
                 return True
+            if "generationPlan" in raw and raw.get("mode") == "video_extend":
+                return False
             # Already-paid requests retain their original exact inputs,
             # including the historical explicit-storyboard duplication.
             # This comparison never recompiles or resubmits that request;
@@ -6485,6 +6445,12 @@ class FileR2VExecutionService:
                 # input change) or the predecessor frame is gone entirely.
                 if getattr(creation, "first_frame_version_id", ""):
                     return False
+                if (
+                    "predecessorElementId" in raw
+                    and creation.predecessor_element_id
+                    != raw["predecessorElementId"]
+                ):
+                    return False
                 frozen_last = str(raw.get("lastFrameVersionId") or "")
                 if frozen_last and frozen_last != str(
                     getattr(creation, "last_frame_version_id", "") or "",
@@ -6492,9 +6458,24 @@ class FileR2VExecutionService:
                     # The shipped tail frame was re-authored since
                     # payment: a genuine input change, quarantine.
                     return False
+                try:
+                    predecessor = planned_predecessor(timeline, element)
+                except ValidationError:
+                    return False
                 return bool(
-                    continuity_reference_ids(project, timeline, element),
+                    continuity_reference_ids(
+                        project,
+                        timeline,
+                        element,
+                        predecessor=predecessor,
+                    )
                 )
+            authored_first_frame = creation.first_frame_version_id
+            if (
+                authored_first_frame
+                and authored_first_frame != resolved_first_frame
+            ):
+                return False
             current_refs = (
                 [resolved_first_frame] if resolved_first_frame else []
             )

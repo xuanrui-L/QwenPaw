@@ -31,7 +31,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_PROJECT_SCHEMA_VERSION = 11
+CURRENT_PROJECT_SCHEMA_VERSION = 12
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 
@@ -855,6 +855,29 @@ class R2VPromptSync(StrictModel):
     video_input_fingerprint: Sha256 | None = None
 
 
+class R2VGenerationPlan(StrictModel):
+    """A generation choice authored by the planning model for one shot."""
+
+    method: Literal["r2v", "r2v_last_frame", "video_extend"]
+    use_storyboard: bool
+    predecessor_element_id: EntityId | None = None
+    anchor_instruction: str = ""
+
+    @model_validator(mode="after")
+    def _validate_inputs(self) -> R2VGenerationPlan:
+        if (self.method != "r2v") != bool(self.predecessor_element_id):
+            raise ValueError(
+                "只有末帧参考和视频延长使用 predecessor_element_id"
+            )
+        if self.method == "video_extend" and self.use_storyboard:
+            raise ValueError("视频延长只接收前段视频，不能同时使用分镜")
+        if (self.method == "r2v_last_frame") != bool(
+            self.anchor_instruction.strip()
+        ):
+            raise ValueError("仅末帧参考方式需要填写 anchor_instruction")
+        return self
+
+
 class R2VCreation(StrictModel):
     """Declarative R2V creative facts, independent of the executing Agent."""
 
@@ -884,6 +907,7 @@ class R2VCreation(StrictModel):
     # planner; None keeps legacy projects on the vocabulary path.
     transition_intent: Literal["cut", "continue", "one_take"] | None = None
     storyboard_intent: Literal["needed", "none"] | None = None
+    generation_plan: R2VGenerationPlan | None = None
     storyboard_prompt: str = ""
     storyboard_reference_version_ids: list[EntityId] = Field(
         default_factory=list,
@@ -958,10 +982,8 @@ class I2VCreation(StrictModel):
     narrative: str = ""
     continuity: str = ""
     first_frame_version_id: EntityId | None = None
-    # Model-selected target END frame (persistable version ref). When
-    # set, the frame rides as a reference image with an explicit role
-    # sentence so providers without a native last-frame parameter
-    # still receive the target through the prompt.
+    predecessor_element_id: EntityId | None = None
+    # An exact end-frame version used when the provider supports it.
     last_frame_version_id: EntityId | None = None
     video_prompt: str = ""
     generate_audio: bool = Field(
@@ -969,6 +991,12 @@ class I2VCreation(StrictModel):
         description="Generate native video audio. Set false for silent footage.",
     )
     recipe: GenerationRecipe | None = None
+
+    @model_validator(mode="after")
+    def _validate_first_frame(self) -> I2VCreation:
+        if self.first_frame_version_id and self.predecessor_element_id:
+            raise ValueError("I2V 首帧请选择一个素材版本或一个前段镜头")
+        return self
 
 
 class S2VCreation(StrictModel):
@@ -1540,7 +1568,7 @@ class LinearPresentation(StrictModel):
 
 
 class Project(StrictModel):
-    schema_version: Literal[10, 11] = CURRENT_PROJECT_SCHEMA_VERSION
+    schema_version: Literal[10, 11, 12] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
     generation: int = Field(default=0, ge=0)
     created_at: UtcDateTime
@@ -2399,6 +2427,7 @@ __all__ = [
     "ProjectSettings",
     "ProjectSource",
     "R2VCreation",
+    "R2VGenerationPlan",
     "RenderSource",
     "MotionGraphic",
     "SourceAssetVersion",

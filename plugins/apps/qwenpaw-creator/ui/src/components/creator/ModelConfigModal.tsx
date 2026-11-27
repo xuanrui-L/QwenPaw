@@ -752,11 +752,48 @@ const PANE_OF_TYPE: Record<TabType, SettingsPane> = {
   s2v: "media",
 };
 
+function videoCanReuseLlmKey(protocol: string): boolean {
+  return /dashscope|百炼|token plan/i.test(protocol);
+}
+
+function connectionInputs(config: ModelConfigData, type: ModelType): string {
+  const item = config[type] as ModelConfigItem;
+  const itemInputs = [item.protocol, item.base_url, item.model_name, item.api_key];
+
+  switch (type) {
+    case "vlm":
+      return config.vlm.use_llm
+        ? connectionInputs(config, "llm")
+        : JSON.stringify(itemInputs);
+    case "embedding":
+      return JSON.stringify([
+        itemInputs,
+        config.embedding.reuse_vlm_key
+          ? [connectionInputs(config, "vlm"), connectionInputs(config, "llm")]
+          : null,
+      ]);
+    case "image":
+    case "video":
+    case "asr":
+    case "tts":
+    case "s2v":
+      return JSON.stringify([
+        itemInputs,
+        type === "asr" ? config.asr.provider : null,
+        type === "tts" ? config.tts.voice : null,
+        config[type].reuse_llm_key ? connectionInputs(config, "llm") : null,
+      ]);
+    default:
+      return JSON.stringify(itemInputs);
+  }
+}
+
 const VIDEO_MODE_LABEL_KEYS: Record<string, string> = {
   r2v: "modelConfig.videoModeR2v",
   t2v: "modelConfig.videoModeT2v",
   i2v: "modelConfig.videoModeI2v",
   video_edit: "modelConfig.videoModeEdit",
+  video_extend: "modelConfig.videoModeExtend",
 };
 
 function isWan3VideoModel(modelName: string): boolean {
@@ -1128,6 +1165,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     llm: true,
   });
+  const latestConfig = useRef(config);
+  latestConfig.current = config;
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [tested, setTested] = useState<Record<string, boolean>>({});
   const [testingLlmMultimodal, setTestingLlmMultimodal] = useState(false);
@@ -1299,6 +1338,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         merged.image.protocol = IMAGE_PROTOCOLS[0];
       if (!VIDEO_PROTOCOLS.includes(merged.video.protocol))
         merged.video.protocol = VIDEO_PROTOCOLS[0];
+      if (!videoCanReuseLlmKey(merged.video.protocol)) {
+        merged.video = { ...merged.video, reuse_llm_key: false };
+      }
       // A never-configured section arrives with empty base_url/model, and a
       // frozen preset URL cannot be typed in. Sections with a single
       // protocol (TTS/S2V) would therefore be unsavable, because switching
@@ -1422,7 +1464,16 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         return updated;
       });
       if (field !== "enabled") {
-        setTested((prev) => ({ ...prev, [type]: false }));
+        setTested((prev) => {
+          const result = { ...prev, [type]: false };
+          if (type === "llm") {
+            for (const section of ["image", "video", "tts", "asr", "s2v"] as const) {
+              if (config[section].reuse_llm_key) result[section] = false;
+            }
+            if (config.embedding.reuse_vlm_key) result.embedding = false;
+          }
+          return result;
+        });
         if (type === "llm" || type === "vlm") {
           setTested((prev) => ({
             ...prev,
@@ -1435,7 +1486,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         }
       }
     },
-    [config.grounding.search_reuse_llm, ttsModels],
+    [config, ttsModels],
   );
 
   const updateGrounding = useCallback(
@@ -1761,6 +1812,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
 
   const handleTest = useCallback(
     async (type: ModelType): Promise<boolean> => {
+      const inputs = connectionInputs(config, type);
       let item = config[type] as ModelConfigItem;
       if (type === "vlm" && config.vlm.use_llm) {
         item = config.llm;
@@ -1824,6 +1876,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           voice: type === "tts" ? config.tts.voice : undefined,
           require_api_key: !isFree,
         });
+        if (inputs !== connectionInputs(latestConfig.current, type)) return false;
         if (data.ok) {
           if (data.capability_verified === false) {
             // The backend only managed a free read-only call for this
@@ -1877,10 +1930,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       // handleTest validates the fields (warning toast when incomplete) and
       // returns whether the probe passed, but no longer enables the card
       // itself, so switch it on here only after a passing probe.
+      const inputs = connectionInputs(config, type);
       const ok = await handleTest(type);
-      if (ok) updateItem(type, "enabled", true);
+      if (ok && inputs === connectionInputs(latestConfig.current, type)) {
+        updateItem(type, "enabled", true);
+      }
     },
-    [handleTest, handleVlmToggle, updateItem],
+    [config, handleTest, handleVlmToggle, updateItem],
   );
 
   const handleGroundingTest = useCallback(async (): Promise<boolean> => {
@@ -1990,12 +2046,17 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       }
 
       for (const section of dirtySections) {
-        if (section !== "grounding" && !tested[section]) {
+        if (
+          section !== "grounding" &&
+          (section === "llm" || config[section].enabled) &&
+          !tested[section]
+        ) {
           const ok = await handleTest(section);
           if (!ok) return;
         }
       }
 
+      if (latestConfig.current !== config) return;
       if (dirtySections.length > 0) {
         // Save everything in one POST: sequential per-section PATCHes each
         // re-validate the full grounding config, so interdependent edits
@@ -2165,6 +2226,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
 
   const handleProtocolChange = async (type: ModelType, protocol: string) => {
     updateItem(type, "protocol", protocol);
+    if (type === "video" && !videoCanReuseLlmKey(protocol)) {
+      updateItem("video", "reuse_llm_key", false);
+    }
     const preset = getPresetForType(type, protocol);
     if (preset) {
       if (preset.base_url_options?.length) {
@@ -2380,11 +2444,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             )}
           </div>
         </div>
-        {/* Always offer the reuse switch for image/video, whatever the
-            protocol: gating it on DashScope/百炼/token plan left a
-            non-Bailian image/video model stuck on the default reuse flag with
-            no way to uncheck it, so its own API Key field stayed disabled. */}
-        {(type === "image" || type === "video") && (
+        {(type === "image" ||
+          (type === "video" && videoCanReuseLlmKey(item.protocol))) && (
           <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
             <Checkbox
               checked={

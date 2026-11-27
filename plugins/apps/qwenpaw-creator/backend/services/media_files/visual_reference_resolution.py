@@ -329,6 +329,9 @@ def video_reference_plan(
     )
     selected = selected_element_output(project, element, "storyboard")
     storyboard_id = selected[1] if selected is not None else None
+    from models.video_task_plans import uses_storyboard
+
+    include_storyboard = uses_storyboard(creation)
     if storyboard_id:
         own_versions.add(storyboard_id)
     # Resolve before filtering: an explicitly storyboard-only plan must not
@@ -339,7 +342,7 @@ def video_reference_plan(
         creation.video_reference_version_ids,
     )
     return (
-        *([storyboard_id] if storyboard_id else []),
+        *([storyboard_id] if storyboard_id and include_storyboard else []),
         *(
             version_id
             for version_id in additional

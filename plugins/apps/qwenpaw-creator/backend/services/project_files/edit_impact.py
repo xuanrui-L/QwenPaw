@@ -238,6 +238,7 @@ _R2V_VIDEO_ONLY_FIELDS = {
     "video_prompt",
     "generate_audio",
     "video_reference_version_ids",
+    "generation_plan",
 }
 _EDIT_METADATA_FIELDS = {"intent", "reason"}
 _OVERLAY_GENERATION_INPUT_FIELDS = {
