@@ -34,7 +34,8 @@ SB = "输出9:16分镜图，9格3×3网格，每格内部9:16，清晰分隔边�
 VD = "[Image 1]提供分镜顺序，生成9:16连续6秒视频，不展示宫格。"
 UPDATED = {
     "narrative": "女子左手将钥匙放入包内，轻声说：找到了。",
-    "storyboardPrompt": SB + "女子左手将钥匙放入包内，声音意图为“找到了”，不在画面中写台词。",
+    "storyboardPrompt": SB
+    + "女子左手将钥匙放入包内，声音意图为“找到了”，不在画面中写台词。",
     "videoPrompt": VD + "女子左手将钥匙放入包内，轻声说：找到了。",
 }
 
@@ -482,3 +483,34 @@ def test_confirm_current_makes_storyboard_eligible_without_new_image(
         assert service.status(PID, TID, EID)["narrative"] == edited_plan
 
     asyncio.run(run())
+
+
+def test_confirm_no_storyboard_plan_does_not_require_a_storyboard_or_image_one(
+    services,
+):
+    base = services.projects.read(PID)
+    candidate = base.project.model_dump(mode="json")
+    creation = candidate["timelines"]["items"][TID]["elements_by_id"][EID][
+        "creation"
+    ]
+    creation.update(
+        generation_plan={"method": "r2v", "use_storyboard": False},
+        storyboard_prompt="",
+        video_prompt="女子拿起钥匙，手掌慢慢攥紧。",
+    )
+    services.commits.commit(
+        base=base, candidate=candidate, origin="frontend_edit"
+    )
+    result = asyncio.run(
+        PromptSyncService(services).confirm_current(
+            PID, TID, EID, stage="video"
+        ),
+    )
+    assert result["ok"]
+    current = services.projects.read(PID).project
+    assert (
+        current.timelines.items[TID]
+        .elements_by_id[EID]
+        .creation.storyboard_prompt
+        == ""
+    )

@@ -608,7 +608,7 @@ export interface ProjectPatchRequest {
 export interface R2VReferenceOrderItem {
   index: number;
   versionId: string;
-  kind: "storyboard" | "source" | "artifact";
+  kind: "storyboard" | "source" | "artifact" | "continuity";
   name: string;
   available?: boolean;
 }

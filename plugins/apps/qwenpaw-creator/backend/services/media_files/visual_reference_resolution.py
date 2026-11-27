@@ -409,7 +409,7 @@ def preview_r2v_reference_order(
                 "imageIndex": None if extending else 1,
                 "videoIndex": 1 if extending else None,
                 "versionId": (version_id or "") if extending else "",
-                "kind": "artifact",
+                "kind": "continuity",
                 "available": bool(version_id),
                 "name": (
                     f"{predecessor.label or predecessor.element_id} · 前段视频"
