@@ -172,16 +172,16 @@ def test_image_model_guidance_uses_the_configured_reference_limit(
 def test_image_budget_guidance_blocks_paid_calls_before_exceeding_user_limit():
     prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
 
-    assert "共享设计图数 + R2V Element 数" in prompt
-    assert re.search(r"超出上限时[^。]*付费调用前[^。]*\[BLOCKED\]", prompt)
-    assert re.search(r"不能用共享设计 Artifact[^。]*跨 Element 复用", prompt)
+    assert "共享设计图数 + R2V Element 数" not in prompt
+    assert "`use_storyboard=true`" in prompt
+    assert "按实际需要生成的共享资产、阵容图和已选分镜节点计数" in prompt
+    assert "复用选中产物不产生新调用" in prompt
+    assert "无法同时满足要求时，在提交付费调用前说明具体冲突" in prompt
+    assert "共享设计图仅作为视觉参考" in prompt
     assert re.search(r"不得建立 cast lineup[^。]*第二个可调度视觉节点", prompt)
     assert re.search(
-        r"共享角色/场景设计资产只能生成 1 张[^。]*" r"一个复合 `scene` 实体及其一个 Variant",
-        prompt,
-    )
-    assert re.search(
-        r"全部图片调用上限[^。]*不足以覆盖[^。]*storyboard[^。]*" r"不得先行占用视觉设计预算",
+        r"共享角色/场景设计资产只能生成 1 张[^。]*"
+        r"一个复合 `scene` 实体及其一个 Variant",
         prompt,
     )
 
@@ -416,9 +416,9 @@ def test_execution_guidance_tracks_authorization_mode(
     prompt = render_creator_system_prompt(project_id=_PROJECT_ID)
     sync_instructions = (
         "promptSyncRequired",
-        "并非审阅冷却",
-        "保留现有内容并生成",
-        "不要声称会自动重试",
+        "先读取并核对受影响镜头",
+        "只有本轮工具清单提供 confirm_prompt_sync 才用它确认",
+        "需重新发起制作请求",
     )
     for instruction in sync_instructions:
         assert (instruction in prompt) is requires_approval, instruction

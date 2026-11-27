@@ -103,8 +103,9 @@ def _adopt_historical_video(project: Project):
     return Project.model_validate(updated), impact
 
 
+@pytest.mark.parametrize("schema_version", [10, 11])
 @pytest.mark.parametrize("creation_type", ["r2v", "i2v"])
-def test_v11_video_acceptance_survives_the_upgrade(creation_type):
+def test_legacy_video_acceptance_survives_the_upgrade(creation_type, schema_version):
     from services.project_files.migrations import migrate_project_document
     from services.project_files.models import I2VCreation
     from services.project_files.prompt_sync import digest
@@ -118,13 +119,20 @@ def test_v11_video_acceptance_survives_the_upgrade(creation_type):
             video_prompt="动作", first_frame_version_id="board-new",
         )
     legacy = project.model_dump(mode="json")
-    legacy["schema_version"] = 11
+    legacy["schema_version"] = schema_version
     creation = legacy["timelines"]["items"]["timeline:main"][
         "elements_by_id"
     ]["clip-history"]["creation"]
     creation.pop(
         "generation_plan" if creation_type == "r2v" else "predecessor_element_id"
     )
+    if schema_version == 10:
+        for field in (
+            ("force_storyboard", "transition_intent", "storyboard_intent")
+            if creation_type == "r2v"
+            else ("last_frame_version_id",)
+        ):
+            del creation[field]
     slot = legacy["assets"]["artifact_slots_by_id"]["element:clip-history:main"]
     slot["metadata"]["selectionAcceptance"]["inputFingerprint"] = "sha256:" + digest(
         {
@@ -1765,7 +1773,7 @@ def test_anchored_video_can_publish_without_storyboard(legacy):
 
 def test_video_without_storyboard_gets_stale_when_its_visual_reference_changes():
     project = _project()
-    scene = _entity("scene:station", {"var:night": "asset-old"})
+    scene = _entity("scene:station", {"var:night": "asset-old", "var:dawn": None})
     project.visual.entities.items[scene.entity_id] = scene
     project.visual.entities.order.append(scene.entity_id)
     shot = _element(
@@ -1799,6 +1807,34 @@ def test_video_without_storyboard_gets_stale_when_its_visual_reference_changes()
     assert derive_work_graph(project).by_id["video:shot"].status is WorkNodeStatus.DONE
     select_scene_version("asset-new")
     assert derive_work_graph(project).by_id["video:shot"].status is WorkNodeStatus.STALE
+
+    slot = project.assets.artifact_slots_by_id["element:shot:main"]
+    slot.selected_version_id = None
+    select_scene_version("asset-old")
+    models = ("", "wan3.0-video-prime")
+    initial = derive_work_graph(project, media_models=models).by_id["video:shot"]
+    ledger = dispatch_ledger_fingerprint(initial.dispatch_fingerprint, models)
+    failure = _task(
+        "r2v_generation", "element:shot", TaskStatus.FAILED,
+        idempotency_key=f"dag-video:shot-{dispatch_slot(ledger)}",
+    )
+
+    def failed_graph():
+        return derive_work_graph(project, tasks=[failure], media_models=models)
+
+    assert failed_graph().by_id["video:shot"].status is WorkNodeStatus.FAILED
+    select_scene_version("asset-new")
+    assert failed_graph().by_id["video:shot"].status is WorkNodeStatus.READY
+    slot.selected_version_id = "video-old"
+
+    shot.creation.video_reference_version_ids = ["asset-new"]
+    shot.creation.visual_variant_refs[scene.entity_id] = "var:dawn"
+    _add_element(project, _element("unaffected"))
+    graph = derive_work_graph(project)
+    node = graph.by_id["video:shot"]
+    assert node.status is WorkNodeStatus.GATED
+    assert "冲突" in node.missing[0]
+    assert "video:unaffected" in graph.by_id
 
 
 @pytest.mark.parametrize("can_extend", [False, True])

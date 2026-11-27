@@ -1310,6 +1310,17 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 and video_plan.method != "video_extend"
                 and not video_plan.use_storyboard
             )
+            direct_visual_refs: tuple[str, ...] = ()
+            visual_reference_error = ""
+            if video_uses_direct_visual_refs:
+                from services.media_files.visual_reference_resolution import (
+                    video_reference_plan,
+                )
+
+                try:
+                    direct_visual_refs = video_reference_plan(project, element)
+                except ValidationError as error:
+                    visual_reference_error = str(error)
             if (
                 video_uses_direct_visual_refs
                 and not creation.video_reference_version_ids
@@ -1381,6 +1392,31 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 else None
             )
 
+            if video_uses_direct_visual_refs:
+                # Freeze the concrete ordered image/video inputs, including
+                # versions picked up through automatic variant bindings.
+                previous_fingerprint = fingerprint
+                fingerprint = _fingerprint(
+                    fingerprint, "direct_visual_refs", *direct_visual_refs
+                )
+                if failure is not None:
+                    snapshot = (getattr(failure, "metadata", {}) or {}).get(
+                        "requestSnapshot"
+                    )
+                    frozen_refs = (
+                        snapshot.get("referenceVersionIds")
+                        if isinstance(snapshot, Mapping)
+                        else None
+                    )
+                    # Old ledgers did not hash these references. Keep a
+                    # failure parked unless the frozen inputs prove drift.
+                    if not isinstance(frozen_refs, list) or direct_visual_refs == tuple(
+                        ref
+                        for ref in frozen_refs
+                        if not str(ref).startswith("continuity:")
+                    ):
+                        legacy_fingerprint = previous_fingerprint
+
             tail_frame = None
             last_frame_error = ""
             if (
@@ -1427,9 +1463,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             video_text_gap = False
             if task is not None:
                 status = WorkNodeStatus.RUNNING
-            elif not video_slot and plan_error:
+            elif visual_reference_error or (not video_slot and plan_error):
                 status = WorkNodeStatus.GATED
-                video_missing = (plan_error,)
+                video_missing = (visual_reference_error or plan_error,)
             elif (
                 creation_type in {"i2v", "s2v"}
                 and (
@@ -1464,13 +1500,8 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # for failure-parking, but do NOT trigger STALE re-generation.
                 upstream_for_stale = upstream_selected
                 if video_uses_direct_visual_refs:
-                    from services.media_files.visual_reference_resolution import (
-                        video_reference_plan,
-                    )
-
-                    # Compare the actual visual references, without including
-                    # the predecessor whose reroll must not cascade paid work.
-                    upstream_for_stale = video_reference_plan(project, element)
+                    # A predecessor reroll must not cascade paid work.
+                    upstream_for_stale = direct_visual_refs
                 elif creation_type == "r2v":
                     upstream_for_stale = (
                         [storyboard_slot] if storyboard_dep else []

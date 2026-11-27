@@ -17,14 +17,22 @@ def video_selection_fingerprint(
     element: TimelineElement,
     storyboard_version_id: str | None,
     *,
-    legacy_continuity_fields: bool = False,
+    legacy_schema_version: int | None = None,
 ) -> str:
     creation = element.creation.model_dump(mode="json")
-    if legacy_continuity_fields:
-        # v11 receipts predate these optional fields. Keep genuine new
-        # values in the comparison so an authored plan expires the receipt.
-        for field in ("generation_plan", "predecessor_element_id"):
-            if creation.get(field) is None:
+    if legacy_schema_version is not None:
+        # Historical receipts omitted fields that did not exist yet.
+        # Only omit defaults, so an authored change still expires a receipt.
+        introduced = {"generation_plan": None, "predecessor_element_id": None}
+        if legacy_schema_version <= 10:
+            introduced.update(
+                force_storyboard=False,
+                transition_intent=None,
+                storyboard_intent=None,
+                last_frame_version_id=None,
+            )
+        for field, default in introduced.items():
+            if creation.get(field) == default:
                 creation.pop(field, None)
     payload = {
         "creation": creation,
@@ -79,11 +87,14 @@ def accepted_video_selection_is_current(
     )
     version_id = storyboard.selected_version_id if storyboard else None
     fingerprint = acceptance.get("inputFingerprint")
-    return fingerprint == video_selection_fingerprint(
-        element,
-        version_id,
-    ) or fingerprint == video_selection_fingerprint(
-        element,
-        version_id,
-        legacy_continuity_fields=True,
+    if fingerprint == video_selection_fingerprint(element, version_id):
+        return True
+    return any(
+        fingerprint
+        == video_selection_fingerprint(
+            element,
+            version_id,
+            legacy_schema_version=schema_version,
+        )
+        for schema_version in (11, 10)
     )

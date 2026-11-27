@@ -48,6 +48,28 @@ afterEach(() => {
   useDecisionFocusStore.getState().clear();
 });
 
+it("discloses the added and submitted lengths on a video-extension card", () => {
+  seed(vi.fn());
+  const authorization = makePendingAuthorization({
+    targetRef: "element:r2v-window",
+    scope: {
+      operation: "r2v_generation",
+      parameters: {
+        mode: "video_extend",
+        durationSeconds: 8,
+        timelineDurationSeconds: 4,
+        ratio: "adaptive",
+        aspectRatio: "16:9",
+      },
+    },
+  });
+
+  render(<ExecutionAuthorizationCard authorization={authorization} />);
+  expect(screen.getByText(/视频续写.*新增 4 秒.*提交 8 秒（含前段）/)).toBeInTheDocument();
+  expect(screen.getByText(/画幅跟随前段/)).toBeInTheDocument();
+  expect(screen.queryByText(/画幅 16:9/)).not.toBeInTheDocument();
+});
+
 describe("ExecutionAuthorizationCard inline prompt editing", () => {
   it("does not approve a refreshed snapshot while an untouched old draft is visible", () => {
     seed(vi.fn());

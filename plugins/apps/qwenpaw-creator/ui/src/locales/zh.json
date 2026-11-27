@@ -1350,6 +1350,8 @@
   "executionAuth": {
     "title": "高成本媒体执行",
     "duration": "时长 {{duration}}秒",
+    "extensionDuration": "视频续写 · 新增 {{timelineDuration}} 秒 · 提交 {{duration}} 秒（含前段）",
+    "extensionAspectRatio": "画幅跟随前段",
     "resolutionLabel": "分辨率 {{resolution}}",
     "ratio": "比例 {{ratio}}",
     "frameSize": "画幅 {{size}}",

@@ -1489,6 +1489,7 @@ def _submission_input_fingerprint_legacy(
     *,
     keep_default_audio: bool = False,
     keep_force_storyboard: bool = False,
+    keep_unset_tail: bool = True,
     references: tuple[str, ...] = (),
 ) -> str:
     """Fingerprint shape frozen by builds before segment continuity.
@@ -1517,6 +1518,8 @@ def _submission_input_fingerprint_legacy(
         creation.pop("transition_intent", None)
     if creation.get("storyboard_intent") is None:
         creation.pop("storyboard_intent", None)
+    if not keep_unset_tail and creation.get("last_frame_version_id") is None:
+        creation.pop("last_frame_version_id", None)
     if not keep_default_audio and creation.get("generate_audio") is True:
         del creation["generate_audio"]
     return _fingerprint(
@@ -1599,11 +1602,13 @@ def _matches_submission_inputs(
             element_id,
             keep_default_audio=audio,
             keep_force_storyboard=force,
+            keep_unset_tail=tail,
             references=ids,
         )
         for ids in references
         for audio in (False, True)
         for force in (False, True)
+        for tail in (True, False)
     )
 
 
