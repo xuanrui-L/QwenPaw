@@ -191,7 +191,7 @@ export default function VideoTemplatePicker({
       <button
         type="button"
         data-style-entry
-        className={`flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-full px-4 py-1 text-sm font-medium leading-6 text-[#656563] transition-colors hover:bg-[rgba(43,27,0,0.08)] hover:text-[var(--color-text-primary)] dark:text-[var(--color-text-secondary)] dark:hover:bg-white/10 ${
+        className={`flex shrink-0 cursor-pointer items-center gap-1 whitespace-nowrap rounded-full px-4 py-1 text-sm font-medium leading-6 text-[#656563] transition-colors hover:bg-[rgba(43,27,0,0.08)] hover:text-[var(--color-text-primary)] dark:text-[var(--color-text-secondary)] dark:hover:bg-white/10 ${
           open
             ? "bg-[rgba(43,27,0,0.08)] dark:bg-white/10"
             : "bg-[rgba(43,27,0,0.04)] dark:bg-white/5"

@@ -710,6 +710,7 @@ def _r2v_element(element_id: str, narrative: str = "叙事") -> dict:
         "location": {},
         "creation": {
             "type": "r2v",
+            "generation_plan": {"method": "r2v", "use_storyboard": True},
             "narrative": narrative,
             "storyboard_prompt": "分镜 prompt",
             "video_prompt": "视频 prompt",

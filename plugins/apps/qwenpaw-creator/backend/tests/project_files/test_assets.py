@@ -852,7 +852,14 @@ def test_force_delete_detaches_live_and_snapshot_references(tmp_path):
     # input the graph would happily reuse for another render.
     node = derive_work_graph(after).by_id["video:el-i2v-1"]
     assert node.status is WorkNodeStatus.GATED
-    assert node.missing == ("first_frame_version_id 缺失",)
+    # Segment-continuity adds a second hint explaining that publishing a
+    # predecessor video would auto-supply the first frame. Asserted as
+    # the exact tuple so the reasons stay precisely these two — neither
+    # a lost primary reason nor gate-message sprawl slips through.
+    assert node.missing == (
+        "first_frame_version_id 缺失",
+        "请指定首帧版本或前段镜头",
+    )
 
 
 def test_force_delete_refuses_required_audio_reference(tmp_path):
@@ -1318,12 +1325,12 @@ def test_force_delete_marks_final_video_and_element_outputs_stale(
     )
     project.assets.artifact_slots_by_id[final_slot.slot_id] = final_slot
     project.assets.artifact_slots_by_id[element_slot.slot_id] = element_slot
-    project.assets.artifact_versions_by_id[
-        final_version.version_id
-    ] = final_version
-    project.assets.artifact_versions_by_id[
-        element_version.version_id
-    ] = element_version
+    project.assets.artifact_versions_by_id[final_version.version_id] = (
+        final_version
+    )
+    project.assets.artifact_versions_by_id[element_version.version_id] = (
+        element_version
+    )
 
     base = _publish_project(store, base, project)
 
@@ -1368,12 +1375,12 @@ def test_force_delete_marks_final_video_and_element_outputs_stale(
         stale=False,
         created_at=NOW,
     )
-    after.assets.artifact_slots_by_id[
-        storyboard_slot.slot_id
-    ] = storyboard_slot
-    after.assets.artifact_versions_by_id[
-        storyboard_version.version_id
-    ] = storyboard_version
+    after.assets.artifact_slots_by_id[storyboard_slot.slot_id] = (
+        storyboard_slot
+    )
+    after.assets.artifact_versions_by_id[storyboard_version.version_id] = (
+        storyboard_version
+    )
     # Re-publish so the store accepts the addition, then force-delete
     # another version to confirm staleness is still applied.
     base2 = _publish_project(store, snapshot, after)

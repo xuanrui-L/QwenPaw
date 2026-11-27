@@ -22,6 +22,7 @@ from services.file_agent_runtime.work_graph import (
     WorkNode,
     WorkNodeStatus,
     derive_work_graph,
+    probe_ffmpeg_ready,
 )
 from services.file_agent_runtime.work_scheduler import (
     _blocked_by_active_media_review,
@@ -548,6 +549,19 @@ def requested_work_node(snapshot: Any, node: WorkNode) -> RequestedWorkNode:
                 parameters["durationSeconds"] = (
                     element.span.duration_tick / timeline.ticks_per_second
                 )
+                plan = getattr(element.creation, "generation_plan", None)
+                if plan is not None and plan.method == "video_extend":
+                    from services.media_files.r2v_execution import (
+                        _extension_material_version,
+                    )
+
+                    parameters.update(
+                        mode="video_extend",
+                        extensionElementId=element.element_id,
+                        extensionMaterialVersionId=_extension_material_version(
+                            project, timeline, element
+                        ),
+                    )
                 break
     if node.regeneration_of:
         authored_inputs["regenerationOf"] = node.regeneration_of
@@ -639,7 +653,7 @@ async def ready_request_context(
     Only the confirmed node's frontend edit grace is waived, and only while
     the read snapshot still matches. Unattended callers must not confirm edits.
     """
-    from services.run_review import admission
+    from services.run_review.text_review import active_sync_review_gates
     from services.run_review.media_review import active_media_review_slots
 
     snapshot, tasks, reviews = await asyncio.gather(
@@ -651,6 +665,7 @@ async def ready_request_context(
         snapshot.project,
         tasks=tasks,
         media_models=(get_image_model_name(), get_video_model_name()),
+        ffmpeg_ready=await asyncio.to_thread(probe_ffmpeg_ready),
     )
     publications = [_publication_artifacts(review) for review in reviews]
     creative_review_pending = any(items is None for items in publications)
@@ -677,8 +692,9 @@ async def ready_request_context(
         is not None
     )
     fences = await asyncio.to_thread(
-        admission.active_sync_fences,
+        active_sync_review_gates,
         services.projects.project_root(project_id) / "runtime" / "run-review",
+        snapshot.project,
     )
     from .manual_regeneration_hold import ManualRegenerationHoldStore
 

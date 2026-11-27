@@ -443,7 +443,7 @@ describe("ModelConfigModal configuration lifecycle", () => {
       api_key: "saved-secret",
       base_url: "https://provider.test/v1",
     },
-    video: { ...emptyConfig.video, reuse_llm_key: true },
+    video: { ...emptyConfig.video, api_key: "video-key", reuse_llm_key: false },
   };
 
   it.each<[string, Record<string, unknown>, boolean]>([
@@ -478,6 +478,70 @@ describe("ModelConfigModal configuration lifecycle", () => {
       }
     },
   );
+
+  async function openVideoCard(): Promise<HTMLInputElement> {
+    fireEvent.click(await screen.findByRole("button", { name: /媒体生成/ }));
+    fireEvent.click(await screen.findByText("视频生成模型"));
+    return (await screen.findByRole("checkbox", {
+      name: "视频生成模型",
+    })) as HTMLInputElement;
+  }
+
+  it("saves a disable without probing an unavailable provider", async () => {
+    const { calls } = installMockFetch(configRoutes({
+      ...llmConfiguredVideoOff,
+      video: { ...llmConfiguredVideoOff.video, enabled: true },
+    }, { ok: false, error: "expired key" }));
+    render(<ModelConfigModal open onClose={vi.fn()} />);
+    const toggle = await openVideoCard();
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: /保存配置/ }));
+
+    await waitFor(() => expect(calls.find((call) =>
+      call.method === "POST" && call.url.endsWith("/models/config"),
+    )?.body).toMatchObject({ video: { enabled: false } }));
+    expect(calls.some((call) => call.url.endsWith("/models/test"))).toBe(false);
+  });
+
+  it("discards an enable probe if the model changes while it is pending", async () => {
+    const config = {
+      ...llmConfiguredVideoOff,
+      video: { ...llmConfiguredVideoOff.video, model_name: "original-model" },
+    };
+    const { calls, fetchMock } = installMockFetch(configRoutes(config, { ok: true }));
+    const fetchResponse = fetchMock.getMockImplementation()!;
+    let releaseProbe!: () => void;
+    const pendingProbe = new Promise<void>((resolve) => { releaseProbe = resolve; });
+    fetchMock.mockImplementation(async (input, init) => {
+      const response = await fetchResponse(input, init);
+      if (String(input).endsWith("/models/test")) await pendingProbe;
+      return response;
+    });
+    render(<ModelConfigModal open onClose={vi.fn()} />);
+    const toggle = await openVideoCard();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith("/models/test"))).toBe(true));
+    fireEvent.change(screen.getByDisplayValue("original-model"), { target: { value: "new-model" } });
+    releaseProbe();
+    await waitFor(() => expect(toggle).not.toBeDisabled());
+    expect(toggle).not.toBeChecked();
+  });
+
+  it("tests a non-Bailian key without enabling the model or borrowing the LLM key", async () => {
+    const { calls } = installMockFetch(configRoutes({
+      ...llmConfiguredVideoOff,
+      video: { ...llmConfiguredVideoOff.video, reuse_llm_key: true },
+    }, { ok: true }));
+    render(<ModelConfigModal open onClose={vi.fn()} />);
+    const toggle = await openVideoCard();
+    expect(screen.queryByRole("checkbox", { name: /复用.*API Key/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /测试连通性/ }));
+    await waitFor(() => expect(calls.find((call) =>
+      call.url.endsWith("/models/test"),
+    )?.body).toMatchObject({ type: "video", api_key: "video-key" }));
+    expect(toggle).not.toBeChecked();
+  });
 
   it("maps every protocol option to a label key present in both locales", () => {
     // Guards the display-label map against drift into raw Chinese values.

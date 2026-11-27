@@ -614,6 +614,7 @@
     "videoModeT2v": "t2v text-to-video",
     "videoModeI2v": "i2v image-to-video",
     "videoModeEdit": "video_edit editing",
+    "videoModeExtend": "Video extension (previous clip)",
     "ttsFamilyNoteQwen": "Qwen-TTS family: system voices synthesize directly; cloning/design binds to family companion models and created voices are picked up automatically. Voices never cross families.",
     "ttsFamilyNoteCosy": "CosyVoice family: no system voices — clone or design a voice before synthesis; voices cannot be shared with the Qwen-TTS family.",
     "leaveBlankKeep": "Leave blank to keep current key",
@@ -1124,7 +1125,20 @@
     "shotsLabel": "Shots",
     "refsLabel": "Related assets",
     "advancedSettings": "More settings",
-    "refsPill": "{{count}} refs"
+    "refsPill": "{{count}} refs",
+    "intentPlaceholder": "Creative intent not set — one sentence on what this segment must achieve; type here",
+    "wirePreview": "Actually sent (this render)",
+    "wireMode": {
+      "r2v": "plain r2v reference generation",
+      "video_extend": "video extension (predecessor as material)",
+      "i2v": "image-to-video (first-frame continuation)",
+      "video_edit": "video edit",
+      "t2v": "text-to-video"
+    },
+    "wireAnchorNote": "Image 1 is the predecessor's last frame (extracted at runtime)",
+    "wireAnchorPruned": "anchor pruned",
+    "wireBgmOn": "shared BGM attached",
+    "wireBgmOff": "no BGM (native audio)"
   },
   "agent": {
     "assistant": "Creative Assistant",
@@ -1336,6 +1350,8 @@
   "executionAuth": {
     "title": "High-cost Media Execution",
     "duration": "Duration {{duration}}s",
+    "extensionDuration": "Extend video · Add {{timelineDuration}}s · Submit {{duration}}s (including the preceding clip)",
+    "extensionAspectRatio": "Match the preceding clip’s aspect ratio",
     "resolutionLabel": "Resolution {{resolution}}",
     "ratio": "Ratio {{ratio}}",
     "frameSize": "Frame size {{size}}",
@@ -2349,7 +2365,8 @@
       "final": "Final",
       "storyboard": "Storyboard",
       "design": "Design",
-      "none": "Pending"
+      "none": "Pending",
+      "anchor": "Anchored"
     },
     "columns": {
       "understanding": "Understanding",

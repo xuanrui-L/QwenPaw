@@ -18,6 +18,8 @@ TOTAL_KEYS = {
     "transactionsBytes",
     "transactionsLegacyBytes",
     "orphanBytes",
+    "eventStreamBytes",
+    "continuityBytes",
 }
 
 

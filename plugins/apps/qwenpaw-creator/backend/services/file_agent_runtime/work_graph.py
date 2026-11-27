@@ -36,6 +36,12 @@ from services.project_files.blueprint_readiness import (
     STORY_BEFORE_VISUAL_MESSAGE,
     visual_story_missing,
 )
+from domain.errors import ValidationError
+from models.video_task_plans import (
+    planned_predecessor,
+    planned_predecessor_id,
+    uses_storyboard,
+)
 from services.project_files.models import (
     ArtifactVersionRenderSource,
     narrative_timeline_ids,
@@ -403,6 +409,8 @@ def _failure_inputs_changed(
     node_id: str,
     fingerprint: str,
     media_models: tuple[str, str] | None = None,
+    *,
+    legacy_fingerprint: str | None = None,
 ) -> bool:
     """True when the parked failure was rendered from different inputs.
 
@@ -429,6 +437,7 @@ def _failure_inputs_changed(
         node_id,
         fingerprint,
         media_models,
+        legacy_fingerprint=legacy_fingerprint,
     )
 
 
@@ -551,6 +560,7 @@ def _dispatch_inputs_changed(
     media_models: tuple[str, str] | None,
     *,
     completed: bool = False,
+    legacy_fingerprint: str | None = None,
 ) -> bool:
     prefix = f"dag-{node_id}-"
     if not key.startswith(prefix) or dispatch_key_predates_digest_ledger(key):
@@ -579,7 +589,20 @@ def _dispatch_inputs_changed(
         return True
     ledger = dispatch_ledger_fingerprint(fingerprint, media_models)
     legacy_slot = hashlib.sha256(ledger.encode("utf-8")).hexdigest()[:16]
-    return identity not in {ledger, dispatch_slot(ledger), legacy_slot}
+    accepted = {ledger, dispatch_slot(ledger), legacy_slot}
+    if legacy_fingerprint is not None and legacy_fingerprint != fingerprint:
+        # One-time upgrade compatibility: a failure parked before the
+        # current fingerprint shape (segment continuity's prev_video_slot
+        # marker) matches the previous digest. Accepting it keeps the
+        # node parked instead of re-billing a rollout as an input edit;
+        # any real change still misses both digest families.
+        prior = dispatch_ledger_fingerprint(legacy_fingerprint, media_models)
+        accepted.add(prior)
+        accepted.add(dispatch_slot(prior))
+        accepted.add(
+            hashlib.sha256(prior.encode("utf-8")).hexdigest()[:16],
+        )
+    return identity not in accepted
 
 
 # pylint: disable-next=too-many-return-statements
@@ -671,8 +694,15 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
     tasks: Sequence[Any] = (),
     *,
     media_models: tuple[str, str] | None = None,
+    ffmpeg_ready: bool | None = None,
 ) -> WorkGraph:
     """Project the production DAG from durable facts. Pure function.
+
+    ``ffmpeg_ready`` is injected environment state, like ``media_models``:
+    ``False`` gates I2V Elements that rely on the automatic last-frame
+    first frame, because dispatching them would fail at submit time with
+    a misleading "provide a first frame" error. ``None`` (default) means
+    the caller did not probe and the graph stays optimistic.
 
     Deliberately one long node-construction pass: every lane reads the
     same freshly built ``statuses`` map, and splitting it would thread
@@ -1027,7 +1057,14 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         video_node_ids = video_nodes_by_timeline.setdefault(timeline_id, [])
         timeline = project.timelines.items[timeline_id]
         script_node = script_node_by_timeline.get(timeline_id)
-        for element_id, element in timeline.elements_by_id.items():
+        # Iterate by absolute start tick so adjacent-segment continuity
+        # sees the predecessor video node already in ``statuses`` by
+        # the time we build the successor's deps.
+        sorted_element_items = sorted(
+            timeline.elements_by_id.items(),
+            key=lambda item: (int(item[1].span.start_tick), item[0]),
+        )
+        for element_id, element in sorted_element_items:
             creation = element.creation
             if not element.enabled:
                 continue
@@ -1039,6 +1076,12 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             lane = f"element:{element_id}"
             label = element.label or element_id
             creation_type = getattr(creation, "type", "r2v")
+            video_plan = (
+                creation.generation_plan
+                if isinstance(creation, R2VCreation)
+                else None
+            )
+            video_slot = _slot_selected(project, f"element:{element_id}:main")
             prompt_sync_gap = None
             storyboard_sync_gap = None
             if creation_type == "r2v" and not element_id.startswith(
@@ -1100,6 +1143,19 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 )
                 task = active.get(key)
                 failure = failed.get(key)
+                # A settled legacy video without a selected storyboard did
+                # not need one to compose. Do not create a new paid job merely
+                # because it was opened after the schema upgrade.
+                has_legacy_video_without_storyboard = (
+                    video_plan is None
+                    and storyboard_slot is None
+                    and video_slot in project.assets.artifact_versions_by_id
+                    and not _artifact_is_stale(project, video_slot, ())
+                )
+                skip_storyboard = task is None and (
+                    not uses_storyboard(creation)
+                    or has_legacy_video_without_storyboard
+                )
                 missing = (*_upstream_missing(deps, statuses), *gate_missing)
                 authored_text_gap = False
                 upstream_selected = _element_upstream_selected(
@@ -1178,47 +1234,54 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     status = WorkNodeStatus.GATED
                     missing = (storyboard_sync_gap,)
                     authored_text_gap = True
-                add(
-                    WorkNode(
-                        node_id=storyboard_id,
-                        kind="storyboard",
-                        label=f"{label} · 分镜",
-                        status=status,
-                        deps=tuple(deps),
-                        lane=lane,
-                        timeline_id=timeline_id,
-                        task_id=getattr(task, "task_id", None),
-                        progress=getattr(task, "progress", None),
-                        error=(
-                            _task_error_summary(failure)
-                            if status is WorkNodeStatus.FAILED
-                            else None
+                if skip_storyboard:
+                    storyboard_id = None
+                else:
+                    add(
+                        WorkNode(
+                            node_id=storyboard_id,
+                            kind="storyboard",
+                            label=f"{label} · 分镜",
+                            status=status,
+                            deps=tuple(deps),
+                            lane=lane,
+                            timeline_id=timeline_id,
+                            task_id=getattr(task, "task_id", None),
+                            progress=getattr(task, "progress", None),
+                            error=(
+                                _task_error_summary(failure)
+                                if status is WorkNodeStatus.FAILED
+                                else None
+                            ),
+                            missing=missing,
+                            authored_text_gap=authored_text_gap,
+                            prompt_sync_required=(
+                                bool(storyboard_sync_gap)
+                                or (
+                                    not (
+                                        creation.storyboard_prompt or ""
+                                    ).strip()
+                                    and (creation.narrative or "").strip()
+                                )
+                            ),
+                            locator={"page": "plan", "elementId": element_id},
+                            command="GENERATE_STORYBOARD_IMAGE",
+                            target_ref=f"element:{element_id}",
+                            dispatch_fingerprint=fingerprint,
+                            regeneration_of=(
+                                storyboard_slot
+                                if status
+                                in (
+                                    WorkNodeStatus.STALE,
+                                    WorkNodeStatus.FAILED,
+                                )
+                                else None
+                            ),
                         ),
-                        missing=missing,
-                        authored_text_gap=authored_text_gap,
-                        prompt_sync_required=(
-                            bool(storyboard_sync_gap)
-                            or (
-                                not (creation.storyboard_prompt or "").strip()
-                                and (creation.narrative or "").strip()
-                            )
-                        ),
-                        locator={"page": "plan", "elementId": element_id},
-                        command="GENERATE_STORYBOARD_IMAGE",
-                        target_ref=f"element:{element_id}",
-                        dispatch_fingerprint=fingerprint,
-                        regeneration_of=(
-                            storyboard_slot
-                            if status
-                            in (WorkNodeStatus.STALE, WorkNodeStatus.FAILED)
-                            else None
-                        ),
-                    ),
-                )
+                    )
 
             # Video node for all types
             video_id = f"video:{element_id}"
-            video_slot = _slot_selected(project, f"element:{element_id}:main")
             key = (
                 TaskKind.R2V_GENERATION.value,
                 f"element:{element_id}",
@@ -1230,11 +1293,69 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             # Determine storyboard dependency and upstream refs
             storyboard_done = True
             storyboard_dep: tuple[str, ...] = ()
-            if creation_type == "r2v" and storyboard_id is not None:
+            if (
+                creation_type == "r2v"
+                and storyboard_id is not None
+                and uses_storyboard(creation)
+            ):
                 storyboard_done = (
                     statuses[storyboard_id] is WorkNodeStatus.DONE
                 )
                 storyboard_dep = (storyboard_id,)
+
+            visual_video_deps: tuple[str, ...] = ()
+            visual_video_gaps: tuple[str, ...] = ()
+            video_uses_direct_visual_refs = (
+                video_plan is not None
+                and video_plan.method != "video_extend"
+                and not video_plan.use_storyboard
+            )
+            direct_visual_refs: tuple[str, ...] = ()
+            visual_reference_error = ""
+            if video_uses_direct_visual_refs:
+                from services.media_files.visual_reference_resolution import (
+                    video_reference_plan,
+                )
+
+                try:
+                    direct_visual_refs = video_reference_plan(project, element)
+                except ValidationError as error:
+                    visual_reference_error = str(error)
+            if (
+                video_uses_direct_visual_refs
+                and not creation.video_reference_version_ids
+            ):
+                # With no exact references or storyboard, the resolved video
+                # inputs come from the authored visual bindings.
+                visual_video_deps = tuple(deps)
+                visual_video_gaps = (
+                    *_upstream_missing(visual_video_deps, statuses),
+                    *gate_missing,
+                )
+
+            prev_video_dep: tuple[str, ...] = ()
+            prev_video_slot: str | None = None
+            prev_video_done = True
+            predecessor_error = ""
+            try:
+                predecessor = planned_predecessor(timeline, element)
+            except ValidationError as error:
+                predecessor = None
+                predecessor_error = str(error)
+            if predecessor is not None:
+                prev_video_node_id = f"video:{predecessor.element_id}"
+                prev_video_dep = (prev_video_node_id,)
+                prev_video_slot = _slot_selected(
+                    project,
+                    f"element:{predecessor.element_id}:main",
+                )
+                prev_video_done = (
+                    prev_video_slot is not None
+                    and statuses.get(prev_video_node_id) is WorkNodeStatus.DONE
+                )
+                if ffmpeg_ready is False:
+                    predecessor_error = "生成方案需要可用的 ffmpeg/ffprobe"
+            anchor_slot_observed = prev_video_slot
             upstream_selected = _video_upstream_refs(
                 creation_type,
                 creation,
@@ -1248,22 +1369,128 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     creation,
                     video_id,
                     storyboard_slot,
+                    prev_video_slot=prev_video_slot,
                 ),
             )
+            # Upgrade-window compatibility: a FAILED task parked before
+            # segment continuity landed carries a digest computed
+            # without the prev_video_slot marker. Comparing only the
+            # new shape would read the added marker as "inputs changed"
+            # and promote every parked failure with a published
+            # predecessor straight back to a paid rerun. The legacy
+            # digest keeps them parked until a real input moves.
+            legacy_fingerprint = (
+                _fingerprint(
+                    *_video_fingerprint_parts(
+                        creation_type,
+                        creation,
+                        video_id,
+                        storyboard_slot,
+                    ),
+                )
+                if prev_video_slot
+                else None
+            )
 
+            if video_uses_direct_visual_refs:
+                # Freeze the concrete ordered image/video inputs, including
+                # versions picked up through automatic variant bindings.
+                previous_fingerprint = fingerprint
+                fingerprint = _fingerprint(
+                    fingerprint, "direct_visual_refs", *direct_visual_refs
+                )
+                if failure is not None:
+                    snapshot = (getattr(failure, "metadata", {}) or {}).get(
+                        "requestSnapshot"
+                    )
+                    frozen_refs = (
+                        snapshot.get("referenceVersionIds")
+                        if isinstance(snapshot, Mapping)
+                        else None
+                    )
+                    # Old ledgers did not hash these references. Keep a
+                    # failure parked unless the frozen inputs prove drift.
+                    if not isinstance(frozen_refs, list) or direct_visual_refs == tuple(
+                        ref
+                        for ref in frozen_refs
+                        if not str(ref).startswith("continuity:")
+                    ):
+                        legacy_fingerprint = previous_fingerprint
+
+            tail_frame = None
+            last_frame_error = ""
+            if (
+                isinstance(creation, I2VCreation)
+                and creation.last_frame_version_id
+            ):
+                from models.config import (
+                    get_video_backend,
+                    get_video_model_name,
+                )
+                from models.video_capabilities import supports_last_frame
+
+                model = (
+                    media_models[1] if media_models else get_video_model_name()
+                )
+                if supports_last_frame(model, get_video_backend()):
+                    tail_frame = creation.last_frame_version_id
+                    upstream_selected.append(tail_frame)
+                    fingerprint = _fingerprint(
+                        fingerprint, "last_frame", tail_frame
+                    )
+                else:
+                    last_frame_error = "当前视频模型不支持生成方案指定的 I2V 尾帧"
+
+            extension_error = ""
+            if video_plan is not None and video_plan.method == "video_extend":
+                from models.config import (
+                    get_video_backend,
+                    get_video_model_name,
+                )
+                from models.video_capabilities import (
+                    supports_video_continuation,
+                )
+
+                model = (
+                    media_models[1] if media_models else get_video_model_name()
+                )
+                if not supports_video_continuation(model, get_video_backend()):
+                    extension_error = "当前视频模型不支持视频延长；请重选生成方案"
+            plan_error = (
+                predecessor_error or last_frame_error or extension_error
+            )
             video_missing: tuple[str, ...] = ()
             video_text_gap = False
             if task is not None:
                 status = WorkNodeStatus.RUNNING
-            elif creation_type in {"i2v", "s2v"} and (
-                input_gaps := _video_readiness_gates(
-                    creation_type,
-                    creation,
+            elif visual_reference_error or (not video_slot and plan_error):
+                status = WorkNodeStatus.GATED
+                video_missing = (visual_reference_error or plan_error,)
+            elif (
+                creation_type in {"i2v", "s2v"}
+                and (
+                    not (
+                        isinstance(creation, I2VCreation)
+                        and video_slot
+                        and not creation.first_frame_version_id
+                        and not planned_predecessor_id(element)
+                    )
+                )
+                and (
+                    input_gaps := _video_readiness_gates(
+                        creation_type,
+                        creation,
+                        prev_video_slot=anchor_slot_observed,
+                    )
                 )
             ):
                 # Removing a required input is an unfinished revision even
                 # when an old clip remains selected. Empty upstream refs
                 # cannot prove that clip current or authorize a new compose.
+                # This early branch is a STRUCTURAL input check only, so it
+                # deliberately omits ``ffmpeg_ready``: an environment probe
+                # must never re-GATE an already-DONE node (that is handled
+                # on the READY / STALE paths below).
                 status = WorkNodeStatus.GATED
                 video_missing = input_gaps
             elif video_slot:
@@ -1271,11 +1498,14 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # so _artifact_is_stale always returns False for T2V.
                 # Prompt-only changes are caught by the dispatch fingerprint
                 # for failure-parking, but do NOT trigger STALE re-generation.
-                upstream_for_stale = (
-                    [storyboard_slot]
-                    if creation_type == "r2v"
-                    else upstream_selected
-                )
+                upstream_for_stale = upstream_selected
+                if video_uses_direct_visual_refs:
+                    # A predecessor reroll must not cascade paid work.
+                    upstream_for_stale = direct_visual_refs
+                elif creation_type == "r2v":
+                    upstream_for_stale = (
+                        [storyboard_slot] if storyboard_dep else []
+                    )
                 status = (
                     WorkNodeStatus.STALE
                     if _artifact_is_stale(
@@ -1288,13 +1518,26 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             elif not storyboard_done:
                 status = WorkNodeStatus.GATED
                 video_missing = (storyboard_id,) if storyboard_id else ()
+            elif visual_video_gaps:
+                status = WorkNodeStatus.GATED
+                video_missing = visual_video_gaps
             elif failure is not None and not _failure_inputs_changed(
                 failure,
                 video_id,
                 fingerprint,
                 media_models,
+                legacy_fingerprint=legacy_fingerprint,
             ):
+                # The node's own parked failure outranks the continuity
+                # wait: while the predecessor rerolls, this node must
+                # keep showing its own error summary instead of a
+                # generic "waiting on prev" gate. Inputs-changed is
+                # judged first (including the upgrade-window legacy
+                # digest), so nothing genuinely stale stays hidden.
                 status = WorkNodeStatus.FAILED
+            elif creation_type in {"r2v", "i2v"} and not prev_video_done:
+                status = WorkNodeStatus.GATED
+                video_missing = prev_video_dep
             elif (
                 creation_type != "s2v"
                 and not (creation.video_prompt or "").strip()
@@ -1307,6 +1550,8 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 gates = _video_readiness_gates(
                     creation_type,
                     creation,
+                    prev_video_slot=anchor_slot_observed,
+                    ffmpeg_ready=ffmpeg_ready,
                 )
                 if gates is not None:
                     status = WorkNodeStatus.GATED
@@ -1316,11 +1561,20 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     status = WorkNodeStatus.READY
 
             if status is WorkNodeStatus.STALE:
-                video_missing = _upstream_missing(
-                    (*deps, *storyboard_dep),
-                    statuses,
+                video_missing = tuple(
+                    dict.fromkeys(
+                        (
+                            *_upstream_missing(
+                                (*storyboard_dep, *prev_video_dep), statuses
+                            ),
+                            *visual_video_gaps,
+                        )
+                    )
                 )
-                if (
+                if plan_error:
+                    status = WorkNodeStatus.GATED
+                    video_missing = (*video_missing, plan_error)
+                elif (
                     creation_type != "s2v"
                     and not (creation.video_prompt or "").strip()
                 ):
@@ -1331,6 +1585,8 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     gates = _video_readiness_gates(
                         creation_type,
                         creation,
+                        prev_video_slot=anchor_slot_observed,
+                        ffmpeg_ready=ffmpeg_ready,
                     )
                     if gates:
                         status = WorkNodeStatus.GATED
@@ -1343,6 +1599,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                             video_id,
                             fingerprint,
                             media_models,
+                            legacy_fingerprint=legacy_fingerprint,
                         )
                     ):
                         status = WorkNodeStatus.FAILED
@@ -1387,10 +1644,19 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     kind="video",
                     label=f"{label} · 视频",
                     status=status,
-                    deps=(
-                        (script_node, *storyboard_dep)
-                        if script_node is not None
-                        else storyboard_dep
+                    deps=tuple(
+                        dict.fromkeys(
+                            (
+                                *(
+                                    (script_node,)
+                                    if script_node is not None
+                                    else ()
+                                ),
+                                *storyboard_dep,
+                                *prev_video_dep,
+                                *visual_video_deps,
+                            )
+                        )
                     ),
                     lane=lane,
                     timeline_id=timeline_id,
@@ -1628,14 +1894,32 @@ def _video_fingerprint_parts(
     creation: R2VCreation | T2VCreation | I2VCreation | S2VCreation,
     video_id: str,
     storyboard_slot: str | None,
+    *,
+    prev_video_slot: str | None = None,
 ) -> tuple:
-    """Return the fingerprint components for a video node by creation type."""
+    """Return the fingerprint components for a video node by creation type.
+
+    ``prev_video_slot`` participates for R2V and I2V only, so reissuing
+    the predecessor video automatically shifts this node's dispatch
+    fingerprint and the scheduler marks it STALE before a new provider
+    call. T2V keeps its original shape (no continuity anchors), and S2V
+    continues to key on its script/portrait/audio triple.
+    """
     # Preserve the identity of pre-field projects using the default audio.
     # Silent footage is a different production input and approval scope.
     audio_parts = (
         ("generateAudio", False)
         if creation_type != "s2v" and not creation.generate_audio
         else ()
+    )
+    # Only append the prev_video_slot marker when a predecessor is
+    # actually present. Baking ``("prev_video_slot", "")`` into every
+    # R2V / I2V fingerprint would shift the tuple for every project
+    # created before continuity landed, which ``_failure_inputs_changed``
+    # would read as "inputs changed" and promote parked FAILED nodes
+    # straight back to READY for a fresh paid dispatch.
+    prev_slot_part: tuple = (
+        ("prev_video_slot", prev_video_slot) if prev_video_slot else ()
     )
     if creation_type == "t2v":
         return (video_id, creation.video_prompt, *audio_parts)
@@ -1644,7 +1928,13 @@ def _video_fingerprint_parts(
             video_id,
             creation.video_prompt,
             creation.first_frame_version_id,
+            *(
+                ("predecessor", creation.predecessor_element_id)
+                if creation.predecessor_element_id
+                else ()
+            ),
             *audio_parts,
+            *prev_slot_part,
         )
     if creation_type == "s2v":
         return (
@@ -1660,7 +1950,13 @@ def _video_fingerprint_parts(
         creation.video_prompt,
         storyboard_slot,
         sorted(creation.video_reference_version_ids),
+        *(
+            ("generation_plan", creation.generation_plan.model_dump_json())
+            if creation.generation_plan is not None
+            else ()
+        ),
         *audio_parts,
+        *prev_slot_part,
     )
 
 
@@ -1702,12 +1998,25 @@ def _video_upstream_refs(
 def _video_readiness_gates(
     creation_type: str,
     creation: R2VCreation | T2VCreation | I2VCreation | S2VCreation,
+    *,
+    prev_video_slot: str | None = None,
+    ffmpeg_ready: bool | None = None,
 ) -> tuple[str, ...] | None:
     """Return missing reasons if the video node is gated, else None.
 
     Note: T2V's video_prompt check is handled by the caller before invoking
     this function. This function only checks additional gates beyond the
     prompt requirement.
+
+    I2V gains a second path to readiness: when the previous segment's
+    main slot already has a selected video, the submit-time continuity
+    layer auto-adopts its last frame as the first-frame input, so the
+    Element may stay without an authored ``first_frame_version_id``.
+    Without a published predecessor the gate still fires. When the
+    caller probed the environment and ffmpeg/ffprobe are unavailable
+    (``ffmpeg_ready is False``), the auto path cannot run either, and
+    the gate says so instead of letting the node dispatch into a
+    misleading submit-time failure.
     """
     if creation_type == "s2v":
         assert isinstance(creation, S2VCreation)
@@ -1720,7 +2029,19 @@ def _video_readiness_gates(
     if creation_type == "i2v":
         assert isinstance(creation, I2VCreation)
         if not creation.first_frame_version_id:
-            return ("first_frame_version_id 缺失",)
+            if not prev_video_slot:
+                if creation.predecessor_element_id:
+                    return ("生成方案引用的前段视频尚未发布",)
+                return (
+                    "first_frame_version_id 缺失",
+                    "请指定首帧版本或前段镜头",
+                )
+            if ffmpeg_ready is False:
+                return (
+                    "ffmpeg/ffprobe 未就绪，无法自动抽取上一段末帧作为首帧",
+                    "请修复 ffmpeg 依赖，或在本 Element 上显式声明 "
+                    "first_frame_version_id",
+                )
     # t2v: no extra gates beyond video_prompt (checked by caller)
     return None
 
@@ -1736,6 +2057,24 @@ def _video_dispatch_command(
     if creation_type == "i2v":
         return CreatorCommandType.GENERATE_R2V_VIDEO.value, {"mode": "i2v"}
     return CreatorCommandType.GENERATE_R2V_VIDEO.value, {}
+
+
+def probe_ffmpeg_ready() -> bool:
+    """Whether segment-continuity extraction can run in this process.
+
+    Injected into ``derive_work_graph`` by callers that drive dispatch or
+    serve the graph UI. The probe walks PATH, so the graph projection
+    itself stays free of environment reads unless a caller asks for them;
+    callers that do not probe keep the optimistic default.
+    """
+
+    from services.runtime_files.runtime_dependencies import (
+        resolve_ffmpeg,
+        resolve_ffprobe,
+    )
+
+    ffmpeg_path = resolve_ffmpeg()
+    return bool(ffmpeg_path and resolve_ffprobe(ffmpeg_path=ffmpeg_path))
 
 
 def _element_upstream_selected(

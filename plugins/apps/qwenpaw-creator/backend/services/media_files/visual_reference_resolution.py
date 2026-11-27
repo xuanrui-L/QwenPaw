@@ -25,6 +25,79 @@ def _owner_entity_id(owner_ref: str | None) -> str | None:
     return owner_ref
 
 
+def project_ref_media_kind(project: Project, version_id: str) -> str:
+    """``"video"`` only when the reference verifiably resolves to a video.
+
+    Unresolvable ids (e.g. synthetic ``continuity:*`` markers) report
+    ``"image"``: the caller's continuity bookkeeping decides their real
+    kind, and anything the index does not call a video has always been
+    addressed through the image sequence.
+    """
+
+    source = project.assets.source_versions_by_id.get(version_id)
+    if source is not None:
+        media_type = source.media_type
+    else:
+        artifact = project.assets.artifact_versions_by_id.get(version_id)
+        if artifact is None:
+            return "image"
+        indexed = project.assets.files_by_id.get(artifact.file_id)
+        if indexed is None:
+            return "image"
+        media_type = indexed.media_type
+    return "video" if media_type.casefold().startswith("video/") else "image"
+
+
+def number_references_by_media(
+    project: Project,
+    version_ids: Iterable[str],
+    *,
+    force_video: Iterable[str] = (),
+) -> list[tuple[str, str, int]]:
+    """``(version_id, kind, ordinal)`` in send order, per-type sequences.
+
+    Providers address references in two independent sequences counted per
+    media type (``图N`` / ``视频N`` on the Wan family; the canonical
+    ``[Image N]`` authoring form renders into the image one), so ordinals
+    are tallied separately for images and videos. An all-image sequence
+    numbers exactly like the old positional one, so only plans carrying
+    video references observe any difference — and there positional
+    numbering pointed markers at the wrong or nonexistent reference.
+    Single source of truth for the runtime role block, the continuity
+    suffix indices, and the preview's ``imageIndex``/``videoIndex``; the
+    three must never re-implement this independently or they drift into
+    colliding ``[Image N]`` markers inside the paid request.
+
+    ``force_video`` names ids the Asset Index cannot resolve but whose
+    submit-time media type is known — the synthetic continuity tail clip
+    — so they tally into the video sequence instead of the fallback.
+    """
+
+    forced = set(force_video)
+    numbered: list[tuple[str, str, int]] = []
+    image_ordinal = 0
+    video_ordinal = 0
+    # Deduplicate first: the submit resolver sends each id once, so the
+    # ordinals here must follow the same unique sequence or a repeated
+    # reference would inflate both counts.
+    for raw_id in dict.fromkeys(str(item) for item in version_ids):
+        version_id = str(raw_id)
+        if (
+            version_id in forced
+            or project_ref_media_kind(
+                project,
+                version_id,
+            )
+            == "video"
+        ):
+            video_ordinal += 1
+            numbered.append((version_id, "video", video_ordinal))
+        else:
+            image_ordinal += 1
+            numbered.append((version_id, "image", image_ordinal))
+    return numbered
+
+
 def _entity_ids(creation: R2VCreation) -> list[str]:
     """Return the stable semantic order used by prompt reference mappings.
 
@@ -107,29 +180,28 @@ def _resolved_variant_id(
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _lineup_anchor_version_ids(
+def implicit_r2v_visual_slots(
     project: Project,
     creation: R2VCreation,
-) -> list[str]:
-    """Selected cast-lineup images referenced by this element.
-
-    The lineup is the group anchor for relative consistency (scale
-    ratios, shared style baseline, spatial order), so it must lead the
-    reference chain ahead of individual identity anchors. A referenced
-    lineup without a generated image contributes nothing yet — the
-    element keeps working while visual development catches up.
-    """
-
-    anchors: list[str] = []
-    for ref in creation.cast_lineup_refs:
+) -> Iterable[tuple[str, str | None]]:
+    """Yield authored owners and their optional selections in send order."""
+    for ref in dict.fromkeys(creation.cast_lineup_refs):
         lineup = project.visual.cast_lineups.items.get(ref)
         if lineup is None:
-            # Mirrors the entity invariant below: a validated Project
-            # cannot reach here, so fail loudly for mutated models.
             raise ValidationError(f"R2V 引用的阵容图不存在: {ref}")
-        if lineup.selected_artifact_version_id:
-            anchors.append(lineup.selected_artifact_version_id)
-    return anchors
+        yield f"lineup:{ref}", lineup.selected_artifact_version_id
+
+    for entity_id in _entity_ids(creation):
+        entity = project.visual.entities.items.get(entity_id)
+        if entity is None:
+            raise ValidationError(f"R2V 视觉引用实体不存在: {entity_id}")
+        variant_id = _resolved_variant_id(project, creation, entity, ())
+        if variant_id is not None:
+            yield f"asset:{entity_id}", (
+                entity.variants.items[variant_id].selected_artifact_version_id
+            )
+        elif not entity.variants.order and entity.selected_artifact_version_id:
+            yield f"asset:{entity_id}", entity.selected_artifact_version_id
 
 
 def resolve_r2v_visual_reference_version_ids(
@@ -187,37 +259,13 @@ def resolve_r2v_visual_reference_version_ids(
                         "或调整 visual_variant_refs",
                     )
         return tuple(explicit)
-    selected: list[str] = []
-    for entity_id in _entity_ids(creation):
-        entity = project.visual.entities.items.get(entity_id)
-        if entity is None:
-            # A validated Project guarantees this invariant. Keep a controlled
-            # failure for callers holding a manually mutated in-memory model;
-            # silently skipping would generate without a required identity.
-            raise ValidationError(
-                f"R2V 视觉引用实体不存在: {entity_id}",
-            )
-        variant_id = _resolved_variant_id(
-            project,
-            creation,
-            entity,
-            (),
-        )
-        if variant_id is not None:
-            version_id = entity.variants.items[
-                variant_id
-            ].selected_artifact_version_id
-        else:
-            version_id = (
-                entity.selected_artifact_version_id
-                if not entity.variants.order
-                else None
-            )
-        if version_id is not None:
-            selected.append(version_id)
-
-    lineup_anchors = _lineup_anchor_version_ids(project, creation)
-    return tuple(dict.fromkeys([*lineup_anchors, *selected]))
+    return tuple(
+        dict.fromkeys(
+            version_id
+            for _, version_id in implicit_r2v_visual_slots(project, creation)
+            if version_id is not None
+        ),
+    )
 
 
 def video_reference_plan(
@@ -256,6 +304,9 @@ def video_reference_plan(
     )
     selected = selected_element_output(project, element, "storyboard")
     storyboard_id = selected[1] if selected is not None else None
+    from models.video_task_plans import uses_storyboard
+
+    include_storyboard = uses_storyboard(creation)
     if storyboard_id:
         own_versions.add(storyboard_id)
     # Resolve before filtering: an explicitly storyboard-only plan must not
@@ -266,7 +317,7 @@ def video_reference_plan(
         creation.video_reference_version_ids,
     )
     return (
-        *([storyboard_id] if storyboard_id else []),
+        *([storyboard_id] if storyboard_id and include_storyboard else []),
         *(
             version_id
             for version_id in additional
@@ -283,21 +334,15 @@ def preview_r2v_reference_order(
     image_model_name: str = "",
     project_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Authoritative ``[Image N]`` order preview for one r2v Element.
-
-    Video mirrors the submit path (storyboard first, then the resolved
-    visual reference chain, deduplicated in order) so the frontend can label
-    each reference with the index the video prompt will cite.  Entity
-    binding and deduplication reorder references, which makes the order
-    impossible to reconstruct client-side from the raw creation fields.
-    """
+    """Preview authored media in the same order used in the request."""
+    from models.video_task_plans import uses_storyboard
 
     from services.media_files.element_adapter import (
         find_timeline_element,
         selected_element_output,
     )
 
-    _, element = find_timeline_element(project, element_id)
+    timeline, element = find_timeline_element(project, element_id)
     creation = element.creation
     if not isinstance(creation, R2VCreation):
         raise ValidationError(
@@ -313,8 +358,12 @@ def preview_r2v_reference_order(
     storyboard_id = (
         selected_storyboard[1] if selected_storyboard is not None else None
     )
+    plan = creation.generation_plan if stage == "video" else None
+    extending = plan is not None and plan.method == "video_extend"
     dropped: tuple[str, ...] = ()
-    if stage == "storyboard":
+    if extending:
+        version_ids = ()
+    elif stage == "storyboard":
         version_ids, dropped = storyboard_reference_plan(
             project,
             creation,
@@ -323,19 +372,78 @@ def preview_r2v_reference_order(
     else:
         version_ids = video_reference_plan(project, element)
     references: list[dict[str, Any]] = []
-    if stage == "video" and storyboard_id is None:
+    supports_plan = True
+    if plan is not None and plan.predecessor_element_id is not None:
+        from models.video_task_plans import planned_predecessor
+        from services.media_files.segment_continuity import (
+            resolve_predecessor_video_version,
+        )
+
+        try:
+            predecessor = planned_predecessor(timeline, element)
+        except ValidationError:
+            predecessor = None
+        version_id = (
+            resolve_predecessor_video_version(project, predecessor)
+            if predecessor is not None
+            else None
+        )
+        available = bool(
+            version_id and project_ref_media_kind(project, version_id) == "video"
+        )
+        predecessor_label = (
+            (predecessor.label if predecessor else "")
+            or plan.predecessor_element_id
+        )
+        reference_label = "前段视频" if extending else "前段末帧"
+        references.append(
+            {
+                "index": 1,
+                "imageIndex": None if extending else 1,
+                "videoIndex": 1 if extending else None,
+                "versionId": (version_id or "") if extending else "",
+                "kind": "continuity",
+                "available": available,
+                "name": f"{predecessor_label} · {reference_label}",
+            }
+        )
+        if extending:
+            from models.config import get_video_backend, get_video_model_name
+            from models.video_capabilities import supports_video_continuation
+
+            supports_plan = supports_video_continuation(
+                get_video_model_name(), get_video_backend()
+            )
+    if (
+        stage == "video"
+        and storyboard_id is None
+        and uses_storyboard(creation)
+    ):
         # Video execution requires this element's selected storyboard. Keep
         # its semantic position while authoring, without inventing a version
         # ID or allowing an identity reference to impersonate [Image 1].
         references.append(
             {
-                "index": 1,
+                "index": len(references) + 1,
+                "imageIndex": len(references) + 1,
+                "videoIndex": None,
                 "versionId": "",
                 "kind": "storyboard",
                 "available": False,
                 "name": "分镜图（待生成）",
             },
         )
+    reserved_images = sum(row["imageIndex"] is not None for row in references)
+    wire_ordinals = {
+        version_id: (
+            media_kind,
+            ordinal + reserved_images if media_kind == "image" else ordinal,
+        )
+        for version_id, media_kind, ordinal in number_references_by_media(
+            project,
+            version_ids,
+        )
+    }
     for index, version_id in enumerate(version_ids, start=len(references) + 1):
         source = project.assets.source_versions_by_id.get(version_id)
         artifact = project.assets.artifact_versions_by_id.get(version_id)
@@ -364,9 +472,15 @@ def preview_r2v_reference_order(
                 )
             except (CreatorError, KeyError):
                 available = False
+        wire_kind, wire_ordinal = wire_ordinals.get(
+            version_id,
+            ("image", None),
+        )
         references.append(
             {
                 "index": index,
+                "imageIndex": (wire_ordinal if wire_kind == "image" else None),
+                "videoIndex": (wire_ordinal if wire_kind == "video" else None),
                 "versionId": version_id,
                 "kind": kind,
                 "available": available,
@@ -402,7 +516,8 @@ def preview_r2v_reference_order(
         "budgetDroppedVersionIds": list(dropped),
         "invalidMarkerIndices": invalid_indices,
         "ready": (
-            all(item["available"] for item in references)
+            supports_plan
+            and all(item["available"] for item in references)
             and not invalid_indices
             and (
                 stage != "storyboard"

@@ -723,6 +723,7 @@ class SubtitleStyleRequest(StrictModel):
 
 
 @router.patch("/{project_id}/subtitles/style")
+# pylint: disable-next=too-many-statements
 async def set_subtitle_style(
     project_id: str,
     request: SubtitleStyleRequest,
@@ -762,6 +763,7 @@ async def set_subtitle_style(
         MotionGraphic,
     )
 
+    # pylint: disable-next=too-many-branches,too-many-statements
     def operation() -> dict[str, Any]:
         snapshot = services.projects.read(project_id)
         project = snapshot.project
@@ -775,7 +777,7 @@ async def set_subtitle_style(
             or "subtitle_style" in request.model_fields_set
         ):
             raise ValidationError(
-                "elementIds 只能配合入场/出场/循环选择；" "风格包与覆盖样式始终作用于全项目字幕。",
+                "elementIds 只能配合入场/出场/循环选择；风格包与覆盖样式始终作用于全项目字幕。",
             )
         # A present key is authoritative, so the UI can also go back:
         # ``null``/``""`` mean smart recommend and an explicit ``null`` style

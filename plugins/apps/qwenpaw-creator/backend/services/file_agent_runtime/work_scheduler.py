@@ -52,6 +52,7 @@ from services.file_agent_runtime.work_graph import (
     WorkNode,
     WorkNodeStatus,
     derive_work_graph,
+    probe_ffmpeg_ready,
 )
 from services.project_files import frontend_edit_hold
 from services.project_files.facade import CreatorFileServices
@@ -661,8 +662,12 @@ class WorkGraphScheduler:
             snapshot.project,
             tasks=tasks,
             media_models=(get_image_model_name(), get_video_model_name()),
+            ffmpeg_ready=await asyncio.to_thread(probe_ffmpeg_ready),
         )
         from services.run_review import admission
+        from services.run_review.text_review import (
+            active_sync_review_gates,
+        )
         from services.run_review.media_review import active_media_review_slots
         from .workgraph_execution import _publication_artifacts
 
@@ -703,8 +708,9 @@ class WorkGraphScheduler:
             / "run-review"
         )
         sync_fences = await asyncio.to_thread(
-            admission.active_sync_fences,
+            active_sync_review_gates,
             reports_root,
+            snapshot.project,
         )
         sync_review_pending = bool(sync_fences)
         if sync_review_pending:

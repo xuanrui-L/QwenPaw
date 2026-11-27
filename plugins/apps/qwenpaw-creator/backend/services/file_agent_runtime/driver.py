@@ -3243,16 +3243,22 @@ class FileCreatorAgentRuntime:
             )
             injected_settled = True
             needs_review = bool(result.review_ids)
-            await asyncio.to_thread(
-                self.sessions.set_goal_status,
-                project_id,
-                goal.goal_id,
-                (
-                    CreatorGoalStatus.WAITING_REVIEW
-                    if needs_review
-                    else CreatorGoalStatus.COMPLETED
-                ),
-            )
+            if needs_review:
+                await asyncio.to_thread(
+                    self.sessions.set_goal_status,
+                    project_id,
+                    goal.goal_id,
+                    CreatorGoalStatus.WAITING_REVIEW,
+                )
+            elif not await asyncio.to_thread(
+                self._has_unfinished_automatic_production, project_id,
+            ):
+                await asyncio.to_thread(
+                    self.sessions.set_goal_status,
+                    project_id,
+                    goal.goal_id,
+                    CreatorGoalStatus.COMPLETED,
+                )
             try:
                 await asyncio.to_thread(
                     self.sessions.clear_active_run,
@@ -9498,6 +9504,26 @@ class FileCreatorAgentRuntime:
         )
         self._wake.set()
 
+    def _has_unfinished_automatic_production(self, project_id: str) -> bool:
+        if not self.work_scheduler.enabled():
+            return False
+        try:
+            snapshot = self.services.projects.read(project_id)
+            if snapshot.project.settings.production_stage == "script":
+                return False
+            tasks = self.executions.list_tasks(project_id)
+            graph = derive_work_graph(
+                snapshot.project,
+                tasks=tasks,
+                media_models=(get_image_model_name(), get_video_model_name()),
+            )
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "could not verify production completion for %s", project_id,
+            )
+            return True
+        return any(node.kind != "script" for node in graph.unfinished())
+
     async def _maybe_wake_for_unfinished_work(
         self,
         project_id: str,
@@ -9573,6 +9599,24 @@ class FileCreatorAgentRuntime:
                 )
             )
             if not deterministic_failures:
+                if (
+                    session.active_goal_id == last.goal_id
+                    and (
+                        await asyncio.to_thread(
+                            self.sessions.get_goal, project_id, last.goal_id,
+                        )
+                    ).status is CreatorGoalStatus.ACTIVE
+                    and not await asyncio.to_thread(
+                        self.services.reviews.all_pending, project_id,
+                    )
+                ):
+                    await asyncio.to_thread(
+                        self.sessions.complete_idle_goal,
+                        project_id,
+                        session.session_id,
+                        goal_id=last.goal_id,
+                        observed_message_seq=session.last_message_seq,
+                    )
                 return
         # Wake the scheduler to dispatch any READY nodes or retry preparations.
         self.work_scheduler.wake(project_id)
@@ -11494,7 +11538,10 @@ async def billing_arguments_for(
     spec: SpecialistToolSpec,
     tool_arguments: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Tool arguments adjusted so the estimate matches what is billed.
+    """Normalize approval terms against the prepared provider request.
+
+    Extension submits both the material and new footage. Keep the wire
+    duration separate from the duration added to the timeline.
 
     ``video_edit`` ignores the tool's ``durationSeconds``: the provider
     bills the input video's own length (truncated to its documented
@@ -11507,7 +11554,56 @@ async def billing_arguments_for(
     arguments = dict(tool_arguments)
     if spec.provider_kind != "video":
         return arguments
-    if str(arguments.get("mode") or "").strip().casefold() != "video_edit":
+    mode = str(arguments.get("mode") or "").strip().casefold()
+    if mode == "video_extend":
+        from services.media_files.r2v_execution import (
+            _build_task_plan,
+            _duration,
+        )
+        from services.media_files.element_adapter import find_timeline_element
+        from services.project_files.models import R2VCreation
+
+        snapshot = await asyncio.to_thread(services.projects.read, project_id)
+        timeline, element = find_timeline_element(
+            snapshot.project, str(arguments.get("extensionElementId") or "")
+        )
+        timeline_seconds = (
+            element.span.duration_tick / timeline.ticks_per_second
+        )
+        creation = element.creation
+        plan = (
+            creation.generation_plan
+            if isinstance(creation, R2VCreation)
+            else None
+        )
+        if (
+            plan is None
+            or plan.method != "video_extend"
+            or timeline_seconds != arguments.get("durationSeconds")
+        ):
+            raise ValidationError("续写生成方案已修改，请重新申请制作授权")
+        resolved = await asyncio.to_thread(
+            _build_task_plan,
+            snapshot.project,
+            services.projects.project_root(project_id),
+            timeline,
+            element,
+            base_mode="r2v",
+            duration_seconds=_duration(timeline_seconds),
+            ratio=snapshot.project.settings.aspect_ratio,
+        )
+        if resolved.predecessor_version_id != arguments.get(
+            "extensionMaterialVersionId",
+        ):
+            raise ValidationError("续写前段版本已修改，请重新申请制作授权")
+        return {
+            **arguments,
+            "durationSeconds": resolved.submit_duration_seconds,
+            "timelineDurationSeconds": timeline_seconds,
+            "materialDurationSeconds": resolved.material_duration_seconds,
+            "ratio": resolved.ratio,
+        }
+    if mode != "video_edit":
         return arguments
     video_ref = str(arguments.get("videoRef") or "").strip()
     if not video_ref:
@@ -11649,7 +11745,13 @@ def _authorization_summary(
     elif spec.provider_kind == "video":
         mode = str(tool_arguments.get("mode") or "r2v").strip().casefold()
         duration = tool_arguments.get("durationSeconds")
-        if duration:
+        result_seconds = tool_arguments.get("timelineDurationSeconds")
+        if mode == "video_extend" and duration and result_seconds is not None:
+            parts.append(
+                f"视频续写 · 新增 {result_seconds:g} 秒"
+                f" · 提交 {duration} 秒（含前段）",
+            )
+        elif duration:
             # video_edit follows its input video, so name the source of the
             # number the price is computed from.
             parts.append(
