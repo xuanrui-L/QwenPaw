@@ -93,50 +93,6 @@ class VideoTaskPlan:
     strong_continuity: bool = False
 
 
-def legacy_continuity_signals(
-    elements_by_id: dict,
-    element: TimelineElement,
-    prev: TimelineElement | None,
-) -> tuple[str, str, bool]:
-    """Decode v11 fields solely to verify already-frozen request digests."""
-
-    transition_kind = "none"
-    if prev is not None:
-        for item in elements_by_id.values():
-            creation = item.creation
-            if (
-                getattr(creation, "type", "") == "transition"
-                and creation.from_element_id == prev.element_id
-                and creation.to_element_id == element.element_id
-            ):
-                from services.media_files.transitions import (
-                    normalize_transition_kind,
-                )
-
-                transition_kind = (
-                    "cut"
-                    if normalize_transition_kind(creation.transition_kind)
-                    == "cut"
-                    else "blend"
-                )
-                break
-    if transition_kind == "none":
-        # Structured author intent outranks the vocabulary; an
-        # explicit Transition element (checked above) outranks both.
-        # One source keeps dispatch, claim fingerprint and work graph
-        # from ever routing the same segment differently.
-        authored = getattr(element.creation, "transition_intent", None)
-        if authored in ("cut", "continue", "one_take"):
-            return "none", authored, authored == "one_take"
-    # Structured intent only: free text is never creative routing
-    # input anymore. Missing fields mean "neutral", and the callers
-    # apply their documented conservative defaults for that case.
-    authored = getattr(element.creation, "transition_intent", None)
-    if authored in ("cut", "continue", "one_take"):
-        return transition_kind, authored, authored == "one_take"
-    return transition_kind, "neutral", False
-
-
 def planned_predecessor_id(element: TimelineElement) -> str | None:
     creation = element.creation
     if creation.type == "r2v":
@@ -174,23 +130,9 @@ def uses_storyboard(creation: Any) -> bool:
     return plan is None or plan.use_storyboard
 
 
-def r2v_continuity_storyboard_need(
-    _project: Any,
-    _timeline: Any,
-    element: TimelineElement,
-) -> str:
-    plan = getattr(element.creation, "generation_plan", None)
-    if not uses_storyboard(element.creation):
-        return "none"
-    if plan is not None and plan.method == "r2v_last_frame":
-        return "combined"
-    return "plain"
-
-
 __all__ = [
     "VideoTaskKind",
     "VideoTaskPlan",
-    "legacy_continuity_signals",
     "planned_predecessor",
     "planned_predecessor_id",
     "uses_storyboard",

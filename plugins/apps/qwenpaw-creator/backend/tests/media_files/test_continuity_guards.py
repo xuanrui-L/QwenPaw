@@ -217,10 +217,6 @@ def _frame_entry(tmp_path: Path, prev_version: str = "prev-version-1"):
 
 
 def test_extract_registers_inflight_anchor(tmp_path, monkeypatch) -> None:
-    """Major-2: a successful extract registers the predecessor digest,
-    so event-driven prunes in the same process treat the anchors a
-    queued payload froze as in flight."""
-
     project, timeline, _f, second = _two_segment_project("v1")
     source = tmp_path / "prev.mp4"
     source.write_bytes(b"fake-video")
@@ -304,43 +300,10 @@ def test_bgm_cache_identity_separates_budgets_and_sources(bgm_excerpt):
     assert "-c:a" not in commands[0]
 
 
-def test_bgm_source_probe_failure_skips_instead_of_crashing(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """CR round-3 P2-1: an unreadable source (ffprobe timeout/loss)
-    must degrade to the documented bgm skip. The cleanup branch used
-    to touch an unassigned tmp handle and raised UnboundLocalError,
-    which no caller catches — the video task died instead of skipping."""
-
-    project, timeline = _bgm_project(tmp_path)
-    _bind_bgm_config(monkeypatch)
-    _mock_ffmpeg_paths(monkeypatch)
-
-    def boom(*_a, **_k):
-        raise RuntimeError("ffprobe timeout")
-
-    monkeypatch.setattr(sc, "_probe_duration", boom)
-    assert (
-        rx._resolve_bgm_reference(
-            project,
-            timeline,
-            tmp_path,
-            voice_count=0,
-            element_id="e2",
-        )
-        == ""
-    )
-
-
 def test_bgm_reference_budget_matrix(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """One matrix for the shared-bgm resolve rules: no bgm element,
-    voice slot overflow, models without standalone audio, and voices
-    consuming the 15s time budget all resolve to no bgm reference."""
-
     def resolve(project, timeline, **kw):
         return rx._resolve_bgm_reference(
             project,
@@ -358,10 +321,15 @@ def test_bgm_reference_budget_matrix(
     assert resolve(with_bgm, bgm_tl, voice_count=5) == ""
     assert resolve(with_bgm, bgm_tl, voice_count=2, voice_seconds=14.5) == ""
 
-    monkeypatch.setattr(
-        "models.config.get_video_model_name",
-        lambda: "some-other-model",
-    )
+    with monkeypatch.context() as unsupported:
+        _bind_bgm_config(unsupported, "some-other-model")
+        assert resolve(with_bgm, bgm_tl, voice_count=0) == ""
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("ffprobe timeout")
+
+    _mock_ffmpeg_paths(monkeypatch)
+    monkeypatch.setattr(sc, "_probe_duration", unavailable)
     assert resolve(with_bgm, bgm_tl, voice_count=0) == ""
 
 
@@ -473,14 +441,25 @@ def test_explicit_plan_controls_reference_identity_when_prose_suggests_a_cut():
     ].deps == ("storyboard:e2",)
 
 
-def test_legacy_projects_do_not_infer_a_new_generation_method():
-    project, timeline, _first, second = _two_segment_project("prev-v")
+def test_legacy_project_keeps_its_mode_and_can_resume_a_frozen_anchor():
+    project, timeline, first, second = _two_segment_project("prev-v1")
     second.creation.generation_plan = None
     second.creation.transition_intent = "one_take"
     second.creation.storyboard_intent = "none"
-    assert not rx._r2v_strong_continuity(project, timeline, second)
+    assert rx._reference_ids_with_continuity(project, timeline, second) == ()
     assert derive_work_graph(project).by_id["video:e2"].deps == (
         "storyboard:e2",
+    )
+    refs = ("continuity:last_frame:prev-v1",)
+    digest = rx._submission_input_fingerprint_legacy(
+        project, "e2", references=refs
+    )
+    assert rx._matches_submission_inputs(
+        project, "e2", digest, payload_refs=refs
+    )
+    _publish_artifact(project, first, "prev-v2")
+    assert not rx._matches_submission_inputs(
+        project, "e2", digest, payload_refs=refs
     )
 
 

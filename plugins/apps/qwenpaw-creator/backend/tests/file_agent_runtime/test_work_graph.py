@@ -1747,6 +1747,13 @@ def test_i2v_work_graph_tracks_native_tail_only(native_tail):
         output_name="main",
     )
     _add_element(project, clip)
+    media_models = ("", "wan3.0-video-prime" if native_tail else "wan2.7-i2v")
+    if not native_tail:
+        pending = derive_work_graph(project, media_models=media_models).by_id[
+            "video:clip"
+        ]
+        assert pending.status is WorkNodeStatus.GATED
+        assert "不支持" in pending.missing[0]
     _select_slot(
         project,
         slot_id="element:clip:main",
@@ -1755,7 +1762,6 @@ def test_i2v_work_graph_tracks_native_tail_only(native_tail):
         version_id="out",
         provenance=["artifact-version:first", "artifact-version:tail-a"],
     )
-    media_models = ("", "wan3.0-video-prime" if native_tail else "wan2.7-i2v")
     first = derive_work_graph(project, media_models=media_models).by_id[
         "video:clip"
     ]

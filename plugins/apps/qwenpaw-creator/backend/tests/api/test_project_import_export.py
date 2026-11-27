@@ -27,6 +27,7 @@ from services.runtime_files import ProjectRuntimeSessionStore
 from services.project_files.store import ProjectStore
 from services.project_files import archive as project_archive
 from services.project_files.models import IndexedFile, Project
+from services.project_files.json_pointer import hash_json_value
 
 pytestmark = pytest.mark.unit
 
@@ -947,13 +948,8 @@ def test_windows_uri_rewrite_preserves_archived_transaction(
 
 @pytest.mark.parametrize("old_schema", [9, 10, 11])
 def test_old_project_archive_imports_and_allows_editing(
-    app,
-    api_runtime_root,
-    run_scenario,
-    old_schema,
+    app, run_scenario, old_schema
 ):
-    from services.project_files.commit import ProjectCommitBoundary
-
     project_id = f"project-legacy-{old_schema}"
     legacy = Project.new(project_id=project_id, name="旧版短片").model_dump(
         mode="json",
@@ -967,32 +963,48 @@ def test_old_project_archive_imports_and_allows_editing(
         "location": {},
         "creation": {"type": "r2v", "narrative": "雨中相遇"},
     }
+    if old_schema == 11:
+        timeline["elements_by_id"]["old-shot"]["creation"].update(
+            transition_intent="one_take", storyboard_intent="none"
+        )
     payload = io.BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
         archive.writestr(f"{project_id}/project.json", json.dumps(legacy))
 
     async def scenario(client):
-        response = await _import(client, "legacy.zip", payload.getvalue())
-        assert response.status_code == 200, response.text
-        store = ProjectStore(api_runtime_root)
-        base = store.read(project_id)
-        assert base.project.schema_version == 12
-        candidate = base.project.model_dump(mode="json")
-        clip = candidate["timelines"]["items"]["timeline:main"][
-            "elements_by_id"
-        ]["old-shot"]
-        assert clip["creation"]["generation_plan"] is None
-        clip["label"] = "编辑后的旧镜头"
-        ProjectCommitBoundary(store).commit(
-            base=base,
-            candidate=candidate,
-            origin="frontend_edit",
+        imported = await _import(client, "legacy.zip", payload.getvalue())
+        assert imported.status_code == 200, imported.text
+        url = f"/projects/{project_id}/project"
+        base = (await client.get(url)).json()
+        edited = await client.patch(
+            url,
+            json={
+                "clientCommandId": "edit-old-shot",
+                "editSessionId": "legacy-import",
+                "baseGeneration": base["generation"],
+                "baseEtag": base["etag"],
+                "operations": [
+                    {
+                        "op": "replace",
+                        "path": (
+                            "/timelines/items/timeline:main/"
+                            "elements_by_id/old-shot/label"
+                        ),
+                        "value": "编辑后的旧镜头",
+                        "expectedValueHash": hash_json_value("原镜头"),
+                    },
+                ],
+            },
         )
-        reread = store.read(project_id)
-        shot = reread.project.timelines.items["timeline:main"].elements_by_id[
-            "old-shot"
-        ]
-        assert shot.label == "编辑后的旧镜头"
-        assert shot.creation.narrative == "雨中相遇"
+        assert edited.status_code == 200, edited.text
+        project = (await client.get(url)).json()["project"]
+        assert project["schema_version"] == 12
+        elements = project["timelines"]["items"]["timeline:main"]["elements_by_id"]
+        shot = elements["old-shot"]
+        assert shot["label"] == "编辑后的旧镜头"
+        assert shot["creation"]["narrative"] == "雨中相遇"
+        assert shot["creation"]["generation_plan"] is None
+        if old_schema == 11:
+            assert shot["creation"]["transition_intent"] == "one_take"
 
     run_scenario(app, scenario)
