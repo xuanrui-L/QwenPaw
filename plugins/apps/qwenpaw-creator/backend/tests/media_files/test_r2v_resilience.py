@@ -760,7 +760,11 @@ def test_resume_admitted_video_from_before_project_audio_control(
     provider = AsyncMock()
     provider.submit.return_value = "paid-once"
     worker = FileR2VExecutionService(services, provider=provider)
-    # Captured from the same admitted fixture written by Creator b4e148a16.
+    # REAL digest captured from the target branch (pre-force_storyboard)
+    # for this exact admitted fixture: default serialization (strips
+    # generate_audio=True, no force_storyboard field). Do not replace
+    # with a re-captured current-schema value — replaying the genuine
+    # old bytes is the point.
     historical = "sha256:813f46236c95cc475293f2e12f19c079f53e98be2be57a86aa628b7aa5fbb955"
 
     def restore_historical_fingerprint(state):
@@ -914,3 +918,87 @@ def test_frozen_inputs_still_current_by_video_mode(
         project,
         task,
     )
+
+
+def test_plain_r2v_frozen_payload_keeps_the_legacy_key_set(
+    tmp_path,
+    monkeypatch,
+):
+    """Regression guardrail (continuity plan §5): an unchanged Project
+    state must freeze the exact pre-continuity request shape. The
+    mode/extension/bgm/voice keys join only when those paths actually
+    ship, so a plain r2v dispatch stays byte-identical across builds —
+    old digests keep validating and no new field can silently widen the
+    claim surface."""
+
+    services = _services(tmp_path, monkeypatch)
+    dispatched = _dispatch(services, key="video-legacy-keys")
+    tasks = ProjectExecutionStore(services.root).list_tasks(PROJECT_ID)
+    task = next(t for t in tasks if t.task_id == dispatched.task_id)
+    request = task.metadata["requestSnapshot"]
+    for key in (
+        "mode",
+        "continuityShape",
+        "continuityTrimOffset",
+        "providerDurationSeconds",
+        "bgmReferenceUrl",
+        "referenceVoiceUrls",
+        "firstFrameUrl",
+        "firstFrameVersionId",
+        "videoUrl",
+        "videoVersionId",
+    ):
+        assert key not in request, f"plain r2v payload grew key {key}"
+
+
+def test_resume_admitted_video_rejects_explicit_force_storyboard(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """CR round-2 negative: replaying the genuine historical digest is
+    only safe while inputs are untouched. Flipping force_storyboard
+    after admit is a real input change — the claim must fail (task
+    re-queues), never silently reuse the old digest."""
+
+    from unittest.mock import AsyncMock
+
+    services = _services(tmp_path, monkeypatch)
+    task_id = _dispatch(services).task_id
+    provider = AsyncMock()
+    provider.submit.return_value = "paid-once"
+    worker = FileR2VExecutionService(services, provider=provider)
+    historical = (
+        "sha256:813f46236c95cc475293f2e12f19c079f53e98be2be57a86a"
+        "a628b7aa5fbb955"
+    )
+
+    def restore_historical_fingerprint(state):
+        return state.model_copy(
+            update={
+                "request": {
+                    **state.request,
+                    "projectInputFingerprint": historical,
+                },
+            },
+        )
+
+    state = worker._update_state_sync(
+        PROJECT_ID,
+        task_id,
+        restore_historical_fingerprint,
+    )
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    elements = candidate["timelines"]["items"]["timeline:main"][
+        "elements_by_id"
+    ]
+    elements[ELEMENT_ID]["creation"]["force_storyboard"] = True
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.FRONTEND_EDIT,
+        review_policy=ReviewPolicy.AUTO_FIX,
+    )
+    task = worker.executions.get_task(PROJECT_ID, task_id)
+    assert asyncio.run(worker._submit(task, state)) is False
+    assert provider.submit.await_count == 0

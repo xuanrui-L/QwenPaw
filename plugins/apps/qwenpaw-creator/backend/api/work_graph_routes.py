@@ -32,6 +32,7 @@ from services.file_agent_runtime.work_graph import (
     WorkGraph,
     WorkNode,
     derive_work_graph,
+    probe_ffmpeg_ready,
 )
 from services.file_agent_runtime.work_scheduler import (
     WorkGraphScheduler,
@@ -134,6 +135,7 @@ def read_project_work_graph(
         tasks=tasks,
         pending_reviews=services.reviews.all_pending(project_id),
         media_models=(get_image_model_name(), get_video_model_name()),
+        ffmpeg_ready=probe_ffmpeg_ready(),
     )
 
 
@@ -299,6 +301,7 @@ async def dispatch_work_graph_node(
         snapshot.project,
         tasks=tasks,
         media_models=(get_image_model_name(), get_video_model_name()),
+        ffmpeg_ready=await asyncio.to_thread(probe_ffmpeg_ready),
     )
     node = graph.by_id.get(node_id)
     if node is None:
@@ -397,7 +400,9 @@ async def dispatch_work_graph_node(
             settled = current.status in TERMINAL_TASK_STATUSES
             if settled:
                 current_graph = await asyncio.to_thread(
-                    read_project_work_graph, project_id, services
+                    read_project_work_graph,
+                    project_id,
+                    services,
                 )
                 node = current_graph.by_id.get(node_id, node)
             return {

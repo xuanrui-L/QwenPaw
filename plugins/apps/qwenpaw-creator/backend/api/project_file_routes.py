@@ -11,7 +11,7 @@ import re
 from typing import Any, Literal, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, Header, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field, model_validator
 
 from domain.errors import (
@@ -496,6 +496,90 @@ async def get_r2v_reference_order(
         image_model_name=get_image_model_name(),
         project_root=services.projects.project_root(project_id),
     )
+
+
+@router.get("/elements/{element_id}/wire-preview")
+async def get_element_wire_preview(
+    project_id: str,
+    element_id: str,
+    services: CreatorFileServices = Depends(project_file_services),
+) -> dict[str, Any]:
+    """The request that was ACTUALLY sent for one Element's latest task.
+
+    The overview card renders the authored prompt, but a strong-continuity
+    dispatch rewrites it (promoted last-frame anchor, storyboard swap) and
+    that rewrite never lands back in the Project. This read-only view
+    surfaces the frozen wire request so creators can see the real sent
+    prompt, the real [Image N] order and whether bgm rode along.
+    Elements without any video task report ``found: false``.
+    """
+
+    def collect() -> dict[str, Any]:
+        from services.runtime_files.execution_store import (
+            ProjectExecutionStore,
+        )
+
+        rows = []
+        for task in ProjectExecutionStore(services.root).list_tasks(
+            project_id,
+        ):
+            if task.kind != "r2v_generation":
+                continue
+            raw = task.metadata.get("requestSnapshot")
+            if isinstance(raw, Mapping) and raw.get("elementId") == element_id:
+                rows.append((str(task.created_at), task, raw))
+        if not rows:
+            return {"found": False}
+        rows.sort(key=lambda item: item[0])
+        _created, task, request = rows[-1]
+        refs = [str(item) for item in request.get("referenceVersionIds") or []]
+        anchor_version = ""
+        if refs and refs[0].startswith("continuity:last_frame:"):
+            anchor_version = refs[0].split(":", 2)[2]
+        return {
+            "found": True,
+            "taskId": task.task_id,
+            "createdAt": str(task.created_at),
+            "status": str(task.status),
+            "mode": str(request.get("mode") or "r2v"),
+            "continuityShape": str(request.get("continuityShape") or ""),
+            "prompt": str(request.get("prompt") or ""),
+            "referenceVersionIds": refs,
+            "anchorVersionId": anchor_version,
+            "bgmReferenceUrl": str(request.get("bgmReferenceUrl") or ""),
+        }
+
+    return await asyncio.to_thread(collect)
+
+
+@router.get("/wire-preview/anchor-image")
+async def get_wire_anchor_image(
+    project_id: str,
+    version: str,
+    services: CreatorFileServices = Depends(project_file_services),
+) -> FileResponse:
+    """Serve the runtime-extracted last frame for one prev version.
+
+    Same deterministic cache path the continuity layer writes
+    (``runtime/continuity/<digest(prev_version)>/last_frame.png``); the
+    version id is validated before touching the filesystem, and a pruned
+    cache surfaces as 404 so the UI can show a placeholder instead.
+    """
+
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{1,128}", version):
+        raise ValidationError("version 参数不合法")
+    from services.media_files.segment_continuity import _digest_for
+
+    path = (
+        services.projects.project_root(project_id)
+        / "runtime"
+        / "continuity"
+        / _digest_for(version)
+        / "last_frame.png"
+    )
+    if not path.is_file():
+        raise NotFoundError("末帧抽取图已被回收或尚未生成")
+    return FileResponse(path, media_type="image/png")
 
 
 @router.get("/project")

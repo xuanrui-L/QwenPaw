@@ -1779,8 +1779,8 @@ export function WorkbenchSurface({
   const handleRegenerate = (kind: "storyboard" | "video") =>
     void regenerateNode(kind);
 
-  // The storyboard the backend will lock as [Image 1] is the *selected*
-  // version, not whichever one is being viewed.
+  // Resolve the selected storyboard; its reference index comes from the
+  // generation plan's backend preview.
   const currentStoryboard =
     storyboardVersions.find(
       (version) => version.version_id === storyboardSlot?.selected_version_id,
@@ -1799,7 +1799,8 @@ export function WorkbenchSurface({
       order.elementId !== element.element_id
     )
       return [];
-    return order.references.map((item) => {
+    return order.references.flatMap((item) => {
+      if (item.videoIndex != null || item.imageIndex === null) return [];
       const artifact = project.assets.artifact_versions_by_id[item.versionId];
       const source = project.assets.source_versions_by_id[item.versionId];
       const available =
@@ -1811,18 +1812,18 @@ export function WorkbenchSurface({
                 artifact.file_id
               ]?.media_type.startsWith("image/"),
           ));
-      return {
-        index: item.index,
+      return [{
+        index: item.imageIndex ?? item.index,
         referenceId: item.versionId,
         name: item.name,
-        kind: item.kind,
-        missing: !available,
+        kind: item.kind === "continuity" ? "artifact" as const : item.kind,
+        missing: item.kind === "continuity" ? item.available === false : !available,
         thumbUrl: !available
           ? null
           : source
           ? getAssetVersionMediaUrl(item.versionId)
           : getArtifactVersionMediaUrl(item.versionId),
-      };
+      }];
     });
   };
   const sbTokens = tokensForOrder(storyboardReferenceOrder);

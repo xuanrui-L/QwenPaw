@@ -56,14 +56,16 @@ COPY --from=node-runtime \
   /usr/local/bin/node \
   /usr/local/bin/npm \
   /usr/local/bin/npx \
-  /usr/local/bin/corepack \
   /usr/local/bin/
 COPY --from=node-runtime \
   /usr/local/lib/node_modules/npm \
   /usr/local/lib/node_modules/npm
-COPY --from=node-runtime \
-  /usr/local/lib/node_modules/corepack \
-  /usr/local/lib/node_modules/corepack
+# Newer Node images ship without corepack; overlay it only when the
+# pinned node-runtime stage still carries it.
+RUN --mount=type=bind,from=node-runtime,source=/usr/local,target=/nodeusr \
+    (cp /nodeusr/bin/corepack /usr/local/bin/ 2>/dev/null || true) && \
+    (cp -r /nodeusr/lib/node_modules/corepack /usr/local/lib/node_modules/ \
+      2>/dev/null || true)
 RUN ln -sf node /usr/local/bin/nodejs
 
 # Keep image metadata consistent with the overlaid runtime.

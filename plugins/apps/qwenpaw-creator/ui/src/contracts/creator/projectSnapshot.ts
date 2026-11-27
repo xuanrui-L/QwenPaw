@@ -25,6 +25,7 @@ export interface ProjectSettingsDocument extends ProjectJsonRecord {
   language: string;
   target_duration_seconds: number | null;
   content_type: string | null;
+  video_continuity?: "continuity" | "throughput";
   subtitle_policy?: "auto" | "on" | "off";
   subtitle_template?: string | null;
   subtitle_style?: SubtitleStyleDocument | null;
@@ -220,6 +221,12 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   visual_variant_refs: Record<string, string>;
   cast_lineup_refs?: string[];
   recipe: GenerationRecipeDocument | null;
+  generation_plan?: {
+    method: "r2v" | "r2v_last_frame" | "video_extend";
+    use_storyboard: boolean;
+    predecessor_element_id?: string | null;
+    anchor_instruction?: string;
+  } | null;
   storyboard_prompt: string;
   storyboard_reference_version_ids: string[];
   video_prompt: string;
@@ -250,6 +257,8 @@ export interface I2VCreationDocument extends ProjectJsonRecord {
   narrative: string;
   continuity: string;
   first_frame_version_id: string | null;
+  last_frame_version_id?: string | null;
+  predecessor_element_id?: string | null;
   video_prompt: string;
   generate_audio?: boolean;
   recipe: GenerationRecipeDocument | null;
@@ -598,8 +607,10 @@ export interface ProjectPatchRequest {
 /** One entry of the authoritative [Image N] reference order (backend view). */
 export interface R2VReferenceOrderItem {
   index: number;
+  imageIndex?: number | null;
+  videoIndex?: number | null;
   versionId: string;
-  kind: "storyboard" | "source" | "artifact";
+  kind: "storyboard" | "source" | "artifact" | "continuity";
   name: string;
   available?: boolean;
 }
@@ -629,4 +640,17 @@ export interface ProjectPatchResponse {
     regenerationRequired: boolean;
     renderBlockedByGeneration: boolean;
   };
+}
+/** Frozen wire request of one Element's latest video task (read-only). */
+export interface WirePreviewResponse {
+  found: boolean;
+  taskId?: string;
+  createdAt?: string;
+  status?: string;
+  mode?: string;
+  continuityShape?: string;
+  prompt?: string;
+  referenceVersionIds?: string[];
+  anchorVersionId?: string;
+  bgmReferenceUrl?: string;
 }

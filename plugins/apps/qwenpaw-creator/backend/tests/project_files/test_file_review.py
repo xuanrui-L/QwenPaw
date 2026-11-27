@@ -165,7 +165,10 @@ def test_rejection_feedback_is_durable_and_idempotent(tmp_path) -> None:
     assert resolved.status is ReviewStatus.PENDING
     assert journal.state is ReviewDecisionJournalState.FINALIZED
     assert journal.rejection_feedback is not None
-    assert journal.rejection_feedback.feedback_note == "人物状态不对；保持身份一致后重做"
+    assert (
+        journal.rejection_feedback.feedback_note
+        == "人物状态不对；保持身份一致后重做"
+    )
     assert "/name" in journal.runtime_feedback_message
     assert [target.json_pointers for target in journal.rejection_targets] == [
         ["/name"],
@@ -962,6 +965,7 @@ def test_reject_prunes_i2v_and_s2v_exact_version_inputs(tmp_path) -> None:
         "narrative": "猫发现老鼠",
         "video_prompt": "动画，猫追老鼠",
         "first_frame_version_id": "av-1",
+        "last_frame_version_id": "av-1",
     }
     elements["el-2"] = {
         "element_id": "el-2",
@@ -994,6 +998,7 @@ def test_reject_prunes_i2v_and_s2v_exact_version_inputs(tmp_path) -> None:
     elements = project.timelines.items["timeline:main"].elements_by_id
     assert "av-1" not in project.assets.artifact_versions_by_id
     assert elements["el-1"].creation.first_frame_version_id is None
+    assert elements["el-1"].creation.last_frame_version_id is None
     assert elements["el-2"].creation.portrait_version_id is None
     assert elements["el-2"].creation.audio_version_id is None
 

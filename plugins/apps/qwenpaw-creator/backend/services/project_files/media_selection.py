@@ -16,9 +16,28 @@ from .models import ArtifactVersion, Project, TimelineElement
 def video_selection_fingerprint(
     element: TimelineElement,
     storyboard_version_id: str | None,
+    *,
+    legacy_schema_version: int | None = None,
 ) -> str:
+    creation = element.creation.model_dump(mode="json")
+    if legacy_schema_version is not None:
+        # Historical receipts omitted fields that did not exist yet.
+        # Only omit defaults, so an authored change still expires a receipt.
+        introduced = {"generation_plan": None, "predecessor_element_id": None}
+        if legacy_schema_version <= 10:
+            introduced.update(
+                force_storyboard=False,
+                transition_intent=None,
+                storyboard_intent=None,
+                last_frame_version_id=None,
+            )
+        if legacy_schema_version <= 9:
+            introduced["generate_audio"] = True
+        for field, default in introduced.items():
+            if creation.get(field) == default:
+                creation.pop(field, None)
     payload = {
-        "creation": element.creation.model_dump(mode="json"),
+        "creation": creation,
         "duration_tick": element.span.duration_tick,
         "storyboard_version_id": storyboard_version_id,
     }
@@ -68,7 +87,16 @@ def accepted_video_selection_is_current(
     storyboard = project.assets.artifact_slots_by_id.get(
         f"element:{element_id}:storyboard",
     )
-    return acceptance.get("inputFingerprint") == video_selection_fingerprint(
-        element,
-        storyboard.selected_version_id if storyboard else None,
+    version_id = storyboard.selected_version_id if storyboard else None
+    fingerprint = acceptance.get("inputFingerprint")
+    if fingerprint == video_selection_fingerprint(element, version_id):
+        return True
+    return any(
+        fingerprint
+        == video_selection_fingerprint(
+            element,
+            version_id,
+            legacy_schema_version=schema_version,
+        )
+        for schema_version in (11, 10, 9)
     )

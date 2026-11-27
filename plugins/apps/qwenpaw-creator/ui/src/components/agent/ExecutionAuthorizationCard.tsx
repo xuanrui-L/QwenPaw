@@ -163,16 +163,20 @@ export function authorizationParameterSummary(
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "";
   const parameters = raw as Record<string, unknown>;
   const parts: string[] = [];
-  if (
-    typeof parameters.durationSeconds === "number" &&
-    Number.isFinite(parameters.durationSeconds) &&
-    parameters.durationSeconds > 0
-  ) {
+  const duration = parameters.durationSeconds;
+  const timelineDuration = parameters.timelineDurationSeconds;
+  const positiveDuration = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0;
+  const extending = parameters.mode === "video_extend";
+  if (extending && positiveDuration(duration) && positiveDuration(timelineDuration)) {
     parts.push(
-      i18n.t("executionAuth.duration", {
-        duration: parameters.durationSeconds,
+      i18n.t("executionAuth.extensionDuration", {
+        duration,
+        timelineDuration,
       }),
     );
+  } else if (positiveDuration(duration)) {
+    parts.push(i18n.t("executionAuth.duration", { duration }));
   }
   if (
     typeof parameters.resolution === "string" &&
@@ -186,13 +190,17 @@ export function authorizationParameterSummary(
   }
   const validRatio = (value: unknown): value is string =>
     typeof value === "string" && /^[1-9]\d{0,3}:[1-9]\d{0,3}$/u.test(value);
-  if (validRatio(parameters.ratio)) {
-    parts.push(i18n.t("executionAuth.ratio", { ratio: parameters.ratio }));
-  }
-  if (validRatio(parameters.aspectRatio)) {
-    parts.push(
-      i18n.t("executionAuth.frameSize", { size: parameters.aspectRatio }),
-    );
+  if (extending && parameters.ratio === "adaptive") {
+    parts.push(i18n.t("executionAuth.extensionAspectRatio"));
+  } else {
+    if (validRatio(parameters.ratio)) {
+      parts.push(i18n.t("executionAuth.ratio", { ratio: parameters.ratio }));
+    }
+    if (validRatio(parameters.aspectRatio)) {
+      parts.push(
+        i18n.t("executionAuth.frameSize", { size: parameters.aspectRatio }),
+      );
+    }
   }
   if (typeof parameters.generateAudio === "boolean") {
     parts.push(

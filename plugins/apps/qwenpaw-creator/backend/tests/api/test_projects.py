@@ -768,6 +768,7 @@ def test_subtitle_toggle_follows_the_subtitle_definition(
     assert stored().settings.subtitle_policy == "off"
 
 
+# pylint: disable-next=too-many-statements
 def test_subtitle_style_patch_redraws_prompts_and_documents(
     app,
     api_runtime_root,
@@ -1113,7 +1114,7 @@ def test_subtitle_style_patch_keeps_the_caption_box_legal(
             ),
         )
 
-    project_id, refused, baked, durable = run_scenario(app, scenario)
+    _project_id, refused, baked, durable = run_scenario(app, scenario)
     assert refused.status_code == 422, refused.text
     assert "未知的字幕风格包" in refused.text
     assert baked.status_code == 200, baked.text
@@ -1224,4 +1225,46 @@ def test_delete_closes_logging_before_rename(
     assert order.count("close_logging") >= 2
     assert order.index("replace") < (
         len(order) - 1 - order[::-1].index("close_logging")
+    )
+
+
+def test_project_create_persists_video_continuity_choice(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """Retired switch: creation accepts the legacy field but ignores
+    it — continuity is the backend default, no mode is persisted."""
+
+    payload = _create_payload(
+        "project-create-continuity-1",
+        "末班车",
+        videoContinuity="throughput",
+    )
+
+    async def scenario(client):
+        created = await client.post("/projects", json=payload)
+        project_id = created.json()["projectId"]
+        snapshot = await client.get(f"/projects/{project_id}/project")
+        default_payload = _create_payload(
+            "project-create-continuity-2",
+            "默认项目",
+        )
+        created_default = await client.post("/projects", json=default_payload)
+        snapshot_default = await client.get(
+            f"/projects/{created_default.json()['projectId']}/project",
+        )
+        return created, snapshot, created_default, snapshot_default
+
+    created, snapshot, created_default, snapshot_default = run_scenario(
+        app,
+        scenario,
+    )
+    assert created.status_code == 201
+    settings = snapshot.json()["project"]["settings"]
+    assert settings.get("video_continuity") is None
+    assert created_default.status_code == 201
+    assert (
+        snapshot_default.json()["project"]["settings"]["video_continuity"]
+        is None
     )

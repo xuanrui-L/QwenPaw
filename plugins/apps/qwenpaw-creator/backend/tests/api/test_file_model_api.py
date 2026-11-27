@@ -685,11 +685,12 @@ def test_video_capability_route_exposes_wan3_all_in_one_contract(
         "provider": "wan",
         "model": "wan3.0-video-prime",
         "known": True,
-        "supportedModes": ["r2v", "t2v", "i2v"],
+        "supportedModes": ["r2v", "t2v", "i2v", "video_extend"],
         "effectiveModels": {
             "r2v": "wan3.0-video-prime",
             "t2v": "wan3.0-video-prime",
             "i2v": "wan3.0-video-prime",
+            "video_extend": "wan3.0-video-prime",
         },
         "derivesModeModel": False,
         "documentationUrl": (

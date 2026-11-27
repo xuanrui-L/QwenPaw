@@ -86,8 +86,11 @@ def plan_input(
     timeline, element = live_element(document, timeline_id, element_id)
     creation = element["creation"]
     settings = document.get("settings", {})
+    creation_inputs = {key: creation.get(key) for key in _PLAN_FIELDS}
+    if creation.get("generation_plan") is not None:
+        creation_inputs["generation_plan"] = creation["generation_plan"]
     return {
-        "creation": {key: creation.get(key) for key in _PLAN_FIELDS},
+        "creation": creation_inputs,
         "durationTick": element.get("span", {}).get("duration_tick"),
         "ticksPerSecond": timeline.get("ticks_per_second"),
         "aspectRatio": settings.get("aspect_ratio"),
@@ -335,13 +338,13 @@ def _refresh_authored_stage_stamps(
         if creation.get(field, "").strip() and creation.get(
             field,
         ) != old_creation.get(field):
-            creation["prompt_sync"][
-                f"{stage}_input_fingerprint"
-            ] = stage_input_fingerprint(
-                document,
-                timeline_id,
-                element_id,
-                stage,
+            creation["prompt_sync"][f"{stage}_input_fingerprint"] = (
+                stage_input_fingerprint(
+                    document,
+                    timeline_id,
+                    element_id,
+                    stage,
+                )
             )
 
 
@@ -367,9 +370,9 @@ def derive_prompt_sync_changes(
     before: Mapping[str, Any],
     after: dict[str, Any],
     *,
-    confirmation: tuple[str, str, str]
-    | tuple[str, str, str, str]
-    | None = None,
+    confirmation: (
+        tuple[str, str, str] | tuple[str, str, str, str] | None
+    ) = None,
     changed_pointers: Iterable[str] | None = None,
 ) -> None:
     # Keep full confirmation and stage-specific stamps in the same CAS pass.
@@ -450,13 +453,13 @@ def derive_prompt_sync_changes(
                 creation["prompt_sync"] = dict(
                     old_sync or sync_stamp(before, timeline_id, element_id),
                 )
-                creation["prompt_sync"][
-                    f"{stage}_input_fingerprint"
-                ] = stage_input_fingerprint(
-                    after,
-                    timeline_id,
-                    element_id,
-                    stage,
+                creation["prompt_sync"][f"{stage}_input_fingerprint"] = (
+                    stage_input_fingerprint(
+                        after,
+                        timeline_id,
+                        element_id,
+                        stage,
+                    )
                 )
                 continue
             if (

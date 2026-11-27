@@ -332,8 +332,11 @@ _VIDU_DIRECT_Q2_PRO_REFERENCE_CAPABILITY = VideoReferenceCapability(
 
 # Generation modes exposed on the r2v_generation tool. ``r2v`` keeps the
 # historical behaviour; the others map onto the upstream model families
-# (happyhorse-*-t2v/-i2v/-video-edit, wan*-t2v/-i2v).
-VIDEO_MODES = ("r2v", "t2v", "i2v", "video_edit")
+# (happyhorse-*-t2v/-i2v/-video-edit, wan*-t2v/-i2v). ``video_extend`` is
+# the first-class continuation task (reference_video + extend intent);
+# the planning layer routes same-scene segments onto it, and only
+# extension-capable models declare it.
+VIDEO_MODES = ("r2v", "t2v", "i2v", "video_edit", "video_extend")
 
 _DASHSCOPE_VIDEO_DOCUMENTATION = (
     "https://help.aliyun.com/zh/model-studio/video-generation-api-reference"
@@ -747,6 +750,44 @@ def is_wan3_video_model(model_name: str) -> bool:
     return _WAN_30_REFERENCE_PATTERN.fullmatch(model_name.strip()) is not None
 
 
+def supports_last_frame(
+    model_name: str,
+    protocol_backend: str = "",
+) -> bool:
+    """True when the configured model documents a NATIVE last-frame
+    input on the i2v request (media type ``last_frame`` on the Wan3.0
+    all-in-one contract). Plain reference images that merely hint at an
+    ending composition do NOT count — the executor must not pretend a
+    tail frame was constrained when the provider has no such parameter.
+    """
+
+    del protocol_backend  # reserved: gateway aliases keep the contract.
+
+    return _WAN_30_REFERENCE_PATTERN.fullmatch(model_name.strip()) is not None
+
+
+def supports_video_continuation(
+    model_name: str,
+    protocol_backend: str = "",
+) -> bool:
+    """True when the configured model officially documents a video-extension
+    task that the R2V submit path can drive by adding a ``reference_video``
+    alongside the regular image references.
+
+    Wan3.0 All-in-One is currently the only family with an explicit
+    "视频延长" contract reachable through the r2v request route. Wan2.7
+    documents video continuation via ``first_clip`` on the i2v endpoint,
+    which is a different request shape not wired here. HappyHorse, Veo,
+    Seedance, Kling and Vidu either forbid video references or use them
+    only as style/subject anchors, so the executor must fall back to
+    last-frame image continuity for those models.
+    """
+
+    del protocol_backend  # reserved: any Wan3-compatible gateway alias keeps
+    # the same model_id contract, so backend key never overrides the answer.
+    return is_wan3_video_model(model_name)
+
+
 def is_vidu_model(model_name: str) -> bool:
     """True when the configured video model is a Bailian-hosted Vidu model."""
 
@@ -850,7 +891,7 @@ def video_model_capability(
         documentation_url = _HAPPYHORSE_REFERENCE_DOCUMENTATION
     elif backend == "wan":
         if is_wan3_video_model(model):
-            modes = frozenset({"r2v", "t2v", "i2v"})
+            modes = frozenset({"r2v", "t2v", "i2v", "video_extend"})
             documentation_url = _WAN_30_REFERENCE_DOCUMENTATION
         elif _WAN_27_MODEL_PATTERN.fullmatch(
             model,
@@ -1264,7 +1305,8 @@ def _family_constraint_guidance(
             ]
             if is_kling_omni_model(model_name):
                 lines += [
-                    "- 时长 duration 为 3–15 秒的整数；分辨率仅支持" + " 720p/1080p/4k。",
+                    "- 时长 duration 为 3–15 秒的整数；分辨率仅支持"
+                    + " 720p/1080p/4k。",
                     "- r2v 参考图最多 7 张；可额外携带 1 个特征参考视频，"
                     + "此时参考图最多 4 张且 audio 必须为 off。video prompt"
                     + " 用 @image_N 按参考顺序引用图片（视频用 @video_1）。",
@@ -1488,9 +1530,11 @@ def _image_reference_marker_spec(
         backend == "wan" and _WAN_27_MODEL_PATTERN.fullmatch(normalized)
     ):
         return (
-            re.compile(r"图\s*(\d+)")
-            if is_chinese
-            else re.compile(r"\bImage\s+(\d+)\b", re.IGNORECASE),
+            (
+                re.compile(r"图\s*(\d+)")
+                if is_chinese
+                else re.compile(r"\bImage\s+(\d+)\b", re.IGNORECASE)
+            ),
             "图{index}" if is_chinese else "Image {index}",
         )
     if backend == "wan" and _WAN_26_MODEL_PATTERN.fullmatch(normalized):
@@ -1500,9 +1544,11 @@ def _image_reference_marker_spec(
         )
     if backend == "seedance2":
         return (
-            re.compile(r"图片\s*(\d+)")
-            if is_chinese
-            else re.compile(r"\bimage\s*(\d+)\b", re.IGNORECASE),
+            (
+                re.compile(r"图片\s*(\d+)")
+                if is_chinese
+                else re.compile(r"\bimage\s*(\d+)\b", re.IGNORECASE)
+            ),
             "图片{index}" if is_chinese else "image{index}",
         )
     if backend == "kling":
@@ -1774,7 +1820,10 @@ def video_model_duration_guidance(
         )
     if backend == "kling":
         if is_kling_omni_model(normalized):
-            return f"当前视频模型 `{normalized}` 支持 3–15 秒整数；携带特征" "参考视频时上限降为 10 秒。"
+            return (
+                f"当前视频模型 `{normalized}` 支持 3–15 秒整数；携带特征"
+                "参考视频时上限降为 10 秒。"
+            )
         return f"当前视频模型 `{normalized}` 只支持 5 或 10 秒。"
     if backend == "minimax":
         return (
@@ -1830,12 +1879,24 @@ def video_model_delegator_guidance(
         else "该模型是单模型能力声明，提交时保持原模型 ID。"
     )
     rejected_note = (
-        " 不得创建这些视频类型：" + "、".join(rejected) + "。" if rejected else ""
+        " 不得创建这些视频类型：" + "、".join(rejected) + "。"
+        if rejected
+        else ""
     )
     constraints = _family_constraint_guidance(normalized, protocol_backend)
+    creation_types = [
+        mode for mode in supported if mode in {"r2v", "t2v", "i2v"}
+    ]
+    extension_note = (
+        " 支持视频延长：以 creation.type=r2v 保存镜头，并在 generation_plan"
+        " 中明确选 video_extend。"
+        if "video_extend" in supported
+        else " 当前不支持 generation_plan.method=video_extend。"
+    )
     guidance = (
-        f"当前精确视频模型 `{normalized}` 仅允许 creation.type="
-        f"{','.join(supported)}（{mapping}）。{suffix_note}{rejected_note}"
+        f"当前视频模型 `{normalized}` 支持的生成型 creation.type="
+        f"{','.join(creation_types)}。执行能力：{mapping}。{suffix_note}{rejected_note}"
+        f"{extension_note}"
         " r2v 可由工作图在依赖就绪后自动生成；t2v/i2v 并不因此自动"
         "调度，只有用户目标确实需要且模型支持时才创建对应 Element。"
     )
@@ -1922,6 +1983,7 @@ __all__ = [
     "is_vidu_model",
     "is_wan3_video_model",
     "seedance_video_generation",
+    "supports_video_continuation",
     "validate_video_mode",
     "video_backend_key",
     "video_model_capability",
