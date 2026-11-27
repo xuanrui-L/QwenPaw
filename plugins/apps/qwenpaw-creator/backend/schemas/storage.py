@@ -23,7 +23,8 @@ class ProjectStorageProfileData(StrictModel):
     )
     pending_reclaim_bytes: int = Field(default=0, alias="pendingReclaimBytes")
     pending_transaction_cleanup_bytes: int = Field(
-        default=0, alias="pendingTransactionCleanupBytes"
+        default=0,
+        alias="pendingTransactionCleanupBytes",
     )
     task_work_bytes: int = Field(default=0, alias="taskWorkBytes")
     task_work_legacy_bytes: int = Field(default=0, alias="taskWorkLegacyBytes")
@@ -38,6 +39,7 @@ class ProjectStorageProfileData(StrictModel):
         alias="transactionsLegacyBytes",
     )
     orphan_bytes: int = Field(default=0, alias="orphanBytes")
+    continuity_bytes: int = Field(default=0, alias="continuityBytes")
 
 
 class HistoryReclaimRequest(StrictModel):
@@ -72,6 +74,7 @@ class StorageTotalsData(StrictModel):
     )
     orphan_bytes: int = Field(default=0, alias="orphanBytes")
     event_stream_bytes: int = Field(default=0, alias="eventStreamBytes")
+    continuity_bytes: int = Field(default=0, alias="continuityBytes")
 
 
 class StorageProfileData(StrictModel):

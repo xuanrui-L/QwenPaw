@@ -378,7 +378,9 @@
     "deleteTemplateFailed": "Failed to delete template",
     "videoTemplateNone": "No Template",
     "videoTemplateHint": "Choose a preset to get started quickly",
-    "videoTemplateUserSection": "My Templates"
+    "videoTemplateUserSection": "My Templates",
+    "continuity": "Segment continuity",
+    "modelConfigShort": "Configure"
   },
   "nav": {
     "videoPlan": "Video Plan",
@@ -397,7 +399,12 @@
     "creditsRingTitle": "Credits usage",
     "creditsRingAria": "Remaining Credits",
     "creditsRingUnavailable": "Unavailable: cannot reach the platform credits endpoint",
-    "blueprint": "Video script"
+    "blueprint": "Video script",
+    "continuityLabel": "Segment continuity",
+    "continuityTooltip": "On: same-scene segments render serially with anchored seams for smoother picture and music (scene changes and cuts still parallelize automatically). Off: every segment renders in parallel — faster, but transitions fall back to plain reference generation. Only affects segments not yet started; switch anytime.",
+    "continuityUpdated": "Segment continuity setting updated",
+    "continuityUpdateFailed": "Failed to update setting: {{detail}}",
+    "continuityShort": "Continuity"
   },
   "modelConfig": {
     "title": "Model Configuration",
@@ -895,7 +902,7 @@
     "applySuccess": "Changes applied",
     "applySuccessRegenRequired": "Changes applied; related results marked for regeneration",
     "applySuccessPreviewUpdated": "Changes applied; live preview updated, final cut will recompose",
-    "applySuccessComposeWaiting": "Changes applied; live preview updated, and the final cut is out of date \u2014 press Final Cut to recompose it.",
+    "applySuccessComposeWaiting": "Changes applied; live preview updated, and the final cut is out of date — press Final Cut to recompose it.",
     "applyFailed": "Apply failed: {{detail}}",
     "unsavedChanges": "Unsaved changes",
     "unsavedChangesDesc": "Page drafts will be discarded when you leave. You can go back and click \"Apply Changes\" first.",
@@ -1215,7 +1222,20 @@
     "shotsLabel": "Shots",
     "refsLabel": "Related assets",
     "advancedSettings": "More settings",
-    "refsPill": "{{count}} refs"
+    "refsPill": "{{count}} refs",
+    "intentPlaceholder": "Creative intent not set — one sentence on what this segment must achieve; type here",
+    "wirePreview": "Actually sent (this render)",
+    "wireMode": {
+      "r2v": "plain r2v reference generation",
+      "video_extend": "video extension (predecessor as material)",
+      "i2v": "image-to-video (first-frame continuation)",
+      "video_edit": "video edit",
+      "t2v": "text-to-video"
+    },
+    "wireAnchorNote": "Image 1 is the predecessor's last frame (extracted at runtime)",
+    "wireAnchorPruned": "anchor pruned",
+    "wireBgmOn": "shared BGM attached",
+    "wireBgmOff": "no BGM (native audio)"
   },
   "agent": {
     "assistant": "Creative Assistant",
@@ -1666,7 +1686,7 @@
     "selectRow": "Select entire row",
     "timingAppliedRegenRequired": "Timing adjustments applied; related generation results marked for regeneration",
     "timingAppliedRecomposing": "Timing adjustments applied; recomposing final cut",
-    "timingAppliedComposeWaiting": "Timing applied; the final cut is out of date \u2014 press Final Cut to recompose it.",
+    "timingAppliedComposeWaiting": "Timing applied; the final cut is out of date — press Final Cut to recompose it.",
     "timingApplied": "Timing adjustments applied",
     "applyTimingFailed": "Failed to apply timing adjustments: {{detail}}",
     "undoCancelled": "Timeline was updated by other changes, undo cancelled to avoid overwriting new content",
@@ -2478,7 +2498,8 @@
       "final": "Final",
       "storyboard": "Storyboard",
       "design": "Design",
-      "none": "Pending"
+      "none": "Pending",
+      "anchor": "Anchored"
     },
     "columns": {
       "understanding": "Understanding",

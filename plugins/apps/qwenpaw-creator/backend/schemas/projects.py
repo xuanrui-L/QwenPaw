@@ -114,6 +114,10 @@ class ProjectCreateRequest(StrictModel):
         None,
         alias="subtitlePolicy",
     )
+    video_continuity: Literal["continuity", "throughput"] | None = Field(
+        None,
+        alias="videoContinuity",
+    )
     subtitle_template: str | None = Field(None, alias="subtitleTemplate")
     subtitle_style: SubtitleStylePolicy | None = Field(
         None,

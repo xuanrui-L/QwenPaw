@@ -31,7 +31,7 @@ from pydantic import (
     model_validator,
 )
 
-CURRENT_PROJECT_SCHEMA_VERSION = 10
+CURRENT_PROJECT_SCHEMA_VERSION = 11
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 
@@ -164,6 +164,13 @@ class ProjectSettings(StrictModel):
     language: str = "zh-CN"
     target_duration_seconds: float | None = Field(default=None, ge=0)
     content_type: str | None = None
+    # Project-level continuity dial (the UI's "段间连贯优先" switch):
+    # "continuity" (default) lets the planner route same-scene
+    # continuations onto anchored/extended shapes and serializes only
+    # those segments; "throughput" pins every r2v segment to plain
+    # omni-reference and lets the whole track render in parallel.
+    # Unset falls back to the global CREATOR_VIDEO_CONTINUITY env dial.
+    video_continuity: Literal["continuity", "throughput"] | None = None
     # Captions are opt-in end to end: a Project without an explicit choice
     # never grows subtitle Overlays on its own.
     subtitle_policy: Literal["auto", "on", "off"] = "off"
@@ -881,6 +888,17 @@ class R2VCreation(StrictModel):
     # frame.
     cast_lineup_refs: list[EntityId] = Field(default_factory=list)
     recipe: GenerationRecipe | None = None
+    # Manual override of the automatic storyboard tier (2026-11-25):
+    # anchored segments normally skip the storyboard when simple and ship
+    # it with the anchor when complex; forcing this flag pins the segment
+    # to the anchored+storyboard shape even when the complexity triage
+    # says the anchor alone is enough.
+    force_storyboard: bool = False
+    # Author/agent-declared routing intent (design review 2026-11-27):
+    # structured semantics outrank the keyword/regex fallbacks in the
+    # planner; None keeps legacy projects on the vocabulary path.
+    transition_intent: Literal["cut", "continue", "one_take"] | None = None
+    storyboard_intent: Literal["needed", "none"] | None = None
     storyboard_prompt: str = ""
     storyboard_reference_version_ids: list[EntityId] = Field(
         default_factory=list,
@@ -955,6 +973,11 @@ class I2VCreation(StrictModel):
     narrative: str = ""
     continuity: str = ""
     first_frame_version_id: EntityId | None = None
+    # Model-selected target END frame (persistable version ref). When
+    # set, the frame rides as a reference image with an explicit role
+    # sentence so providers without a native last-frame parameter
+    # still receive the target through the prompt.
+    last_frame_version_id: EntityId | None = None
     video_prompt: str = ""
     generate_audio: bool = Field(
         default=True,
@@ -1683,7 +1706,7 @@ class InteractivePresentation(StrictModel):
 
 
 class Project(StrictModel):
-    schema_version: Literal[10] = CURRENT_PROJECT_SCHEMA_VERSION
+    schema_version: Literal[10, 11] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
     generation: int = Field(default=0, ge=0)
     created_at: UtcDateTime

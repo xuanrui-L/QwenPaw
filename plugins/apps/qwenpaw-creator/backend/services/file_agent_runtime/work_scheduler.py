@@ -61,6 +61,7 @@ from services.file_agent_runtime.work_graph import (
     WorkNode,
     WorkNodeStatus,
     derive_work_graph,
+    probe_ffmpeg_ready,
 )
 from services.project_files import frontend_edit_hold
 from services.project_files.facade import CreatorFileServices
@@ -853,6 +854,7 @@ class WorkGraphScheduler:
             tasks=tasks,
             pending_reviews=pending_reviews,
             media_models=(get_image_model_name(), get_video_model_name()),
+            ffmpeg_ready=await asyncio.to_thread(probe_ffmpeg_ready),
         )
         from services.run_review import admission
         from services.run_review.media_review import active_media_review_slots

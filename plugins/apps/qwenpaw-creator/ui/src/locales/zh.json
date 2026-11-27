@@ -377,7 +377,9 @@
     "deleteTemplateFailed": "删除模板失败",
     "videoTemplateNone": "不使用模板",
     "videoTemplateHint": "选择预设模板快速开始",
-    "videoTemplateUserSection": "我的模板"
+    "videoTemplateUserSection": "我的模板",
+    "continuity": "段间连贯",
+    "modelConfigShort": "配置"
   },
   "nav": {
     "videoPlan": "视频方案",
@@ -396,7 +398,12 @@
     "creditsRingTitle": "Credits 用量",
     "creditsRingAria": "Credits 剩余额度",
     "creditsRingUnavailable": "暂不可用：未连上平台额度接口",
-    "blueprint": "视频脚本"
+    "blueprint": "视频脚本",
+    "continuityLabel": "段间连贯优先",
+    "continuityTooltip": "开启：同场景相邻段串行生成，画面与配乐衔接更连贯（换景/硬切段仍自动并行）。关闭：全部片段并行生成，出片更快，但段间衔接退化为普通参考生成。仅影响尚未开始生成的片段，随时可改。",
+    "continuityUpdated": "段间连贯设置已更新",
+    "continuityUpdateFailed": "设置更新失败：{{detail}}",
+    "continuityShort": "连贯"
   },
   "modelConfig": {
     "title": "模型配置",
@@ -1214,7 +1221,20 @@
     "shotsLabel": "镜头Shots",
     "refsLabel": "关联素材",
     "advancedSettings": "更多设置",
-    "refsPill": "引用{{count}}项素材"
+    "refsPill": "引用{{count}}项素材",
+    "intentPlaceholder": "未填写创作意图：一句话说明本片段要达成什么，可直接输入",
+    "wirePreview": "实际发送内容（本次生成）",
+    "wireMode": {
+      "r2v": "普通参考生成 r2v",
+      "video_extend": "视频延长（前段整片为素材）",
+      "i2v": "图生视频（首帧续写）",
+      "video_edit": "视频编辑",
+      "t2v": "文生视频"
+    },
+    "wireAnchorNote": "图1 为上一片段末帧（运行时抽取）",
+    "wireAnchorPruned": "锚帧已回收",
+    "wireBgmOn": "已注入共享配乐",
+    "wireBgmOff": "未注入配乐（原生音频）"
   },
   "agent": {
     "assistant": "创作助手",
@@ -2477,7 +2497,8 @@
       "final": "成片帧",
       "storyboard": "分镜",
       "design": "设计图",
-      "none": "待分镜"
+      "none": "待分镜",
+      "anchor": "锚定衔接"
     },
     "columns": {
       "understanding": "输入理解",

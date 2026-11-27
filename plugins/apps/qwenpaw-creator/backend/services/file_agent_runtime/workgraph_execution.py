@@ -23,6 +23,7 @@ from services.file_agent_runtime.work_graph import (
     WorkNode,
     WorkNodeStatus,
     derive_work_graph,
+    probe_ffmpeg_ready,
 )
 from services.file_agent_runtime.work_scheduler import (
     _blocked_by_active_media_review,
@@ -659,6 +660,7 @@ async def ready_request_context(
         tasks=tasks,
         pending_reviews=reviews,
         media_models=(get_image_model_name(), get_video_model_name()),
+        ffmpeg_ready=await asyncio.to_thread(probe_ffmpeg_ready),
     )
     publications = [_publication_artifacts(review) for review in reviews]
     creative_review_pending = any(items is None for items in publications)
