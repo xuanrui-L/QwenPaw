@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import tracemalloc
 
 import pytest
 
@@ -27,101 +28,52 @@ STAT = (
 )
 
 
-def _patch_open(monkeypatch, path: str, text: str) -> None:
+def _patch_open(monkeypatch, path: str, text: str | None) -> None:
     def fake_open(target, *args, **kwargs):
-        if target != path:
+        if target != path or text is None:
             raise FileNotFoundError(target)
         return io.StringIO(text)
 
     monkeypatch.setattr("builtins.open", fake_open)
 
 
-def test_arena_segments_counts_only_anonymous_64mib_mappings(
-    monkeypatch,
-) -> None:
-    """Two arena blocks, one 16 MiB anonymous mapping and a same-sized heap
-    must not be counted, and a file-backed mapping neither."""
-
-    _patch_open(monkeypatch, "/proc/self/maps", MAPS)
-    assert mem_probe._arena_segments() == 2
+@pytest.mark.parametrize(("maps", "arenas"), [(MAPS, 2), (None, None)])
+def test_arena_segments_counts_anonymous_64mib_mappings(
+    monkeypatch, maps, arenas
+):
+    _patch_open(monkeypatch, "/proc/self/maps", maps)
+    assert mem_probe._arena_segments() == arenas
 
 
-def test_arena_segments_returns_none_without_proc(monkeypatch) -> None:
-    def always_missing(target, *args, **kwargs):
-        raise OSError(target)
-
-    monkeypatch.setattr("builtins.open", always_missing)
-    assert (
-        mem_probe._arena_segments() is None
-    )  # pylint: disable=protected-access
-
-
-def test_minor_faults_survive_spaces_in_comm(monkeypatch) -> None:
-    """Field indices count after comm, which may itself contain spaces and
-    parentheses — the reason a plain split() on the whole line is wrong."""
-
-    mem_probe._last_faults = None
-    mem_probe._last_fault_at = None
+def test_minor_faults_survive_spaces_in_comm(monkeypatch):
+    monkeypatch.setattr(mem_probe, "_last_faults", None)
+    monkeypatch.setattr(mem_probe, "_last_fault_at", None)
     _patch_open(monkeypatch, "/proc/self/stat", STAT)
-    (
-        faults,
-        rate,
-    ) = mem_probe._minor_fault_metrics()  # pylint: disable=protected-access
-    assert faults == 18707  # field 10 = minflt
-    assert rate is None  # first sample has no window to divide by
+    assert mem_probe._minor_fault_metrics() == (18707, None)
 
     _patch_open(monkeypatch, "/proc/self/stat", STAT.replace("18707", "18907"))
-    (
-        faults,
-        rate,
-    ) = mem_probe._minor_fault_metrics()  # pylint: disable=protected-access
+    faults, rate = mem_probe._minor_fault_metrics()
     assert faults == 18907
     assert rate is not None and rate >= 0
 
 
-def test_python_tracing_stays_off_until_asked(tmp_path, monkeypatch) -> None:
-    """The probe must not become the load it is measuring.
-
-    tracemalloc.start() records a traceback for every allocation the
-    interpreter makes: a live container with two Projects generating spent
-    5.75 s of a 30 s GIL window inside take_snapshot and _group_by, while
-    RSS -- the number that actually answers "will this OOM" -- costs one
-    /proc read.
-    """
-
-    import tracemalloc
-
+@pytest.mark.parametrize("trace_python", [False, True])
+def test_python_tracing_is_opt_in(tmp_path, monkeypatch, trace_python):
     monkeypatch.setenv("CREATOR_MEM_PROBE", "1")
-    monkeypatch.delenv("CREATOR_MEM_PROBE_PY", raising=False)
-    monkeypatch.setattr(mem_probe, "_enabled", False)
-    monkeypatch.setattr(mem_probe, "_baseline", None)
-    monkeypatch.setattr(mem_probe, "_output", None)
+    if trace_python:
+        monkeypatch.setenv("CREATOR_MEM_PROBE_PY", "1")
+    else:
+        monkeypatch.delenv("CREATOR_MEM_PROBE_PY", raising=False)
+    for attr, value in (
+        ("_enabled", False),
+        ("_baseline", None),
+        ("_output", None),
+    ):
+        monkeypatch.setattr(mem_probe, attr, value)
 
-    assert mem_probe.start_probe(tmp_path) is True
+    assert mem_probe.start_probe(tmp_path)
     try:
-        assert tracemalloc.is_tracing() is False
-        assert mem_probe._baseline is None
-    finally:
-        mem_probe.stop_probe()
-
-
-def test_python_tracing_can_be_turned_on_for_a_memory_hunt(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """The capability stays available, just not always paid for."""
-
-    import tracemalloc
-
-    monkeypatch.setenv("CREATOR_MEM_PROBE", "1")
-    monkeypatch.setenv("CREATOR_MEM_PROBE_PY", "1")
-    monkeypatch.setattr(mem_probe, "_enabled", False)
-    monkeypatch.setattr(mem_probe, "_baseline", None)
-    monkeypatch.setattr(mem_probe, "_output", None)
-
-    assert mem_probe.start_probe(tmp_path) is True
-    try:
-        assert tracemalloc.is_tracing() is True
-        assert mem_probe._baseline is not None
+        assert tracemalloc.is_tracing() is trace_python
+        assert (mem_probe._baseline is not None) is trace_python
     finally:
         mem_probe.stop_probe()

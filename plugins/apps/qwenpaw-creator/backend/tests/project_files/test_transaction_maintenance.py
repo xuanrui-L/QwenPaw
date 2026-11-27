@@ -188,6 +188,10 @@ def test_switch_off_keeps_every_directory(tmp_path, monkeypatch):
 
     assert collect_project_transactions(project_root, retention=0) == (0, 0)
     assert directory.is_dir()
+    assert not request_project_sweep(
+        project_root, directory_count=9, threshold=2
+    )
+    assert directory.is_dir()
 
 
 def _services(root, *projects, broken=()):
@@ -244,96 +248,53 @@ def _wait_for_idle(timeout: float = 5.0) -> None:
         time.sleep(0.01)
 
 
-def test_a_growing_project_sweeps_itself_without_waiting_for_a_restart(
-    tmp_path,
-) -> None:
+def test_background_sweep_starts_at_the_threshold(tmp_path):
     project_root = _managed(tmp_path)
-    oldest = _transaction(project_root, "txn-old", "ABORTED", age_days=1)
-    middle = _transaction(project_root, "txn-mid", "ABORTED", age_days=2)
-    newest = _transaction(project_root, "txn-new", "ABORTED", age_days=3)
+    oldest, middle, newest = [
+        _transaction(project_root, name, "ABORTED", age_days=day)
+        for day, name in enumerate(("old", "mid", "new"), 1)
+    ]
 
-    started = request_project_sweep(
-        project_root,
-        directory_count=3,
-        threshold=2,
-        retention=2,
-    )
+    def request(count):
+        return request_project_sweep(
+            project_root,
+            directory_count=count,
+            threshold=2,
+            retention=2,
+        )
+
+    assert not request(1)
+    assert oldest.is_dir()
+    assert request(3)
     _wait_for_idle()
-
-    assert started is True
     assert not oldest.exists()
     assert middle.is_dir() and newest.is_dir()
 
 
-def test_a_project_below_the_threshold_is_not_swept(tmp_path) -> None:
+def test_protected_history_is_not_rescanned_every_commit(tmp_path):
     project_root = _managed(tmp_path)
-    kept = _transaction(project_root, "txn-old", "ABORTED", age_days=1)
-
-    started = request_project_sweep(
+    keep_project_history(project_root, now=BASELINE)
+    ancient = _transaction(
         project_root,
-        directory_count=1,
-        threshold=2,
-        retention=0,
+        "arrived-with-project",
+        "ABORTED",
+        age_days=-5,
     )
 
-    assert started is False
-    assert kept.is_dir()
+    def request(count):
+        return request_project_sweep(
+            project_root,
+            directory_count=count,
+            threshold=2,
+            retention=1,
+        )
 
-
-def test_history_this_build_will_not_touch_is_not_rescanned_every_commit(
-    tmp_path,
-) -> None:
-    project_root = _managed(tmp_path)
-    # Older than the reclaim baseline: the sweep legitimately refuses it.
-    ancient = (
-        project_root / "runtime" / "transactions" / "arrived-with-project"
-    )
-    ancient.mkdir(parents=True)
-    (ancient / "journal.json").write_text(
-        json.dumps({"state": "ABORTED"}),
-        encoding="utf-8",
-    )
-    moment = (BASELINE - timedelta(days=5)).timestamp()
-    os.utime(ancient, (moment, moment))
-
-    first = request_project_sweep(
-        project_root,
-        directory_count=3,
-        threshold=2,
-        retention=1,
-    )
+    assert request(3)
     _wait_for_idle()
-    again = request_project_sweep(
-        project_root,
-        directory_count=4,
-        threshold=2,
-        retention=1,
-    )
-    further = request_project_sweep(
-        project_root,
-        directory_count=6,
-        threshold=2,
-        retention=1,
-    )
+    assert not request(4)
+    assert request(6)
     _wait_for_idle()
-
-    assert first is True
-    # One commit past the mark is not worth another full scan of the same tree.
-    assert again is False
-    assert further is True
     assert ancient.is_dir()
-
-
-def test_a_disabled_gc_starts_no_sweep(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("CREATOR_TRANSACTION_GC_ENABLED", "0")
-    project_root = _managed(tmp_path)
-    kept = _transaction(project_root, "txn-old", "ABORTED", age_days=1)
-
-    assert (
-        request_project_sweep(project_root, directory_count=9, threshold=2)
-        is False
-    )
-    assert kept.is_dir()
 
 
 def test_a_failing_sweep_never_reaches_the_committer(
