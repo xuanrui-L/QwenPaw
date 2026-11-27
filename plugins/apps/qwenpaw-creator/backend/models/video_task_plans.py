@@ -216,10 +216,24 @@ def r2v_may_consume_predecessor(
     )
     if transition_kind != "none" or intent == "cut":
         return False
-    # Missing intent = conservative default: do not anchor, do not
-    # serialize (plain r2v with the authored storyboard), never guess
-    # from prose.
-    return intent in ("continue", "one_take")
+    if intent in ("continue", "one_take"):
+        # Authored declaration wins over the scene/cast clues below:
+        # an explicit continue anchors even across scenes.
+        return True
+    # Missing intent defaults to CONTINUOUS: same scene and no newly
+    # introduced elements anchor automatically (the product default
+    # the switch used to select), without ever reading prose.
+    if getattr(prev.creation, "scene_ref", None) != getattr(
+        element.creation,
+        "scene_ref",
+        None,
+    ):
+        return False
+    prev_refs = set(getattr(prev.creation, "character_refs", []) or [])
+    prev_refs |= set(getattr(prev.creation, "prop_refs", []) or [])
+    cur_refs = set(getattr(element.creation, "character_refs", []) or [])
+    cur_refs |= set(getattr(element.creation, "prop_refs", []) or [])
+    return not (cur_refs - prev_refs)
 
 
 def anchored_segment_is_complex(timeline: Any, element: Any) -> bool:
@@ -362,14 +376,13 @@ def select_video_task_kind(
         return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
     if facts.transition_kind != "none" or facts.continuity_intent == "cut":
         return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
-    # same_scene / new_elements are model-facing context, not vetoes:
-    # an authored continue/one_take declaration routes onto the
-    # anchored shape even across scenes. Hard facts (published
-    # predecessor, capability, budget, ffmpeg) gate below.
-    if facts.continuity_intent not in ("continue", "one_take"):
-        # The submit path shares the scheduler's missing-field
-        # default: neutral never anchors, so graph, wire and
-        # fingerprint can never disagree about predecessor material.
+    # Scene identity and cast are default-path clues: they gate only
+    # when the Agent declared no intent. An authored continue/one_take
+    # routes onto the anchored shape even across scenes (the
+    # scheduler applies the identical rule).
+    if facts.continuity_intent not in ("continue", "one_take") and (
+        not facts.same_scene or facts.new_elements
+    ):
         return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
 
     segment = facts.segment_duration_seconds

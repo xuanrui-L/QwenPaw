@@ -1684,17 +1684,32 @@ def _r2v_strong_continuity(
         # conservative default.
         if transition_kind != "none" or intent == "cut":
             return False
-    elif transition_kind != "none" or intent not in (
-        "continue",
-        "one_take",
-    ):
-        # Same missing-field default as the scheduler: neutral (no
-        # authored intent) never anchors, so graph and wire can never
-        # disagree about the predecessor material.
+    elif transition_kind != "none" or intent == "cut":
+        # Authored cut (or an explicit transition) switches the
+        # anchored shape off; missing intent falls through to the
+        # default-continuous scene gate below.
         return False
-    # Scene identity and newly introduced elements are creative clues
-    # the Agent weighed when writing transition_intent; they do not
-    # veto the anchored shape here (same predicate as the scheduler).
+    authored = getattr(element.creation, "transition_intent", None)
+    if authored not in ("continue", "one_take"):
+        # Undeclared intent keeps the default-continuous gate: same
+        # scene, no newly introduced cast/props. An authored continue
+        # anchors even across scenes (identical to the scheduler).
+        if getattr(prev.creation, "scene_ref", None) != getattr(
+            element.creation,
+            "scene_ref",
+            None,
+        ):
+            return False
+        prev_refs = set(
+            getattr(prev.creation, "character_refs", []) or [],
+        )
+        prev_refs |= set(getattr(prev.creation, "prop_refs", []) or [])
+        cur_refs = set(
+            getattr(element.creation, "character_refs", []) or [],
+        )
+        cur_refs |= set(getattr(element.creation, "prop_refs", []) or [])
+        if cur_refs - prev_refs:
+            return False
     if one_take:
         from models import config as model_config
         from models.video_capabilities import supports_video_continuation

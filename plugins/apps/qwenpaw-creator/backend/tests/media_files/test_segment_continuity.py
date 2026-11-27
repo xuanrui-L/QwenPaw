@@ -2822,10 +2822,10 @@ def test_storyboard_intent_outranks_complexity_regex() -> None:
     assert r2v_continuity_storyboard_need(forced, _tl3, s3) == "combined"
 
 
-def test_missing_intent_fields_take_conservative_defaults() -> None:
-    """Design review: absent intent fields never fall back to prose
-    guessing — the conservative default is plain r2v (no anchor, no
-    serialization) with the authored storyboard riding."""
+def test_missing_intent_fields_default_to_continuous() -> None:
+    """Product default: continuity is ON. Absent intent fields fall
+    back to the scene/cast hard default (same scene anchors, scene
+    change does not) — prose is never consulted."""
 
     from models.video_task_plans import (
         r2v_continuity_storyboard_need,
@@ -2839,6 +2839,21 @@ def test_missing_intent_fields_take_conservative_defaults() -> None:
             "storyboard_intent": None,
             "video_prompt": "镜头环绕人物一周。",
         },
+    )
+    assert (
+        r2v_may_consume_predecessor(
+            timeline.elements_by_id,
+            second,
+            first,
+        )
+        is True
+    )
+    assert (
+        r2v_continuity_storyboard_need(project, timeline, second) == "combined"
+    )
+
+    second.creation = second.creation.model_copy(
+        update={"scene_ref": "scene:elsewhere"},
     )
     assert (
         r2v_may_consume_predecessor(
@@ -2990,11 +3005,11 @@ def test_anchor_failure_zero_images_degrades_to_plain_r2v(
     assert reports[0]["code"] == "CONTINUITY_LEGACY_PROMPT_REPAIRED"
 
 
-def test_missing_intent_never_anchors_in_graph_or_wire() -> None:
-    """CR round-7 P2-1: with no intent fields the scheduler, the
-    executor's strong gate and the fingerprint mirror must all agree
-    on the conservative default — no predecessor dependency, no
-    last-frame reference in the wire stack."""
+def test_default_continuous_and_authored_cut_agree_across_layers() -> None:
+    """CR round-11: the DEFAULT is continuous — missing intent anchors
+    on the same scene across scheduler, executor gate, fingerprint
+    mirror and work graph; an authored cut turns all layers off
+    together, and an authored continue anchors even across scenes."""
 
     from services.file_agent_runtime.work_graph import derive_work_graph
     from services.media_files import r2v_execution as rx
@@ -3008,24 +3023,6 @@ def test_missing_intent_never_anchors_in_graph_or_wire() -> None:
         },
     )
 
-    assert rx._r2v_strong_continuity(project, timeline, second) is False
-    refs = rx._reference_ids_with_continuity(
-        project,
-        timeline,
-        second,
-        mode="r2v",
-    )
-    assert refs == ("sb-v1",)
-
-    graph = derive_work_graph(project, ffmpeg_ready=True)
-    deps = graph.by_id["video:e2"].deps
-    assert "video:e1" not in deps
-    assert "storyboard:e2" in deps
-
-    # Authored continue flips all three layers together.
-    second.creation = second.creation.model_copy(
-        update={"transition_intent": "continue"},
-    )
     assert rx._r2v_strong_continuity(project, timeline, second) is True
     refs = rx._reference_ids_with_continuity(
         project,
@@ -3034,6 +3031,34 @@ def test_missing_intent_never_anchors_in_graph_or_wire() -> None:
         mode="r2v",
     )
     assert refs[0].startswith("continuity:last_frame:")
+    graph = derive_work_graph(project, ffmpeg_ready=True)
+    deps = graph.by_id["video:e2"].deps
+    assert "video:e1" in deps
+    assert "storyboard:e2" in deps
+
+    # Authored cut switches every layer off together.
+    second.creation = second.creation.model_copy(
+        update={"transition_intent": "cut"},
+    )
+    assert rx._r2v_strong_continuity(project, timeline, second) is False
+    refs = rx._reference_ids_with_continuity(
+        project,
+        timeline,
+        second,
+        mode="r2v",
+    )
+    assert refs == ("sb-v1",)
+    graph = derive_work_graph(project, ffmpeg_ready=True)
+    assert "video:e1" not in graph.by_id["video:e2"].deps
+
+    # Authored continue anchors even across scenes.
+    second.creation = second.creation.model_copy(
+        update={
+            "transition_intent": "continue",
+            "scene_ref": "scene:elsewhere",
+        },
+    )
+    assert rx._r2v_strong_continuity(project, timeline, second) is True
 
 
 def test_neutral_intent_real_resolve_request_ships_no_anchor(
