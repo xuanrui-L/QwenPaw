@@ -31,6 +31,8 @@ def video_selection_fingerprint(
                 storyboard_intent=None,
                 last_frame_version_id=None,
             )
+        if legacy_schema_version <= 9:
+            introduced["generate_audio"] = True
         for field, default in introduced.items():
             if creation.get(field) == default:
                 creation.pop(field, None)
@@ -96,5 +98,5 @@ def accepted_video_selection_is_current(
             version_id,
             legacy_schema_version=schema_version,
         )
-        for schema_version in (11, 10)
+        for schema_version in (11, 10, 9)
     )
