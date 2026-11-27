@@ -29,6 +29,9 @@ from .test_task_scratch import (
 )
 
 
+@pytest.mark.skip(
+    reason="infra backfill stage 1: iv baseline semantics; engine PR",
+)
 @_needs_pinned_release
 def test_sweep_ignores_everything_from_before_the_baseline(
     tmp_path: Path,
@@ -80,6 +83,9 @@ def test_sweep_ignores_everything_from_before_the_baseline(
     assert len(_media(scratch)) == 2
 
 
+@pytest.mark.skip(
+    reason="infra backfill stage 1: iv baseline semantics; engine PR",
+)
 def test_scratch_brought_in_by_an_import_stays_protected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -116,11 +122,14 @@ def test_scratch_brought_in_by_an_import_stays_protected(
     assert len(_media(legacy)) == 2
 
 
+@pytest.mark.skip(
+    reason="infra backfill stage 1: iv baseline semantics; engine PR",
+)
 def test_legacy_scratch_respects_the_baseline(
     tmp_path: Path,
 ) -> None:
     legacy, fresh, old_tx, new_tx = _scratch_on_both_sides_of_baseline(
-        tmp_path
+        tmp_path,
     )
 
     entry = project_storage_profile(

@@ -104,7 +104,7 @@ def _project() -> Project:
                     variant_id: VisualVariant(
                         variant_id=variant_id,
                         selected_artifact_version_id=version_id,
-                    )
+                    ),
                 },
                 "order": [variant_id],
             },
@@ -200,11 +200,19 @@ def test_preview_mirrors_submit_order_and_reserves_missing_storyboard() -> (
     assert shifted["ready"] is False
     assert shifted["references"][0] == {
         "index": 1,
+        "imageIndex": 1,
+        "videoIndex": None,
         "versionId": "",
         "kind": "storyboard",
         "available": False,
         "name": "分镜图（待生成）",
     }
+    # The reserved storyboard owns 图1, so plan images behind it carry
+    # the future-real wire ordinals rather than storyboard-less ones.
+    assert [item["imageIndex"] for item in shifted["references"][1:]] == [
+        2,
+        3,
+    ]
     assert [
         (item["index"], item["versionId"]) for item in shifted["references"]
     ] == [
@@ -492,10 +500,13 @@ def _resolve(snapshot, tmp_path, model="qwen-image-3.0-pro"):
 
 
 @pytest.mark.parametrize(
-    "valid", [True, False], ids=["matches-submit", "out-of-range"]
+    "valid",
+    [True, False],
+    ids=["matches-submit", "out-of-range"],
 )
 def test_storyboard_preview_matches_submit_and_rejects_invalid_references(
-    tmp_path, valid
+    tmp_path,
+    valid,
 ):
     snapshot = _snapshot() if valid else _snapshot("采用 [Image 4] 的人物。")
     model = "qwen-image-3.0-pro"
@@ -626,6 +637,6 @@ def test_authoring_tolerates_case_and_spacing() -> None:
 
 def test_marker_helpers_round_trip() -> None:
     assert canonical_marker_indices(
-        f"{canonical_marker(2)} then {canonical_marker(1)}"
+        f"{canonical_marker(2)} then {canonical_marker(1)}",
     ) == (2, 1)
     assert not canonical_marker_indices("no markers here")

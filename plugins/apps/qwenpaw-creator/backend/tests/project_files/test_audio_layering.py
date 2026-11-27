@@ -255,7 +255,7 @@ def test_v8_migration_stamps_roles_and_the_result_stays_loadable() -> None:
     assert elements["audio-clear"]["creation"]["role"] == "sfx"
     assert elements["audio-explicit"]["creation"]["role"] == "bgm"
     assert "role" not in elements["r2v-1"]["creation"]
-    assert migrated["schema_version"] == 10
+    assert migrated["schema_version"] == 11
     Project.model_validate(migrated)  # loadable, or the migration failed
 
 
@@ -336,7 +336,7 @@ def test_v9_document_with_roles_is_not_altered_by_the_repair() -> None:
     # v9→v10 migration bumps the version even when no overlays exist,
     # but nothing else changes for a role-complete audio document.
     migrated = migrate_project_document(raw)
-    assert migrated["schema_version"] == 10
+    assert migrated["schema_version"] == 11
     del migrated["schema_version"]
     del raw["schema_version"]
     assert migrated == raw

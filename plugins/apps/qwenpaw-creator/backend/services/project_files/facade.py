@@ -639,6 +639,7 @@ class CreatorFileServices:
         )
         return default.conversation_id if default is not None else None
 
+    # pylint: disable-next=too-many-return-statements
     def _followup_message_text(
         self,
         project_id: str,
@@ -970,6 +971,23 @@ def preparing_file_services(root: Path) -> Iterator[None]:
             if services is not None:
                 services.poller.stop()
         raise
+
+
+# The first create() runs startup recovery, which scans every Project and holds
+# the registry lock for minutes on a large tree.  Requests that arrive in that
+# window must be told to retry instead of queueing behind the same lock.
+_runtime_preparing = False
+
+
+def mark_runtime_preparing(preparing: bool) -> None:
+    """Publish whether the boot-time recovery is still running."""
+
+    global _runtime_preparing
+    _runtime_preparing = preparing
+
+
+def runtime_is_preparing() -> bool:
+    return _runtime_preparing
 
 
 def clear_creator_file_service_registry() -> None:

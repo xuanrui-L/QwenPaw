@@ -76,6 +76,7 @@ from services.runtime_files.execution_store import (
     ProjectExecutionStore,
 )
 from services.runtime_files.idempotency_store import IdempotencyRecordStore
+from services.runtime_files.media_probe import MediaProbeError, probe_media
 from services.runtime_files.models import (
     ChangeOrigin,
     IdempotencyStatus,
@@ -524,6 +525,41 @@ def _ensure_existing_file(
         )
 
 
+def _probed_source_duration(
+    file_store: AssetFileStore,
+    indexed: IndexedFile,
+    media_kind: str,
+) -> float | None:
+    """Measure one upload's real length while its bytes are still on disk.
+
+    ``duration_seconds`` is the only fact that lets an Edit Element be
+    checked against the media it reads.  Left empty -- which is how every
+    person's own footage arrived until now -- every "does this cut fit"
+    test answers yes by default, and the over-long plan is only discovered
+    when a compose silently renders a shorter film than the Timeline
+    claims.  A media file that cannot be probed stays empty rather than
+    inventing a number; the compose-time reconciliation asks again.
+    """
+
+    if media_kind not in {"video", "audio"}:
+        return None
+    try:
+        probe = probe_media(
+            os.fspath(file_store.resolve_verified_path(indexed)),
+        )
+    except (MediaProbeError, OSError) as error:
+        logger.warning(
+            "asset duration probe failed: file=%s error=%s",
+            indexed.file_id,
+            error,
+        )
+        return None
+    seconds = probe.duration_seconds
+    if not seconds or seconds <= 0:
+        return None
+    return round(float(seconds), 3)
+
+
 def _ingest_many_sync(
     services: CreatorFileServices,
     *,
@@ -679,6 +715,20 @@ def _ingest_many_locked(
                     if stored_kind == "other" and new_media_kind != "other":
                         versions[version_id]["media_kind"] = new_media_kind
                         versions[version_id]["media_type"] = item.media_type
+                        stored_kind = new_media_kind
+                    if not versions[version_id].get("duration_seconds"):
+                        # A row written before uploads measured anything
+                        # still has no length; re-uploading the same bytes
+                        # is the cheapest chance to give it one.
+                        measured = _probed_source_duration(
+                            file_store,
+                            IndexedFile.model_validate(
+                                files[reusable["file_id"]],
+                            ),
+                            stored_kind,
+                        )
+                        if measured is not None:
+                            versions[version_id]["duration_seconds"] = measured
                 else:
                     logical_asset_id = _stable_id(
                         "asset",
@@ -753,7 +803,15 @@ def _ingest_many_locked(
                             file_store.abandon(staged)
                             _ensure_existing_file(file_store, indexed)
                         files[file_id] = indexed.model_dump(mode="json")
-                        versions[version_id] = version.model_dump(mode="json")
+                        serialized = version.model_dump(mode="json")
+                        measured = _probed_source_duration(
+                            file_store,
+                            indexed,
+                            serialized.get("media_kind", ""),
+                        )
+                        if measured is not None:
+                            serialized["duration_seconds"] = measured
+                        versions[version_id] = serialized
                 existing_source = next(
                     (
                         entry

@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
+from pathlib import Path
 import json
 from typing import Any, Callable, Mapping, Sequence
 from uuid import NAMESPACE_URL, uuid5
@@ -925,3 +926,33 @@ __all__ = [
     "publish_script_import",
     "script_import_file_id",
 ]
+
+
+def script_import_needs_transaction(
+    transaction_root: Path,
+    operation_id: str,
+) -> bool:
+    """Keep the committed candidate until its independent replay receipt exists."""
+    if len(operation_id) != 32 or any(
+        c not in "0123456789abcdef" for c in operation_id
+    ):
+        return False
+    receipt = (
+        transaction_root.parent.parent
+        / _IDEMPOTENCY_DIR
+        / f"{operation_id}.json"
+    )
+    try:
+        record = AtomicJsonRecordStore(
+            receipt,
+            ScriptImportIdempotencyRecord,
+            locked=False,
+        ).read_or_none()
+        if record is None or record.operation_id != operation_id:
+            return True
+        outcome = ScriptImportOutcome(**record.outcome)
+        return outcome.project_id != transaction_root.parent.parent.parent.name
+    except (
+        Exception
+    ):  # A damaged receipt cannot replace the committed evidence.
+        return True

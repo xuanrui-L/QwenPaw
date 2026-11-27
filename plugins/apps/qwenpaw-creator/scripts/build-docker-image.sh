@@ -37,6 +37,10 @@ IMAGE_NAME="${1:-qwenpaw-creator:latest}"
 
 # Optional build args.
 QWENPAW_BASE_IMAGE="${QWENPAW_BASE_IMAGE:-agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/qwenpaw:latest}"
+# Pin to the repository Node (matches the Dockerfile ARG default and
+# .nvmrc). The ACR mirror only publishes a rolling `node:slim` tag,
+# which drifts with upstream and breaks the version gate — override
+# NODE_IMAGE explicitly if a mirror is required.
 NODE_IMAGE="${NODE_IMAGE:-node:22.23.4-slim}"
 
 # Read version from source for the runtime boundary label.

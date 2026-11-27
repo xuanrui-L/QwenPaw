@@ -1124,7 +1124,20 @@
     "shotsLabel": "镜头Shots",
     "refsLabel": "关联素材",
     "advancedSettings": "更多设置",
-    "refsPill": "引用{{count}}项素材"
+    "refsPill": "引用{{count}}项素材",
+    "intentPlaceholder": "未填写创作意图：一句话说明本片段要达成什么，可直接输入",
+    "wirePreview": "实际发送内容（本次生成）",
+    "wireMode": {
+      "r2v": "普通参考生成 r2v",
+      "video_extend": "视频延长（前段整片为素材）",
+      "i2v": "图生视频（首帧续写）",
+      "video_edit": "视频编辑",
+      "t2v": "文生视频"
+    },
+    "wireAnchorNote": "图1 为上一片段末帧（运行时抽取）",
+    "wireAnchorPruned": "锚帧已回收",
+    "wireBgmOn": "已注入共享配乐",
+    "wireBgmOff": "未注入配乐（原生音频）"
   },
   "agent": {
     "assistant": "创作助手",
@@ -2349,7 +2362,8 @@
       "final": "成片帧",
       "storyboard": "分镜",
       "design": "设计图",
-      "none": "待分镜"
+      "none": "待分镜",
+      "anchor": "锚定衔接"
     },
     "columns": {
       "understanding": "输入理解",

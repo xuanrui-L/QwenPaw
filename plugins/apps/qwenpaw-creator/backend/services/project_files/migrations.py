@@ -792,6 +792,28 @@ def _migrate_v9_to_v10(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[9] = _migrate_v9_to_v10
 
 
+def _migrate_v10_to_v11(document: dict[str, Any]) -> dict[str, Any]:
+    """10 -> 11: identity-preserving version stamp for the continuity
+    schema additions.
+
+    Everything v11 adds (force_storyboard, transition_intent,
+    storyboard_intent, last_frame_version_id; the retired
+    settings.video_continuity dial stays untouched) carries a model
+    default, so a v10 document upgrades by re-stamping the version
+    alone: every field, the project identity and all selected media
+    survive byte-for-byte, and the migration never guesses creative
+    intent the Agent has not written yet. Old builds reject v11
+    explicitly (11 > 10) instead of failing with extra-field
+    validation noise.
+    """
+
+    document["schema_version"] = 11
+    return document
+
+
+PROJECT_MIGRATIONS[10] = _migrate_v10_to_v11
+
+
 def _repair_v9_missing_audio_roles(document: dict[str, Any]) -> dict[str, Any]:
     """Same-version repair: stamp audio roles on pre-merge v9 documents.
 

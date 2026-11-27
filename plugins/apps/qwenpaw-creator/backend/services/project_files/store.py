@@ -565,7 +565,7 @@ class ProjectStore:
         - AudioCreation.source_asset_version_id → audio track uses this
         - R2VCreation storyboard/video_reference_version_ids
         - OverlayCreation.reference_version_ids
-        - I2VCreation.first_frame_version_id
+        - I2VCreation.first_frame_version_id / last_frame_version_id
         - S2VCreation.portrait_version_id / audio_version_id
 
         Automatic snapshot timelines count here too: a snapshot freezes the
@@ -918,6 +918,15 @@ class ProjectStore:
                                 detachable=True,
                             ),
                         )
+                    if creation.last_frame_version_id == version_id:
+                        references.append(
+                            _timeline_reference_record(
+                                timeline,
+                                element,
+                                "i2v-last-frame",
+                                detachable=True,
+                            ),
+                        )
                 # S2VCreation inputs are consumed directly by r2v_execution
                 # without ever being copied into an owned version, so dropping
                 # the file here would break an active digital-human shot.
@@ -1142,6 +1151,10 @@ class ProjectStore:
             if creation.first_frame_version_id == version_id:
                 creation = creation.model_copy(
                     update={"first_frame_version_id": None},
+                )
+            if creation.last_frame_version_id == version_id:
+                creation = creation.model_copy(
+                    update={"last_frame_version_id": None},
                 )
         elif isinstance(creation, S2VCreation):
             s2v_updates: dict[str, Any] = {}
