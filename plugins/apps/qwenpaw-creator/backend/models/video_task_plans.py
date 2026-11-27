@@ -93,23 +93,12 @@ class VideoTaskPlan:
     strong_continuity: bool = False
 
 
-# Author-intent keyword tables shared by the planner, the fingerprint
-# and the work graph's dependency decision. Cut vocabulary wins over
-# continuation vocabulary (a sentence mixing both describes an edit).
-def continuity_signals(
+def legacy_continuity_signals(
     elements_by_id: dict,
-    element,
-    prev,
+    element: TimelineElement,
+    prev: TimelineElement | None,
 ) -> tuple[str, str, bool]:
-    """Author-intent signals from durable Project data only.
-
-    Returns ``(transition_kind, continuity_intent, one_take)``: the
-    normalized kind of an explicit Transition element wired
-    predecessor→this segment ("none"/"cut"/"blend"), the keyword class
-    of ``creation.continuity``, and whether the text asks for an
-    unbroken camera continuation. Pure so the dispatch resolver, the
-    claim fingerprint and the work graph derive identical values.
-    """
+    """Decode v11 fields solely to verify already-frozen request digests."""
 
     transition_kind = "none"
     if prev is not None:
@@ -201,7 +190,7 @@ def r2v_continuity_storyboard_need(
 __all__ = [
     "VideoTaskKind",
     "VideoTaskPlan",
-    "continuity_signals",
+    "legacy_continuity_signals",
     "planned_predecessor",
     "planned_predecessor_id",
     "uses_storyboard",

@@ -1288,6 +1288,23 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 )
                 storyboard_dep = (storyboard_id,)
 
+            visual_video_deps: tuple[str, ...] = ()
+            visual_video_gaps: tuple[str, ...] = ()
+            if (
+                isinstance(creation, R2VCreation)
+                and creation.generation_plan is not None
+                and creation.generation_plan.method != "video_extend"
+                and not uses_storyboard(creation)
+                and not creation.video_reference_version_ids
+            ):
+                # With no exact references or storyboard, the resolved video
+                # inputs come from the authored visual bindings.
+                visual_video_deps = tuple(deps)
+                visual_video_gaps = (
+                    *_upstream_missing(visual_video_deps, statuses),
+                    *gate_missing,
+                )
+
             prev_video_dep: tuple[str, ...] = ()
             prev_video_slot: str | None = None
             prev_video_done = True
@@ -1428,6 +1445,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             elif not storyboard_done:
                 status = WorkNodeStatus.GATED
                 video_missing = (storyboard_id,) if storyboard_id else ()
+            elif visual_video_gaps:
+                status = WorkNodeStatus.GATED
+                video_missing = visual_video_gaps
             elif failure is not None and not _failure_inputs_changed(
                 failure,
                 video_id,
@@ -1468,18 +1488,15 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     status = WorkNodeStatus.READY
 
             if status is WorkNodeStatus.STALE:
-                # ``deps`` is only built inside the r2v branch above;
-                # reading it for other creation types would leak the
-                # previous loop iteration's script/lineup dependencies
-                # into this node's missing list. Each type therefore
-                # lists exactly the dependency families it declares.
-                video_missing = _upstream_missing(
-                    (
-                        (*deps, *storyboard_dep, *prev_video_dep)
-                        if creation_type == "r2v"
-                        else (*storyboard_dep, *prev_video_dep)
-                    ),
-                    statuses,
+                video_missing = tuple(
+                    dict.fromkeys(
+                        (
+                            *_upstream_missing(
+                                (*storyboard_dep, *prev_video_dep), statuses
+                            ),
+                            *visual_video_gaps,
+                        )
+                    )
                 )
                 if predecessor_error:
                     status = WorkNodeStatus.GATED
@@ -1554,10 +1571,19 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     kind="video",
                     label=f"{label} · 视频",
                     status=status,
-                    deps=(
-                        (script_node, *storyboard_dep, *prev_video_dep)
-                        if script_node is not None
-                        else (*storyboard_dep, *prev_video_dep)
+                    deps=tuple(
+                        dict.fromkeys(
+                            (
+                                *(
+                                    (script_node,)
+                                    if script_node is not None
+                                    else ()
+                                ),
+                                *storyboard_dep,
+                                *prev_video_dep,
+                                *visual_video_deps,
+                            )
+                        )
                     ),
                     lane=lane,
                     timeline_id=timeline_id,

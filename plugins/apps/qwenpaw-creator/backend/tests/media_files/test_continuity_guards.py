@@ -954,3 +954,26 @@ def test_extend_rejects_a_prompt_referencing_an_unsent_image(tmp_path):
             generate_audio=True,
             duration_seconds=4,
         )
+
+
+def test_authored_dependency_is_exact_even_when_a_newer_shot_is_available():
+    from services.media_files import r2v_execution as rx
+    from services.file_agent_runtime.work_graph import derive_work_graph
+
+    first = _element("first", start=0)
+    closer = _element("closer", start=4000)
+    third = _element("third", start=8000)
+    third.creation.generation_plan = R2VGenerationPlan(
+        method="r2v_last_frame",
+        use_storyboard=False,
+        predecessor_element_id="first",
+        anchor_instruction="匹配第一镜尾帧动作",
+    )
+    project, timeline = _project([first, closer, third])
+    _publish_artifact(project, "first", "first-version")
+    _publish_artifact(project, "closer", "closer-version")
+    node = derive_work_graph(project, ffmpeg_ready=True).by_id["video:third"]
+    assert node.deps == ("video:first",)
+    assert rx._reference_ids_with_continuity(project, timeline, third) == (
+        "continuity:last_frame:first-version",
+    )

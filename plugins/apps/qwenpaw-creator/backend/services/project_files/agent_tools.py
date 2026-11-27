@@ -1408,18 +1408,36 @@ class AgentProjectTools:
         candidate: dict[str, Any],
     ) -> None:
         """Keep legacy editing open and require a plan when the Agent authors a shot."""
-        timelines = candidate.get("timelines", {}).get("items", {})
+        timeline_group = candidate.get("timelines")
+        timelines = (
+            timeline_group.get("items")
+            if isinstance(timeline_group, dict)
+            else None
+        )
+        if not isinstance(timelines, dict):
+            return
         for timeline_id, timeline in timelines.items():
+            elements = (
+                timeline.get("elements_by_id")
+                if isinstance(timeline, dict)
+                else None
+            )
+            if not isinstance(elements, dict):
+                continue
             previous_timeline = base.timelines.items.get(timeline_id)
             previous_elements = (
                 previous_timeline.elements_by_id if previous_timeline else {}
             )
-            for element_id, element in timeline.get(
-                "elements_by_id", {}
-            ).items():
-                creation = element.get("creation", {})
-                if creation.get("type") != "r2v" or creation.get(
-                    "generation_plan"
+            for element_id, element in elements.items():
+                creation = (
+                    element.get("creation")
+                    if isinstance(element, dict)
+                    else None
+                )
+                if (
+                    not isinstance(creation, dict)
+                    or creation.get("type") != "r2v"
+                    or creation.get("generation_plan")
                 ):
                     continue
                 previous = previous_elements.get(element_id)
