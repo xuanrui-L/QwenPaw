@@ -395,14 +395,29 @@ def preview_r2v_reference_order(
     references: list[dict[str, Any]] = []
     plan = creation.generation_plan if stage == "video" else None
     if plan is not None and plan.predecessor_element_id is not None:
-        predecessor = timeline.elements_by_id.get(plan.predecessor_element_id)
-        prev_slot = project.assets.artifact_slots_by_id.get(
-            f"element:{plan.predecessor_element_id}:main",
+        from models.video_task_plans import planned_predecessor
+        from services.media_files.segment_continuity import (
+            resolve_predecessor_video_version,
         )
+
+        try:
+            predecessor = planned_predecessor(timeline, element)
+        except ValidationError:
+            predecessor = None
         version_id = (
-            prev_slot.selected_version_id if prev_slot is not None else None
+            resolve_predecessor_video_version(project, predecessor)
+            if predecessor is not None
+            else None
+        )
+        available = bool(
+            version_id and project_ref_media_kind(project, version_id) == "video"
         )
         extending = plan.method == "video_extend"
+        predecessor_label = (
+            (predecessor.label if predecessor else "")
+            or plan.predecessor_element_id
+        )
+        reference_label = "前段视频" if extending else "前段末帧"
         references.append(
             {
                 "index": 1,
@@ -410,12 +425,8 @@ def preview_r2v_reference_order(
                 "videoIndex": 1 if extending else None,
                 "versionId": (version_id or "") if extending else "",
                 "kind": "continuity",
-                "available": bool(version_id),
-                "name": (
-                    f"{predecessor.label or predecessor.element_id} · 前段视频"
-                    if extending and predecessor is not None
-                    else f"{plan.predecessor_element_id} · 前段末帧"
-                ),
+                "available": available,
+                "name": f"{predecessor_label} · {reference_label}",
             }
         )
         if extending:
