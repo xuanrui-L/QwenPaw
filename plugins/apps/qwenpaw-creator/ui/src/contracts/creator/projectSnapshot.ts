@@ -607,6 +607,8 @@ export interface ProjectPatchRequest {
 /** One entry of the authoritative [Image N] reference order (backend view). */
 export interface R2VReferenceOrderItem {
   index: number;
+  imageIndex?: number | null;
+  videoIndex?: number | null;
   versionId: string;
   kind: "storyboard" | "source" | "artifact" | "continuity";
   name: string;
