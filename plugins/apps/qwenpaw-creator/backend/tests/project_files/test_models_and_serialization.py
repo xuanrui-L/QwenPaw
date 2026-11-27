@@ -278,6 +278,8 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
     # Production-stage controls also did not exist in the persisted schema.
     del raw["settings"]["production_stage"]
     del raw["settings"]["script_approval_fingerprint"]
+    # Neither did the project-level segment-continuity switch.
+    del raw["settings"]["video_continuity"]
 
     migrated = load_project_document(raw)
 

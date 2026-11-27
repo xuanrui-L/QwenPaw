@@ -110,6 +110,7 @@ function DraftTimelinePlayer({
 const SOURCE_STYLE: Record<RoughCutSource, string> = {
   final: "bg-[var(--color-success)]/90",
   storyboard: "bg-[var(--color-primary,#3b82f6)]/90",
+  anchor: "bg-[var(--color-accent)]/85",
   none: "bg-black/50",
 };
 

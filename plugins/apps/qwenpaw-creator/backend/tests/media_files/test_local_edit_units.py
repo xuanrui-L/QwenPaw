@@ -22,15 +22,19 @@ from domain.enums import CreatorCommandType
 from domain.errors import StorageIntegrityError
 from domain.errors import ValidationError as DomainValidationError
 from services.media_files import keyframe_cache
+from services.project_files.assets import AssetFileStore
 from services.media_files.element_adapter import reconcile_candidate_span
 from services.media_files.local_execution import (
     FfmpegLocalMediaRunner,
     LocalMediaExecutionSpec,
     LocalMediaInput,
     _caption_fallback_style_kwargs,
+    _measured_output_seconds,
     _motion_document_matches_text,
     _plan_timeline_transitions,
+    _trim_edit_chain,
     _validate_contiguous_edit_elements,
+    reconcile_edit_timelines_across_projects,
 )
 from services.media_files.motion_blueprints import subtitle_pack_animation
 from services.media_files.transitions import (
@@ -207,7 +211,12 @@ def _probe_csv(path, entries):
 
 
 def _render_spec(
-    source, media_type, *, duration=2.0, element="clip-1", **input_options
+    source,
+    media_type,
+    *,
+    duration=2.0,
+    element="clip-1",
+    **input_options,
 ):
     work = source.parent / "work"
     work.mkdir()
@@ -248,7 +257,7 @@ def test_still_image_input_renders_a_timed_segment(tmp_path) -> None:
 
     assert result["media_type"] == "video/mp4"
     assert float(
-        _probe_csv(spec.output_path, "format=duration")
+        _probe_csv(spec.output_path, "format=duration"),
     ) == pytest.approx(2.0, abs=0.15)
 
 
@@ -294,14 +303,17 @@ def test_video_playback_rate_controls_real_output_duration(
     durations = dict(
         line.split(",")
         for line in _probe_csv(
-            spec.output_path, "stream=codec_type,duration"
+            spec.output_path,
+            "stream=codec_type,duration",
         ).splitlines()
     )
     assert float(durations["video"]) == pytest.approx(
-        expected_duration, abs=0.15
+        expected_duration,
+        abs=0.15,
     )
     assert float(durations["audio"]) == pytest.approx(
-        expected_duration, abs=0.15
+        expected_duration,
+        abs=0.15,
     )
 
 
@@ -332,7 +344,9 @@ def test_materialize_keyframe_persists_and_reuses_deterministic_jpeg(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(
-        getattr(keyframe_cache, "media_gate", subprocess), "run", fake_run
+        getattr(keyframe_cache, "media_gate", subprocess),
+        "run",
+        fake_run,
     )
     first = _materialize_keyframe(project_root, source, 4.5004)
     replay = _materialize_keyframe(project_root, source, 4.5)
@@ -410,7 +424,8 @@ def test_keyframe_cache_rejects_directory_redirect(tmp_path, directory_link):
 
 
 @pytest.mark.parametrize(
-    "pick", [None, {"entrance": "pop", "exit": "shrink", "loop": True}]
+    "pick",
+    [None, {"entrance": "pop", "exit": "shrink", "loop": True}],
 )
 def test_normalized_overlay_respects_user_or_pack_animation(pick) -> None:
     overlay = {
@@ -511,7 +526,6 @@ def test_model_boundary_only_admits_the_named_preset_vocabulary() -> None:
     from services.media_files.local_execution import _COLOR_GRADE_FILTERS
     from services.project_files.models import (
         COLOR_GRADE_PRESETS,
-        Project,
         Timeline,
     )
 
@@ -888,3 +902,404 @@ def test_motion_clip_segment_renders_the_document_as_the_picture(
     ]
     assert levels, signature
     assert float(levels[0]) > 24.0, f"frame is almost black (YAVG={levels[0]})"
+
+
+# ── Edit spans capped at the media that actually exists ──────────────────────
+#
+# Field shape: an imported comparison cut described two screen recordings as
+# 180 s and 52 s. The prose was believed, the files were never measured, and
+# the compose produced 29.918 + 52 = 81.9 s. The plan page then showed
+# 03:00 + 00:52 in the rough-cut strip while the same artifact played as 1:21
+# in the overview rail -- two numbers, both faithful to their own source.
+
+
+def _edit_candidate(
+    *,
+    first_seconds: float | None,
+    second_seconds: float | None,
+) -> dict:
+    def version(version_id: str, seconds: float | None) -> dict:
+        row = {
+            "version_id": version_id,
+            "file_id": f"{version_id}-file",
+            "media_kind": "video",
+            "media_type": "video/mp4",
+        }
+        if seconds is not None:
+            row["duration_seconds"] = seconds
+        return row
+
+    def cut(
+        element_id: str,
+        version_id: str,
+        start: int,
+        duration: int,
+    ) -> dict:
+        return {
+            "element_id": element_id,
+            "enabled": True,
+            "span": {"start_tick": start, "duration_tick": duration},
+            "creation": {
+                "type": "edit",
+                "intent": "pick",
+                "original_sound": "preserve",
+            },
+            "render_source": {
+                "type": "source_asset_version",
+                "version_id": version_id,
+                "source_in_tick": 0,
+                "source_out_tick": duration,
+                "playback_rate": 1.0,
+            },
+        }
+
+    return {
+        "assets": {
+            "source_versions_by_id": {
+                "v-qwen4": version("v-qwen4", first_seconds),
+                "v-qoduck": version("v-qoduck", second_seconds),
+            },
+        },
+        "timelines": {
+            "items": {
+                "timeline:main": {
+                    "ticks_per_second": 1000,
+                    "elements_by_id": {
+                        "el-qwen4": cut("el-qwen4", "v-qwen4", 0, 180_000),
+                        "el-qoduck": cut(
+                            "el-qoduck",
+                            "v-qoduck",
+                            180_000,
+                            52_000,
+                        ),
+                        # A caption anchored past the first cut's old end
+                        # must ride the same shift, or it would burn onto
+                        # footage that is no longer anywhere in the film.
+                        "el-caption": {
+                            "element_id": "el-caption",
+                            "enabled": True,
+                            "span": {
+                                "start_tick": 200_000,
+                                "duration_tick": 3_000,
+                            },
+                            "creation": {"type": "overlay", "text": "字幕"},
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
+def _trim(candidate: dict, tmp_path: Path) -> bool:
+    return _trim_edit_chain(
+        candidate,
+        project=Project.new(project_id="p-trim", name="trim"),
+        file_store=AssetFileStore(tmp_path),
+        target_ref="timeline:timeline:main",
+    )
+
+
+def _cut_elements(candidate: dict) -> dict:
+    return candidate["timelines"]["items"]["timeline:main"]["elements_by_id"]
+
+
+def test_edit_span_longer_than_its_media_is_capped_and_the_chain_closes_up(
+    tmp_path: Path,
+) -> None:
+    candidate = _edit_candidate(first_seconds=29.918, second_seconds=54.153)
+    assert _trim(candidate, tmp_path) is True
+    elements = _cut_elements(candidate)
+    first = elements["el-qwen4"]
+    assert first["span"]["duration_tick"] == 29_918
+    assert first["render_source"]["source_out_tick"] == 29_918
+    second = elements["el-qoduck"]
+    # Its own media is long enough, so only its position moves: the second
+    # cut now starts where the shortened first one ends.
+    assert second["span"]["start_tick"] == 29_918
+    assert second["span"]["duration_tick"] == 52_000
+    assert second["render_source"]["source_out_tick"] == 52_000
+    assert elements["el-caption"]["span"]["start_tick"] == 49_918
+    # The Timeline now measures what the rendered file measures.
+    assert (
+        max(
+            item["span"]["start_tick"] + item["span"]["duration_tick"]
+            for item in elements.values()
+        )
+        == 81_918
+    )
+    # Replaying costs nothing: nothing is over-long any more.
+    assert _trim(candidate, tmp_path) is False
+
+
+def test_media_that_fits_the_plan_is_left_untouched(tmp_path: Path) -> None:
+    candidate = _edit_candidate(first_seconds=180.0, second_seconds=52.0)
+    assert _trim(candidate, tmp_path) is False
+    assert (
+        _cut_elements(candidate)["el-qwen4"]["span"]["duration_tick"]
+        == 180_000
+    )
+
+
+def test_unmeasured_source_is_probed_once_and_the_answer_is_stamped(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A version row with no length gets one probe, then carries the number."""
+
+    from services.media_files import local_execution
+
+    class _Probe:
+        duration_seconds = 29.918
+
+    monkeypatch.setattr(
+        local_execution,
+        "probe_media",
+        lambda *_args, **_kwargs: _Probe(),
+    )
+    monkeypatch.setattr(
+        local_execution,
+        "_indexed_version",
+        lambda _project, version_id, **_kwargs: (
+            SimpleNamespace(
+                file_id=f"{version_id}-file",
+                relative_uri="assets/sources/x.mp4",
+            ),
+            object(),
+        ),
+    )
+    monkeypatch.setattr(
+        AssetFileStore,
+        "resolve_verified_path",
+        lambda _self, indexed: Path(f"/tmp/{indexed.file_id}.mp4"),
+    )
+    candidate = _edit_candidate(first_seconds=None, second_seconds=54.153)
+    assert _trim(candidate, tmp_path) is True
+    row = candidate["assets"]["source_versions_by_id"]["v-qwen4"]
+    assert row["duration_seconds"] == 29.918
+    assert (
+        _cut_elements(candidate)["el-qwen4"]["span"]["duration_tick"] == 29_918
+    )
+
+    # The stamped row means a later pass stays arithmetic: no second subprocess.
+    def _no_more_probes(*_args, **_kwargs):
+        raise AssertionError("re-probed an already measured source")
+
+    monkeypatch.setattr(local_execution, "probe_media", _no_more_probes)
+    assert _trim(candidate, tmp_path) is False
+
+
+def test_composed_duration_is_measured_from_the_file_not_the_plan(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    spec = LocalMediaExecutionSpec(
+        command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
+        target_ref="timeline:timeline:main",
+        task_id="task-1",
+        work_dir=tmp_path,
+        output_path=tmp_path / "final.mp4",
+        inputs=(),
+        transitions=(),
+        audio_plan="preserve",
+        expected_duration_seconds=232.0,
+        canvas_size=(1280, 720),
+    )
+
+    from services.media_files import local_execution
+
+    class _Probe:
+        duration_seconds = 81.922
+
+    monkeypatch.setattr(
+        local_execution,
+        "probe_media",
+        lambda *_args, **_kwargs: _Probe(),
+    )
+    assert _measured_output_seconds(spec) == 81.922
+
+    def _unreadable(*_args, **_kwargs):
+        raise local_execution.MediaProbeError("no such file")
+
+    monkeypatch.setattr(local_execution, "probe_media", _unreadable)
+    # A file that cannot be probed keeps the planned number rather than
+    # publishing a null duration every later reader has to guard against.
+    assert _measured_output_seconds(spec) == 232.0
+
+
+class _StubProjects:
+    def __init__(self, root: Path, documents: dict) -> None:
+        self.root = root
+        self.documents = documents
+
+    def discover_project_ids(self):
+        return tuple(self.documents)
+
+    def project_root(self, project_id: str) -> Path:
+        return self.root / project_id
+
+    def read(self, project_id: str):
+        self.reads = getattr(self, "reads", 0) + 1
+        return SimpleNamespace(project=self.documents[project_id])
+
+
+class _StubCommits:
+    def __init__(self, projects: _StubProjects) -> None:
+        self.projects = projects
+        self.calls: list[dict] = []
+
+    def commit(self, *, base, candidate, **_kwargs):
+        self.calls.append(candidate)
+        project_id = base.project.project_id
+        self.projects.documents[project_id] = Project.model_validate(candidate)
+        return SimpleNamespace(snapshot=self.projects.documents[project_id])
+
+
+def _project_with(candidate: dict, project_id: str) -> Project:
+    """A valid Project carrying one candidate timeline."""
+
+    dumped = Project.new(project_id=project_id, name="edit").model_dump(
+        mode="json",
+    )
+    timeline = candidate["timelines"]["items"]["timeline:main"]
+    timeline["timeline_id"] = "timeline:main"
+    for element in timeline["elements_by_id"].values():
+        # Visual Elements carry a canvas location; the candidate dict is
+        # otherwise a pure-tick fixture.
+        element.setdefault("location", {})
+    dumped["timelines"]["items"]["timeline:main"] = timeline
+    dumped["assets"]["source_versions_by_id"] = {
+        version_id: {
+            "logical_asset_id": f"asset-{version_id}",
+            "name": f"{version_id}.mp4",
+            "checksum": "c" * 64,
+            "created_at": "2026-11-16T00:00:00+00:00",
+            **row,
+        }
+        for version_id, row in candidate["assets"][
+            "source_versions_by_id"
+        ].items()
+    }
+    dumped["assets"]["files_by_id"] = {
+        row["file_id"]: {
+            "file_id": row["file_id"],
+            "kind": "source_original",
+            "relative_uri": f"assets/sources/{row['file_id']}.mp4",
+            "sha256": "c" * 64,
+            "size_bytes": 1,
+            "media_type": "video/mp4",
+            "created_at": "2026-11-16T00:00:00+00:00",
+        }
+        for row in dumped["assets"]["source_versions_by_id"].values()
+    }
+    return Project.model_validate(dumped)
+
+
+def _stub_media_probe(monkeypatch, seconds_by_file: dict[str, float]) -> None:
+    """Answer ffprobe per file and keep the probe off the real filesystem.
+
+    The Project model already refuses a source range past a *recorded*
+    duration; the shape that actually survives in the field is a row with
+    no duration at all, so every case here starts from ``None`` and lets
+    the pass measure it.
+    """
+
+    from services.media_files import local_execution
+
+    class _Probe:
+        def __init__(self, seconds: float) -> None:
+            self.duration_seconds = seconds
+
+    def fake_probe(target, **_kwargs):
+        return _Probe(seconds_by_file[Path(target).name])
+
+    monkeypatch.setattr(local_execution, "probe_media", fake_probe)
+    monkeypatch.setattr(
+        local_execution,
+        "_indexed_version",
+        lambda _project, version_id, **_kwargs: (
+            SimpleNamespace(
+                file_id=f"{version_id}-file",
+                relative_uri="assets/sources/x.mp4",
+            ),
+            object(),
+        ),
+    )
+    monkeypatch.setattr(
+        AssetFileStore,
+        "resolve_verified_path",
+        lambda _self, indexed: Path(f"/tmp/{indexed.file_id}.mp4"),
+    )
+
+
+def test_startup_pass_caps_a_stale_timeline_without_being_asked(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The upgrade case: nobody composes, yet the plan must stop lying."""
+
+    _stub_media_probe(
+        monkeypatch,
+        {"v-qwen4-file.mp4": 29.918, "v-qoduck-file.mp4": 54.153},
+    )
+    candidate = _edit_candidate(first_seconds=None, second_seconds=None)
+    project_id = "project-1"
+    root = tmp_path / project_id
+    root.mkdir(parents=True)
+    (root / "project.json").write_text("{}", encoding="utf-8")
+    projects = _StubProjects(
+        tmp_path,
+        {project_id: _project_with(candidate, project_id)},
+    )
+    commits = _StubCommits(projects)
+    services = SimpleNamespace(
+        root=tmp_path,
+        projects=projects,
+        commits=commits,
+    )
+
+    report = reconcile_edit_timelines_across_projects(services)
+    assert report.scanned_projects == 1
+    assert report.reconciled_projects == 1
+    assert len(commits.calls) == 1
+    elements = commits.calls[0]["timelines"]["items"]["timeline:main"][
+        "elements_by_id"
+    ]
+    assert elements["el-qwen4"]["span"]["duration_tick"] == 29_918
+    assert elements["el-qoduck"]["span"]["start_tick"] == 29_918
+    # The measured lengths are stamped in the same commit, so the next read
+    # is arithmetic and the model's own range check finally has teeth.
+    rows = commits.calls[0]["assets"]["source_versions_by_id"]
+    assert rows["v-qwen4"]["duration_seconds"] == 29.918
+    assert rows["v-qoduck"]["duration_seconds"] == 54.153
+
+
+def test_startup_pass_reloads_only_documents_that_moved(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A repeat pass must not re-read every Project: one stat decides."""
+
+    _stub_media_probe(
+        monkeypatch,
+        {"v-qwen4-file.mp4": 29.918, "v-qoduck-file.mp4": 54.153},
+    )
+    candidate = _edit_candidate(first_seconds=None, second_seconds=None)
+    project_id = "project-1"
+    root = tmp_path / project_id
+    root.mkdir(parents=True)
+    (root / "project.json").write_text("{}", encoding="utf-8")
+    projects = _StubProjects(
+        tmp_path,
+        {project_id: _project_with(candidate, project_id)},
+    )
+    services = SimpleNamespace(
+        root=tmp_path,
+        projects=projects,
+        commits=_StubCommits(projects),
+    )
+    reconcile_edit_timelines_across_projects(services)
+    first_reads = projects.reads
+    second = reconcile_edit_timelines_across_projects(services)
+    assert second.scanned_projects == 0
+    assert projects.reads == first_reads

@@ -112,6 +112,7 @@ from services.project_files.models import (
     ArtifactVersion,
     ArtifactVersionRenderSource,
     AudioCreation,
+    DEFAULT_TIMELINE_TICKS_PER_SECOND,
     EditCreation,
     ElementOutputRenderSource,
     I2VCreation,
@@ -129,6 +130,7 @@ from services.project_files.models import (
 )
 from services.media_files.element_adapter import (
     find_timeline_element,
+    reconcile_candidate_span,
     selected_element_output,
 )
 from services.media_files.review_admission import (
@@ -168,6 +170,9 @@ from utils.remote_download import download_remote_file
 # pylint: enable=no-name-in-module
 
 if TYPE_CHECKING:
+    # task_scratch reaches back here through its own imports, so the sweep
+    # budget is a type annotation only at runtime.
+    from services.media_files.task_scratch import SweepBudget
     from services.project_files.facade import CreatorFileServices
 
 
@@ -331,8 +336,10 @@ class LocalMediaRunner(Protocol):
     """Runner boundary.  Implementations write exactly ``spec.output_path``."""
 
     async def render(
-        self, spec: LocalMediaExecutionSpec
-    ) -> Mapping[str, Any]: ...
+        self,
+        spec: LocalMediaExecutionSpec,
+    ) -> Mapping[str, Any]:
+        ...
 
 
 # Unified colour-grade presets applied to the whole composited cut.
@@ -417,7 +424,10 @@ class FfmpegLocalMediaRunner:
             metadata["overlayWarnings"] = overlay_warnings
         return {
             "media_type": "video/mp4",
-            "duration_seconds": spec.expected_duration_seconds,
+            "duration_seconds": await asyncio.to_thread(
+                _measured_output_seconds,
+                spec,
+            ),
             "metadata": metadata,
         }
 
@@ -713,11 +723,8 @@ class FfmpegLocalMediaRunner:
             return None
         video_filter = _COLOR_GRADE_FILTERS.get(grade)
         if video_filter is None:
-            return (
-                f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: "
-                + ", ".join(
-                    sorted(_COLOR_GRADE_FILTERS),
-                )
+            return f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: " + ", ".join(
+                sorted(_COLOR_GRADE_FILTERS),
             )
         graded = spec.work_dir / "graded.mp4"
         self._run(
@@ -1552,12 +1559,12 @@ class FfmpegLocalMediaRunner:
                 )
             ):
                 reject_informal_launch_fallback(
-                    overlay, "动效文档与当前文案不一致"
+                    overlay,
+                    "动效文档与当前文案不一致",
                 )
                 motion = None
                 styled_error = (
-                    f"{overlay['kind']} 动效文档与当前文案不一致，"
-                    "已用回退样式渲染最新文案"
+                    f"{overlay['kind']} 动效文档与当前文案不一致，" "已用回退样式渲染最新文案"
                 )
             if (
                 isinstance(motion, Mapping)
@@ -3066,6 +3073,386 @@ def _validate_contiguous_edit_elements(
         previous_id = element.element_id
 
 
+EDIT_RECONCILIATION_LEDGER = ".edit-source-reconciliation.json"
+
+
+@dataclass(frozen=True, slots=True)
+class EditTimelineReconciliationReport:
+    """What one background Edit pass took on."""
+
+    scanned_projects: int = 0
+    reconciled_projects: int = 0
+    failed_projects: int = 0
+    failures: tuple[str, ...] = ()
+
+
+def _project_document_stamp(project_root: Path) -> tuple[int, int] | None:
+    """``(mtime_ns, size)`` of one ``project.json``, or None when unreadable."""
+
+    try:
+        info = (project_root / "project.json").stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size)
+
+
+def _reconcile_one_project(services: Any, project_id: str) -> bool:
+    """Cap one Project's live Edit chains, committing only what moved."""
+
+    base = services.projects.read(project_id)
+    candidate = base.project.model_dump(mode="json")
+    file_store = AssetFileStore(services.projects.project_root(project_id))
+    changed = False
+    for timeline_id in (candidate.get("timelines") or {}).get("items", {}):
+        # A ``snapshot:`` timeline is frozen history: an Edit cut inside it
+        # records what was once true, and rewriting it would edit the past.
+        if str(timeline_id).startswith("snapshot:"):
+            continue
+        if _trim_edit_chain(
+            candidate,
+            project=base.project,
+            file_store=file_store,
+            target_ref=str(timeline_id),
+        ):
+            changed = True
+    if not changed:
+        return False
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+        review_policy=ReviewPolicy.AUTO_FIX,
+        caused_by_request_id=(
+            f"edit-source-reconcile:{project_id}:"
+            f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+        ),
+    )
+    return True
+
+
+def reconcile_edit_timelines_across_projects(
+    services: Any,
+    *,
+    budget: "SweepBudget | None" = None,
+) -> EditTimelineReconciliationReport:
+    """Cap every Project's Edit chain at its media, without being asked.
+
+    Composing is the natural moment to notice that a cut claims more footage
+    than its file holds, but waiting for one leaves the plan page measuring
+    232 s against a player that says 81.9 s for as long as nobody exports --
+    and a person who just upgraded sees that contradiction on the first
+    look. This pass runs in the post-startup maintenance window instead.
+
+    One ``stat`` per Project decides whether its document moved since the
+    last look, so a healthy install pays a read only for Projects that
+    changed and the identity-only startup sweep the load work just settled
+    on stays that way. ``snapshot:`` timelines are frozen history and are
+    left alone; a Project that cannot be read is reported and skipped
+    rather than ending the pass.
+    """
+
+    ledger_store = AtomicJsonRecordStore(
+        Path(services.root) / EDIT_RECONCILIATION_LEDGER,
+        None,
+    )
+    try:
+        stored = ledger_store.read_or_none()
+    except Exception:  # noqa: BLE001 - a lost ledger only costs one re-read
+        stored = None
+    ledger: dict[str, Any] = stored if isinstance(stored, dict) else {}
+    scanned = 0
+    reconciled = 0
+    failed = 0
+    failures: list[str] = []
+    for project_id in services.projects.discover_project_ids():
+        if budget is not None and not budget.has_room():
+            break
+        project_root = Path(services.projects.project_root(project_id))
+        stamp = _project_document_stamp(project_root)
+        if stamp is None:
+            continue
+        seen = ledger.get(project_id)
+        if isinstance(seen, dict) and seen.get("sourceStamp") == list(stamp):
+            continue
+        scanned += 1
+        try:
+            changed = _reconcile_one_project(services, project_id)
+        except (
+            Exception
+        ) as error:  # noqa: BLE001 - one Project must not stop the pass
+            failures.append(f"{project_id}: {type(error).__name__}: {error}")
+            failed += 1
+            continue
+        # Record the document as it now stands -- a commit moved it.
+        ledger[project_id] = {
+            "sourceStamp": list(
+                _project_document_stamp(project_root) or stamp,
+            ),
+        }
+        if changed:
+            reconciled += 1
+            logger.warning(
+                "edit timelines capped to measured media: project=%s",
+                project_id,
+            )
+    try:
+        ledger_store.write(ledger)
+    except OSError as error:
+        logger.warning(
+            "edit reconciliation ledger cannot be written: %s",
+            error,
+        )
+    return EditTimelineReconciliationReport(
+        scanned_projects=scanned,
+        reconciled_projects=reconciled,
+        failed_projects=failed,
+        failures=tuple(failures),
+    )
+
+
+def _measured_output_seconds(spec: LocalMediaExecutionSpec) -> float | None:
+    """The rendered film's own length, falling back to the planned one.
+
+    The plan's expected duration is what the Timeline asked for, which is not
+    what the file is whenever a source came up short.  Recording the request
+    instead of the result leaves an artifact whose row promises 232 s while
+    the bytes hold 81.9 s, and every later reader that trusts the row --
+    export packaging, the interactive bundle, a reuse check -- inherits the
+    lie.  A file that cannot be probed keeps the planned number rather than
+    publishing a null duration.
+    """
+
+    try:
+        probe = probe_media(os.fspath(spec.output_path))
+    except (MediaProbeError, OSError) as error:
+        logger.warning(
+            "composed duration probe failed, keeping planned duration: %s",
+            error,
+        )
+        return spec.expected_duration_seconds
+    seconds = probe.duration_seconds
+    if not seconds or seconds <= 0:
+        return spec.expected_duration_seconds
+    return round(float(seconds), 3)
+
+
+def _is_edit_chain_element(element: Any) -> bool:
+    """Whether one raw element is an enabled Edit cut reading a source row."""
+
+    if not isinstance(element, dict) or not element.get("enabled"):
+        return False
+    creation = element.get("creation")
+    render_source = element.get("render_source")
+    return bool(
+        isinstance(creation, dict)
+        and creation.get("type") == "edit"
+        and isinstance(element.get("span"), dict)
+        and isinstance(render_source, dict)
+        and render_source.get("type") == "source_asset_version"
+        and isinstance(render_source.get("version_id"), str),
+    )
+
+
+def _measured_source_seconds(
+    project: Project,
+    file_store: AssetFileStore,
+    raw_version: dict[str, Any],
+    version_id: str,
+) -> float | None:
+    """One source's real length, probing the file when the row carries none.
+
+    Uploads stamp ``duration_seconds`` only for recorded takes, so a person's
+    own footage arrives with no length at all.  Every check that then asks
+    "does this cut fit" answers yes by default, and the runner learns the
+    truth only by reading past end of file and stopping early.  The probe is
+    paid once and written back onto the version row, so a later pass costs
+    arithmetic instead of another subprocess.
+    """
+
+    recorded = raw_version.get("duration_seconds")
+    if (
+        isinstance(recorded, (int, float))
+        and not isinstance(recorded, bool)
+        and recorded > 0
+    ):
+        return float(recorded)
+    if not isinstance(raw_version.get("file_id"), str):
+        return None
+    try:
+        indexed, _version = _indexed_version(
+            project,
+            version_id,
+            require_artifact=False,
+        )
+    except (ConflictError, StorageIntegrityError):
+        return None
+    if indexed is None:
+        return None
+    try:
+        probe = probe_media(
+            os.fspath(file_store.resolve_verified_path(indexed)),
+        )
+    except (MediaProbeError, OSError) as error:
+        logger.warning(
+            "source duration probe failed: version=%s error=%s",
+            version_id,
+            error,
+        )
+        return None
+    seconds = probe.duration_seconds
+    if not seconds or seconds <= 0:
+        return None
+    raw_version["duration_seconds"] = round(float(seconds), 3)
+    return float(seconds)
+
+
+def _trim_edit_chain(
+    candidate: dict[str, Any],
+    *,
+    project: Project,
+    file_store: AssetFileStore,
+    target_ref: str,
+) -> bool:
+    """Cap every Edit span at what its media actually is, in place.
+
+    An Edit Element states the same length twice -- the span it occupies in
+    the film, and the source range cut from the media -- and both are written
+    from the script's prose.  When the upload is shorter than the prose, the
+    two rows still agree with each other, so nothing in the document
+    contradicts them; only the rendered file does.  The field case behind
+    this: a clip described as three minutes kept ``duration_tick=180000``
+    against 29.9 s of footage, so the plan page showed 03:00 + 00:52 while
+    the player measured 1:21 on the same artifact.
+
+    The shrink itself is delegated to :func:`reconcile_candidate_span`, the
+    path an s2v clip already takes when its provider delivers less footage
+    than planned: it pulls every element starting at or after the old end
+    forward, which is what keeps the layout in the one shape
+    :func:`_validate_contiguous_edit_elements` accepts.  Shorter media is
+    therefore repaired with a motion rule the pipeline already guarantees,
+    not a second one invented here.
+    """
+
+    timelines = (candidate.get("timelines") or {}).get("items")
+    raw_versions = (candidate.get("assets") or {}).get("source_versions_by_id")
+    if not isinstance(timelines, dict) or not isinstance(raw_versions, dict):
+        return False
+    stripped = target_ref.partition(":")[2] or target_ref
+    timeline = timelines.get(stripped) or timelines.get(target_ref)
+    elements = (
+        timeline.get("elements_by_id") if isinstance(timeline, dict) else None
+    )
+    if not isinstance(elements, dict):
+        return False
+    ticks_per_second = float(
+        timeline.get("ticks_per_second") or DEFAULT_TIMELINE_TICKS_PER_SECOND,
+    )
+
+    def ceiling_of(version_id: str) -> int | None:
+        raw_version = raw_versions.get(version_id)
+        if not isinstance(raw_version, dict):
+            return None
+        seconds = _measured_source_seconds(
+            project,
+            file_store,
+            raw_version,
+            version_id,
+        )
+        if seconds is None:
+            return None
+        return round(seconds * ticks_per_second)
+
+    changed = False
+    ordered = sorted(
+        (
+            (element_id, element)
+            for element_id, element in elements.items()
+            if _is_edit_chain_element(element)
+        ),
+        key=lambda item: int(item[1]["span"].get("start_tick") or 0),
+    )
+    for element_id, element in ordered:
+        span = element["span"]
+        render_source = element["render_source"]
+        planned_duration = int(span.get("duration_tick") or 0)
+        if planned_duration <= 0:
+            continue
+        source_in = int(render_source.get("source_in_tick") or 0)
+        rate = float(render_source.get("playback_rate") or 1.0)
+        ceiling = ceiling_of(str(render_source.get("version_id")))
+        if ceiling is None:
+            continue
+        wanted_out = source_in + round(planned_duration * rate)
+        declared_out = render_source.get("source_out_tick")
+        planned_out = (
+            min(wanted_out, declared_out)
+            if isinstance(declared_out, int)
+            else wanted_out
+        )
+        if planned_out <= ceiling:
+            continue
+        # Never below one tick: a source that starts past the end of the
+        # media stays a beat rather than collapsing into a zero-length
+        # range the schema rejects.
+        trimmed_out = max(source_in + 1, ceiling)
+        render_source["source_out_tick"] = trimmed_out
+        changed = (
+            reconcile_candidate_span(
+                candidate,
+                element_id=element_id,
+                actual_duration_seconds=(
+                    (trimmed_out - source_in) / rate / ticks_per_second
+                ),
+            )
+            or changed
+        )
+    return changed
+
+
+def reconcile_edit_source_durations(
+    services: Any,
+    *,
+    base: ProjectSnapshot,
+    project_id: str,
+    target_ref: str,
+    idempotency_key: str,
+) -> ProjectSnapshot:
+    """Publish the trimmed Edit chain when the media is shorter than the plan.
+
+    Runs ahead of resolution on every local compose, so the Timeline, the
+    rendered file and the rough-cut strip answer with one number.  The
+    correction is an ordinary commit: it carries the composing request's
+    idempotency key, so a retry replays it instead of stacking generations,
+    and a document that already fits its media costs nothing but the read
+    the caller already holds.
+    """
+
+    candidate = base.project.model_dump(mode="json")
+    file_store = AssetFileStore(services.projects.project_root(project_id))
+    if not _trim_edit_chain(
+        candidate,
+        project=base.project,
+        file_store=file_store,
+        target_ref=target_ref,
+    ):
+        return base
+    commit = services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+        review_policy=ReviewPolicy.AUTO_FIX,
+        caused_by_request_id=idempotency_key,
+    )
+    logger.warning(
+        "edit timeline capped to source media: project=%s target=%s "
+        "generation=%s",
+        _log_safe(project_id),
+        target_ref,
+        commit.snapshot.generation,
+    )
+    return commit.snapshot
+
+
 def _edit_motion_overlays(
     project: Project,
     timeline: Timeline,
@@ -3869,7 +4256,7 @@ class FileLocalMediaExecutionService:
         command_value = CreatorCommandType(command)
         if command_value not in _LOCAL_MEDIA_COMMANDS:
             raise ValidationError(
-                f"不支持的文件本地媒体命令: {command_value.value}"
+                f"不支持的文件本地媒体命令: {command_value.value}",
             )
         ids = self._ids(project_id, idempotency_key)
         command_request_hash = _fingerprint(
@@ -3936,6 +4323,22 @@ class FileLocalMediaExecutionService:
                     self.services.projects.read,
                     project_id,
                 )
+        if command_value in {
+            CreatorCommandType.EXECUTE_EDIT,
+            CreatorCommandType.COMPOSE_FINAL_VIDEO,
+        }:
+            # Cap the Edit chain at the media before resolving the plan: the
+            # runner reads source ranges and stops at end of file, so an
+            # over-long span resolves into a film shorter than the Timeline
+            # claims and the plan page then shows both numbers at once.
+            base = await asyncio.to_thread(
+                reconcile_edit_source_durations,
+                self.services,
+                base=base,
+                project_id=project_id,
+                target_ref=target_ref,
+                idempotency_key=idempotency_key,
+            )
         resolved = await asyncio.to_thread(
             _resolve_execution,
             snapshot=base,
@@ -4682,7 +5085,7 @@ class FileLocalMediaExecutionService:
             file_store.abandon(staged)
             if not file_store.inspect(indexed).available:
                 raise StorageIntegrityError(
-                    "稳定本地媒体输出路径已存在但内容不同"
+                    "稳定本地媒体输出路径已存在但内容不同",
                 )
         metadata = {
             "taskId": task.task_id,
@@ -4739,7 +5142,7 @@ class FileLocalMediaExecutionService:
     ) -> FileLocalMediaExecutionResult:
         if not isinstance(task.result, dict):
             raise StorageIntegrityError(
-                "RUNNING 本地媒体 Task 缺少可重放 result"
+                "RUNNING 本地媒体 Task 缺少可重放 result",
             )
         result = dict(task.result)
 
@@ -5133,7 +5536,7 @@ class FileLocalMediaExecutionService:
             ids = self._ids(project_id, key)
             if ids["task_id"] != task.task_id:
                 raise StorageIntegrityError(
-                    "本地媒体 Task 稳定 ID 与 key 不一致"
+                    "本地媒体 Task 稳定 ID 与 key 不一致",
                 )
             if task.status is TaskStatus.RUNNING and task.result is not None:
                 try:

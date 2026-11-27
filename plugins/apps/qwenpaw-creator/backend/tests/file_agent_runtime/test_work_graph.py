@@ -1628,3 +1628,361 @@ def test_anchor_chain_waits_for_stale_intermediate_before_initial_render(
     assert [node.node_id for node in graph.regeneration_nodes()] == [
         middle_ref,
     ]
+
+
+# ── mixed parallelism: only segments that may consume the predecessor ─────
+
+
+def _pair_project(
+    *,
+    second_scene="scene:a",
+    second_kwargs=None,
+    settings_value=None,
+):
+    first = _element("g1", scene_ref="scene:a")
+    second_defaults = {
+        "transition_intent": "continue",
+        "storyboard_intent": "none",
+    }
+    second_defaults.update(second_kwargs or {})
+    second = _element("g2", scene_ref=second_scene, **second_defaults)
+    first = first.model_copy(
+        update={"span": TimelineSpan(start_tick=0, duration_tick=4000)},
+    )
+    second = second.model_copy(
+        update={"span": TimelineSpan(start_tick=4000, duration_tick=4000)},
+    )
+    project = _project()
+    # Declared scenes: assigning settings revalidates the whole Project,
+    # and scene_ref must resolve against the visual library.
+    for scene_id in tuple(dict.fromkeys(("scene:a", second_scene))):
+        if scene_id is None:
+            continue
+        project.visual.entities.items[scene_id] = VisualEntity(
+            entity_id=scene_id,
+            kind="scene",
+            name=scene_id.removeprefix("scene:"),
+            required_variant_ids=[],
+        )
+        project.visual.entities.order.append(scene_id)
+    _add_element(project, first)
+    _add_element(project, second)
+    if settings_value is not None:
+        project.settings = project.settings.model_copy(
+            update={"video_continuity": settings_value},
+        )
+    return project
+
+
+def _video_deps(project) -> tuple:
+    return derive_work_graph(project, ffmpeg_ready=True).by_id["video:g2"].deps
+
+
+def test_same_scene_take_serializes_behind_predecessor() -> None:
+    project = _pair_project(
+        second_kwargs={"continuity": "承接上一段同一动作"},
+    )
+    assert "video:g1" in _video_deps(project)
+
+
+def test_scene_change_runs_in_parallel() -> None:
+    project = _pair_project(second_scene="scene:b")
+    assert "video:g1" not in _video_deps(project)
+
+
+def test_cut_flavoured_continuity_runs_in_parallel() -> None:
+    project = _pair_project(
+        second_kwargs={
+            "continuity": "切到另一机位，时间跳转三年后",
+            "transition_intent": "cut",
+        },
+    )
+    assert "video:g1" not in _video_deps(project)
+
+
+def test_new_elements_run_in_parallel() -> None:
+    project = _pair_project(
+        second_kwargs={"prop_refs": ["prop:umbrella"]},
+    )
+    assert "video:g1" not in _video_deps(project)
+
+
+def test_explicit_transition_parallelizes_same_scene() -> None:
+    from services.project_files.models import TransitionCreation
+
+    project = _pair_project(
+        second_kwargs={"continuity": "承接上一段同一动作"},
+    )
+    transition = TimelineElement(
+        element_id="g-tr",
+        label="g-tr",
+        span=TimelineSpan(start_tick=3800, duration_tick=400),
+        creation=TransitionCreation(
+            from_element_id="g1",
+            to_element_id="g2",
+            transition_kind="cut",
+        ),
+    )
+    _add_element(project, transition)
+    assert "video:g1" not in _video_deps(project)
+
+
+def _storyboard_tier(project, element_id: str) -> str:
+    from models.video_task_plans import r2v_continuity_storyboard_need
+
+    timeline = project.timelines.items["timeline:main"]
+    return r2v_continuity_storyboard_need(
+        project,
+        timeline,
+        timeline.elements_by_id[element_id],
+    )
+
+
+def test_storyboard_tier_matrix() -> None:
+    """Three tiers off one pure function: plain / none / combined."""
+
+    simple = _pair_project(second_kwargs={"continuity": "承接上一段"})
+    assert _storyboard_tier(simple, "g1") == "plain"
+    assert _storyboard_tier(simple, "g2") == "none"
+
+    long = _pair_project(
+        second_kwargs={
+            "continuity": "承接上一段",
+            "storyboard_intent": "needed",
+        },
+    )
+    timeline = long.timelines.items["timeline:main"]
+    timeline.elements_by_id["g2"] = timeline.elements_by_id["g2"].model_copy(
+        update={
+            "span": TimelineSpan(start_tick=4000, duration_tick=12000),
+        },
+    )
+    assert _storyboard_tier(long, "g2") == "combined"
+
+    authored_needed = _pair_project(
+        second_kwargs={
+            "continuity": "承接上一段",
+            "video_prompt": "镜头缓推向站台，男孩抬头。",
+            "storyboard_intent": "needed",
+        },
+    )
+    assert _storyboard_tier(authored_needed, "g2") == "combined"
+
+    assert (
+        _storyboard_tier(_pair_project(second_scene="scene:b"), "g2")
+        == "plain"
+    )
+    forced = _pair_project(
+        second_kwargs={"continuity": "承接上一段", "force_storyboard": True},
+    )
+    assert _storyboard_tier(forced, "g2") == "combined"
+
+
+def test_none_tier_segment_has_no_storyboard_node() -> None:
+    project = _pair_project(second_kwargs={"continuity": "承接上一段"})
+    graph = derive_work_graph(project, ffmpeg_ready=True)
+    assert "storyboard:g2" not in graph.by_id
+    assert "storyboard:g2" not in graph.by_id["video:g2"].deps
+    # The first segment keeps its own storyboard node.
+    assert "storyboard:g1" in graph.by_id
+
+
+def test_none_tier_is_sticky_once_a_storyboard_exists() -> None:
+    """Legacy renders and manual overrides keep their node and artifact."""
+
+    project = _pair_project(second_kwargs={"continuity": "承接上一段"})
+    _select_slot(
+        project,
+        slot_id="element:g2:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:g2",
+        version_id="art:sb2",
+    )
+    graph = derive_work_graph(project, ffmpeg_ready=True)
+    assert "storyboard:g2" in graph.by_id
+    assert "storyboard:g2" in graph.by_id["video:g2"].deps
+
+
+def test_none_tier_published_video_without_storyboard_is_not_stale() -> None:
+    """Publish-gate regression (the third loop class): an anchored
+    simple segment ships with NO storyboard at all. The recorded
+    provenance (anchor + whatever visual inputs exist) must satisfy the
+    video node's staleness gate — if the gate still demanded a
+    storyboard selection, auto_approve would re-bill the render forever
+    (the V1..V24 / s5 loop shape)."""
+
+    project = _pair_project(second_kwargs={"continuity": "承接上一段"})
+    graph = derive_work_graph(project, ffmpeg_ready=True)
+    assert "storyboard:g2" not in graph.by_id
+
+    # Predecessor video lands, then g2 publishes from the anchor alone.
+    _select_slot(
+        project,
+        slot_id="element:g1:main",
+        kind="element_video",
+        owner_ref="element:g1",
+        version_id="art:v1",
+    )
+    _select_slot(
+        project,
+        slot_id="element:g2:main",
+        kind="element_video",
+        owner_ref="element:g2",
+        version_id="art:v2",
+        provenance=["artifact-version:art:v1"],
+    )
+    graph = derive_work_graph(project, ffmpeg_ready=True)
+    assert graph.by_id["video:g2"].status is not WorkNodeStatus.STALE
+    assert graph.by_id["video:g2"].status is WorkNodeStatus.DONE
+
+
+def _plan_facts(**overrides):
+    """ContinuityFacts shortcut mirroring tests.models.test_video_task_plans."""
+
+    from models.video_task_plans import ContinuityFacts
+
+    base = {
+        "creation_type": "r2v",
+        "has_published_predecessor": True,
+        "predecessor_version_id": "artifact-version-prev",
+        "predecessor_duration_seconds": 8.0,
+        "same_scene": True,
+        "cross_episode": False,
+        "new_elements": False,
+        "explicit_first_frame": False,
+        "segment_duration_seconds": 10,
+        "ffmpeg_ready": True,
+        "video_extension_supported": True,
+        "transition_kind": "none",
+        "continuity_intent": "neutral",
+        "one_take": False,
+    }
+    base.update(overrides)
+    return ContinuityFacts(**base)
+
+
+def test_structured_intent_routes_graph_and_submission_alike() -> None:
+    """CR round-5 P2: the structured transition intent must reach the
+    REAL submission route, not only the scheduling helper — continue
+    with a negated cut phrase anchors, cut with continuation wording
+    stays plain, one_take without vocabulary extends."""
+
+    from models.video_task_plans import (
+        continuity_signals,
+        r2v_may_consume_predecessor,
+        select_video_task_kind,
+    )
+
+    project = _pair_project(
+        second_kwargs={"continuity": "不要切到另一机位"},
+    )
+    timeline = project.timelines.items["timeline:main"]
+    first = timeline.elements_by_id["g1"]
+    second = timeline.elements_by_id["g2"]
+
+    second.creation = second.creation.model_copy(
+        update={"transition_intent": "continue"},
+    )
+    kind, intent, one_take = continuity_signals(
+        timeline.elements_by_id,
+        second,
+        first,
+    )
+    assert (kind, intent, one_take) == ("none", "continue", False)
+    assert (
+        r2v_may_consume_predecessor(timeline.elements_by_id, second, first)
+        is True
+    )
+    plan = select_video_task_kind(
+        "r2v",
+        _plan_facts(
+            one_take=False,
+            continuity_intent="continue",
+        ),
+    )
+    assert plan.strong_continuity is True
+
+    second.creation = second.creation.model_copy(
+        update={
+            "continuity": "延续运镜推进",
+            "transition_intent": "cut",
+        },
+    )
+    kind, intent, one_take = continuity_signals(
+        timeline.elements_by_id,
+        second,
+        first,
+    )
+    assert (kind, intent, one_take) == ("none", "cut", False)
+    assert (
+        r2v_may_consume_predecessor(timeline.elements_by_id, second, first)
+        is False
+    )
+    plan = select_video_task_kind(
+        "r2v",
+        _plan_facts(
+            one_take=False,
+            continuity_intent="cut",
+        ),
+    )
+    assert plan.strong_continuity is False
+
+    second.creation = second.creation.model_copy(
+        update={
+            "continuity": "人物推门进入走廊",
+            "transition_intent": "one_take",
+        },
+    )
+    kind, intent, one_take = continuity_signals(
+        timeline.elements_by_id,
+        second,
+        first,
+    )
+    assert one_take is True
+    plan = select_video_task_kind(
+        "r2v",
+        _plan_facts(
+            one_take=True,
+            continuity_intent="one_take",
+        ),
+    )
+    from models.video_task_plans import VideoTaskKind
+
+    assert plan.kind is VideoTaskKind.VIDEO_EXTEND
+
+
+def test_explicit_transition_outranks_structured_continue() -> None:
+    """CR round-5 P2 priority: an explicit Transition element beats a
+    declared continue intent (the old early return skipped it)."""
+
+    from models.video_task_plans import r2v_may_consume_predecessor
+    from services.project_files.models import TransitionCreation
+
+    project = _pair_project(
+        second_kwargs={"continuity": "承接上一段同一动作"},
+    )
+    transition = TimelineElement(
+        element_id="g-tr",
+        label="g-tr",
+        span=TimelineSpan(start_tick=3800, duration_tick=400),
+        creation=TransitionCreation(
+            from_element_id="g1",
+            to_element_id="g2",
+            transition_kind="cut",
+        ),
+    )
+    _add_element(project, transition)
+    timeline = project.timelines.items["timeline:main"]
+    second = timeline.elements_by_id["g2"]
+    second.creation = second.creation.model_copy(
+        update={"transition_intent": "continue"},
+    )
+    assert "video:g1" not in _video_deps(project)
+    assert (
+        r2v_may_consume_predecessor(
+            timeline.elements_by_id,
+            second,
+            timeline.elements_by_id["g1"],
+        )
+        is False
+    )

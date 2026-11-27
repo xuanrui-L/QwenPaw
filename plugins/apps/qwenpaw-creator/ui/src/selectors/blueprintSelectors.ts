@@ -7,6 +7,7 @@ import type {
   TimelineElementDocument,
   VisualEntityDocument,
 } from "@/contracts/creator";
+import { storyboardTierForElement } from "@/lib/storyboardTier";
 import {
   orderedTimelineElements,
   selectLiveTimelineIds,
@@ -179,7 +180,7 @@ export function isVoiceOnlyVisualEntity(
   );
 }
 
-export type RoughCutSource = "final" | "storyboard" | "none";
+export type RoughCutSource = "final" | "storyboard" | "anchor" | "none";
 
 /** Media namespace of RoughCutFrame.versionId: generated artifact vs uploaded/recorded source asset. */
 export type RoughCutVersionKind = "artifact" | "source";
@@ -313,6 +314,19 @@ export function roughCutFrameForElement(
       versionKind: "artifact",
       mediaKind: "image",
       source: "storyboard",
+    };
+  }
+  // Storyboard tiers: an anchored simple continuation never waits for a
+  // storyboard, so the strip must not label it 待分镜.
+  if (
+    element.creation.type === "r2v" &&
+    storyboardTierForElement(project, element.element_id) === "none"
+  ) {
+    return {
+      versionId: null,
+      versionKind: null,
+      mediaKind: null,
+      source: "anchor",
     };
   }
   return {

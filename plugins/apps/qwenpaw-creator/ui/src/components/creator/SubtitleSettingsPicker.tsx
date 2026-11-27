@@ -110,7 +110,7 @@ export default function SubtitleSettingsPicker({
           )}
           popupMatchSelectWidth={false}
           variant="borderless"
-          className="!h-8 !w-auto min-w-[80px] !rounded-full !bg-[rgba(43,27,0,0.04)] dark:!bg-white/5"
+          className="!h-8 !w-auto min-w-[80px] shrink-0 !rounded-full !bg-[rgba(43,27,0,0.04)] dark:!bg-white/5"
           classNames={selectClassNames}
         />
       </Tooltip>
