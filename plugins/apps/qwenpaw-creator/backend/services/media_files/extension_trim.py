@@ -5,8 +5,8 @@ Measured against the live API (2026-11-19): submitting an 8s material
 with ``duration=13`` returns a 13s MP4 whose FIRST 8 seconds are the
 material itself (output head frame SSIM 0.81 vs the material's first
 frame, 0.40 vs its last). The segment artifact we publish must be the
-newly generated tail only, so the material duration is cut before
-Asset staging. Re-encode (not stream-copy) because ``-c copy`` can only
+newly generated tail only, so it is cut at the material's video-track
+end before Asset staging. Re-encode (not stream-copy) because ``-c copy`` can only
 seek on keyframes and would leave up to a GOP of the material behind.
 """
 
