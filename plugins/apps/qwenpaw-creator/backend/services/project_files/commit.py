@@ -426,8 +426,9 @@ class ProjectCommitBoundary:
         ) = None,
         production_stage_confirmation: str | None = None,
         prompt_sync_expected_etag: str | None = None,
-        prompt_sync_context_validator: Callable[[dict[str, Any]], None]
-        | None = None,
+        prompt_sync_context_validator: (
+            Callable[[dict[str, Any]], None] | None
+        ) = None,
         _order_lock_held: bool = False,
         _lifecycle_lock_held: bool = False,
     ) -> ProjectCommitResult:
@@ -556,7 +557,13 @@ class ProjectCommitBoundary:
             # that blocks startup recovery or later commits.
             transactions_root = transaction_root.parent
             transactions_root.mkdir(parents=True, exist_ok=True)
-            staging_root = runtime_root / "temp" / "transactions"
+            staging_parent = runtime_root / "temp"
+            staging_parent.mkdir(mode=0o700, exist_ok=True)
+            if is_link_path(staging_parent) or not staging_parent.is_dir():
+                raise ProjectCommitError(
+                    "Project runtime temp path must be a real directory",
+                )
+            staging_root = staging_parent / "transactions"
             staging_root.mkdir(mode=0o700, exist_ok=True)
             if is_link_path(staging_root) or not staging_root.is_dir():
                 raise ProjectCommitError(
@@ -670,14 +677,18 @@ class ProjectCommitBoundary:
                 ):
                     from domain.errors import ConflictError
 
-                    raise ConflictError("剧本已更新，请查看最新内容后重新确认。")
+                    raise ConflictError(
+                        "剧本已更新，请查看最新内容后重新确认。"
+                    )
                 if (
                     prompt_sync_expected_etag is not None
                     and latest.etag != prompt_sync_expected_etag
                 ):
                     from domain.errors import ConflictError
 
-                    raise ConflictError("项目在保存同步结果时已更新，请按最新内容重新生成")
+                    raise ConflictError(
+                        "项目在保存同步结果时已更新，请按最新内容重新生成"
+                    )
                 latest_doc = _snapshot_document(latest)
                 latest_data = _json(latest.project)
                 if prompt_sync_context_validator is not None:
@@ -1533,9 +1544,11 @@ class ProjectCommitBoundary:
                     if live_hash != operation.after_hash:
                         operation = operation.model_copy(
                             update={
-                                "after": None
-                                if live_value is MISSING
-                                else live_value,
+                                "after": (
+                                    None
+                                    if live_value is MISSING
+                                    else live_value
+                                ),
                                 "after_hash": live_hash,
                             },
                         )
