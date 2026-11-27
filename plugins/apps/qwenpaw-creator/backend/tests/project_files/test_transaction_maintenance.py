@@ -773,7 +773,6 @@ def test_a_directory_removed_during_the_commit_scan_is_skipped_not_raised(
         CommitJournalState,
         PendingProjectRecoveryError,
         ProjectCommitBoundary,
-        ProjectCommitJournal,
     )
 
     project_root = _runtime(tmp_path)

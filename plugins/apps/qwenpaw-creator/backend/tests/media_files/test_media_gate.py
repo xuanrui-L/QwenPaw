@@ -13,8 +13,6 @@ import sys
 import threading
 import time
 
-from pathlib import Path
-
 import pytest
 
 from services.media_files import media_gate

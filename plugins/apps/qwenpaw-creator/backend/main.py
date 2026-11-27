@@ -143,7 +143,7 @@ try:
         shutdown_source_analysis_services,
     )
     from services.media.source_memory import (  # noqa: E402
-        source_memory_service,
+        recover_interrupted_source_memory,
     )
     from services.media.source_observation import (  # noqa: E402
         drain_source_observation_services,
@@ -506,7 +506,7 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
             recover_interrupted_source_video_reads,
             services,
         )
-        await source_memory_service(services).resume_interrupted()
+        recover_interrupted_source_memory(services)
     except BaseException as exc:
         trace_event(
             "creator.runtime.startup_failed",
@@ -602,8 +602,6 @@ async def _shutdown() -> None:
     )
     services = _file_services
     _file_services = None
-    if services is not None:
-        source_memory_service(services).stop()
     if _maintenance_task is not None:
         # A sweep -- or a collapse child holding a rewritten session file --
         # must not outlive the app that owns the data root.  Cancelling the
