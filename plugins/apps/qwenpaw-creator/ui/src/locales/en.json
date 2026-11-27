@@ -325,8 +325,6 @@
     "videoTemplateHint": "Choose a preset to get started quickly",
     "videoTemplateUserSection": "My Templates",
     "continuity": "Segment continuity",
-    "continuityModeContinuity": "Continuity first",
-    "continuityModeThroughput": "Fast parallel",
     "modelConfigShort": "Configure"
   },
   "nav": {
@@ -1181,9 +1179,9 @@
     "wireAnchorPruned": "anchor pruned",
     "wireBgmOn": "shared BGM attached",
     "wireBgmOff": "no BGM (native audio)",
-    "storyboardTierNone": "This segment continues straight from the predecessor's last frame — no storyboard needed",
+    "storyboardTierNone": "The Agent judged this segment needs no storyboard; it continues from the predecessor's last frame. To pin a visual plan for this segment only,",
     "storyboardTierCombined": "Anchor owns the start, storyboard owns the rhythm: shipped together",
-    "forceStoryboard": "Generate storyboard anyway"
+    "forceStoryboard": "pin a storyboard manually"
   },
   "agent": {
     "assistant": "Creative Assistant",

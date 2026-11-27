@@ -200,7 +200,6 @@ def _settings(request: ProjectCreateRequest) -> ProjectSettings:
         resolution=request.resolution,
         content_type=request.content_type,
         subtitle_policy=request.subtitle_policy or "off",
-        video_continuity=request.video_continuity,
         subtitle_template=wanted_template or None,
         subtitle_style=(
             SubtitleStyle(**request.subtitle_style.model_dump())

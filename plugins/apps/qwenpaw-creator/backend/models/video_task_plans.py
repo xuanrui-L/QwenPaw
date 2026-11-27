@@ -205,18 +205,10 @@ def r2v_may_consume_predecessor(
 
     if prev is None:
         return False
-    if getattr(prev.creation, "scene_ref", None) != getattr(
-        element.creation,
-        "scene_ref",
-        None,
-    ):
-        return False
-    prev_refs = set(getattr(prev.creation, "character_refs", []) or [])
-    prev_refs |= set(getattr(prev.creation, "prop_refs", []) or [])
-    cur_refs = set(getattr(element.creation, "character_refs", []) or [])
-    cur_refs |= set(getattr(element.creation, "prop_refs", []) or [])
-    if cur_refs - prev_refs:
-        return False
+    # Scene changes and newly introduced elements are creative
+    # clues for the model, not vetoes: an authored continue/one_take
+    # declaration wins. Only material facts (a published predecessor)
+    # and explicit user transitions gate the anchored shape.
     transition_kind, intent, _one_take = continuity_signals(
         elements_by_id,
         element,

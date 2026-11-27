@@ -63,16 +63,8 @@ function mayConsumePredecessor(
   prev: AnyRecord | null,
 ): boolean {
   if (!prev) return false;
-  if (prev.creation?.scene_ref !== element.creation?.scene_ref) return false;
-  const prevRefs = new Set<string>([
-    ...(prev.creation?.character_refs ?? []),
-    ...(prev.creation?.prop_refs ?? []),
-  ]);
-  const curRefs: string[] = [
-    ...(element.creation?.character_refs ?? []),
-    ...(element.creation?.prop_refs ?? []),
-  ];
-  if (curRefs.some((ref) => !prevRefs.has(ref))) return false;
+  // Scene changes and new elements are creative clues for the model,
+  // not vetoes: an authored continue/one_take declaration wins.
   for (const item of Object.values(
     timeline.elements_by_id ?? {},
   ) as AnyRecord[]) {
@@ -91,17 +83,10 @@ function mayConsumePredecessor(
   return authored === "continue" || authored === "one_take";
 }
 
-function isComplex(timeline: AnyRecord, element: AnyRecord): boolean {
-  const creation = element.creation ?? {};
-  const ticksPerSecond = Math.max(Number(timeline.ticks_per_second ?? 10), 1);
-  const seconds = Number(element.span?.duration_tick ?? 0) / ticksPerSecond;
-  // Hard, measurable constraints only: duration and cast size.
-  const ruleComplex =
-    seconds > 8 || (creation.character_refs ?? []).length >= 2;
-  if (ruleComplex) return true;
-  // Authored need wins; missing defaults conservatively to "the
-  // storyboard rides" (legacy behaviour).
-  return creation.storyboard_intent !== "none";
+function isComplex(_timeline: AnyRecord, element: AnyRecord): boolean {
+  // The model decides: authored storyboard need is the only creative
+  // input. Missing defaults conservatively to "the storyboard rides".
+  return (element.creation ?? {}).storyboard_intent !== "none";
 }
 
 /** Tier for one element; "plain" whenever the segment is not anchored. */

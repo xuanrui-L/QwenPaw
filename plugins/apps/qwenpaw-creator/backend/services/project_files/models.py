@@ -973,6 +973,11 @@ class I2VCreation(StrictModel):
     narrative: str = ""
     continuity: str = ""
     first_frame_version_id: EntityId | None = None
+    # Model-selected target END frame (persistable version ref). When
+    # set, the frame rides as a reference image with an explicit role
+    # sentence so providers without a native last-frame parameter
+    # still receive the target through the prompt.
+    last_frame_version_id: EntityId | None = None
     video_prompt: str = ""
     generate_audio: bool = Field(
         default=True,

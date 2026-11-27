@@ -109,7 +109,7 @@ describe("ElementDetail storyboard tiers", () => {
     );
     expect(box?.textContent).toContain("无需分镜");
     const button = Array.from(box?.querySelectorAll("button") ?? []).find(
-      (item) => item.textContent?.includes("仍生成分镜"),
+      (item) => item.textContent?.includes("手动指定分镜"),
     );
     expect(button).toBeTruthy();
     fireEvent.click(button as HTMLButtonElement);

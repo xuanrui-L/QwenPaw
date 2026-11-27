@@ -1685,8 +1685,11 @@ def test_same_scene_take_serializes_behind_predecessor() -> None:
     assert "video:g1" in _video_deps(project)
 
 
-def test_scene_change_runs_in_parallel() -> None:
-    project = _pair_project(second_scene="scene:b")
+def test_scene_change_without_intent_runs_in_parallel() -> None:
+    project = _pair_project(
+        second_scene="scene:b",
+        second_kwargs={"transition_intent": None},
+    )
     assert "video:g1" not in _video_deps(project)
 
 
@@ -1702,7 +1705,10 @@ def test_cut_flavoured_continuity_runs_in_parallel() -> None:
 
 def test_new_elements_run_in_parallel() -> None:
     project = _pair_project(
-        second_kwargs={"prop_refs": ["prop:umbrella"]},
+        second_kwargs={
+            "prop_refs": ["prop:umbrella"],
+            "transition_intent": None,
+        },
     )
     assert "video:g1" not in _video_deps(project)
 
@@ -1769,7 +1775,13 @@ def test_storyboard_tier_matrix() -> None:
     assert _storyboard_tier(authored_needed, "g2") == "combined"
 
     assert (
-        _storyboard_tier(_pair_project(second_scene="scene:b"), "g2")
+        _storyboard_tier(
+            _pair_project(
+                second_scene="scene:b",
+                second_kwargs={"transition_intent": None},
+            ),
+            "g2",
+        )
         == "plain"
     )
     forced = _pair_project(

@@ -325,8 +325,6 @@
     "videoTemplateHint": "选择预设模板快速开始",
     "videoTemplateUserSection": "我的模板",
     "continuity": "段间连贯",
-    "continuityModeContinuity": "连贯优先",
-    "continuityModeThroughput": "快速并行",
     "modelConfigShort": "配置"
   },
   "nav": {
@@ -1181,9 +1179,9 @@
     "wireAnchorPruned": "锚帧已回收",
     "wireBgmOn": "已注入共享配乐",
     "wireBgmOff": "未注入配乐（原生音频）",
-    "storyboardTierNone": "本段由上一片段末帧直接衔接，无需分镜",
+    "storyboardTierNone": "Agent 判断本段无需分镜，由上一片段末帧直接衔接；如需为本段单独指定视觉计划可",
     "storyboardTierCombined": "末帧管起始、分镜管节奏：本段组合衔接",
-    "forceStoryboard": "仍生成分镜"
+    "forceStoryboard": "手动指定分镜"
   },
   "agent": {
     "assistant": "创作助手",

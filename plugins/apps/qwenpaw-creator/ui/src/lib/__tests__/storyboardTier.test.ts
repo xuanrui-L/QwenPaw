@@ -220,8 +220,8 @@ describe("storyboardTierForElement", () => {
     ]);
     expect(storyboardTierForElement(needed, "e2")).toBe("combined");
 
-    // Hard constraints win over authored "none": a 12s take needs
-    // structure regardless.
+    // The model decides: authored "none" wins even for a long take;
+    // hard duration rules no longer override creative intent.
     const longNone = project([
       el("e1", 0, 50),
       el("e2", 50, 120, {
@@ -229,6 +229,6 @@ describe("storyboardTierForElement", () => {
         storyboard_intent: "none",
       }),
     ]);
-    expect(storyboardTierForElement(longNone, "e2")).toBe("combined");
+    expect(storyboardTierForElement(longNone, "e2")).toBe("none");
   });
 });

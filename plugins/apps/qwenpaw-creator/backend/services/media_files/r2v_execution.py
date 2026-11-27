@@ -1861,6 +1861,18 @@ def _rebuild_prompt_without_anchor(
         # leading separator), never a regex guess at where the
         # author's action begins.
         prompt = prompt[len(_LEGACY_ROLE_PREFIX) :].lstrip("，,；;、 ")
+        if "[Image 1]" in prompt:
+            # The old 图1 (virtual last frame) is still referenced by
+            # authored sentences: remapping around them would silently
+            # rebind those references onto another image. Mark the
+            # lost frame as missing and hand back for Agent repair.
+            raise ValidationError(
+                f"项目 {project.project_id} 元素 {element_id} 的旧格式"
+                "提示词仍含指向上一段末帧的 [Image 1] 引用，而本段不"
+                "发送该帧；系统不会静默重绑素材。下一步：交 Agent 依"
+                "据职责表把这些引用改写到实际素材编号或删除后重新"
+                "派发。",
+            )
         prompt = _remap_legacy_image_refs_after_prefix_removal(prompt)
         cancelled = True
         has_lastframe = _LAST_FRAME_CLAUSE_RE.search(prompt) is not None
@@ -2531,6 +2543,11 @@ def _resolve_request(
         first_frame_ref = str(
             getattr(creation, "first_frame_version_id", None) or "",
         ).strip()
+    last_frame_ref = ""
+    if mode == "i2v":
+        last_frame_ref = str(
+            getattr(creation, "last_frame_version_id", None) or "",
+        ).strip()
     i2v_continuity_entry = None
     if mode == "i2v" and not first_frame_ref:
         # Neither the tool argument nor the Element declares a first
@@ -2719,6 +2736,22 @@ def _resolve_request(
                         *version_ids,
                     )
                     prompt = _shift_authored_image_refs(prompt, 1)
+        if mode == "i2v" and last_frame_ref:
+            # The model-selected target end frame rides as a
+            # reference image with an explicit role sentence:
+            # providers without a native last-frame parameter still
+            # receive the target through the prompt, and the
+            # persistable version ref keeps claim and recovery honest.
+            version_ids = (*version_ids, last_frame_ref)
+            image_ordinal = sum(
+                1
+                for _id, kind, _ordinal in number_references_by_media(
+                    project,
+                    version_ids,
+                )
+                if kind == "image"
+            )
+            prompt += f"\n最后一帧严格对齐图{image_ordinal}（本段目标尾帧），" "请让本段收尾构图落于该帧。"
         if mode == "r2v" and strong_anchor_entry is None:
             # Off/weak/plain and failed-extraction paths all ship
             # without an anchor: rebuild the prompt against the stack
