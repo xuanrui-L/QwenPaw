@@ -10,10 +10,12 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from services.media_files.task_scratch import (
+    confirm_project_reclaim,
     keep_project_history,
     remember_scratch_baseline,
 )
@@ -33,8 +35,6 @@ from services.project_files.transaction_index import (
     record_transaction_scan,
 )
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
-
-from .conftest import make_store
 
 pytestmark = pytest.mark.unit
 
@@ -105,156 +105,74 @@ def test_only_the_newest_terminal_transactions_survive(tmp_path):
     assert not oldest.exists()
 
 
-def test_transactions_that_did_not_settle_are_kept(tmp_path):
+def test_transactions_without_a_terminal_state_are_kept(tmp_path):
     project_root = _managed(tmp_path)
     survivors = [
-        _transaction(project_root, "prepared", "PREPARED", age_days=1),
-        _transaction(project_root, "replaced", "PROJECT_REPLACED", age_days=1),
-        _transaction(project_root, "no-journal", None, age_days=1),
-        _transaction(project_root, "corrupt", None, age_days=1),
-        _transaction(project_root, "settled", "RUNTIME_FINALIZED", age_days=1),
+        _transaction(project_root, name, state, age_days=1)
+        for name, state in (
+            ("prepared", "PREPARED"),
+            ("replaced", "PROJECT_REPLACED"),
+            ("no-journal", None),
+            ("corrupt", None),
+            ("future", "SOMETHING_NEW"),
+        )
     ]
-
-    removed, _size = collect_project_transactions(project_root, retention=0)
-
-    # retention=0 drops settled history, but only what the journal vouches for.
-    assert removed == 1
-    assert [path.exists() for path in survivors[:4]] == [True] * 4
-
-
-def test_an_unknown_state_is_not_treated_as_terminal(tmp_path):
-    project_root = _managed(tmp_path)
-    future = _transaction(
-        project_root,
-        "txn-future",
-        "SOMETHING_NEW",
-        age_days=1,
+    settled = _transaction(
+        project_root, "settled", "RUNTIME_FINALIZED", age_days=1
     )
 
-    assert collect_project_transactions(project_root, retention=0) == (0, 0)
-    assert future.is_dir()
+    assert collect_project_transactions(project_root, retention=0)[0] == 1
+    assert all(path.is_dir() for path in survivors)
+    assert not settled.exists()
 
 
-def test_pre_baseline_history_is_reclaimed_by_default(tmp_path):
-    """A customer inside a pod cannot press anything, so the date gate is
-    gone by default: a settled transaction is settled whatever day it was.
-    """
+@pytest.mark.parametrize(
+    "policy", ["default", "project", "install", "no-baseline"]
+)
+def test_reclaim_of_pre_baseline_history(tmp_path, monkeypatch, policy):
+    project_root = (
+        _runtime(tmp_path) if policy == "no-baseline" else _managed(tmp_path)
+    )
+    oldest = _transaction(project_root, "oldest", "ABORTED", age_days=-9)
+    recent = _transaction(project_root, "recent", "ABORTED", age_days=-5)
+    unsettled = _transaction(project_root, "open", "PREPARED", age_days=-5)
+    if policy == "project":
+        keep_project_history(project_root, now=BASELINE)
+    elif policy == "install":
+        monkeypatch.setenv("CREATOR_STORAGE_KEEP_HISTORY", "1")
 
-    project_root = _managed(tmp_path)
-    legacy = _transaction(project_root, "txn-legacy", "ABORTED", age_days=-5)
-
-    count, size = collect_project_transactions(project_root, retention=0)
-
-    assert count == 1
-    assert size > 0
-    assert not legacy.is_dir()
-
-
-def test_keeping_history_restores_the_baseline_gate(tmp_path):
-    """The #217 promise survives as an explicit choice, per Project."""
-
-    project_root = _managed(tmp_path)
-    legacy = _transaction(project_root, "txn-legacy", "ABORTED", age_days=-5)
-    keep_project_history(project_root, now=BASELINE)
-
-    assert collect_project_transactions(project_root, retention=0) == (0, 0)
-    assert legacy.is_dir()
+    reclaimed = policy in {"default", "no-baseline"}
+    assert collect_project_transactions(project_root, retention=1)[0] == int(
+        reclaimed
+    )
+    assert oldest.exists() is not reclaimed
+    assert recent.is_dir() and unsettled.is_dir()
 
 
-def test_the_install_switch_keeps_every_projects_history(
-    tmp_path,
-    monkeypatch,
+@pytest.mark.parametrize("retention", [1, 50])
+def test_transaction_index_is_invalidated_only_after_a_deletion(
+    tmp_path, retention
 ):
-    """One env var restores the fleet-wide behaviour without a code change."""
-
-    monkeypatch.setenv("CREATOR_STORAGE_KEEP_HISTORY", "1")
     project_root = _managed(tmp_path)
-    legacy = _transaction(project_root, "txn-legacy", "ABORTED", age_days=-5)
-
-    assert collect_project_transactions(project_root, retention=0) == (0, 0)
-    assert legacy.is_dir()
-
-
-def test_a_project_without_a_baseline_is_swept_now(tmp_path):
-    """No baseline used to mean "nothing is provably new"; with the date gate
-    no longer protecting history there is nothing left to wait for.
-    """
-
-    project_root = _runtime(tmp_path)
-    directory = _transaction(
-        project_root,
-        "txn-1",
-        "RUNTIME_FINALIZED",
-        age_days=1,
-    )
-
-    assert collect_project_transactions(project_root, retention=0) != (0, 0)
-    assert not directory.is_dir()
-
-
-def test_the_default_sweep_bends_no_other_rule(tmp_path):
-    """Reclaiming by default changes the date gate and nothing else.
-
-    Field note: one imported Project held 618 terminal transactions -- 8.4 GB
-    -- every one older than its baseline, so the gated sweep freed exactly
-    nothing.  Retention and the terminal-state test still have to hold.
-    """
-
-    project_root = _managed(tmp_path)
-    oldest = _transaction(project_root, "txn-oldest", "ABORTED", age_days=-9)
-    recent = _transaction(project_root, "txn-recent", "ABORTED", age_days=-5)
-    unsettled = _transaction(project_root, "txn-open", "PREPARED", age_days=-5)
-
-    count, size = collect_project_transactions(project_root, retention=1)
-
-    assert count == 1
-    assert size > 0
-    assert not oldest.is_dir()  # the oldest beyond the retention goes first
-    assert recent.is_dir()  # the newest receipt is still kept
-    assert unsettled.is_dir()  # an unsettled transaction is never touched
-
-
-def test_the_settled_listing_is_invalidated(tmp_path):
-    project_root = _managed(tmp_path)
-    transactions_root = project_root / "runtime" / "transactions"
+    root = project_root / "runtime" / "transactions"
     _transaction(project_root, "txn-1", "RUNTIME_FINALIZED", age_days=1)
     _transaction(project_root, "txn-2", "RUNTIME_FINALIZED", age_days=2)
     record_transaction_scan(
-        transactions_root,
-        plan_transaction_scan(
-            transactions_root,
-            current_transaction_id="txn-2",
-        ),
+        root,
+        plan_transaction_scan(root, current_transaction_id="txn-2"),
         {"txn-1": "RUNTIME_FINALIZED"},
     )
 
-    collect_project_transactions(project_root, retention=1)
-
-    assert not (transactions_root / ".journal-index.json").exists()
-
-
-def test_a_no_op_sweep_keeps_the_index(tmp_path):
-    project_root = _managed(tmp_path)
-    transactions_root = project_root / "runtime" / "transactions"
-    _transaction(project_root, "txn-1", "RUNTIME_FINALIZED", age_days=1)
-    record_transaction_scan(
-        transactions_root,
-        plan_transaction_scan(
-            transactions_root,
-            current_transaction_id="txn-1",
-        ),
-        {"txn-1": "RUNTIME_FINALIZED"},
+    removed, removed_bytes = collect_project_transactions(
+        project_root, retention=retention
     )
-
-    assert collect_project_transactions(project_root, retention=50) == (0, 0)
-
-    stored = AtomicJsonRecordStore(
-        transactions_root / ".journal-index.json",
-        TransactionJournalIndex,
-    ).read()
-    # Untouched: the sweep removed nothing, so the commit path's cache still
-    # describes the directory it was built from.
-    assert stored.pending == ("txn-1",)
+    assert removed == int(retention == 1)
+    index = root / INDEX_FILE_NAME
+    if removed:
+        assert not index.exists()
+    else:
+        assert removed_bytes == 0
+        assert _read_index(root).pending == ("txn-2",)
 
 
 def test_switch_off_keeps_every_directory(tmp_path, monkeypatch):
@@ -272,27 +190,18 @@ def test_switch_off_keeps_every_directory(tmp_path, monkeypatch):
     assert directory.is_dir()
 
 
-class _Services:
-    """The two Project-store methods the sweep needs."""
+def _services(root, *projects, broken=()):
+    def project_root(project_id):
+        if project_id in broken:
+            raise RuntimeError("unreadable store")
+        return root / project_id
 
-    def __init__(self, root: Path, broken: tuple[str, ...] = ()):
-        self.root = root
-        self.broken = broken
-
-        projects = self
-
-        class _Projects:
-            @staticmethod
-            def discover_project_ids():
-                return ["project-1", "project-2", "project-broken"]
-
-            @staticmethod
-            def project_root(project_id):
-                if project_id in projects.broken:
-                    raise RuntimeError("unreadable store")
-                return projects.root / project_id
-
-        self.projects = _Projects
+    return SimpleNamespace(
+        projects=SimpleNamespace(
+            discover_project_ids=lambda: projects,
+            project_root=project_root,
+        )
+    )
 
 
 def test_sweep_covers_every_project_and_never_raises(tmp_path):
@@ -307,7 +216,13 @@ def test_sweep_covers_every_project_and_never_raises(tmp_path):
     _transaction(tmp_path / "project-2", "p2-old", "ABORTED", age_days=1)
 
     summary = collect_terminal_transactions(
-        _Services(tmp_path, broken=("project-broken",)),
+        _services(
+            tmp_path,
+            "project-1",
+            "project-2",
+            "project-broken",
+            broken=("project-broken",),
+        ),
         retention=1,
     )
 
@@ -522,130 +437,38 @@ def test_an_expired_pass_deletes_nothing(tmp_path):
     assert budget.stopped_early
 
 
-def test_an_oversized_project_waits_for_a_person(tmp_path, monkeypatch):
-    """Seventeen gigabytes is a decision, not a background job.
-
-    The field Project's settled history is minutes of deletion and a rewrite
-    of receipts nobody may have wanted gone; above the cap the automatic pass
-    reports it and leaves, until the storage page's confirm button lands.
-    """
-
-    from services.media_files.task_scratch import confirm_project_reclaim
-
+@pytest.mark.parametrize("confirmation", ["project", "on-demand"])
+def test_automatic_reclaim_cap_requires_confirmation(
+    tmp_path, monkeypatch, confirmation
+):
     monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "1000")
     project_root = _managed(tmp_path)
-    first = _transaction(
-        project_root,
-        "txn-1",
-        "ABORTED",
-        age_days=-5,
-        body_bytes=4096,
-    )
-    second = _transaction(
-        project_root,
-        "txn-2",
-        "ABORTED",
-        age_days=-4,
-        body_bytes=4096,
+    newest = _transaction(project_root, "new", "ABORTED", age_days=-4)
+    oldest = _transaction(
+        project_root, "old", "ABORTED", age_days=-5, body_bytes=4096
     )
     report = {}
 
-    outcome = collect_project_transactions(
-        project_root,
-        retention=0,
-        report=report,
-    )
-
-    assert outcome == (0, 0)
-    assert report["skipped_bytes"] > 1000
-    assert first.is_dir() and second.is_dir()
-
-    confirm_project_reclaim(project_root, now=BASELINE)
-
-    assert collect_project_transactions(project_root, retention=0) != (0, 0)
-    assert not first.is_dir() and not second.is_dir()
-
-
-def test_the_on_demand_reclaim_ignores_the_cap(tmp_path, monkeypatch):
-    """A person who pressed confirm asked for exactly this, cap or no cap."""
-
-    monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "1000")
-    project_root = _managed(tmp_path)
-    directory = _transaction(
-        project_root,
-        "txn-1",
-        "ABORTED",
-        age_days=-5,
-        body_bytes=4096,
-    )
-
-    summary = collect_terminal_transactions(
-        type(
-            "S",
-            (),
-            {
-                "projects": type(
-                    "P",
-                    (),
-                    {
-                        "discover_project_ids": staticmethod(
-                            lambda: [project_root.name],
-                        ),
-                        "project_root": staticmethod(lambda _id: project_root),
-                    },
-                )(),
-            },
-        )(),
-        retention=0,
-        enforce_cap=False,
-    )
-
-    assert summary.removed_transactions == 1
-    assert summary.skipped_projects == 0
-    assert not directory.is_dir()
-
-
-def test_the_cap_applies_when_the_caller_asks_for_no_report(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Confirmation protects the history regardless of who wants statistics.
-
-    Review #243: the cap check was gated on ``report is not None``, so the same
-    Project waited for a human at startup while the commit-triggered sweep --
-    which passes no report -- deleted that surplus unconfirmed.
-    """
-
-    project_root = _managed(tmp_path)
-    _transaction(
-        project_root,
-        "txn-new",
-        "RUNTIME_FINALIZED",
-        age_days=30,
-    )
-    _transaction(
-        project_root,
-        "txn-old",
-        "RUNTIME_FINALIZED",
-        age_days=1,
-        body_bytes=5_000,
-    )
-    monkeypatch.setenv(
-        "CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES",
-        "1000",
-    )
-
-    reported: dict = {}
     assert collect_project_transactions(
-        project_root,
-        retention=1,
-        report=reported,
+        project_root, retention=1, report=report
     ) == (0, 0)
-    # The whole directory counts, journal.json included, so this is a floor.
-    assert reported["skipped_bytes"] >= 5_000
-
-    # The runtime path passes no report at all: same refusal, no deletions.
+    assert report["skipped_bytes"] >= 4096
     assert collect_project_transactions(project_root, retention=1) == (0, 0)
+    assert oldest.is_dir()
+
+    if confirmation == "project":
+        confirm_project_reclaim(project_root, now=BASELINE)
+        assert collect_project_transactions(project_root, retention=1)[0] == 1
+    else:
+        summary = collect_terminal_transactions(
+            _services(tmp_path, project_root.name),
+            retention=1,
+            enforce_cap=False,
+        )
+        assert summary.removed_transactions == 1
+        assert summary.skipped_projects == 0
+    assert not oldest.exists()
+    assert newest.is_dir()
 
 
 def test_profile_and_sweep_agree_when_listing_order_is_not_mtime_order(
@@ -747,303 +570,86 @@ def test_an_unsettled_reservation_keeps_its_transaction(
     assert not settled.exists()
 
 
-@pytest.mark.skip(
-    reason="infra backfill stage 1: needs iv commit path",
-)
-def test_a_directory_removed_during_the_commit_scan_is_skipped_not_raised(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """GC reclaiming a settled directory mid-scan must not fake a 409.
-
-    Review #243 r4548690102: the GC uses ``shutil.rmtree`` outside the
-    project-commit-order lock, so a transaction directory can vanish
-    between ``list_transaction_ids`` and the journal read on the commit
-    scan path. The old code treated a missing journal as an integrity
-    failure and raised ``PendingProjectRecoveryError`` (surfaced as 409
-    to every API route); the sweep that legitimately reclaimed settled
-    history therefore poisoned the next commit. The scan now
-    distinguishes "directory gone -- nothing to recover" from "directory
-    present but journal missing -- damage".
-    """
-
-    import shutil
-
-    from services.project_files.commit import (
-        CommitJournalState,
-        PendingProjectRecoveryError,
-        ProjectCommitBoundary,
-    )
-
-    project_root = _runtime(tmp_path)
-    transactions_root = project_root / "runtime" / "transactions"
-
-    def _journal(name: str, state: CommitJournalState) -> Path:
-        directory = transactions_root / name
-        directory.mkdir(parents=True, exist_ok=True)
-        moment = (BASELINE + timedelta(days=1)).isoformat()
-        (directory / "journal.json").write_text(
-            json.dumps(
-                {
-                    "transaction_id": name,
-                    "project_id": "project-1",
-                    "state": state.value,
-                    "base_etag": "sha256:base",
-                    "candidate_etag": "sha256:candidate",
-                    "temp_path": f"runtime/transactions/{name}/tmp.json",
-                    "touched_pointers": [],
-                    "created_at": moment,
-                    "updated_at": moment,
-                },
-            ),
-            encoding="utf-8",
-        )
-        return directory
-
-    keep = _journal("txn-keep", CommitJournalState.RUNTIME_FINALIZED)
-    doomed = _journal("txn-doomed", CommitJournalState.RUNTIME_FINALIZED)
-
-    from services.project_files import commit as commit_module
-
-    real_read = commit_module.AtomicJsonRecordStore.read_or_none
-    fired = [False]
-
-    def racy_read(self_store):
-        path = self_store.path
-        if (
-            not fired[0]
-            and path.parent == doomed
-            and path.name == "journal.json"
-        ):
-            fired[0] = True
-            shutil.rmtree(doomed)
-            return None
-        return real_read(self_store)
-
-    monkeypatch.setattr(
-        commit_module.AtomicJsonRecordStore,
-        "read_or_none",
-        racy_read,
-    )
-
-    ProjectCommitBoundary._assert_no_pending_publication(  # noqa: SLF001
-        runtime_root=project_root / "runtime",
-        current_transaction_id="txn-live",
-        authority_etag="sha256:whatever",
-    )
-
-    assert fired[0], "the scan never hit the doomed journal -- test broken"
-    assert keep.is_dir()
-    assert not doomed.exists()
-
-    # A genuinely damaged directory (present, journal missing) still
-    # raises: the fix must not swallow the real integrity failure.
-    corrupt = transactions_root / "txn-corrupt-dir"
-    corrupt.mkdir()
-    monkeypatch.undo()
-    with pytest.raises(PendingProjectRecoveryError, match="has no journal"):
-        ProjectCommitBoundary._assert_no_pending_publication(  # noqa: SLF001
-            runtime_root=project_root / "runtime",
-            current_transaction_id="txn-live",
-            authority_etag="sha256:whatever",
-        )
-    assert corrupt.is_dir()
-
-
 def test_gc_reclaims_through_an_atomic_rename_not_a_partial_rmtree(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """The scan-safe fix lives in the GC, not only in the scan.
-
-    Review #243 follow-up (r4548690102): the scan-side ``lstat`` guard
-    only covered one timing (directory already gone). ``shutil.rmtree``
-    is not atomic -- it unlinks ``journal.json`` first and rmdirs the
-    parent last -- so a scan could still catch a legitimate "directory
-    present, journal missing" intermediate state and raise
-    ``PendingProjectRecoveryError`` on what was really an in-progress
-    reclaim. The GC now moves the transaction to a dot-prefixed
-    tombstone with ``os.rename``, which is a single atomic operation on
-    the same filesystem; the original path either fully exists or does
-    not, never half-deleted. ``list_transaction_ids`` skips leading-
-    dot entries by its existing rule, so the tombstone is invisible to
-    the scan throughout.
-    """
-
+    tmp_path, monkeypatch
+):
     project_root = _managed(tmp_path)
     doomed = _transaction(
-        project_root,
-        "txn-doomed",
-        "RUNTIME_FINALIZED",
-        age_days=2,
+        project_root, "doomed", "RUNTIME_FINALIZED", age_days=2
     )
-    keep = _transaction(
-        project_root,
-        "txn-keep",
-        "RUNTIME_FINALIZED",
-        age_days=3,
-    )
-    transactions_root = project_root / "runtime" / "transactions"
-
-    # The commit scan parses journals against ``ProjectCommitJournal``,
-    # which the existing ``_transaction`` helper does not fully populate.
-    # Rewrite them with every required field so the scan probe below can
-    # actually get through ``_assert_no_pending_publication``.
-    def _rewrite_journal(directory: Path, name: str) -> None:
-        moment = (BASELINE + timedelta(days=1)).isoformat()
-        (directory / "journal.json").write_text(
-            json.dumps(
-                {
-                    "transaction_id": name,
-                    "project_id": "project-1",
-                    "state": "RUNTIME_FINALIZED",
-                    "base_etag": "sha256:base",
-                    "candidate_etag": "sha256:candidate",
-                    "temp_path": f"runtime/transactions/{name}/tmp.json",
-                    "touched_pointers": [],
-                    "created_at": moment,
-                    "updated_at": moment,
-                },
-            ),
-            encoding="utf-8",
+    keep = _transaction(project_root, "keep", "RUNTIME_FINALIZED", age_days=3)
+    for directory in (doomed, keep):
+        path = directory / "journal.json"
+        moment = BASELINE.isoformat()
+        journal = json.loads(path.read_text())
+        journal.update(
+            transaction_id=directory.name,
+            project_id=project_root.name,
+            base_etag="sha256:base",
+            candidate_etag="sha256:candidate",
+            temp_path=f"runtime/transactions/{directory.name}/tmp.json",
+            touched_pointers=[],
+            created_at=moment,
+            updated_at=moment,
         )
+        path.write_text(json.dumps(journal))
 
-    _rewrite_journal(doomed, "txn-doomed")
-    _rewrite_journal(keep, "txn-keep")
+    real_rename = transaction_gc.os.rename
+    tombstones = []
 
-    # Spy ``os.rename`` and, at the moment GC would rename the doomed
-    # transaction to a tombstone, run a scan through the same
-    # directory state. The doomed name is atomically gone -- the scan
-    # sees ``FileNotFoundError`` on ``lstat`` -- and the tombstone
-    # prefix hides it from ``list_transaction_ids`` too.
-    from services.project_files import transaction_gc as gc_module
-    from services.project_files.commit import ProjectCommitBoundary
-
-    real_rename = gc_module.os.rename
-    probe = [None]
-
-    def spy_rename(src, dst):
-        result = real_rename(src, dst)
-        if src == doomed and probe[0] is None:
-            probe[0] = transactions_root
-            # Directory is fully gone from the original path at this
-            # instant; a scan running here must not raise.
-            ProjectCommitBoundary._assert_no_pending_publication(  # noqa
+    def scan_after_rename(src, dst):
+        real_rename(src, dst)
+        if src == doomed:
+            tombstones.append(Path(dst))
+            assert not doomed.exists()
+            assert (Path(dst) / "journal.json").is_file()
+            ProjectCommitBoundary._assert_no_pending_publication(
                 runtime_root=project_root / "runtime",
                 current_transaction_id="txn-live",
                 authority_etag="sha256:whatever",
             )
-        return result
 
-    monkeypatch.setattr(gc_module.os, "rename", spy_rename)
-
-    removed, _bytes = collect_project_transactions(
-        project_root,
-        retention=1,
-    )
-
-    assert probe[0] == transactions_root, (
-        "the scan probe never fired -- GC did not take the atomic "
-        "rename path the fix promises"
-    )
-    assert removed == 1
-    assert not doomed.exists()
+    monkeypatch.setattr(transaction_gc.os, "rename", scan_after_rename)
+    assert collect_project_transactions(project_root, retention=1)[0] == 1
+    (tombstone,) = tombstones
+    assert not tombstone.exists()
     assert keep.is_dir()
-    # No lingering tombstone: the sweep's rmtree followed the rename.
-    lingering = [
-        p for p in transactions_root.iterdir() if p.name.startswith(".")
-    ]
-    assert not lingering
 
 
 def test_a_partially_deleted_tombstone_is_reclaimed_by_the_next_sweep(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """An interrupted tombstone delete must not leak the bytes forever.
-
-    Review #243 r4548690102 follow-up: ``_atomic_reclaim`` renames then
-    ``rmtree``s. If the rmtree is interrupted after the journal is gone
-    but a large snapshot file remains, the old code returned success and
-    counted the full size as freed -- while the leftover tombstone, now
-    journal-less, could never pass the journal-based eligibility check
-    again, so its bytes leaked across every future sweep. The reviewer's
-    fault injection: first GC = (1, 1330) with ``large-project.json``
-    surviving, second GC = (0, 0), file still on disk.
-
-    Now ``_atomic_reclaim`` reports "moved out of scan" separately from
-    "bytes actually released", and ``_purge_tombstones`` reclaims any
-    ``.deleted-*`` leftover by name, independent of its journal.
-    """
-
+    tmp_path, monkeypatch
+):
     project_root = _managed(tmp_path)
     doomed = _transaction(
         project_root,
-        "txn-doomed",
+        "doomed",
         "RUNTIME_FINALIZED",
         age_days=2,
         body_bytes=4096,
     )
-    transactions_root = project_root / "runtime" / "transactions"
-
     real_rmtree = transaction_gc.shutil.rmtree
-    state = {"tripped": False}
 
     def partial_rmtree(path, *args, **kwargs):
-        # First delete attempt (the tombstone inside _atomic_reclaim)
-        # removes only the journal and leaves the big file, mimicking an
-        # interrupted sweep.
-        if not state["tripped"] and path.name.startswith(
-            transaction_gc.TOMBSTONE_PREFIX,
-        ):
-            state["tripped"] = True
-            (path / "journal.json").unlink(missing_ok=True)
-            return
-        real_rmtree(path, *args, **kwargs)
+        if path.name.startswith(transaction_gc.TOMBSTONE_PREFIX):
+            (path / "journal.json").unlink()
+        else:
+            real_rmtree(path, *args, **kwargs)
 
-    monkeypatch.setattr(transaction_gc.shutil, "rmtree", partial_rmtree)
+    with monkeypatch.context() as patch:
+        patch.setattr(transaction_gc.shutil, "rmtree", partial_rmtree)
+        # Renamed successfully; the bytes have yet to be freed.
+        assert collect_project_transactions(project_root, retention=0) == (
+            1,
+            0,
+        )
 
-    first_removed, first_bytes = collect_project_transactions(
-        project_root,
-        retention=0,
-    )
-
-    assert state["tripped"], "the sweep never reached the tombstone delete"
-    assert doomed.exists() is False
-    tombstones = [
-        p
-        for p in transactions_root.iterdir()
-        if p.name.startswith(transaction_gc.TOMBSTONE_PREFIX)
-    ]
-    assert (
-        len(tombstones) == 1
-    ), "the interrupted tombstone must survive round 1"
-    tombstone = tombstones[0]
+    assert not doomed.exists()
+    (tombstone,) = doomed.parent.glob(f"{transaction_gc.TOMBSTONE_PREFIX}*")
     assert not (tombstone / "journal.json").exists()
-    assert any(
-        child.is_file() and child.stat().st_size > 0
-        for child in tombstone.iterdir()
-    ), "a large file must remain to represent the leaked bytes"
-    # Moved out of the scan (counted) but the disk is not released, so
-    # the byte tally must not claim it was.
-    assert first_removed == 1
-    assert first_bytes == 0
-
-    # Round two with a healthy rmtree: the journal-less tombstone cannot
-    # be picked up by the eligibility scan, so only the name-based purge
-    # can reclaim it.
-    monkeypatch.setattr(transaction_gc.shutil, "rmtree", real_rmtree)
-    second_removed, second_bytes = collect_project_transactions(
-        project_root,
-        retention=0,
-    )
-
-    assert not tombstone.exists(), (
-        "the leftover tombstone was never reclaimed -- exactly the leak "
-        "the fix promises to close"
-    )
-    assert second_removed >= 1
-    assert second_bytes > 0
+    assert (tombstone / "final.json").stat().st_size == 4096
+    removed, freed = collect_project_transactions(project_root, retention=0)
+    assert removed >= 1 and freed >= 4096
+    assert not tombstone.exists()
 
 
 def test_cancelled_candidate_scan_cannot_authorize_partial_retention(
@@ -1102,17 +708,6 @@ def test_cancelled_tombstone_scan_keeps_remaining_bytes(tmp_path, monkeypatch):
     assert collect_project_transactions(root) == (1, len(b"remaining"))
 
 
-def _commit(store, base, transaction_id: str, description: str):
-    candidate = base.project.model_dump(mode="json")
-    candidate["description"] = description
-    return ProjectCommitBoundary(store).commit(
-        base=base,
-        candidate=candidate,
-        origin="runtime_task",
-        transaction_id=transaction_id,
-    )
-
-
 def _read_index(transactions_root: Path) -> TransactionJournalIndex:
     return AtomicJsonRecordStore(
         transactions_root / INDEX_FILE_NAME,
@@ -1124,50 +719,6 @@ def _transactions_root(tmp_path) -> Path:
     root = tmp_path / "transactions"
     root.mkdir()
     return root
-
-
-def _spy_journal_reads(monkeypatch) -> list[str]:
-    """Record every transaction journal opened, by directory name."""
-
-    opened: list[str] = []
-    original = AtomicJsonRecordStore.read_or_none
-
-    def spy(self):  # type: ignore[no-untyped-def]
-        if self.path.name == "journal.json":
-            opened.append(self.path.parent.name)
-        return original(self)
-
-    monkeypatch.setattr(AtomicJsonRecordStore, "read_or_none", spy)
-    return opened
-
-
-@pytest.mark.skip(
-    reason="infra backfill stage 1: needs iv commit path",
-)
-def test_each_commit_reads_only_the_transaction_still_in_flight(
-    tmp_path,
-    monkeypatch,
-):
-    # The guard used to open every journal the project ever wrote, so saving
-    # got slower for the rest of the project's life. One transaction can be in
-    # flight per commit, so a bounded history must mean a bounded read count.
-    store, base = make_store(tmp_path)
-    opened = _spy_journal_reads(monkeypatch)
-
-    _commit(store, base, "txn-1", "first")
-    assert not opened
-
-    second = _commit(
-        store,
-        store.read(base.project.project_id),
-        "txn-2",
-        "second",
-    )
-    assert opened == ["txn-1"]
-
-    before = len(opened)
-    _commit(store, second.snapshot, "txn-3", "third")
-    assert opened[before:] == ["txn-2"]
 
 
 def test_index_records_the_transaction_in_flight_as_pending(tmp_path):

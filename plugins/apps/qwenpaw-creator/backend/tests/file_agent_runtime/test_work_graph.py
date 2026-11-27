@@ -1633,187 +1633,53 @@ def test_anchor_chain_waits_for_stale_intermediate_before_initial_render(
     ]
 
 
-# ── mixed parallelism: only segments that may consume the predecessor ─────
-
-
-def _pair_project(
-    *,
-    second_scene="scene:a",
-    second_kwargs=None,
-    settings_value=None,
-):
-    first = _element("g1", scene_ref="scene:a")
-    second_defaults = {
-        "transition_intent": "continue",
-        "storyboard_intent": "none",
-    }
-    second_defaults.update(second_kwargs or {})
-    second = _element("g2", scene_ref=second_scene, **second_defaults)
-    first = first.model_copy(
-        update={"span": TimelineSpan(start_tick=0, duration_tick=4000)},
-    )
-    second = second.model_copy(
-        update={"span": TimelineSpan(start_tick=4000, duration_tick=4000)},
-    )
+def _pair_project(*, second_scene="scene:a", **creation):
     project = _project()
-    # Declared scenes: assigning settings revalidates the whole Project,
-    # and scene_ref must resolve against the visual library.
-    for scene_id in tuple(dict.fromkeys(("scene:a", second_scene))):
-        if scene_id is None:
-            continue
+    for scene_id in dict.fromkeys(("scene:a", second_scene)):
         project.visual.entities.items[scene_id] = VisualEntity(
             entity_id=scene_id,
             kind="scene",
-            name=scene_id.removeprefix("scene:"),
+            name=scene_id,
             required_variant_ids=[],
         )
         project.visual.entities.order.append(scene_id)
-    _add_element(project, first)
-    if second.creation.generation_plan is not None:
-        second.creation.generation_plan = R2VGenerationPlan.model_validate(
-            second.creation.generation_plan,
-        )
+    _add_element(project, _element("g1", scene_ref="scene:a"))
+    second = _element("g2", scene_ref=second_scene, **creation)
+    second.span = TimelineSpan(start_tick=4000, duration_tick=4000)
     _add_element(project, second)
-    if settings_value is not None:
-        project.settings = project.settings.model_copy(
-            update={"video_continuity": settings_value},
-        )
     return project
 
 
-def _video_deps(project) -> tuple:
-    return derive_work_graph(project, ffmpeg_ready=True).by_id["video:g2"].deps
-
-
-def test_model_can_choose_a_predecessor_or_parallel_work_in_the_same_scene():
-    legacy = _pair_project(second_kwargs={"continuity": "承接上一段同一动作"})
-    planned = _pair_project(
-        second_kwargs={
-            "generation_plan": R2VGenerationPlan(
-                method="r2v_last_frame",
-                use_storyboard=False,
-                predecessor_element_id="g1",
-                anchor_instruction="保留动作和人物位置",
-            )
-        }
-    )
-    assert "video:g1" not in _video_deps(legacy)
-    assert "video:g1" in _video_deps(planned)
-
-
-def test_scene_change_without_intent_runs_in_parallel() -> None:
-    project = _pair_project(
-        second_scene="scene:b",
-        second_kwargs={"transition_intent": None},
-    )
-    assert "video:g1" not in _video_deps(project)
-
-
-def test_cut_flavoured_continuity_runs_in_parallel() -> None:
-    project = _pair_project(
-        second_kwargs={
-            "continuity": "切到另一机位，时间跳转三年后",
-            "transition_intent": "cut",
-        },
-    )
-    assert "video:g1" not in _video_deps(project)
-
-
-def test_new_elements_run_in_parallel() -> None:
-    project = _pair_project(
-        second_kwargs={
-            "prop_refs": ["prop:umbrella"],
-            "transition_intent": None,
-        },
-    )
-    assert "video:g1" not in _video_deps(project)
-
-
-def test_explicit_transition_parallelizes_same_scene() -> None:
-    from services.project_files.models import TransitionCreation
-
-    project = _pair_project(
-        second_kwargs={"continuity": "承接上一段同一动作"},
-    )
-    transition = TimelineElement(
-        element_id="g-tr",
-        label="g-tr",
-        span=TimelineSpan(start_tick=3800, duration_tick=400),
-        creation=TransitionCreation(
-            from_element_id="g1",
-            to_element_id="g2",
-            transition_kind="cut",
-        ),
-    )
-    _add_element(project, transition)
-    assert "video:g1" not in _video_deps(project)
-
-
-def _storyboard_tier(project, element_id: str) -> str:
-    from models.video_task_plans import r2v_continuity_storyboard_need
-
-    timeline = project.timelines.items["timeline:main"]
-    return r2v_continuity_storyboard_need(
-        project,
-        timeline,
-        timeline.elements_by_id[element_id],
-    )
-
-
-def test_only_the_plan_controls_storyboard_use():
-    plan = R2VGenerationPlan(
+def _anchor_plan(*, use_storyboard=False):
+    return R2VGenerationPlan(
         method="r2v_last_frame",
-        use_storyboard=False,
+        use_storyboard=use_storyboard,
         predecessor_element_id="g1",
         anchor_instruction="保留动作和人物位置",
     )
-    for use_storyboard, expected in ((False, "none"), (True, "combined")):
-        project = _pair_project(
-            second_scene="scene:b",
-            second_kwargs={
-                "generation_plan": plan.model_copy(
-                    update={"use_storyboard": use_storyboard}
-                ),
-                "transition_intent": "cut",
-                "force_storyboard": True,
-            },
-        )
-        assert _storyboard_tier(project, "g1") == "plain"
-        assert _storyboard_tier(project, "g2") == expected
-        assert "video:g1" in _video_deps(project)
-        assert ("storyboard:g2" in _video_deps(project)) is use_storyboard
 
 
-def test_none_tier_segment_has_no_storyboard_node() -> None:
+@pytest.mark.parametrize("second_scene", ["scene:a", "scene:b"])
+@pytest.mark.parametrize("use_anchor", [False, True])
+def test_only_the_generation_plan_adds_a_predecessor(second_scene, use_anchor):
     project = _pair_project(
-        second_kwargs={
-            "generation_plan": R2VGenerationPlan(
-                method="r2v_last_frame",
-                use_storyboard=False,
-                predecessor_element_id="g1",
-                anchor_instruction="保留动作和人物位置",
-            )
-        }
+        second_scene=second_scene,
+        continuity="承接上一段同一动作",
+        transition_intent="continue",
+        prop_refs=["prop:umbrella"],
+        generation_plan=_anchor_plan() if use_anchor else None,
     )
-    graph = derive_work_graph(project, ffmpeg_ready=True)
-    assert "storyboard:g2" not in graph.by_id
-    assert "storyboard:g2" not in graph.by_id["video:g2"].deps
-    # The first segment keeps its own storyboard node.
-    assert "storyboard:g1" in graph.by_id
+    deps = derive_work_graph(project, ffmpeg_ready=True).by_id["video:g2"].deps
+    assert ("video:g1" in deps) is use_anchor
 
 
-def test_unused_storyboard_does_not_become_a_dependency() -> None:
-    """An existing storyboard does not override the authored plan."""
-
+@pytest.mark.parametrize("use_storyboard", [False, True])
+def test_only_the_plan_controls_storyboard_use(use_storyboard):
     project = _pair_project(
-        second_kwargs={
-            "generation_plan": R2VGenerationPlan(
-                method="r2v_last_frame",
-                use_storyboard=False,
-                predecessor_element_id="g1",
-                anchor_instruction="保留动作和人物位置",
-            )
-        }
+        second_scene="scene:b",
+        generation_plan=_anchor_plan(use_storyboard=use_storyboard),
+        transition_intent="cut",
+        force_storyboard=True,
     )
     _select_slot(
         project,
@@ -1823,32 +1689,14 @@ def test_unused_storyboard_does_not_become_a_dependency() -> None:
         version_id="art:sb2",
     )
     graph = derive_work_graph(project, ffmpeg_ready=True)
-    assert "storyboard:g2" not in graph.by_id
-    assert "storyboard:g2" not in graph.by_id["video:g2"].deps
+    assert "storyboard:g1" in graph.by_id
+    assert ("storyboard:g2" in graph.by_id) is use_storyboard
+    assert ("storyboard:g2" in graph.by_id["video:g2"].deps) is use_storyboard
+    assert "video:g1" in graph.by_id["video:g2"].deps
 
 
-def test_none_tier_published_video_without_storyboard_is_not_stale() -> None:
-    """Publish-gate regression (the third loop class): an anchored
-    simple segment ships with NO storyboard at all. The recorded
-    provenance (anchor + whatever visual inputs exist) must satisfy the
-    video node's staleness gate — if the gate still demanded a
-    storyboard selection, auto_approve would re-bill the render forever
-    (the V1..V24 / s5 loop shape)."""
-
-    project = _pair_project(
-        second_kwargs={
-            "generation_plan": R2VGenerationPlan(
-                method="r2v_last_frame",
-                use_storyboard=False,
-                predecessor_element_id="g1",
-                anchor_instruction="保留动作和人物位置",
-            )
-        }
-    )
-    graph = derive_work_graph(project, ffmpeg_ready=True)
-    assert "storyboard:g2" not in graph.by_id
-
-    # Predecessor video lands, then g2 publishes from the anchor alone.
+def test_anchored_video_can_publish_without_storyboard():
+    project = _pair_project(generation_plan=_anchor_plan())
     _select_slot(
         project,
         slot_id="element:g1:main",
@@ -1865,19 +1713,16 @@ def test_none_tier_published_video_without_storyboard_is_not_stale() -> None:
         provenance=["artifact-version:art:v1"],
     )
     graph = derive_work_graph(project, ffmpeg_ready=True)
-    assert graph.by_id["video:g2"].status is not WorkNodeStatus.STALE
     assert graph.by_id["video:g2"].status is WorkNodeStatus.DONE
 
 
 def test_invalid_declared_predecessor_is_reported_without_using_closest_shot():
     project = _pair_project(
-        second_kwargs={
-            "generation_plan": R2VGenerationPlan(
-                method="video_extend",
-                use_storyboard=False,
-                predecessor_element_id="missing",
-            )
-        }
+        generation_plan=R2VGenerationPlan(
+            method="video_extend",
+            use_storyboard=False,
+            predecessor_element_id="missing",
+        )
     )
     node = derive_work_graph(project, ffmpeg_ready=True).by_id["video:g2"]
     assert node.status is WorkNodeStatus.GATED

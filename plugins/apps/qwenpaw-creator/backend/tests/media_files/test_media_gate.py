@@ -407,21 +407,6 @@ def test_slot_count_prefers_the_environment(
     assert media_gate.slot_count() == media_gate.MAX_SLOTS
 
 
-def test_slot_count_shrinks_with_a_tight_container(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv(media_gate.ENV_SLOTS, raising=False)
-    monkeypatch.setattr(media_gate, "cgroup_used_mb", lambda: 0.0)
-    monkeypatch.setattr(
-        media_gate,
-        "container_memory_mb",
-        lambda: media_gate.DEFAULT_FFMPEG_PEAK_MB * 2.9,
-    )
-    assert media_gate.slot_count() == 2
-    monkeypatch.setattr(media_gate, "container_memory_mb", lambda: 10.0)
-    assert media_gate.slot_count() == media_gate.MIN_SLOTS
-
-
 def test_run_forwards_the_subprocess_contract(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -459,44 +444,29 @@ def test_run_forwards_the_subprocess_contract(
     assert failure.value.returncode == 3
 
 
-def test_slot_count_reserves_the_host_before_sizing_slots(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An ffmpeg is not the only tenant: the host interpreter pays first."""
-
+@pytest.mark.parametrize(
+    ("limit_mb", "used_mb", "slots"),
+    [
+        (media_gate.DEFAULT_FFMPEG_PEAK_MB * 2.9, 0, 2),
+        (10, 0, media_gate.MIN_SLOTS),
+        (
+            media_gate.HOST_RESERVE_MB
+            + media_gate.DEFAULT_FFMPEG_PEAK_MB * 1.9,
+            0,
+            1,
+        ),
+        (1024, 0, 1),
+        (4096, 0, media_gate.MAX_SLOTS),
+        (4096, 3900, media_gate.MIN_SLOTS),
+    ],
+)
+def test_slots_respect_the_memory_limit_and_usage(
+    monkeypatch, limit_mb, used_mb, slots
+):
     monkeypatch.delenv(media_gate.ENV_SLOTS, raising=False)
-    monkeypatch.setattr(media_gate, "cgroup_used_mb", lambda: 0.0)
-    monkeypatch.setattr(
-        media_gate,
-        "container_memory_mb",
-        lambda: media_gate.HOST_RESERVE_MB
-        + media_gate.DEFAULT_FFMPEG_PEAK_MB * 1.9,
-    )
-    assert media_gate.slot_count() == 1
-    # A 1 GB container fits one measured 512 MB encoder plus the host, not the
-    # four the old 120 MB estimate happily handed out.
-    monkeypatch.setattr(media_gate, "container_memory_mb", lambda: 1024.0)
-    assert media_gate.slot_count() == 1
-    monkeypatch.setattr(media_gate, "container_memory_mb", lambda: 4096.0)
-    assert media_gate.slot_count() == media_gate.MAX_SLOTS
-
-
-def test_slot_count_shrinks_when_the_ceiling_is_already_spent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Field case 2026-11-05: a 12 GB ceiling looked like room for four
-    encoders while glibc arena fragmentation had already pinned 3.9 GB of
-    RSS in this same cgroup. Sizing off the ceiling alone admitted four
-    512 MB ffmpeg processes into space that was already gone, and the
-    container was OOM-killed. Page cache is excluded because the kernel
-    drops it under pressure — it is not what competes with an encoder."""
-
-    monkeypatch.delenv(media_gate.ENV_SLOTS, raising=False)
-    monkeypatch.setattr(media_gate, "container_memory_mb", lambda: 4096.0)
-    monkeypatch.setattr(media_gate, "cgroup_used_mb", lambda: 0.0)
-    assert media_gate.slot_count() == media_gate.MAX_SLOTS
-    monkeypatch.setattr(media_gate, "cgroup_used_mb", lambda: 3900.0)
-    assert media_gate.slot_count() == media_gate.MIN_SLOTS
+    monkeypatch.setattr(media_gate, "container_memory_mb", lambda: limit_mb)
+    monkeypatch.setattr(media_gate, "cgroup_used_mb", lambda: used_mb)
+    assert media_gate.slot_count() == slots
 
 
 def test_cgroup_used_mb_excludes_page_cache(tmp_path, monkeypatch) -> None:
@@ -528,38 +498,27 @@ def test_cgroup_used_mb_excludes_page_cache(tmp_path, monkeypatch) -> None:
     assert media_gate.cgroup_used_mb() is None
 
 
-def test_cpu_budget_reads_a_cgroup_quota(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    v2 = tmp_path / "cpu.max"
-    v2.write_text("250000 100000", encoding="ascii")
-    missing = str(tmp_path / "absent")
-    monkeypatch.setattr(media_gate, "_CGROUP_V2_CPU_MAX", str(v2))
-    monkeypatch.setattr(media_gate, "_CGROUP_V1_QUOTA", missing)
-    monkeypatch.setattr(media_gate, "_CGROUP_V1_PERIOD", missing)
+@pytest.mark.parametrize(
+    ("v2", "quota", "expected"),
+    [("250000 100000", None, 2), (None, "400000", 4)],
+)
+def test_cpu_budget_reads_cgroup_quota(
+    tmp_path, monkeypatch, v2, quota, expected
+):
+    for key, value in (
+        ("_CGROUP_V2_CPU_MAX", v2),
+        ("_CGROUP_V1_QUOTA", quota),
+        ("_CGROUP_V1_PERIOD", "100000" if quota else None),
+    ):
+        path = tmp_path / key
+        monkeypatch.setattr(media_gate, key, str(path))
+        if value is not None:
+            path.write_text(value, encoding="ascii")
 
-    assert media_gate.cpu_budget() == 2
-
-    # "max" is no ceiling, so the affinity-aware count decides.
-    v2.write_text("max", encoding="ascii")
-    assert media_gate.cpu_budget() >= 1
-
-
-def test_cpu_budget_falls_back_to_the_cgroup_v1_pair(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    quota = tmp_path / "cpu.cfs_quota_us"
-    period = tmp_path / "cpu.cfs_period_us"
-    quota.write_text("400000", encoding="ascii")
-    period.write_text("100000", encoding="ascii")
-    v2_absent = str(tmp_path / "none")
-    monkeypatch.setattr(media_gate, "_CGROUP_V2_CPU_MAX", v2_absent)
-    monkeypatch.setattr(media_gate, "_CGROUP_V1_QUOTA", str(quota))
-    monkeypatch.setattr(media_gate, "_CGROUP_V1_PERIOD", str(period))
-
-    assert media_gate.cpu_budget() == 4
+    assert media_gate.cpu_budget() == expected
+    if v2:
+        (tmp_path / "_CGROUP_V2_CPU_MAX").write_text("max", encoding="ascii")
+        assert media_gate.cpu_budget() >= 1
 
 
 def test_thread_ceiling_follows_the_cores_a_container_owns(

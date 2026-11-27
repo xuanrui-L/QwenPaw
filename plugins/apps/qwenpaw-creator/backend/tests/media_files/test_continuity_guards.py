@@ -1,493 +1,209 @@
 # -*- coding: utf-8 -*-
-# Continuity payment/recovery guards (migrated from the retired
-# test_segment_continuity.py suite: only the discriminating cases with
-# no equivalent coverage elsewhere, per PR#290 review item 3).
-
-# -*- coding: utf-8 -*-
-# flake8: noqa: E501
 # pylint: disable=protected-access
-# pylint: disable=use-implicit-booleaness-not-comparison
-# pylint: disable=unused-argument
-"""Unit coverage for the segment-continuity injection layer.
-
-Pure helpers (predecessor lookup, capability split, prompt formatting,
-fingerprint stability, budget accounting) sit alongside mocked ffmpeg
-cases that exercise the atomic write and tail-clip soft-failure paths
-without invoking a real provider. All cases are unit-level and never
-reach out to a live video model.
-"""
+"""Regression coverage for video continuity and reference handling."""
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import subprocess
+from types import SimpleNamespace
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
-from models.video_capabilities import supports_video_continuation
-from services.media_files.segment_continuity import (
-    continuity_prompt_suffix,
-    continuity_reference_ids,
-    find_predecessor_video_element,
-    resolve_predecessor_video_version,
-)
+from domain.errors import ValidationError
+from models.video_task_plans import VideoTaskKind, VideoTaskPlan
+from services.file_agent_runtime.work_graph import derive_work_graph
+from services.media_files import r2v_execution as rx
+from services.media_files import segment_continuity as sc
 from services.project_files.models import (
     ArtifactSlot,
-    ElementLocation,
+    ArtifactVersion,
+    AudioCreation,
+    ElementOutput,
     I2VCreation,
+    IndexedFile,
     Project,
     R2VCreation,
     R2VGenerationPlan,
-    T2VCreation,
+    SourceAssetVersion,
     Timeline,
     TimelineElement,
     TimelineSpan,
 )
+from services.runtime_files import runtime_dependencies as rd
 
 pytestmark = pytest.mark.unit
 
 
-def _element(
-    element_id: str,
-    *,
-    start: int,
-    duration: int = 4000,
-    enabled: bool = True,
-    creation_type: str = "r2v",
-) -> TimelineElement:
-    if creation_type == "i2v":
-        creation = I2VCreation(video_prompt="续写")
-    elif creation_type == "t2v":
-        creation = T2VCreation(video_prompt="纯文本")
-    else:
-        creation = R2VCreation(
-            narrative="动作",
-            storyboard_prompt="分镜",
-            video_prompt="视频",
-        )
+def _element(element_id: str, start: int, *, creation=None) -> TimelineElement:
     return TimelineElement(
         element_id=element_id,
         label=element_id,
-        span=TimelineSpan(start_tick=start, duration_tick=duration),
-        location=ElementLocation(),
-        creation=creation,
-        enabled=enabled,
+        span=TimelineSpan(start_tick=start, duration_tick=4000),
+        location={},
+        creation=creation
+        or R2VCreation(
+            narrative="动作", storyboard_prompt="分镜", video_prompt="视频"
+        ),
     )
 
 
-def _project(elements: list[TimelineElement]) -> tuple[Project, Timeline]:
+def _project(*elements: TimelineElement) -> tuple[Project, Timeline]:
     project = Project.new(project_id="p-continuity", name="Continuity")
-    timeline = Timeline(timeline_id="timeline:main", ticks_per_second=1000)
-    timeline = timeline.model_copy(
-        update={
-            "elements_by_id": {item.element_id: item for item in elements},
-        },
-    )
-    project.timelines.items["timeline:main"] = timeline
-    project.timelines.order = ["timeline:main"]
+    timeline = project.timelines.items["timeline:main"]
+    timeline.elements_by_id.update({el.element_id: el for el in elements})
     return project, timeline
 
 
-def _select_prev_video(
-    project: Project,
-    prev_element_id: str,
-    version: str,
-) -> None:
-    project.assets.artifact_slots_by_id[f"element:{prev_element_id}:main"] = (
-        ArtifactSlot(
-            slot_id=f"element:{prev_element_id}:main",
-            owner_ref=f"element:{prev_element_id}",
-            kind="element_video",
-            version_ids=[version],
-            selected_version_id=version,
-        )
+def _publish_artifact(project, element, version, *, storyboard=False):
+    output = "storyboard" if storyboard else "main"
+    kind = "r2v_storyboard_image" if storyboard else "element_video"
+    owner = f"element:{element.element_id}"
+    slot = f"{owner}:{output}"
+    file = f"file-{version}"
+    checksum = "0" * 64
+    created = "2026-08-05T00:00:00Z"
+    project.assets.artifact_slots_by_id[slot] = ArtifactSlot(
+        slot_id=slot,
+        owner_ref=owner,
+        kind=kind,
+        version_ids=[version],
+        selected_version_id=version,
     )
-
-
-def _publish_artifact(
-    project: Project,
-    element_id: str,
-    version_id: str,
-    *,
-    stale: bool = False,
-    media_type: str = "video/mp4",
-) -> None:
-    """Select a published artifact version on one element's main slot."""
-
-    from services.project_files.models import ArtifactVersion, IndexedFile
-
-    slot_id = f"element:{element_id}:main"
-    project.assets.artifact_slots_by_id[slot_id] = ArtifactSlot(
-        slot_id=slot_id,
-        owner_ref=f"element:{element_id}",
-        kind="element_video",
-        version_ids=[version_id],
-        selected_version_id=version_id,
-    )
-    project.assets.files_by_id[f"file-{version_id}"] = IndexedFile(
-        file_id=f"file-{version_id}",
+    project.assets.files_by_id[file] = IndexedFile(
+        file_id=file,
         kind="artifact_payload",
-        media_type=media_type,
-        relative_uri=f"assets/artifacts/file-{version_id}",
-        sha256="0" * 64,
+        media_type="image/png" if storyboard else "video/mp4",
+        relative_uri=f"assets/artifacts/{file}",
+        sha256=checksum,
         size_bytes=1,
-        created_at="2026-08-05T00:00:00Z",
+        created_at=created,
     )
-    project.assets.artifact_versions_by_id[version_id] = ArtifactVersion(
-        version_id=version_id,
-        name=version_id,
-        slot_id=slot_id,
-        kind="element_video",
-        owner_ref=f"element:{element_id}",
-        file_id=f"file-{version_id}",
-        checksum="0" * 64,
+    project.assets.artifact_versions_by_id[version] = ArtifactVersion(
+        version_id=version,
+        name=version,
+        slot_id=slot,
+        kind=kind,
+        owner_ref=owner,
+        file_id=file,
+        checksum=checksum,
         based_on_generation=1,
-        provenance_refs=[],
-        stale=stale,
-        created_at="2026-08-05T00:00:00Z",
+        created_at=created,
     )
+    if storyboard:
+        element.outputs[output] = ElementOutput(slot_id=slot)
 
 
 def _two_segment_project(prev_version: str | None = None):
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000)
-    # Confirmed same scene (scene unknown = empty refs never anchors
-    # by default, so the default-continuous fixtures must declare it).
-    from services.project_files.models import VisualEntity
-
-    for el in (first, second):
-        el.creation = el.creation.model_copy(
-            update={"scene_ref": "scene:stop"},
-        )
-    # Structured intent defaults: anchored simple continuation. The
-    # planner no longer guesses routing from prose, so fixtures state
-    # the intent explicitly.
-    second.creation = second.creation.model_copy(
-        update={
-            "generation_plan": R2VGenerationPlan(
-                method="r2v_last_frame",
-                use_storyboard=False,
-                predecessor_element_id="e1",
-                anchor_instruction="保留上一动作",
-            ),
-        },
+    first, second = _element("e1", 0), _element("e2", 4000)
+    second.creation.generation_plan = R2VGenerationPlan(
+        method="r2v_last_frame",
+        use_storyboard=False,
+        predecessor_element_id=first.element_id,
+        anchor_instruction="保留上一动作",
     )
-    project, timeline = _project([first, second])
-    project.visual.entities.items["scene:stop"] = VisualEntity(
-        entity_id="scene:stop",
-        kind="scene",
-        name="站台",
-        required_variant_ids=[],
-    )
+    project, timeline = _project(first, second)
     if prev_version:
-        _select_prev_video(project, "e1", prev_version)
+        _publish_artifact(project, first, prev_version)
     return project, timeline, first, second
 
 
-def _frozen_task(snapshot: dict):
-    from types import SimpleNamespace
-
+def _frozen_task(*references: str, mode="r2v", **snapshot):
     return SimpleNamespace(
         task_id="task-inflight",
         project_id="p-continuity",
         kind="r2v_generation",
         status="RUNNING",
         input_refs=["element:e2"],
-        metadata={"requestSnapshot": snapshot},
-    )
-
-
-def _storyboard_selected(
-    project,
-    element,
-    *,
-    element_id: str = "e2",
-    version_id: str = "sb-v1",
-) -> None:
-    """Select a storyboard artifact for an element (slot+file+version)."""
-
-    from services.project_files.models import (
-        ArtifactVersion,
-        ElementOutput,
-        IndexedFile,
-    )
-
-    slot_id = f"element:{element_id}:storyboard"
-    project.assets.artifact_slots_by_id[slot_id] = ArtifactSlot(
-        slot_id=slot_id,
-        owner_ref=f"element:{element_id}",
-        kind="r2v_storyboard_image",
-        version_ids=[version_id],
-        selected_version_id=version_id,
-    )
-    project.assets.files_by_id[f"file-{version_id}"] = IndexedFile(
-        file_id=f"file-{version_id}",
-        kind="artifact_payload",
-        media_type="image/png",
-        relative_uri=f"assets/artifacts/file-{version_id}",
-        sha256="1" * 64,
-        size_bytes=1,
-        created_at="2026-08-05T00:00:00Z",
-    )
-    project.assets.artifact_versions_by_id[version_id] = ArtifactVersion(
-        version_id=version_id,
-        name=version_id,
-        slot_id=slot_id,
-        kind="r2v_storyboard_image",
-        owner_ref=f"element:{element_id}",
-        file_id=f"file-{version_id}",
-        checksum="1" * 64,
-        based_on_generation=1,
-        provenance_refs=[],
-        stale=False,
-        created_at="2026-08-05T00:00:00Z",
-    )
-    element.outputs["storyboard"] = ElementOutput(slot_id=slot_id)
-
-
-def _bgm_project(tmp_path, *, with_bgm: bool = True):
-    from services.project_files.models import (
-        AudioCreation,
-        SourceAssetVersion,
-    )
-
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000)
-    project, timeline = _project([first, second])
-    if not with_bgm:
-        return project, timeline, second
-    music = tmp_path / "assets" / "sources" / "bed.mp3"
-    music.parent.mkdir(parents=True, exist_ok=True)
-    music.write_bytes(b"ID3" + b"\0" * 100)
-    bgm_el = TimelineElement(
-        element_id="bgm-1",
-        label="bgm-1",
-        span=TimelineSpan(start_tick=0, duration_tick=30000),
-        creation=AudioCreation(
-            source_asset_version_id="audio-v1",
-            role="bgm",
-        ),
-    )
-    timeline = timeline.model_copy(
-        update={
-            "elements_by_id": {
-                **timeline.elements_by_id,
-                "bgm-1": bgm_el,
-            },
+        metadata={
+            "requestSnapshot": {
+                "elementId": "e2",
+                "mode": mode,
+                "referenceVersionIds": list(references),
+                **snapshot,
+            }
         },
     )
-    project.timelines.items["timeline:main"] = timeline
-    project.assets.source_versions_by_id["audio-v1"] = SourceAssetVersion(
-        version_id="audio-v1",
-        logical_asset_id="asset-a1",
-        name="bed",
-        file_id="file-audio-v1",
-        checksum="2" * 64,
-        media_kind="audio",
-        media_type="audio/mpeg",
-        created_at="2026-08-05T00:00:00Z",
-    )
-    from services.project_files.models import IndexedFile
 
-    project.assets.files_by_id["file-audio-v1"] = IndexedFile(
-        file_id="file-audio-v1",
-        kind="source_original",
-        media_type="audio/mpeg",
-        relative_uri="assets/sources/bed.mp3",
-        sha256="2" * 64,
-        size_bytes=103,
-        created_at="2026-08-05T00:00:00Z",
+
+def _inputs_current(project, task):
+    return rx.FileR2VExecutionService._frozen_inputs_still_current(
+        project, task
     )
-    return project, timeline, second
+
+
+def _bgm_project(tmp_path, *, with_bgm=True):
+    project, timeline = _project(_element("e2", 4000))
+    if with_bgm:
+        relative_uri = "assets/sources/bed.mp3"
+        music = tmp_path / relative_uri
+        music.parent.mkdir(parents=True, exist_ok=True)
+        music.write_bytes(b"ID3")
+        timeline.elements_by_id["bgm"] = TimelineElement(
+            element_id="bgm",
+            label="bgm",
+            span=TimelineSpan(start_tick=0, duration_tick=30000),
+            creation=AudioCreation(
+                source_asset_version_id="audio-v1", role="bgm"
+            ),
+        )
+        created = "2026-08-05T00:00:00Z"
+        checksum = "2" * 64
+        project.assets.source_versions_by_id["audio-v1"] = SourceAssetVersion(
+            version_id="audio-v1",
+            logical_asset_id="asset-a1",
+            name="bed",
+            file_id="file-audio-v1",
+            checksum=checksum,
+            media_kind="audio",
+            media_type="audio/mpeg",
+            created_at=created,
+        )
+        project.assets.files_by_id["file-audio-v1"] = IndexedFile(
+            file_id="file-audio-v1",
+            kind="source_original",
+            media_type="audio/mpeg",
+            relative_uri=relative_uri,
+            sha256=checksum,
+            size_bytes=3,
+            created_at=created,
+        )
+    return project, timeline
 
 
 def _bind_bgm_config(monkeypatch, model="wan3.0-video"):
-    from models import config as model_config
-
-    monkeypatch.setattr(model_config, "get_video_model_name", lambda: model)
-    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    monkeypatch.setattr("models.config.get_video_model_name", lambda: model)
+    monkeypatch.setattr("models.config.get_video_backend", lambda: "wan")
 
 
-def test_frozen_r2v_publishes_after_prev_reroll() -> None:
-    """Major-1: a prev-segment reroll while the successor render is
-    in flight (already paid) must not quarantine the finished clip.
-    The Project references are unchanged; only the synthetic
-    ``continuity:*:prevV`` IDs shifted, and those were the submit
-    path's anchors, not a re-billable input edit."""
+@pytest.mark.parametrize(
+    ("storyboard_version", "current"),
+    [("sb-v1", True), ("sb-v2", False), (None, True)],
+    ids=["predecessor-reroll", "storyboard-reselected", "no-storyboard"],
+)
+def test_frozen_r2v_publish_guard(storyboard_version, current):
+    project, _, first, second = _two_segment_project("prev-v1")
+    references = ["continuity:last_frame:prev-v1"]
+    if storyboard_version:
+        second.creation.generation_plan = None
+        _publish_artifact(project, second, storyboard_version, storyboard=True)
+        references += ["sb-v1", "continuity:tail_clip:prev-v1"]
+    task = _frozen_task(*references)
 
-    from services.media_files.r2v_execution import (
-        FileR2VExecutionService,
-    )
-    from services.project_files.models import ElementOutput
-
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000)
-    project, _timeline = _project([first, second])
-    # Storyboard selected on e2 so the r2v branch can resolve its plan.
-    second.outputs["storyboard"] = ElementOutput(
-        slot_id="element:e2:storyboard",
-    )
-    project.assets.artifact_slots_by_id["element:e2:storyboard"] = (
-        ArtifactSlot(
-            slot_id="element:e2:storyboard",
-            owner_ref="element:e2",
-            kind="r2v_storyboard_image",
-            version_ids=["sb-v1"],
-            selected_version_id="sb-v1",
-        )
-    )
-    # Prev published as V1 when the task was admitted.
-    _select_prev_video(project, "e1", "prevV1")
-    frozen = _frozen_task(
-        {
-            "elementId": "e2",
-            "mode": "r2v",
-            "referenceVersionIds": [
-                "sb-v1",
-                "continuity:last_frame:prevV1",
-                "continuity:tail_clip:prevV1",
-            ],
-        },
-    )
-    # Predecessor rerolled to V2 mid-render.
-    _select_prev_video(project, "e1", "prevV2")
-
-    assert FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
+    if current:
+        _publish_artifact(project, first, "prev-v2")
+    assert _inputs_current(project, task) is current
 
 
-def test_frozen_r2v_quarantines_when_storyboard_changes() -> None:
-    """Major-1 control: the publish tolerance is scoped to the prev
-    reroll. A genuine Project-input change (storyboard reselected)
-    still quarantines, so the fix did not widen into a blanket pass."""
-
-    from services.media_files.r2v_execution import (
-        FileR2VExecutionService,
-    )
-    from services.project_files.models import ElementOutput
-
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000)
-    project, _timeline = _project([first, second])
-    second.outputs["storyboard"] = ElementOutput(
-        slot_id="element:e2:storyboard",
-    )
-    project.assets.artifact_slots_by_id["element:e2:storyboard"] = (
-        ArtifactSlot(
-            slot_id="element:e2:storyboard",
-            owner_ref="element:e2",
-            kind="r2v_storyboard_image",
-            version_ids=["sb-v2"],
-            selected_version_id="sb-v2",
-        )
-    )
-    _select_prev_video(project, "e1", "prevV1")
-    frozen = _frozen_task(
-        {
-            "elementId": "e2",
-            "mode": "r2v",
-            "referenceVersionIds": [
-                "sb-v1",
-                "continuity:last_frame:prevV1",
-                "continuity:tail_clip:prevV1",
-            ],
-        },
-    )
-    # Storyboard moved sb-v1 -> sb-v2: a real input change.
-    assert not FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
-
-
-def test_frozen_i2v_publishes_after_prev_reroll() -> None:
-    """Major-1 (i2v): an auto-framed i2v render paid against the prev
-    last frame publishes across a prev reroll, but quarantines once an
-    explicit first frame is authored (a genuine input change)."""
-
-    from services.media_files.r2v_execution import (
-        FileR2VExecutionService,
-    )
-
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000, creation_type="i2v")
-    project, _timeline = _project([first, second])
-    _select_prev_video(project, "e1", "prevV1")
-    frozen = _frozen_task(
-        {
-            "elementId": "e2",
-            "mode": "i2v",
-            "referenceVersionIds": ["continuity:last_frame:prevV1"],
-            "firstFrameVersionId": "continuity:last_frame:prevV1",
-        },
-    )
-    _select_prev_video(project, "e1", "prevV2")
-
-    assert FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
-
-    # Authoring an explicit first frame mid-render is a real change.
-    second.creation.first_frame_version_id = "user-frame"
-    assert not FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
-
-
-def test_frozen_none_tier_publishes_without_storyboard() -> None:
-    """CR P2-1: a none-tier render has no storyboard by design. The
-    publish gate must apply the same tier rule as the submit path, or
-    any unrelated project commit (etag/generation drift) would
-    quarantine an already-paid, still-valid finished clip."""
-
-    from services.media_files.r2v_execution import (
-        FileR2VExecutionService,
-    )
-
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000)
-    second.creation = second.creation.model_copy(
-        update={
-            "generation_plan": R2VGenerationPlan(
-                method="r2v_last_frame",
-                use_storyboard=False,
-                predecessor_element_id="e1",
-                anchor_instruction="保留上一动作",
-            ),
-        },
-    )
-    project, _timeline = _project([first, second])
-    _select_prev_video(project, "e1", "prevV1")
-    frozen = _frozen_task(
-        {
-            "elementId": "e2",
-            "mode": "r2v",
-            "referenceVersionIds": ["continuity:last_frame:prevV1"],
-        },
-    )
-    assert FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
-
-
-def _mock_ffmpeg_paths(monkeypatch) -> None:
-    import services.runtime_files.runtime_dependencies as rd
-
-    monkeypatch.setattr(rd, "resolve_ffmpeg", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(
-        rd,
-        "resolve_ffprobe",
-        lambda ffmpeg_path: "/usr/bin/ffprobe",
-    )
+def _mock_ffmpeg_paths(monkeypatch):
+    monkeypatch.setattr(rd, "resolve_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(rd, "resolve_ffprobe", lambda **kwargs: "ffprobe")
 
 
 def _frame_entry(tmp_path: Path, prev_version: str = "prev-version-1"):
-    from services.media_files import segment_continuity as sc
-
     png = tmp_path / "last_frame.png"
     png.write_bytes(b"fake-png")
     return sc._build_entry(
@@ -504,10 +220,6 @@ def test_extract_registers_inflight_anchor(tmp_path, monkeypatch) -> None:
     """Major-2: a successful extract registers the predecessor digest,
     so event-driven prunes in the same process treat the anchors a
     queued payload froze as in flight."""
-
-    from collections import OrderedDict
-
-    from services.media_files import segment_continuity as sc
 
     project, timeline, _f, second = _two_segment_project("v1")
     source = tmp_path / "prev.mp4"
@@ -535,8 +247,6 @@ def test_extract_registers_inflight_anchor(tmp_path, monkeypatch) -> None:
 
 
 def test_missing_ffmpeg_blocks_the_selected_method():
-    from services.file_agent_runtime.work_graph import derive_work_graph
-
     project, _timeline, _first, _second = _two_segment_project("prev-v1")
     missing = derive_work_graph(project, ffmpeg_ready=False).by_id["video:e2"]
     assert "video:e1" in missing.deps
@@ -544,121 +254,54 @@ def test_missing_ffmpeg_blocks_the_selected_method():
     assert "ffmpeg" in missing.missing[0]
 
 
-def test_bgm_excerpt_parallel_same_source_budget(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """CR round-3 P2-2: segments resolve bgm in parallel threads. Two
-    cuts of the same source+identity must not share one temp path
-    (the pid-only name made the second os.replace die with
-    FileNotFoundError, bypassing the skip handler)."""
-
-    import subprocess
-    from concurrent.futures import ThreadPoolExecutor
-
-    from services.media_files import r2v_execution as rx
-    from services.media_files import segment_continuity as sc
-    from services.runtime_files import runtime_dependencies as rd
-
-    project, _timeline, _second = _bgm_project(tmp_path)
-    monkeypatch.setattr(rd, "resolve_ffmpeg", lambda: "ffmpeg")
-    monkeypatch.setattr(rd, "resolve_ffprobe", lambda **_k: "ffprobe")
-
-    def fake_run(cmd, **kwargs):  # noqa: ANN001, ARG001
-        Path(cmd[-1]).write_bytes(b"cut")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(rx.subprocess, "run", fake_run)
-
-    def probe_by_path(path, *_a, **_k):  # noqa: ANN001
-        return 60.0 if Path(path).name == "bed.wav" else 10.0
-
-    monkeypatch.setattr(sc, "_probe_duration", probe_by_path)
+@pytest.fixture
+def bgm_excerpt(tmp_path, monkeypatch):
+    project, _ = _bgm_project(tmp_path)
     source = tmp_path / "bed.wav"
-    source.write_bytes(b"x" * 8)
+    source.write_bytes(b"source")
+    _mock_ffmpeg_paths(monkeypatch)
+    commands = []
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(
-            pool.map(
-                lambda _i: rx._bgm_excerpt(
-                    project,
-                    tmp_path,
-                    source,
-                    "e2",
-                    max_seconds=15.0,
-                    source_identity="sha-x",
-                ),
-                range(8),
-            ),
-        )
-    assert len(set(results)) == 1
-
-
-def test_bgm_cache_identity_separates_budgets_and_sources(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """CR round-2 P2-C: 10.75s and 10.2s budgets (and different source
-    versions) must never share one cache entry, and the cut re-encodes
-    instead of stream-copying packet boundaries."""
-
-    import itertools
-    import subprocess
-
-    from services.media_files import r2v_execution as rx
-    from services.media_files import segment_continuity as sc
-    from services.runtime_files import runtime_dependencies as rd
-
-    project, _timeline, _second = _bgm_project(tmp_path)
-    monkeypatch.setattr(rd, "resolve_ffmpeg", lambda: "ffmpeg")
-    monkeypatch.setattr(rd, "resolve_ffprobe", lambda **_k: "ffprobe")
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, **kwargs):  # noqa: ANN001, ARG001
-        calls.append(list(cmd))
+    def run(cmd, **kwargs):
+        commands.append(cmd)
         Path(cmd[-1]).write_bytes(b"cut")
         return subprocess.CompletedProcess(cmd, 0)
 
-    monkeypatch.setattr(rx.subprocess, "run", fake_run)
-    # source probes long (60s), each cut verifies within budget (10s).
-    cycle = itertools.cycle([60.0, 10.0])
+    monkeypatch.setattr(rx.subprocess, "run", run)
     monkeypatch.setattr(
         sc,
         "_probe_duration",
-        lambda *_a, **_k: next(cycle),
+        lambda path, *_: 60.0 if path == source else 10.0,
     )
-    source = tmp_path / "bed.wav"
-    source.write_bytes(b"x" * 8)
 
-    first = rx._bgm_excerpt(
-        project,
-        tmp_path,
-        source,
-        "e2",
-        max_seconds=10.75,
-        source_identity="sha-a",
-    )
-    second = rx._bgm_excerpt(
-        project,
-        tmp_path,
-        source,
-        "e2",
-        max_seconds=10.2,
-        source_identity="sha-a",
-    )
-    third = rx._bgm_excerpt(
-        project,
-        tmp_path,
-        source,
-        "e2",
-        max_seconds=10.75,
-        source_identity="sha-b",
-    )
-    assert len({first, second, third}) == 3
-    assert len(calls) == 3
-    assert "-c:a" not in calls[0]
-    # Exact-budget label in the cache name.
+    def excerpt(budget, identity):
+        return rx._bgm_excerpt(
+            project,
+            tmp_path,
+            source,
+            "e2",
+            max_seconds=budget,
+            source_identity=identity,
+        )
+
+    return excerpt, commands
+
+
+def test_bgm_excerpt_parallel_same_source_budget(bgm_excerpt):
+    excerpt, _ = bgm_excerpt
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = set(pool.map(lambda _: excerpt(15.0, "sha-x"), range(8)))
+    assert len(results) == 1
+    assert Path(unquote(urlsplit(results.pop()).path)).read_bytes() == b"cut"
+
+
+def test_bgm_cache_identity_separates_budgets_and_sources(bgm_excerpt):
+    excerpt, commands = bgm_excerpt
+    first = excerpt(10.75, "sha-a")
+    assert len({first, excerpt(10.2, "sha-a"), excerpt(10.75, "sha-b")}) == 3
     assert "head10.75" in Path(first).name
+    assert len(commands) == 3
+    assert "-c:a" not in commands[0]
 
 
 def test_bgm_source_probe_failure_skips_instead_of_crashing(
@@ -670,14 +313,9 @@ def test_bgm_source_probe_failure_skips_instead_of_crashing(
     to touch an unassigned tmp handle and raised UnboundLocalError,
     which no caller catches — the video task died instead of skipping."""
 
-    from services.media_files import r2v_execution as rx
-    from services.media_files import segment_continuity as sc
-    from services.runtime_files import runtime_dependencies as rd
-
-    project, timeline, _second = _bgm_project(tmp_path)
+    project, timeline = _bgm_project(tmp_path)
     _bind_bgm_config(monkeypatch)
-    monkeypatch.setattr(rd, "resolve_ffmpeg", lambda: "ffmpeg")
-    monkeypatch.setattr(rd, "resolve_ffprobe", lambda **_k: "ffprobe")
+    _mock_ffmpeg_paths(monkeypatch)
 
     def boom(*_a, **_k):
         raise RuntimeError("ffprobe timeout")
@@ -703,8 +341,6 @@ def test_bgm_reference_budget_matrix(
     voice slot overflow, models without standalone audio, and voices
     consuming the 15s time budget all resolve to no bgm reference."""
 
-    from services.media_files import r2v_execution as rx
-
     def resolve(project, timeline, **kw):
         return rx._resolve_bgm_reference(
             project,
@@ -715,10 +351,10 @@ def test_bgm_reference_budget_matrix(
         )
 
     _bind_bgm_config(monkeypatch)
-    bare, bare_tl, _ = _bgm_project(tmp_path, with_bgm=False)
+    bare, bare_tl = _bgm_project(tmp_path, with_bgm=False)
     assert resolve(bare, bare_tl, voice_count=0) == ""
 
-    with_bgm, bgm_tl, _ = _bgm_project(tmp_path)
+    with_bgm, bgm_tl = _bgm_project(tmp_path)
     assert resolve(with_bgm, bgm_tl, voice_count=5) == ""
     assert resolve(with_bgm, bgm_tl, voice_count=2, voice_seconds=14.5) == ""
 
@@ -732,11 +368,7 @@ def test_bgm_reference_budget_matrix(
 def test_over_budget_extension_cannot_fall_back_to_an_anchor(
     tmp_path, monkeypatch
 ):
-    from domain.errors import ValidationError
-    from services.media_files import r2v_execution as rx
-    from services.media_files import segment_continuity as sc
-
-    project, timeline, _first, second = _two_segment_project("prev-v1")
+    project, timeline, first, second = _two_segment_project("prev-v1")
     second.creation.generation_plan = R2VGenerationPlan(
         method="video_extend",
         use_storyboard=False,
@@ -763,7 +395,7 @@ def test_over_budget_extension_cannot_fall_back_to_an_anchor(
     frozen = rx._submission_input_fingerprint(
         project, "e2", mode="video_extend"
     )
-    _select_prev_video(project, "e1", "prev-v2")
+    _publish_artifact(project, first, "prev-v2")
     assert not rx._matches_submission_inputs(
         project,
         "e2",
@@ -773,135 +405,56 @@ def test_over_budget_extension_cannot_fall_back_to_an_anchor(
     )
 
 
-def test_two_frame_i2v_publish_gate() -> None:
-    """CR round-12 P2-3: the publish gate compares BOTH frozen frames;
-    an unrelated project commit still publishes, a re-authored tail
-    frame quarantines."""
-
-    from services.media_files.r2v_execution import (
-        FileR2VExecutionService,
+@pytest.mark.parametrize(
+    ("auto_first", "sent_tail", "authored_tail"),
+    [
+        (False, True, "tail"),
+        (False, False, "tail"),
+        (True, False, "tail"),
+        (True, False, None),
+    ],
+)
+def test_frozen_i2v_publish_guard(auto_first, sent_tail, authored_tail):
+    first = _element("e1", 0)
+    second = _element(
+        "e2",
+        4000,
+        creation=I2VCreation(
+            video_prompt="男孩走进走廊。",
+            first_frame_version_id=None if auto_first else "frame",
+            last_frame_version_id=authored_tail,
+        ),
     )
-    from services.project_files.models import I2VCreation
-
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000)
-    second.creation = I2VCreation(
-        video_prompt="男孩走进走廊。",
-        first_frame_version_id="frame-a",
-        last_frame_version_id="frame-b",
-    )
-    project, _timeline = _project([first, second])
-    frozen = _frozen_task(
-        {
-            "elementId": "e2",
-            "mode": "i2v",
-            "firstFrameVersionId": "frame-a",
-            "firstFrameUrl": "file:///a.png",
-            "lastFrameVersionId": "frame-b",
-            "lastFrameUrl": "file:///b.png",
-            "referenceVersionIds": ["frame-a", "frame-b"],
-        },
-    )
-    assert FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
-    second.creation = second.creation.model_copy(
-        update={"last_frame_version_id": "frame-c"},
-    )
-    assert not FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
+    project, _ = _project(first, second)
+    frozen_first = "continuity:last_frame:prev-v1" if auto_first else "frame"
+    if auto_first:
+        _publish_artifact(project, first, "prev-v1")
+    task = _frozen_task(
+        frozen_first,
+        *(["tail"] if sent_tail else []),
+        mode="i2v",
+        firstFrameVersionId=frozen_first,
+        firstFrameUrl="file:///first.png",
+        lastFrameVersionId="tail" if sent_tail else "",
+        lastFrameUrl="file:///tail.png" if sent_tail else "",
+        lastFrameAuthoredVersionId=(authored_tail or "")
+        if not sent_tail
+        else "",
     )
 
+    if auto_first:
+        _publish_artifact(project, first, "prev-v2")
+    assert _inputs_current(project, task)
 
-def test_first_frame_only_fallback_publishes_despite_authored_tail() -> None:
-    """CR round-13 P2-1: when the model cannot receive a native tail
-    frame the payload ships first-frame only — the authored-but-
-    unsent tail must not make the finished clip fail the publish
-    gate on an unchanged project."""
-
-    from services.media_files.r2v_execution import (
-        FileR2VExecutionService,
-    )
-    from services.project_files.models import I2VCreation
-
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000)
-    second.creation = I2VCreation(
-        video_prompt="男孩走进走廊。",
-        first_frame_version_id="frame-a",
-        last_frame_version_id="frame-b",
-    )
-    project, _timeline = _project([first, second])
-    frozen = _frozen_task(
-        {
-            "elementId": "e2",
-            "mode": "i2v",
-            "firstFrameVersionId": "frame-a",
-            "firstFrameUrl": "file:///a.png",
-            "lastFrameVersionId": "",
-            "lastFrameUrl": "",
-            "lastFrameAuthoredVersionId": "frame-b",
-            "referenceVersionIds": ["frame-a"],
-        },
-    )
-    assert FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
-
-
-def test_auto_first_frame_publishes_despite_authored_tail() -> None:
-    """CR round-13 P2-1 (auto-first shape): the predecessor reroll
-    still publishes the paid clip, and an authored unsent tail never
-    quarantines it."""
-
-    from services.media_files.r2v_execution import (
-        FileR2VExecutionService,
-    )
-    from services.project_files.models import I2VCreation
-
-    first = _element("e1", start=0)
-    second = _element("e2", start=4000)
-    second.creation = I2VCreation(
-        video_prompt="男孩走进走廊。",
-        last_frame_version_id="frame-b",
-    )
-    project, _timeline = _project([first, second])
-    _select_prev_video(project, "e1", "prev-v1")
-    frozen = _frozen_task(
-        {
-            "elementId": "e2",
-            "mode": "i2v",
-            "firstFrameVersionId": "continuity:last_frame:prev-v1",
-            "firstFrameUrl": "file:///prev.png",
-            "lastFrameVersionId": "",
-            "lastFrameUrl": "",
-            "lastFrameAuthoredVersionId": "frame-b",
-            "referenceVersionIds": ["continuity:last_frame:prev-v1"],
-        },
-    )
-    assert FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
-    # The tail was re-authored but never shipped: still publishable.
-    second.creation = second.creation.model_copy(
-        update={"last_frame_version_id": "frame-c"},
-    )
-    assert FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        frozen,
-    )
+    second.creation.last_frame_version_id = "tail-reselected"
+    assert _inputs_current(project, task) is not sent_tail
+    second.creation.first_frame_version_id = "frame-reselected"
+    assert not _inputs_current(project, task)
 
 
 def test_explicit_plan_controls_reference_identity_when_prose_suggests_a_cut():
-    from services.file_agent_runtime.work_graph import derive_work_graph
-    from services.media_files import r2v_execution as rx
-
     project, timeline, _first, second = _two_segment_project("prev-v")
-    _storyboard_selected(project, second)
+    _publish_artifact(project, second, "sb-v1", storyboard=True)
     second.creation.continuity = "切去几年以后"
     refs = rx._reference_ids_with_continuity(project, timeline, second)
     assert refs == ("continuity:last_frame:prev-v",)
@@ -921,9 +474,6 @@ def test_explicit_plan_controls_reference_identity_when_prose_suggests_a_cut():
 
 
 def test_legacy_projects_do_not_infer_a_new_generation_method():
-    from services.file_agent_runtime.work_graph import derive_work_graph
-    from services.media_files import r2v_execution as rx
-
     project, timeline, _first, second = _two_segment_project("prev-v")
     second.creation.generation_plan = None
     second.creation.transition_intent = "one_take"
@@ -935,10 +485,6 @@ def test_legacy_projects_do_not_infer_a_new_generation_method():
 
 
 def test_extend_rejects_a_prompt_referencing_an_unsent_image(tmp_path):
-    from domain.errors import ValidationError
-    from models.video_task_plans import VideoTaskKind, VideoTaskPlan
-    from services.media_files import r2v_execution as rx
-
     project, _timeline, _first, second = _two_segment_project("prev-v")
     with pytest.raises(ValidationError, match="不能引用未发送的图片"):
         rx._resolve_extend_request(
@@ -957,9 +503,6 @@ def test_extend_rejects_a_prompt_referencing_an_unsent_image(tmp_path):
 
 
 def test_authored_dependency_is_exact_even_when_a_newer_shot_is_available():
-    from services.media_files import r2v_execution as rx
-    from services.file_agent_runtime.work_graph import derive_work_graph
-
     first = _element("first", start=0)
     closer = _element("closer", start=4000)
     third = _element("third", start=8000)
@@ -969,9 +512,9 @@ def test_authored_dependency_is_exact_even_when_a_newer_shot_is_available():
         predecessor_element_id="first",
         anchor_instruction="匹配第一镜尾帧动作",
     )
-    project, timeline = _project([first, closer, third])
-    _publish_artifact(project, "first", "first-version")
-    _publish_artifact(project, "closer", "closer-version")
+    project, timeline = _project(first, closer, third)
+    _publish_artifact(project, first, "first-version")
+    _publish_artifact(project, closer, "closer-version")
     node = derive_work_graph(project, ffmpeg_ready=True).by_id["video:third"]
     assert node.deps == ("video:first",)
     assert rx._reference_ids_with_continuity(project, timeline, third) == (
