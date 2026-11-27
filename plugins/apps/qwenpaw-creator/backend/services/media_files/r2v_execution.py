@@ -1694,11 +1694,11 @@ def _r2v_strong_continuity(
         # Undeclared intent keeps the default-continuous gate: same
         # scene, no newly introduced cast/props. An authored continue
         # anchors even across scenes (identical to the scheduler).
-        if getattr(prev.creation, "scene_ref", None) != getattr(
-            element.creation,
-            "scene_ref",
-            None,
-        ):
+        prev_scene = getattr(prev.creation, "scene_ref", None)
+        cur_scene = getattr(element.creation, "scene_ref", None)
+        if not prev_scene or not cur_scene or prev_scene != cur_scene:
+            # Scene unknown (empty refs) is not a confirmed same
+            # scene: no default anchoring.
             return False
         prev_refs = set(
             getattr(prev.creation, "character_refs", []) or [],
@@ -1713,11 +1713,41 @@ def _r2v_strong_continuity(
     if one_take:
         from models import config as model_config
         from models.video_capabilities import supports_video_continuation
+        from models.video_task_plans import (
+            WAN_30_EXTEND_HEADROOM_SECONDS,
+            WAN_30_MAX_INPUT_PLUS_OUTPUT_SECONDS,
+            WAN_30_MAX_REFERENCE_VIDEO_SECONDS,
+        )
 
-        if supports_video_continuation(
-            model_config.get_video_model_name(),
-            model_config.get_video_backend(),
-        ):
+        # Only exclude the anchor when the dispatch would REALLY go
+        # VIDEO_EXTEND — capability alone is not enough: an
+        # over-budget one_take falls back to anchored r2v and the
+        # fingerprint must then carry the anchor or a stale claim
+        # could ship an outdated opening.
+        prev_version = resolve_predecessor_video_version(project, prev)
+        material_seconds = (
+            media_version_duration_seconds(project, prev_version)
+            if prev_version
+            else None
+        )
+        segment_seconds = element.span.duration_tick / max(
+            timeline.ticks_per_second,
+            1,
+        )
+        extend_budget = (
+            WAN_30_MAX_INPUT_PLUS_OUTPUT_SECONDS
+            - WAN_30_EXTEND_HEADROOM_SECONDS
+        )
+        can_extend = (
+            supports_video_continuation(
+                model_config.get_video_model_name(),
+                model_config.get_video_backend(),
+            )
+            and material_seconds is not None
+            and 0 < material_seconds <= WAN_30_MAX_REFERENCE_VIDEO_SECONDS
+            and material_seconds + segment_seconds <= extend_budget
+        )
+        if can_extend:
             return False
     from services.file_agent_runtime.work_graph import probe_ffmpeg_ready
 
@@ -1872,7 +1902,9 @@ def _rebuild_prompt_without_anchor(
         # leading separator), never a regex guess at where the
         # author's action begins.
         prompt = prompt[len(_LEGACY_ROLE_PREFIX) :].lstrip("，,；;、 ")
-        if "[Image 1]" in prompt:
+        from models.reference_markers import canonical_marker_indices
+
+        if 1 in canonical_marker_indices(prompt):
             # The old 图1 (virtual last frame) is still referenced by
             # authored sentences: remapping around them would silently
             # rebind those references onto another image. Mark the
@@ -2289,9 +2321,9 @@ def _build_task_plan(
         if resolved:
             has_prev = True
             prev_version = resolved
-            same_scene = getattr(prev.creation, "scene_ref", None) == (
-                getattr(creation, "scene_ref", None)
-            )
+            prev_scene = getattr(prev.creation, "scene_ref", None)
+            cur_scene = getattr(creation, "scene_ref", None)
+            same_scene = bool(prev_scene) and prev_scene == cur_scene
             prev_refs = set(getattr(prev.creation, "character_refs", []) or [])
             prev_refs |= set(getattr(prev.creation, "prop_refs", []) or [])
             cur_refs = set(getattr(creation, "character_refs", []) or [])
@@ -6420,12 +6452,24 @@ class FileR2VExecutionService:
                 # input change) or the predecessor frame is gone entirely.
                 if getattr(creation, "first_frame_version_id", ""):
                     return False
+                frozen_last = str(raw.get("lastFrameVersionId") or "")
+                if frozen_last and frozen_last != str(
+                    getattr(creation, "last_frame_version_id", "") or "",
+                ):
+                    # The shipped tail frame was re-authored since
+                    # payment: a genuine input change, quarantine.
+                    return False
                 return bool(
                     continuity_reference_ids(project, timeline, element),
                 )
             current_refs = (
                 [resolved_first_frame] if resolved_first_frame else []
             )
+            current_last = str(
+                getattr(creation, "last_frame_version_id", "") or "",
+            )
+            if current_last:
+                current_refs.append(current_last)
             return current_refs == [str(item) for item in frozen_refs]
         elif creation_type == "s2v":
             if not isinstance(creation, S2VCreation):

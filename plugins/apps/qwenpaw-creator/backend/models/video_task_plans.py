@@ -28,7 +28,6 @@ layer gathers durable facts and runs the plan.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 from dataclasses import dataclass
 from enum import StrEnum
@@ -220,14 +219,13 @@ def r2v_may_consume_predecessor(
         # Authored declaration wins over the scene/cast clues below:
         # an explicit continue anchors even across scenes.
         return True
-    # Missing intent defaults to CONTINUOUS: same scene and no newly
-    # introduced elements anchor automatically (the product default
-    # the switch used to select), without ever reading prose.
-    if getattr(prev.creation, "scene_ref", None) != getattr(
-        element.creation,
-        "scene_ref",
-        None,
-    ):
+    # Missing intent defaults to CONTINUOUS — but only for a
+    # CONFIRMED same scene: an empty scene_ref on either side is
+    # "scene unknown", not "same scene", and must not lock the
+    # segment onto an unverified predecessor frame.
+    prev_scene = getattr(prev.creation, "scene_ref", None)
+    cur_scene = getattr(element.creation, "scene_ref", None)
+    if not prev_scene or not cur_scene or prev_scene != cur_scene:
         return False
     prev_refs = set(getattr(prev.creation, "character_refs", []) or [])
     prev_refs |= set(getattr(prev.creation, "prop_refs", []) or [])

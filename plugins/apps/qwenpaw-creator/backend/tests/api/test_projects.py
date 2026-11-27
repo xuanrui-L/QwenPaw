@@ -1233,8 +1233,8 @@ def test_project_create_persists_video_continuity_choice(
     api_runtime_root,
     run_scenario,
 ):
-    """The composer's continuity pill lands in ProjectSettings; omitting
-    it keeps the field unset so the env dial stays the fallback."""
+    """Retired switch: creation accepts the legacy field but ignores
+    it — continuity is the backend default, no mode is persisted."""
 
     payload = _create_payload(
         "project-create-continuity-1",
@@ -1262,7 +1262,7 @@ def test_project_create_persists_video_continuity_choice(
     )
     assert created.status_code == 201
     settings = snapshot.json()["project"]["settings"]
-    assert settings["video_continuity"] == "throughput"
+    assert settings.get("video_continuity") is None
     assert created_default.status_code == 201
     assert (
         snapshot_default.json()["project"]["settings"]["video_continuity"]

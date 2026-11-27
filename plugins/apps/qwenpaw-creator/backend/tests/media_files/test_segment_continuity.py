@@ -738,6 +738,14 @@ def _mock_ffmpeg_paths(monkeypatch) -> None:
 def _two_segment_project(prev_version: str | None = None):
     first = _element("e1", start=0)
     second = _element("e2", start=4000)
+    # Confirmed same scene (scene unknown = empty refs never anchors
+    # by default, so the default-continuous fixtures must declare it).
+    from services.project_files.models import VisualEntity
+
+    for el in (first, second):
+        el.creation = el.creation.model_copy(
+            update={"scene_ref": "scene:stop"},
+        )
     # Structured intent defaults: anchored simple continuation. The
     # planner no longer guesses routing from prose, so fixtures state
     # the intent explicitly.
@@ -748,6 +756,12 @@ def _two_segment_project(prev_version: str | None = None):
         },
     )
     project, timeline = _project([first, second])
+    project.visual.entities.items["scene:stop"] = VisualEntity(
+        entity_id="scene:stop",
+        kind="scene",
+        name="站台",
+        required_variant_ids=[],
+    )
     if prev_version:
         _select_prev_video(project, "e1", prev_version)
     return project, timeline, first, second
@@ -1892,6 +1906,25 @@ def test_r2v_strong_continuity_matrix(monkeypatch) -> None:
     )
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
     project, timeline, first, second = _two_segment_project("prev-v")
+    # Extend-feasible material: the one_take row must see a real
+    # 8s predecessor to exclude the anchor.
+    from services.project_files.models import ArtifactVersion
+
+    project.assets.artifact_versions_by_id["prev-v"] = ArtifactVersion(
+        version_id="prev-v",
+        name="prev-v",
+        slot_id="element:e1:video",
+        kind="artifact_video",
+        owner_ref="element:e1",
+        file_id="file-prev-v",
+        checksum="5" * 64,
+        based_on_generation=1,
+        provenance_refs=[],
+        stale=False,
+        created_at="2026-08-05T00:00:00Z",
+        duration_seconds=8.0,
+    )
+    _ = first, second
     assert rx._r2v_strong_continuity(project, timeline, second)
 
     cut = _element("e2", start=4000)
@@ -1907,6 +1940,20 @@ def test_r2v_strong_continuity_matrix(monkeypatch) -> None:
         update={"transition_intent": "one_take"},
     )
     _p, tl = _project([first, one_take])
+    _p.assets.artifact_versions_by_id["prev-v"] = ArtifactVersion(
+        version_id="prev-v",
+        name="prev-v",
+        slot_id="element:e1:video",
+        kind="artifact_video",
+        owner_ref="element:e1",
+        file_id="file-prev-v",
+        checksum="5" * 64,
+        based_on_generation=1,
+        provenance_refs=[],
+        stale=False,
+        created_at="2026-08-05T00:00:00Z",
+        duration_seconds=8.0,
+    )
     _select_prev_video(_p, "e1", "prev-v")
     # wan3.0 can extend a one-take → the r2v strong path must NOT claim
     # the anchor (the dispatch would ship as VIDEO_EXTEND instead).
@@ -3455,3 +3502,94 @@ def test_bgm_reference_budget_matrix(
         lambda: "some-other-model",
     )
     assert resolve(with_bgm, bgm_tl, voice_count=0) == ""
+
+
+def test_over_budget_one_take_claim_rejects_prev_reroll() -> None:
+    """CR round-12 P2-1: an over-budget one_take falls back to the
+    ANCHORED r2v shape — the fingerprint must then carry the anchor,
+    so a predecessor reroll between ADMIT and SUBMIT fails the claim
+    instead of paying for a stale opening."""
+
+    from services.media_files import r2v_execution as rx
+    from services.project_files.models import ArtifactVersion
+
+    project, timeline, first, second = _two_segment_project()
+    second.creation = second.creation.model_copy(
+        update={"transition_intent": "one_take"},
+    )
+    _select_prev_video(project, "e1", "prev-v1")
+    project.assets.artifact_versions_by_id["prev-v1"] = ArtifactVersion(
+        version_id="prev-v1",
+        name="prev-v1",
+        slot_id="element:e1:video",
+        kind="artifact_video",
+        owner_ref="element:e1",
+        file_id="file-prev-v1",
+        checksum="5" * 64,
+        based_on_generation=1,
+        provenance_refs=[],
+        stale=False,
+        created_at="2026-08-05T00:00:00Z",
+        duration_seconds=31.0,
+    )
+    # 31s material + 4s segment busts the extend budget: the plan
+    # anchors instead of extending, and the mirror must agree.
+    refs = rx._reference_ids_with_continuity(
+        project,
+        timeline,
+        second,
+        mode="r2v",
+    )
+    assert refs[0] == "continuity:last_frame:prev-v1"
+
+    frozen = rx._submission_input_fingerprint(project, "e2", mode="r2v")
+    _select_prev_video(project, "e1", "prev-v2")
+    assert not rx._matches_submission_inputs(
+        project,
+        "e2",
+        frozen,
+        mode="r2v",
+        payload_refs=["continuity:last_frame:prev-v1"],
+    )
+
+
+def test_two_frame_i2v_publish_gate() -> None:
+    """CR round-12 P2-3: the publish gate compares BOTH frozen frames;
+    an unrelated project commit still publishes, a re-authored tail
+    frame quarantines."""
+
+    from services.media_files.r2v_execution import (
+        FileR2VExecutionService,
+    )
+    from services.project_files.models import I2VCreation
+
+    first = _element("e1", start=0)
+    second = _element("e2", start=4000)
+    second.creation = I2VCreation(
+        video_prompt="男孩走进走廊。",
+        first_frame_version_id="frame-a",
+        last_frame_version_id="frame-b",
+    )
+    project, _timeline = _project([first, second])
+    frozen = _frozen_task(
+        {
+            "elementId": "e2",
+            "mode": "i2v",
+            "firstFrameVersionId": "frame-a",
+            "firstFrameUrl": "file:///a.png",
+            "lastFrameVersionId": "frame-b",
+            "lastFrameUrl": "file:///b.png",
+            "referenceVersionIds": ["frame-a", "frame-b"],
+        },
+    )
+    assert FileR2VExecutionService._frozen_inputs_still_current(
+        project,
+        frozen,
+    )
+    second.creation = second.creation.model_copy(
+        update={"last_frame_version_id": "frame-c"},
+    )
+    assert not FileR2VExecutionService._frozen_inputs_still_current(
+        project,
+        frozen,
+    )
