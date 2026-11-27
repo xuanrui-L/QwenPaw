@@ -669,7 +669,8 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                             },
                             "value": {
                                 "description": (
-                                    "add/replace/upsert_entity 的写入值；" "保持浅嵌套"
+                                    "add/replace/upsert_entity 的写入值；"
+                                    "保持浅嵌套"
                                 ),
                             },
                             "collection": {
@@ -1385,7 +1386,8 @@ class AgentProjectTools:
             "剧本正文已进入待审阅，审阅通过后才会成为当前版本；"
             "不要重新起草，也不要为该素材创建 ProjectSource 或委派素材理解。"
             if outcome.review_id is not None
-            else "剧本正文已登记为当前版本；不要重新起草覆盖它，也不要为该" "素材创建 ProjectSource 或委派素材理解。"
+            else "剧本正文已登记为当前版本；不要重新起草覆盖它，也不要为该"
+            "素材创建 ProjectSource 或委派素材理解。"
         )
         return payload
 
@@ -1411,6 +1413,7 @@ class AgentProjectTools:
             json_args=request.json_args,
         )
         self._reject_frozen_snapshot_edits(base, candidate)
+        self._require_authored_video_plans(base.project, candidate)
         candidate = self._apply_agent_edit_impacts(base, candidate)
         auto_snapshotted = auto_snapshot_timelines(
             base.project.model_dump(mode="json"),
@@ -1490,6 +1493,42 @@ class AgentProjectTools:
                 update={"cut_advisory": cut_advisory},
             )
         return commit_result
+
+    @staticmethod
+    def _require_authored_video_plans(
+        base: Project,
+        candidate: dict[str, Any],
+    ) -> None:
+        """Keep legacy editing open and require a plan when the Agent authors a shot."""
+        timelines = candidate.get("timelines", {}).get("items", {})
+        for timeline_id, timeline in timelines.items():
+            previous_timeline = base.timelines.items.get(timeline_id)
+            previous_elements = (
+                previous_timeline.elements_by_id if previous_timeline else {}
+            )
+            for element_id, element in timeline.get(
+                "elements_by_id", {}
+            ).items():
+                creation = element.get("creation", {})
+                if creation.get("type") != "r2v" or creation.get(
+                    "generation_plan"
+                ):
+                    continue
+                previous = previous_elements.get(element_id)
+                before = previous.creation if previous else None
+                if (
+                    getattr(before, "type", "") != "r2v"
+                    or any(
+                        creation.get(field, "") != getattr(before, field, "")
+                        for field in ("intent", "narrative", "continuity")
+                    )
+                    or getattr(before, "generation_plan", None) is not None
+                ):
+                    raise AgentProjectToolError(
+                        f"镜头 {element_id} 需要 generation_plan。根据镜头意图、"
+                        "可用素材与模型能力明确选择方法、分镜和前段依赖。",
+                        code="VIDEO_GENERATION_PLAN_REQUIRED",
+                    )
 
     def _reject_frozen_snapshot_edits(
         self,
@@ -1828,6 +1867,7 @@ class AgentProjectTools:
         candidate = base.project.model_dump(mode="json")
         apply_patch_ops(candidate, request.ops)
         self._reject_frozen_snapshot_edits(base, candidate)
+        self._require_authored_video_plans(base.project, candidate)
         candidate = self._apply_agent_edit_impacts(base, candidate)
         auto_snapshotted = auto_snapshot_timelines(
             base.project.model_dump(mode="json"),

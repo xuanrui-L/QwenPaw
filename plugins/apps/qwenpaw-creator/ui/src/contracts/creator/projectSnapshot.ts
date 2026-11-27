@@ -221,6 +221,12 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   visual_variant_refs: Record<string, string>;
   cast_lineup_refs?: string[];
   recipe: GenerationRecipeDocument | null;
+  generation_plan?: {
+    method: "r2v" | "r2v_last_frame" | "video_extend";
+    use_storyboard: boolean;
+    predecessor_element_id?: string | null;
+    anchor_instruction?: string;
+  } | null;
   storyboard_prompt: string;
   storyboard_reference_version_ids: string[];
   video_prompt: string;
@@ -251,6 +257,8 @@ export interface I2VCreationDocument extends ProjectJsonRecord {
   narrative: string;
   continuity: string;
   first_frame_version_id: string | null;
+  last_frame_version_id?: string | null;
+  predecessor_element_id?: string | null;
   video_prompt: string;
   generate_audio?: boolean;
   recipe: GenerationRecipeDocument | null;

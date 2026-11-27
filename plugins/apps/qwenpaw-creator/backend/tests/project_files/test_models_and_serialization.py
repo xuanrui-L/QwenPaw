@@ -128,7 +128,7 @@ def test_project_new_has_complete_valid_defaults_and_utc_time():
         now=datetime(2026, 7, 15, 16, 0, tzinfo=timezone.utc),
     )
 
-    assert project.schema_version == 11
+    assert project.schema_version == 12
     assert project.generation == 0
     assert project.created_at.tzinfo == timezone.utc
     assert project.timelines.order == ["timeline:main"]
@@ -160,16 +160,16 @@ def _variant_project() -> Project:
         },
         order=["char:hero"],
     )
-    project.timelines.items["timeline:main"].elements_by_id[
-        "element:hero"
-    ] = TimelineElement(
-        element_id="element:hero",
-        span=TimelineSpan(start_tick=0, duration_tick=1_000),
-        location=ElementLocation(),
-        creation=R2VCreation(
-            character_refs=["char:hero"],
-            visual_variant_refs={"char:hero": "variant:fallen"},
-        ),
+    project.timelines.items["timeline:main"].elements_by_id["element:hero"] = (
+        TimelineElement(
+            element_id="element:hero",
+            span=TimelineSpan(start_tick=0, duration_tick=1_000),
+            location=ElementLocation(),
+            creation=R2VCreation(
+                character_refs=["char:hero"],
+                visual_variant_refs={"char:hero": "variant:fallen"},
+            ),
+        )
     )
     return Project.model_validate(project.model_dump(mode="json"))
 
@@ -283,7 +283,7 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
 
     migrated = load_project_document(raw)
 
-    assert migrated.schema_version == 11
+    assert migrated.schema_version == 12
     assert migrated.settings.production_stage == "media"
     assert migrated.settings.script_approval_fingerprint is None
     assert migrated.visual.entities.items[

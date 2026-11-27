@@ -40,8 +40,11 @@ from services.media_files.interaction_fingerprint import (
     motion_matches_request,
     interaction_request_fingerprint,
 )
-from services.media_files.segment_continuity import (
-    find_predecessor_video_element,
+from domain.errors import ValidationError
+from models.video_task_plans import (
+    planned_predecessor,
+    planned_predecessor_id,
+    uses_storyboard,
 )
 from services.project_files.models import (
     ArtifactVersionRenderSource,
@@ -1195,24 +1198,8 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 )
                 task = active.get(key)
                 failure = failed.get(key)
-                # Storyboard tiers (2026-11-25): anchored simple segments
-                # skip the storyboard entirely — no node, no wait, no
-                # spend. Sticky by artifact: a selected storyboard (legacy
-                # render or manual override) keeps its node even when the
-                # triage now says the anchor alone would do.
-                from models.video_task_plans import (
-                    r2v_continuity_storyboard_need,
-                )
-
-                storyboard_tier = r2v_continuity_storyboard_need(
-                    project,
-                    timeline,
-                    element,
-                )
                 skip_storyboard = (
-                    storyboard_tier == "none"
-                    and storyboard_slot is None
-                    and task is None
+                    not uses_storyboard(creation) and task is None
                 )
                 missing = (*_upstream_missing(deps, statuses), *gate_missing)
                 authored_text_gap = False
@@ -1352,86 +1339,39 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             # Determine storyboard dependency and upstream refs
             storyboard_done = True
             storyboard_dep: tuple[str, ...] = ()
-            if creation_type == "r2v" and storyboard_id is not None:
+            if (
+                creation_type == "r2v"
+                and storyboard_id is not None
+                and uses_storyboard(creation)
+            ):
                 storyboard_done = (
                     statuses[storyboard_id] is WorkNodeStatus.DONE
                 )
                 storyboard_dep = (storyboard_id,)
 
-            # Adjacent-segment continuity: R2V and I2V Elements wait on
-            # the video immediately before them on the same lane. Uses
-            # the same ``find_predecessor_video_element`` helper the
-            # submit path consults so both sides agree on who counts
-            # as a neighbour (strictly earlier ``start_tick``; same-
-            # tick siblings are parallel, not chained). The submit
-            # path pulls the predecessor's tail clip and last frame
-            # from that Element's main slot, so a reroll there must
-            # invalidate this Element before we spend a provider call
-            # on stale anchors. An I2V Element with an authored first
-            # frame never reads the predecessor, so it is exempt from
-            # both the gate and the fingerprint marker: chaining it
-            # anyway would park the node behind a video it does not
-            # consume and rerun parked failures on an irrelevant roll.
             prev_video_dep: tuple[str, ...] = ()
             prev_video_slot: str | None = None
             prev_video_done = True
-            # The chain splits two questions: was an anchor candidate
-            # ever published (anchor_slot_observed — a durable fact the
-            # readiness gate cites so an I2V Element names the true
-            # blocker instead of a misleading "publish the prev video")
-            # vs will an anchor actually ship (only while ffmpeg can
-            # run; otherwise the dependency, the gating wait, and the
-            # fingerprint marker step aside, because an anchor that
-            # never ships must not gate a node or re-queue a parked
-            # failure for a paid rerun whose wire inputs are unchanged).
-            # Known limitation (non-billing): the graph only sees the
-            # durable ``creation.first_frame_version_id``. An I2V Element
-            # whose first frame is supplied solely via the ephemeral
-            # ``firstFrameRef`` dispatch argument still looks auto-framed
-            # here, so a prev reroll may GATE it or re-queue a parked
-            # failure even though submit will use the explicit frame. It
-            # never causes a paid cascade (submit honours the argument);
-            # the durable fix is to persist firstFrameRef onto creation.
-            anchor_slot_observed: str | None = None
-            consumes_continuity = creation_type == "r2v" or (
-                creation_type == "i2v"
-                and not getattr(creation, "first_frame_version_id", "")
-            )
-            if consumes_continuity:
-                prev_element = find_predecessor_video_element(
-                    timeline,
-                    element,
+            predecessor_error = ""
+            try:
+                predecessor = planned_predecessor(timeline, element)
+            except ValidationError as error:
+                predecessor = None
+                predecessor_error = str(error)
+            if predecessor is not None:
+                prev_video_node_id = f"video:{predecessor.element_id}"
+                prev_video_dep = (prev_video_node_id,)
+                prev_video_slot = _slot_selected(
+                    project,
+                    f"element:{predecessor.element_id}:main",
                 )
-                if prev_element is not None:
-                    anchor_slot_observed = _slot_selected(
-                        project,
-                        f"element:{prev_element.element_id}:main",
-                    )
-                    # Mixed parallelism: only anchor-routable r2v
-                    # segments serialize behind their predecessor;
-                    # scene changes, cuts and the throughput dial ship
-                    # plain and run parallel. I2V auto-framing keeps
-                    # its chain (its shape always consumes the prev).
-                    from models.video_task_plans import (
-                        r2v_may_consume_predecessor,
-                    )
-
-                    may_consume = creation_type != "r2v" or (
-                        r2v_may_consume_predecessor(
-                            timeline.elements_by_id,
-                            element,
-                            prev_element,
-                        )
-                    )
-                    if ffmpeg_ready is not False and may_consume:
-                        prev_video_node_id = f"video:{prev_element.element_id}"
-                        prev_video_dep = (prev_video_node_id,)
-                        prev_video_slot = anchor_slot_observed
-                        prev_video_done = (
-                            anchor_slot_observed is not None
-                            and statuses.get(prev_video_node_id)
-                            is WorkNodeStatus.DONE
-                        )
+                prev_video_done = (
+                    prev_video_slot is not None
+                    and statuses.get(prev_video_node_id) is WorkNodeStatus.DONE
+                )
+                if ffmpeg_ready is False:
+                    predecessor_error = "生成方案需要可用的 ffmpeg/ffprobe"
+            anchor_slot_observed = prev_video_slot
             upstream_selected = _video_upstream_refs(
                 creation_type,
                 creation,
@@ -1468,15 +1408,50 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 else None
             )
 
+            tail_frame = None
+            if (
+                isinstance(creation, I2VCreation)
+                and creation.last_frame_version_id
+            ):
+                from models.config import (
+                    get_video_backend,
+                    get_video_model_name,
+                )
+                from models.video_capabilities import supports_last_frame
+
+                model = (
+                    media_models[1] if media_models else get_video_model_name()
+                )
+                if supports_last_frame(model, get_video_backend()):
+                    tail_frame = creation.last_frame_version_id
+                    upstream_selected.append(tail_frame)
+                    fingerprint = _fingerprint(
+                        fingerprint, "last_frame", tail_frame
+                    )
+
             video_missing: tuple[str, ...] = ()
             video_text_gap = False
             if task is not None:
                 status = WorkNodeStatus.RUNNING
-            elif creation_type in {"i2v", "s2v"} and (
-                input_gaps := _video_readiness_gates(
-                    creation_type,
-                    creation,
-                    prev_video_slot=anchor_slot_observed,
+            elif not video_slot and predecessor_error:
+                status = WorkNodeStatus.GATED
+                video_missing = (predecessor_error,)
+            elif (
+                creation_type in {"i2v", "s2v"}
+                and (
+                    not (
+                        isinstance(creation, I2VCreation)
+                        and video_slot
+                        and not creation.first_frame_version_id
+                        and not planned_predecessor_id(element)
+                    )
+                )
+                and (
+                    input_gaps := _video_readiness_gates(
+                        creation_type,
+                        creation,
+                        prev_video_slot=anchor_slot_observed,
+                    )
                 )
             ):
                 # Removing a required input is an unfinished revision even
@@ -1494,7 +1469,11 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # Prompt-only changes are caught by the dispatch fingerprint
                 # for failure-parking, but do NOT trigger STALE re-generation.
                 upstream_for_stale = (
-                    [storyboard_slot]
+                    (
+                        [storyboard_slot]
+                        if storyboard_slot and uses_storyboard(creation)
+                        else []
+                    )
                     if creation_type == "r2v"
                     else upstream_selected
                 )
@@ -1556,12 +1535,17 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # into this node's missing list. Each type therefore
                 # lists exactly the dependency families it declares.
                 video_missing = _upstream_missing(
-                    (*deps, *storyboard_dep, *prev_video_dep)
-                    if creation_type == "r2v"
-                    else (*storyboard_dep, *prev_video_dep),
+                    (
+                        (*deps, *storyboard_dep, *prev_video_dep)
+                        if creation_type == "r2v"
+                        else (*storyboard_dep, *prev_video_dep)
+                    ),
                     statuses,
                 )
-                if (
+                if predecessor_error:
+                    status = WorkNodeStatus.GATED
+                    video_missing = (*video_missing, predecessor_error)
+                elif (
                     creation_type != "s2v"
                     and not (creation.video_prompt or "").strip()
                 ):
@@ -2243,6 +2227,11 @@ def _video_fingerprint_parts(
             video_id,
             creation.video_prompt,
             creation.first_frame_version_id,
+            *(
+                ("predecessor", creation.predecessor_element_id)
+                if creation.predecessor_element_id
+                else ()
+            ),
             *audio_parts,
             *prev_slot_part,
         )
@@ -2260,6 +2249,11 @@ def _video_fingerprint_parts(
         creation.video_prompt,
         storyboard_slot,
         sorted(creation.video_reference_version_ids),
+        *(
+            ("generation_plan", creation.generation_plan.model_dump_json())
+            if creation.generation_plan is not None
+            else ()
+        ),
         *audio_parts,
         *prev_slot_part,
     )
@@ -2335,9 +2329,11 @@ def _video_readiness_gates(
         assert isinstance(creation, I2VCreation)
         if not creation.first_frame_version_id:
             if not prev_video_slot:
+                if creation.predecessor_element_id:
+                    return ("生成方案引用的前段视频尚未发布",)
                 return (
                     "first_frame_version_id 缺失",
-                    "上一段末帧也不可用：请先发布前一段视频，或在本 Element 上显式声明首帧",
+                    "请指定首帧版本或前段镜头",
                 )
             if ffmpeg_ready is False:
                 return (

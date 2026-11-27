@@ -253,6 +253,8 @@ def continuity_reference_ids(
     project: Project,
     timeline: Timeline,
     element: TimelineElement,
+    *,
+    predecessor: TimelineElement | None = None,
 ) -> tuple[str, ...]:
     """Stable synthetic IDs for fingerprint / ``input_refs`` comparison.
 
@@ -267,7 +269,7 @@ def continuity_reference_ids(
     leaves the machine.
     """
 
-    prev = find_predecessor_video_element(timeline, element)
+    prev = predecessor or find_predecessor_video_element(timeline, element)
     if prev is None:
         return ()
     prev_version = resolve_predecessor_video_version(project, prev)
@@ -730,6 +732,7 @@ def extract_continuity_artifacts(
     project_root: Path,
     timeline: Timeline,
     element: TimelineElement,
+    predecessor: TimelineElement | None = None,
 ) -> ContinuityBundle | None:
     """Return the predecessor's last_frame for I2V auto-first-frame.
 
@@ -763,7 +766,7 @@ def extract_continuity_artifacts(
     # Splitting it would scatter the lock/cache/GC invariant across
     # helpers without reducing real complexity.
     # pylint: disable=too-many-branches,too-many-statements
-    prev = find_predecessor_video_element(timeline, element)
+    prev = predecessor or find_predecessor_video_element(timeline, element)
     if prev is None:
         _trace_skip(
             "no_predecessor",

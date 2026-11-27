@@ -21,17 +21,19 @@ Two contract facts (official docs, M0-verified against the live API on
   material prefix before publishing, or the segment duplicates its
   predecessor on the timeline.
 
-The planner is pure: facts in, one ``VideoTaskPlan`` out. It never
-touches the filesystem, providers or the Project graph; the execution
-layer gathers durable facts and runs the plan.
+The planning model selects the request shape and dependencies. Helpers here
+validate the declared dependency and describe the prepared provider task.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from dataclasses import dataclass
 from enum import StrEnum
-import math
+from domain.errors import ValidationError
+
+if TYPE_CHECKING:
+    from services.project_files.models import Timeline, TimelineElement
 
 # Wan3.0 reference_video quota: at most 5 clips totalling <=15s, and
 # input + output share the 30s ceiling. The headroom absorbs provider
@@ -62,45 +64,6 @@ class VideoTaskKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class ContinuityFacts:
-    """Deterministic, already-published inputs to one routing decision.
-
-    ``predecessor_version_id`` is the predecessor Element's selected
-    main-slot artifact (the real Asset Index version an extension
-    references); ``predecessor_duration_seconds`` is probed from it.
-    ``same_scene`` compares the two Elements' ``scene_ref``; ``
-    new_elements`` is true when this segment introduces a character or
-    prop the predecessor did not carry. ``cross_episode`` marks a
-    segment with no in-timeline predecessor (a new episode's opener).
-    Everything here is durable data, so the same project state always
-    routes the same way (claim/submit replay safe).
-    """
-
-    creation_type: str = "r2v"
-    has_published_predecessor: bool = False
-    predecessor_version_id: str = ""
-    predecessor_duration_seconds: float = 0.0
-    same_scene: bool = False
-    cross_episode: bool = False
-    new_elements: bool = False
-    explicit_first_frame: bool = False
-    segment_duration_seconds: int = 0
-    ffmpeg_ready: bool = True
-    video_extension_supported: bool = False
-    # Author-intent signals read off the Timeline (see the routing
-    # matrix): ``transition_kind`` is the normalized kind of an explicit
-    # Transition element between predecessor and this segment
-    # ("none"/"cut"/"blend"); ``continuity_intent`` classifies the
-    # segment's ``creation.continuity`` text ("continue"/"cut"/
-    # "neutral"); ``one_take`` marks continuity text that explicitly
-    # asks for an unbroken camera continuation (一镜到底/延续运镜), the
-    # only way VIDEO_EXTEND is still chosen for an r2v segment.
-    transition_kind: str = "none"
-    continuity_intent: str = "neutral"
-    one_take: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class VideoTaskPlan:
     """The routed task kind plus everything the submit path must honour.
 
@@ -127,7 +90,6 @@ class VideoTaskPlan:
     ratio: str = ""
     submit_duration_seconds: int = 0
     trim_offset_seconds: float | None = None
-    auto_first_frame: bool = False
     strong_continuity: bool = False
 
 
@@ -186,241 +148,61 @@ def continuity_signals(
     return transition_kind, "neutral", False
 
 
-def r2v_may_consume_predecessor(
-    elements_by_id: dict,
-    element,
-    prev,
-) -> bool:
-    """Whether an r2v segment can be routed onto an anchored shape.
-
-    The work graph serializes a video node behind its predecessor only
-    while this holds; scene changes, explicit transitions, cut-flavoured
-    continuity and newly introduced elements all route to plain omni
-    reference, which never reads the predecessor's footage — gating
-    those waits was over-conservative serialization. Mirrors the
-    planner's rules 2-4 exactly (rule 1's dial is resolved by the
-    caller), and it is cheap pure data so graph and executor agree.
-    """
-
-    if prev is None:
-        return False
-    # Scene changes and newly introduced elements are creative
-    # clues for the model, not vetoes: an authored continue/one_take
-    # declaration wins. Only material facts (a published predecessor)
-    # and explicit user transitions gate the anchored shape.
-    transition_kind, intent, _one_take = continuity_signals(
-        elements_by_id,
-        element,
-        prev,
-    )
-    if transition_kind != "none" or intent == "cut":
-        return False
-    if intent in ("continue", "one_take"):
-        # Authored declaration wins over the scene/cast clues below:
-        # an explicit continue anchors even across scenes.
-        return True
-    # Missing intent defaults to CONTINUOUS — but only for a
-    # CONFIRMED same scene: an empty scene_ref on either side is
-    # "scene unknown", not "same scene", and must not lock the
-    # segment onto an unverified predecessor frame.
-    prev_scene = getattr(prev.creation, "scene_ref", None)
-    cur_scene = getattr(element.creation, "scene_ref", None)
-    if not prev_scene or not cur_scene or prev_scene != cur_scene:
-        return False
-    prev_refs = set(getattr(prev.creation, "character_refs", []) or [])
-    prev_refs |= set(getattr(prev.creation, "prop_refs", []) or [])
-    cur_refs = set(getattr(element.creation, "character_refs", []) or [])
-    cur_refs |= set(getattr(element.creation, "prop_refs", []) or [])
-    return not (cur_refs - prev_refs)
-
-
-def anchored_segment_is_complex(timeline: Any, element: Any) -> bool:
-    """Whether an anchored segment needs the storyboard to ride along.
-
-    The last-frame anchor guarantees a truthful STARTING state; the
-    storyboard supplies rhythm and composition. Long takes, multiple
-    people, camera moves, multi-beat narration and prop state changes
-    all ask the model to structure time — the anchor alone is not enough
-    (triage conditions from the 2026-11-25 plan, informed by Seedance
-    time-beat guidance: anything needing timeline management deserves a
-    structural reference).
-    """
-
+def planned_predecessor_id(element: TimelineElement) -> str | None:
     creation = element.creation
-    authored_sb = getattr(creation, "storyboard_intent", None)
-    # The model decides: authored storyboard need is the only
-    # creative input; a missing field defaults conservatively to
-    # "the storyboard rides" (legacy behaviour).
-    return authored_sb != "none"
+    if creation.type == "r2v":
+        plan = creation.generation_plan
+        return plan.predecessor_element_id if plan is not None else None
+    if creation.type == "i2v":
+        return creation.predecessor_element_id
+    return None
+
+
+def planned_predecessor(
+    timeline: Timeline,
+    element: TimelineElement,
+) -> TimelineElement | None:
+    predecessor_id = planned_predecessor_id(element)
+    if predecessor_id is None:
+        return None
+    candidate = timeline.elements_by_id.get(predecessor_id)
+    if (
+        candidate is None
+        or not candidate.enabled
+        or candidate.creation.type not in {"r2v", "i2v", "t2v", "s2v"}
+        or candidate.span.start_tick >= element.span.start_tick
+        or candidate.span.start_tick + candidate.span.duration_tick
+        > element.span.start_tick
+    ):
+        raise ValidationError(
+            f"指定的前段 {predecessor_id} 必须是同一轨道内已启用、先于本段结束的视频镜头",
+        )
+    return candidate
+
+
+def uses_storyboard(creation: Any) -> bool:
+    plan = getattr(creation, "generation_plan", None)
+    return plan is None or plan.use_storyboard
 
 
 def r2v_continuity_storyboard_need(
-    project: Any,
-    timeline: Any,
-    element: Any,
+    _project: Any,
+    _timeline: Any,
+    element: TimelineElement,
 ) -> str:
-    """Three-tier storyboard need for one r2v segment.
-
-    ``plain``     not anchor-routed (first segment, scene change, cut,
-                  new elements, throughput dial): storyboard ships as
-                  always.
-    ``none``      anchored and simple: the storyboard is neither
-                  generated nor sent; the last-frame anchor plus the
-                  prompt carries the segment.
-    ``combined``  anchored but complex (or manually forced): anchor AND
-                  storyboard ship together, anchor as 图1, storyboard
-                  promoted to 图2 (keep+shift stack).
-
-    Pure project data so work graph, executor and fingerprint agree.
-    """
-
-    creation = getattr(element, "creation", None)
-    if getattr(creation, "type", None) != "r2v":
-        return "plain"
-    if getattr(creation, "force_storyboard", False):
+    plan = getattr(element.creation, "generation_plan", None)
+    if not uses_storyboard(element.creation):
+        return "none"
+    if plan is not None and plan.method == "r2v_last_frame":
         return "combined"
-    # Lazy import: the continuity layer already leans on this module.
-    from services.media_files.segment_continuity import (
-        find_predecessor_video_element,
-    )
-
-    prev = find_predecessor_video_element(timeline, element)
-    if not r2v_may_consume_predecessor(
-        timeline.elements_by_id,
-        element,
-        prev,
-    ):
-        return "plain"
-    from services.runtime_files.runtime_dependencies import (
-        resolve_ffmpeg,
-    )
-
-    if not resolve_ffmpeg():
-        # Every anchored tier ships a last-frame reference; without
-        # the extractor that reference can never materialize, so plan
-        # the plain shape instead of a request that fails validation.
-        return "plain"
-    return (
-        "combined"
-        if anchored_segment_is_complex(timeline, element)
-        else "none"
-    )
-
-
-def _plain(
-    facts: ContinuityFacts,
-    kind: VideoTaskKind,
-    *,
-    ratio: str,
-    auto_first_frame: bool = False,
-) -> VideoTaskPlan:
-    return VideoTaskPlan(
-        kind=kind,
-        ratio=ratio,
-        submit_duration_seconds=facts.segment_duration_seconds,
-        auto_first_frame=auto_first_frame,
-    )
-
-
-# pylint: disable-next=too-many-return-statements
-def select_video_task_kind(
-    base_mode: str,
-    facts: ContinuityFacts,
-    *,
-    project_ratio: str = "",
-) -> VideoTaskPlan:
-    """Route one segment submission onto a first-class task kind.
-
-    Non-r2v base modes keep their own kind (the author already chose
-    i2v/t2v/video_edit; i2v may still auto-adopt the predecessor frame).
-    For an r2v base the planner applies the author-intent routing rules
-    in order — the seam evidence (A/B, 2026-11-24) is that a PROMOTED
-    last-frame anchor inside the reference stack stitches nearly as well
-    as pixel-locking while keeping the cast references and the bgm
-    reference_audio channel, so same-scene continuations stay R2V:
-
-    1. ``off``/``weak``, no published predecessor, or a new episode:
-       plain R2V.
-    2. An explicit Transition element between predecessor and this
-       segment (cut OR blend): plain R2V — the author asked for an edit
-       point, and a crossfade hides the seam by construction.
-    3. continuity text with cut vocabulary (切到/另一机位/时间跳转…):
-       plain R2V.
-    4. Scene change or newly introduced characters/props: plain R2V —
-       new anchors need the reference stack, and a cut fights pixel
-       continuation.
-    5. ``one_take`` text, extension-capable model, whole predecessor
-       within the 15s/30s budgets: VIDEO_EXTEND (camera and audio
-       literally continue; output is prefix-trimmed before publishing).
-    6. Otherwise (same scene, continuous-take or neutral intent):
-       R2V with ``strong_continuity`` — the executor extracts the
-       predecessor's last frame and leads the reference stack with it.
-       Without ffmpeg the anchor cannot be extracted, so fall back to
-       plain R2V.
-    """
-
-    if base_mode != "r2v":
-        kind = VideoTaskKind(base_mode)
-        return _plain(
-            facts,
-            kind,
-            ratio=project_ratio,
-            auto_first_frame=(
-                kind is VideoTaskKind.I2V and not facts.explicit_first_frame
-            ),
-        )
-
-    if not facts.has_published_predecessor or facts.cross_episode:
-        return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
-    if facts.transition_kind != "none" or facts.continuity_intent == "cut":
-        return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
-    # Scene identity and cast are default-path clues: they gate only
-    # when the Agent declared no intent. An authored continue/one_take
-    # routes onto the anchored shape even across scenes (the
-    # scheduler applies the identical rule).
-    if facts.continuity_intent not in ("continue", "one_take") and (
-        not facts.same_scene or facts.new_elements
-    ):
-        return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
-
-    segment = facts.segment_duration_seconds
-    budget = (
-        WAN_30_MAX_INPUT_PLUS_OUTPUT_SECONDS - WAN_30_EXTEND_HEADROOM_SECONDS
-    )
-    prev = facts.predecessor_duration_seconds
-    if (
-        facts.one_take
-        and facts.video_extension_supported
-        and facts.predecessor_version_id
-        and 0 < prev <= WAN_30_MAX_REFERENCE_VIDEO_SECONDS
-        and prev + segment <= budget
-    ):
-        return VideoTaskPlan(
-            kind=VideoTaskKind.VIDEO_EXTEND,
-            predecessor_version_id=facts.predecessor_version_id,
-            material_duration_seconds=prev,
-            # The provider matches the material's own frame; the project
-            # ratio must not force a letterbox mid-clip.
-            ratio="adaptive",
-            submit_duration_seconds=int(math.ceil(prev + segment)),
-            trim_offset_seconds=prev,
-        )
-    if facts.ffmpeg_ready:
-        plan = _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
-        return VideoTaskPlan(
-            kind=plan.kind,
-            ratio=plan.ratio,
-            submit_duration_seconds=plan.submit_duration_seconds,
-            strong_continuity=True,
-        )
-    return _plain(facts, VideoTaskKind.R2V, ratio=project_ratio)
+    return "plain"
 
 
 __all__ = [
-    "ContinuityFacts",
     "VideoTaskKind",
     "VideoTaskPlan",
     "continuity_signals",
-    "r2v_may_consume_predecessor",
-    "select_video_task_kind",
+    "planned_predecessor",
+    "planned_predecessor_id",
+    "uses_storyboard",
 ]
