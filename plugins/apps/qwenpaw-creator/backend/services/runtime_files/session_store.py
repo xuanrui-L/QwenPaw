@@ -984,6 +984,45 @@ class ProjectRuntimeSessionStore:
             )
             return CreatorGoalRecord.model_validate(updated)
 
+    def complete_idle_goal(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        goal_id: str,
+        observed_message_seq: int,
+    ) -> bool:
+        """Complete production only if the observed idle Session still owns it."""
+        project_id, session_id = self._safe_session_ids(project_id, session_id)
+        with self._project_lock(project_id):
+            session = self._read_session_snapshot_unlocked(
+                project_id, session_id,
+            )
+            if (
+                session.status is not CreatorSessionStatus.IDLE
+                or session.active_run_id is not None
+                or session.active_goal_id != goal_id
+                or session.last_message_seq != observed_message_seq
+            ):
+                return False
+            goal = self._read_goal_unlocked(project_id, goal_id)
+            if goal.status is not CreatorGoalStatus.ACTIVE:
+                return False
+            self._goal_store(project_id, goal_id).write(
+                goal.model_copy(
+                    update={
+                        "status": CreatorGoalStatus.COMPLETED,
+                        "updated_at": utc_now(),
+                    },
+                ),
+            )
+            logger.info(
+                "goal status: project=%s goal=%s status=COMPLETED",
+                project_id,
+                goal_id,
+            )
+            return True
+
     def resolve_pending_review(
         self,
         project_id: str,

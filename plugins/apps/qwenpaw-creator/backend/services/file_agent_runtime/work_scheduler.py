@@ -857,6 +857,9 @@ class WorkGraphScheduler:
             ffmpeg_ready=await asyncio.to_thread(probe_ffmpeg_ready),
         )
         from services.run_review import admission
+        from services.run_review.text_review import (
+            active_sync_review_gates,
+        )
         from services.run_review.media_review import active_media_review_slots
         from .workgraph_execution import _publication_artifacts
 
@@ -893,8 +896,9 @@ class WorkGraphScheduler:
             / "run-review"
         )
         sync_fences = await asyncio.to_thread(
-            admission.active_sync_fences,
+            active_sync_review_gates,
             reports_root,
+            snapshot.project,
         )
         sync_review_pending = bool(sync_fences)
         if sync_review_pending:

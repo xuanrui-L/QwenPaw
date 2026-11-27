@@ -19,7 +19,7 @@ import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from schemas.run_review import RubricScore, SyncReviewAdvisory
 from services.observability.tracing import trace_event
@@ -32,6 +32,9 @@ from services.run_review.prompt_contract import (
     check_changed_r2v_prompt_contracts,
 )
 from utils.logger import setup_logger
+
+if TYPE_CHECKING:
+    from services.project_files.models import Project
 
 logger = setup_logger("creator.run_review.text")
 
@@ -583,6 +586,7 @@ def _prompt_contract_advisory(
     reports_root: Path,
     transaction_id: str,
     content_job_admitted: bool,
+    project_generation: int | None,
 ) -> dict[str, Any] | None:
     """Persist and gate deterministic R2V prompt findings.
 
@@ -612,6 +616,14 @@ def _prompt_contract_advisory(
         pointer_group="generation_content",
         reviewed_pointers=reviewed_pointers,
         round_number=1,
+        reference_order_generation=(
+            project_generation
+            if all(
+                item["code"] == "VIDEO_REFERENCE_ROLE_MISMATCH"
+                for item in findings
+            )
+            else None
+        ),
     )
     advisory = SyncReviewAdvisory(
         transaction_id=transaction_id,
@@ -645,6 +657,31 @@ def _prompt_contract_advisory(
         projectId=project_id,
     )
     return payload
+
+
+def active_sync_review_gates(
+    reports_root: Path,
+    project: Project,
+) -> tuple[dict[str, Any], ...]:
+    """Recheck reference-only advisories when their Project inputs change."""
+    fences = admission.active_sync_fences(reports_root)
+    checked = False
+    for fence in fences:
+        generation = fence.get("reference_order_generation")
+        if not isinstance(generation, int) or generation >= project.generation:
+            continue
+        report = check_changed_r2v_prompt_contracts(
+            project.model_dump(mode="json"),
+            fence["reviewed_pointers"],
+        )
+        admission.settle_reference_order_recheck(
+            reports_root,
+            fence,
+            generation=project.generation,
+            passed=report["passed"],
+        )
+        checked = True
+    return admission.active_sync_fences(reports_root) if checked else fences
 
 
 def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
@@ -694,6 +731,7 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
                 reports_root=reports_root,
                 transaction_id=transaction_id,
                 content_job_admitted=False,
+                project_generation=project_json.get("generation"),
             )
 
         jobs = _admit_sync_review_jobs(
@@ -712,6 +750,7 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
                 reports_root=reports_root,
                 transaction_id=transaction_id,
                 content_job_admitted=False,
+                project_generation=project_json.get("generation"),
             )
 
         content_pointers = [
@@ -794,6 +833,7 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
             reports_root=reports_root,
             transaction_id=transaction_id,
             content_job_admitted=content_job_admitted,
+            project_generation=project_json.get("generation"),
         )
         if prompt_payload is not None:
             delivered.append(prompt_payload)

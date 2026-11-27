@@ -660,7 +660,7 @@ async def ready_request_context(
     Only the confirmed node's frontend edit grace is waived, and only while
     the read snapshot still matches. Unattended callers must not confirm edits.
     """
-    from services.run_review import admission
+    from services.run_review.text_review import active_sync_review_gates
     from services.run_review.media_review import active_media_review_slots
 
     snapshot, tasks, reviews = await asyncio.gather(
@@ -700,8 +700,9 @@ async def ready_request_context(
         is not None
     )
     fences = await asyncio.to_thread(
-        admission.active_sync_fences,
+        active_sync_review_gates,
         services.projects.project_root(project_id) / "runtime" / "run-review",
+        snapshot.project,
     )
     from .manual_regeneration_hold import ManualRegenerationHoldStore
 

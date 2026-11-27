@@ -498,41 +498,67 @@ def hold_sync_blocker(
     pointer_group: str,
     reviewed_pointers: Sequence[str],
     round_number: int,
+    reference_order_generation: int | None = None,
 ) -> None:
-    """Keep dependent media gated while an advisory still needs repair.
-
-    The short-lived pre-commit fence only protects the time spent inside the
-    inline reviewer.  A weak advisory must also protect the following agent
-    turn; otherwise the scheduler starts paid generation from the rejected
-    prompt before the model can apply the feedback.  One blocker per pointer
-    group is enough because a newer repair supersedes the older content.
-    """
-
-    write_json(
-        _sync_blocker_dir(reports_root) / f"{safe_ref(pointer_group)}.json",
-        {
-            "token": f"sync-blocker-{safe_ref(pointer_group)}",
+    """Keep dependent media gated while an advisory still needs repair."""
+    token = safe_ref(pointer_group)
+    path = _sync_blocker_dir(reports_root) / f"{token}.json"
+    with _sync_lock(reports_root):
+        previous = read_json(path)
+        if reference_order_generation is not None and previous is not None:
+            # A reference-order recheck cannot settle an independent textual
+            # advisory. Keep both scopes under the stronger existing gate.
+            if "reference_order_generation" not in previous:
+                reference_order_generation = None
+            reviewed_pointers = (
+                *previous.get("reviewed_pointers", ()), *reviewed_pointers,
+            )
+        payload = {
+            "token": f"sync-blocker-{token}",
             "project_id": project_id,
             "pointer_group": pointer_group,
             "reviewed_pointers": sorted(set(reviewed_pointers)),
             "round": round_number,
             "kind": "awaiting_repair",
             "created_at": datetime.now(UTC).isoformat(),
-        },
-    )
+        }
+        if reference_order_generation is not None:
+            payload["reference_order_generation"] = reference_order_generation
+        write_json(path, payload)
 
 
 def clear_sync_blocker(reports_root: Path, *, pointer_group: str) -> None:
     """Release the unresolved-advisory blocker for one pointer group."""
-
     path = _sync_blocker_dir(reports_root) / f"{safe_ref(pointer_group)}.json"
     try:
-        path.unlink(missing_ok=True)
+        with _sync_lock(reports_root):
+            path.unlink(missing_ok=True)
     except OSError:
         logger.exception(
-            "failed to release sync-review blocker %s",
-            pointer_group,
+            "failed to release sync-review blocker %s", pointer_group,
         )
+
+
+def settle_reference_order_recheck(
+    reports_root: Path,
+    fence: Mapping[str, Any],
+    *,
+    generation: int,
+    passed: bool,
+) -> None:
+    """Commit a reference-only result if no newer review replaced the gate."""
+    path = _sync_blocker_dir(reports_root) / (
+        f"{safe_ref(str(fence['pointer_group']))}.json"
+    )
+    with _sync_lock(reports_root):
+        if read_json(path) != fence:
+            return
+        if passed:
+            path.unlink()
+        else:
+            write_json(
+                path, {**fence, "reference_order_generation": generation},
+            )
 
 
 def active_sync_fences(reports_root: Path) -> tuple[dict[str, Any], ...]:

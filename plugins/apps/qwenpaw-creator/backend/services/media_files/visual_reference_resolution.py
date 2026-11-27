@@ -180,29 +180,28 @@ def _resolved_variant_id(
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _lineup_anchor_version_ids(
+def implicit_r2v_visual_slots(
     project: Project,
     creation: R2VCreation,
-) -> list[str]:
-    """Selected cast-lineup images referenced by this element.
-
-    The lineup is the group anchor for relative consistency (scale
-    ratios, shared style baseline, spatial order), so it must lead the
-    reference chain ahead of individual identity anchors. A referenced
-    lineup without a generated image contributes nothing yet — the
-    element keeps working while visual development catches up.
-    """
-
-    anchors: list[str] = []
-    for ref in creation.cast_lineup_refs:
+) -> Iterable[tuple[str, str | None]]:
+    """Yield authored owners and their optional selections in send order."""
+    for ref in dict.fromkeys(creation.cast_lineup_refs):
         lineup = project.visual.cast_lineups.items.get(ref)
         if lineup is None:
-            # Mirrors the entity invariant below: a validated Project
-            # cannot reach here, so fail loudly for mutated models.
             raise ValidationError(f"R2V 引用的阵容图不存在: {ref}")
-        if lineup.selected_artifact_version_id:
-            anchors.append(lineup.selected_artifact_version_id)
-    return anchors
+        yield f"lineup:{ref}", lineup.selected_artifact_version_id
+
+    for entity_id in _entity_ids(creation):
+        entity = project.visual.entities.items.get(entity_id)
+        if entity is None:
+            raise ValidationError(f"R2V 视觉引用实体不存在: {entity_id}")
+        variant_id = _resolved_variant_id(project, creation, entity, ())
+        if variant_id is not None:
+            yield f"asset:{entity_id}", (
+                entity.variants.items[variant_id].selected_artifact_version_id
+            )
+        elif not entity.variants.order and entity.selected_artifact_version_id:
+            yield f"asset:{entity_id}", entity.selected_artifact_version_id
 
 
 def resolve_r2v_visual_reference_version_ids(
@@ -260,37 +259,13 @@ def resolve_r2v_visual_reference_version_ids(
                         "或调整 visual_variant_refs",
                     )
         return tuple(explicit)
-    selected: list[str] = []
-    for entity_id in _entity_ids(creation):
-        entity = project.visual.entities.items.get(entity_id)
-        if entity is None:
-            # A validated Project guarantees this invariant. Keep a controlled
-            # failure for callers holding a manually mutated in-memory model;
-            # silently skipping would generate without a required identity.
-            raise ValidationError(
-                f"R2V 视觉引用实体不存在: {entity_id}",
-            )
-        variant_id = _resolved_variant_id(
-            project,
-            creation,
-            entity,
-            (),
-        )
-        if variant_id is not None:
-            version_id = entity.variants.items[
-                variant_id
-            ].selected_artifact_version_id
-        else:
-            version_id = (
-                entity.selected_artifact_version_id
-                if not entity.variants.order
-                else None
-            )
-        if version_id is not None:
-            selected.append(version_id)
-
-    lineup_anchors = _lineup_anchor_version_ids(project, creation)
-    return tuple(dict.fromkeys([*lineup_anchors, *selected]))
+    return tuple(
+        dict.fromkeys(
+            version_id
+            for _, version_id in implicit_r2v_visual_slots(project, creation)
+            if version_id is not None
+        ),
+    )
 
 
 def video_reference_plan(
