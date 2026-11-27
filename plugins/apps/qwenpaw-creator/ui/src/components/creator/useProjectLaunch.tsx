@@ -423,7 +423,6 @@ export function useProjectLaunch(options?: {
     resolution: string;
     aspectRatio: string;
     sourceUrls: string[];
-    videoContinuity?: "continuity" | "throughput";
   };
 }) {
   const { t } = useTranslation();
@@ -446,13 +445,6 @@ export function useProjectLaunch(options?: {
   const [aspectRatio, setAspectRatio] = useState<string>(
     initialValues?.aspectRatio ?? "16:9",
   );
-  // Inter-segment continuity at launch: continuity (default) keeps
-  // same-scene segments anchored and serialized; throughput parallelizes
-  // every segment as plain omni-reference. Persisted into the created
-  // project's settings, where the chat toolbar switch can change it later.
-  const [videoContinuity, setVideoContinuity] = useState<
-    "continuity" | "throughput"
-  >(initialValues?.videoContinuity ?? "continuity");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(
     null,
   );
@@ -689,7 +681,6 @@ export function useProjectLaunch(options?: {
             : interactiveContentTypeFromBrief(projectDescription),
         templateId: selectedTemplateId ?? undefined,
         subtitlePolicy,
-        videoContinuity,
         subtitleTemplate: subtitleTemplate ?? undefined,
         subtitleStyle: subtitleStyle ?? undefined,
         subtitleAnimation: subtitleAnimation ?? undefined,
@@ -789,8 +780,6 @@ export function useProjectLaunch(options?: {
     setSelectedTemplateId,
     subtitlePolicy,
     setSubtitlePolicy,
-    videoContinuity,
-    setVideoContinuity,
     subtitleTemplate,
     setSubtitleTemplate,
     subtitleStyle,

@@ -1178,10 +1178,7 @@
     "wireAnchorNote": "Image 1 is the predecessor's last frame (extracted at runtime)",
     "wireAnchorPruned": "anchor pruned",
     "wireBgmOn": "shared BGM attached",
-    "wireBgmOff": "no BGM (native audio)",
-    "storyboardTierNone": "The Agent judged this segment needs no storyboard; it continues from the predecessor's last frame. To pin a visual plan for this segment only,",
-    "storyboardTierCombined": "Anchor owns the start, storyboard owns the rhythm: shipped together",
-    "forceStoryboard": "pin a storyboard manually"
+    "wireBgmOff": "no BGM (native audio)"
   },
   "agent": {
     "assistant": "Creative Assistant",

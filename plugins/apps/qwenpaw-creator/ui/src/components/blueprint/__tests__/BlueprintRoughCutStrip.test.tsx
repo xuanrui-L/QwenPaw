@@ -2,6 +2,7 @@ import { cloneProject } from "@/test/projectSnapshotFixtures";
 import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import BlueprintRoughCutStrip from "@/components/blueprint/BlueprintRoughCutStrip";
+import { AssetDownloadProvider } from "@/components/assets/AssetDownload";
 import type { ProjectDocument } from "@/contracts/creator";
 
 /**
@@ -22,6 +23,25 @@ function renderStrip(project: ProjectDocument) {
 }
 
 describe("BlueprintRoughCutStrip whole-film preview", () => {
+  it("uses the selected composed film for its QR and hides the action in review or after edits", () => {
+    const project = withWholeFilm(cloneProject());
+    const surface = (document: ProjectDocument, review = false) => (
+      <AssetDownloadProvider projectId={document.project_id} review={review}>
+        <BlueprintRoughCutStrip project={document} onSelectTimeline={vi.fn()} />
+      </AssetDownloadProvider>
+    );
+    const { container, rerender } = render(surface(project));
+    const buttons = () => container.querySelectorAll("[data-asset-download]");
+    expect(buttons()).toHaveLength(1);
+    expect(buttons()[0]).toHaveAttribute("data-asset-download", "final-v1");
+    rerender(surface(project, true));
+    expect(buttons()).toHaveLength(0);
+    const edited = structuredClone(project);
+    edited.assets.artifact_versions_by_id["final-v1"].stale = true;
+    rerender(surface(edited));
+    expect(buttons()).toHaveLength(0);
+  });
+
   it("offers no whole-film chip before a final_video is composed", () => {
     const { container } = renderStrip(cloneProject());
     expect(container.querySelector("[data-blueprint-roughcut]")).toBeTruthy();

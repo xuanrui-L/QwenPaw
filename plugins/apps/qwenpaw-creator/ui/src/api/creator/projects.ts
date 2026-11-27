@@ -11,13 +11,11 @@ import type {
   ProjectSnapshotEnvelope,
   ProjectSnapshotPollResult,
   R2VReferenceOrderResponse,
-  WirePreviewResponse,
   SubtitleStyle,
   SubtitleStyleUpdateRequest,
 } from "@/contracts/creator";
 import {
   CreatorHttpError,
-  creatorAuthenticatedUrl,
   creatorFetch,
   creatorRequest,
   invalidateCreatorListReads,
@@ -303,32 +301,6 @@ export function getR2VReferenceOrder(
     `/projects/${encodeURIComponent(projectId)}/elements/${encodeURIComponent(
       elementId,
     )}/r2v-references${stage === "storyboard" ? "?stage=storyboard" : ""}`,
-  );
-}
-
-/** The frozen request that was actually sent for one Element's latest
- * video task (authoritative wire prompt + real [Image N] order). */
-export function getWirePreview(
-  projectId: string,
-  elementId: string,
-): Promise<WirePreviewResponse> {
-  return creatorRequest(
-    `/projects/${encodeURIComponent(projectId)}/elements/${encodeURIComponent(
-      elementId,
-    )}/wire-preview`,
-  );
-}
-
-/** Runtime-extracted last frame served straight from the continuity
- * cache; 404 once pruned, so the UI falls back to a placeholder. */
-export function getWireAnchorImageUrl(
-  projectId: string,
-  version: string,
-): string {
-  return creatorAuthenticatedUrl(
-    `/projects/${encodeURIComponent(
-      projectId,
-    )}/wire-preview/anchor-image?version=${encodeURIComponent(version)}`,
   );
 }
 

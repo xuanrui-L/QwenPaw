@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
-  Image,
   Input,
   InputNumber,
   Select,
@@ -27,7 +26,6 @@ import {
 import type {
   ProjectDocument,
   R2VReferenceOrderResponse,
-  WirePreviewResponse,
   SubtitleAnimationPolicy,
   SubtitleStyleUpdateRequest,
   TaskView,
@@ -38,8 +36,6 @@ import {
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
   getR2VReferenceOrder,
-  getWireAnchorImageUrl,
-  getWirePreview,
 } from "@/api/creator";
 import { regenerateNarration } from "@/api/creator/voice";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -53,7 +49,6 @@ import {
 import { presentPromptEntityNames } from "@/lib/promptEntityNames";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { storyboardOfOwner } from "@/components/workbench/referenceThumbs";
-import { storyboardTierForElement } from "@/lib/storyboardTier";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
 import PreviewImage from "@/components/assets/PreviewImage";
 import SubtitleStyleSection, {
@@ -111,7 +106,6 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 function TextField({
   label,
   value,
-  placeholder,
   multiline = false,
   path,
   field,
@@ -120,7 +114,6 @@ function TextField({
 }: {
   label: string;
   value: string;
-  placeholder?: string;
   multiline?: boolean;
   path: string;
   field: string;
@@ -138,7 +131,6 @@ function TextField({
       {multiline ? (
         <Input.TextArea
           value={value}
-          placeholder={placeholder}
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
           autoSize={{ minRows: 3, maxRows: 8 }}
@@ -301,16 +293,10 @@ function RefThumb({
   return (
     <span className="relative inline-block" title={name}>
       {url ? (
-        <Image
+        <img
           src={url}
           alt={name}
-          width={54}
-          height={40}
-          style={{
-            objectFit: "cover",
-            borderRadius: 10,
-            border: "1px solid var(--color-border)",
-          }}
+          className="h-10 w-[54px] rounded-[10px] border border-[var(--color-border)] object-cover"
         />
       ) : (
         <span className="flex h-10 w-[54px] items-center justify-center rounded-[10px] border border-dashed border-[var(--color-border)] px-1 text-center text-[9px] leading-tight text-[var(--color-text-tertiary)]">
@@ -426,13 +412,6 @@ export default function ElementDetail({
       setNarrationBusy(false);
     }
   };
-  const storyboardTier = useMemo(
-    () =>
-      element && element.creation.type === "r2v"
-        ? storyboardTierForElement(project, element.element_id)
-        : "plain",
-    [element, project],
-  );
   const storyboardVersionId = useMemo(
     () =>
       element && element.creation.type === "r2v"
@@ -443,9 +422,6 @@ export default function ElementDetail({
   // r2v 总览引用缩略的权威 [Image N] 序号；失败/非 r2v 时回退客户端聚合。
   const [referenceOrder, setReferenceOrder] =
     useState<R2VReferenceOrderResponse | null>(null);
-  const [wirePreview, setWirePreview] = useState<WirePreviewResponse | null>(
-    null,
-  );
   const overviewElementId = element?.element_id ?? null;
   const overviewIsR2v = element?.creation.type === "r2v";
   useEffect(() => {
@@ -466,28 +442,6 @@ export default function ElementDetail({
       })
       .catch(() => {
         if (!cancelled) setReferenceOrder(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [project.project_id, overviewElementId, overviewIsR2v]);
-  // The overview renders the AUTHORED prompt; a strong-continuity
-  // dispatch rewrites it at submit time (promoted anchor, storyboard
-  // swap). The frozen task snapshot holds the truth, so the "实际发送
-  // 内容" section reads that instead of the Project.
-  useEffect(() => {
-    if (!overviewElementId || !overviewIsR2v) {
-      setWirePreview(null);
-      return;
-    }
-    let cancelled = false;
-    setWirePreview(null);
-    getWirePreview(project.project_id, overviewElementId)
-      .then((result) => {
-        if (!cancelled) setWirePreview(result?.found ? result : null);
-      })
-      .catch(() => {
-        if (!cancelled) setWirePreview(null);
       });
     return () => {
       cancelled = true;
@@ -809,7 +763,6 @@ export default function ElementDetail({
                 <TextField
                   label={t("elementDetail.intent")}
                   value={creation.intent}
-                  placeholder={t("elementDetail.intentPlaceholder")}
                   multiline
                   path={pointer("creation", "intent")}
                   field={`element:${element.element_id}/creation/intent`}
@@ -828,7 +781,7 @@ export default function ElementDetail({
                   </p>
                 )
               )}
-              {creation.type !== "r2v" && lead?.continuity && (
+              {lead?.continuity && (
                 <p
                   title={presentPromptEntityNames(lead.continuity, project)}
                   className="truncate text-xs leading-[1.7] text-[var(--color-text-tertiary)]"
@@ -880,53 +833,30 @@ export default function ElementDetail({
                 {t("elementDetail.storyboardLabel")}
               </span>
             </div>
-            {storyboardTier === "none" && !storyboardVersionId ? (
-              <div className="flex items-center justify-between gap-2 rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 px-3 py-2">
-                <span className="min-w-0 text-xs leading-relaxed text-[var(--color-text-secondary)]">
-                  {t("elementDetail.storyboardTierNone")}
+            <div className="flex items-center gap-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-1.5">
+              <span className="h-[42px] w-[71px] shrink-0 overflow-hidden rounded border border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
+                {storyboardVersionId && (
+                  <PreviewImage
+                    src={getArtifactVersionMediaUrl(storyboardVersionId)}
+                    alt={t("elementDetail.storyboardLabel")}
+                    loading="lazy"
+                    className="h-full w-full object-cover"
+                  />
+                )}
+              </span>
+              <span className="min-w-0 leading-tight">
+                <span className="block truncate text-xs text-[var(--color-text-primary)]">
+                  {storyboardVersionId
+                    ? t("elementDetail.storyboardReady")
+                    : t("elementDetail.storyboardPending")}
                 </span>
-                <Button
-                  size="small"
-                  className="!shrink-0"
-                  disabled={applying}
-                  onClick={() =>
-                    onChange((draft) => {
-                      if (draft.creation.type === "r2v")
-                        draft.creation.force_storyboard = true;
-                    })
-                  }
-                >
-                  {t("elementDetail.forceStoryboard")}
-                </Button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-1.5">
-                <span className="h-[42px] w-[71px] shrink-0 overflow-hidden rounded border border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
-                  {storyboardVersionId && (
-                    <PreviewImage
-                      src={getArtifactVersionMediaUrl(storyboardVersionId)}
-                      alt={t("elementDetail.storyboardLabel")}
-                      loading="lazy"
-                      className="h-full w-full object-cover"
-                    />
-                  )}
+                <span className="block text-xs leading-relaxed text-[var(--color-text-tertiary)]">
+                  {t("elementDetail.storyboardHint", {
+                    action: t("elementDetail.enterWorkbench"),
+                  })}
                 </span>
-                <span className="min-w-0 leading-tight">
-                  <span className="block truncate text-xs text-[var(--color-text-primary)]">
-                    {storyboardVersionId
-                      ? t("elementDetail.storyboardReady")
-                      : t("elementDetail.storyboardPending")}
-                  </span>
-                  <span className="block text-xs leading-relaxed text-[var(--color-text-tertiary)]">
-                    {storyboardTier === "combined"
-                      ? t("elementDetail.storyboardTierCombined")
-                      : t("elementDetail.storyboardHint", {
-                          action: t("elementDetail.enterWorkbench"),
-                        })}
-                  </span>
-                </span>
-              </div>
-            )}
+              </span>
+            </div>
           </div>
         )}
 
@@ -981,84 +911,16 @@ export default function ElementDetail({
               </span>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Image.PreviewGroup>
-                {r2vRefThumbs.map((item) => (
-                  <RefThumb
-                    key={item.key}
-                    url={item.url}
-                    name={item.name}
-                    index={item.index}
-                  />
-                ))}
-              </Image.PreviewGroup>
+              {r2vRefThumbs.map((item) => (
+                <RefThumb
+                  key={item.key}
+                  url={item.url}
+                  name={item.name}
+                  index={item.index}
+                />
+              ))}
             </div>
           </div>
-        )}
-        {creation.type === "r2v" && wirePreview?.found && (
-          <details data-element-wire-preview className="space-y-1.5">
-            <summary className="cursor-pointer text-sm text-[var(--color-text-primary)]">
-              {t("elementDetail.wirePreview")}
-            </summary>
-            <div className="space-y-2 rounded-[10px] border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-3">
-              <div className="text-xs text-[var(--color-text-secondary)]">
-                {t(`elementDetail.wireMode.${wirePreview.mode || "r2v"}`)}
-                {wirePreview.anchorVersionId
-                  ? ` · ${t("elementDetail.wireAnchorNote")}`
-                  : ""}
-                {" · "}
-                {wirePreview.bgmReferenceUrl
-                  ? t("elementDetail.wireBgmOn")
-                  : t("elementDetail.wireBgmOff")}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Image.PreviewGroup>
-                  {(wirePreview.referenceVersionIds || []).map((id, idx) => {
-                    const isAnchor = id.startsWith("continuity:last_frame:");
-                    const url = isAnchor
-                      ? getWireAnchorImageUrl(
-                          project.project_id,
-                          id.slice("continuity:last_frame:".length),
-                        )
-                      : referenceThumbUrl(project, id);
-                    return (
-                      <span
-                        key={id}
-                        className="relative inline-block"
-                        title={
-                          isAnchor ? t("elementDetail.wireAnchorNote") : id
-                        }
-                      >
-                        {url ? (
-                          <Image
-                            src={url}
-                            alt={id}
-                            width={54}
-                            height={40}
-                            fallback="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='54' height='40'><rect width='54' height='40' rx='10' fill='%23eee'/><text x='27' y='24' font-size='9' text-anchor='middle' fill='%23999'>已回收</text></svg>"
-                            style={{
-                              objectFit: "cover",
-                              borderRadius: 10,
-                              border: "1px solid var(--color-border)",
-                            }}
-                          />
-                        ) : (
-                          <span className="flex h-10 w-[54px] items-center justify-center rounded-[10px] border border-dashed border-[var(--color-border)] px-1 text-center text-[9px] leading-tight text-[var(--color-text-tertiary)]">
-                            {t("elementDetail.wireAnchorPruned")}
-                          </span>
-                        )}
-                        <i className="absolute left-1 top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-[5px] bg-black/55 px-0.5 font-mono text-[8px] font-bold not-italic text-white">
-                          {idx + 1}
-                        </i>
-                      </span>
-                    );
-                  })}
-                </Image.PreviewGroup>
-              </div>
-              <div className="max-h-[160px] overflow-y-auto whitespace-pre-wrap rounded-[10px] bg-[var(--color-bg-primary)] p-2 text-xs leading-[1.6] text-[var(--color-text-primary)]">
-                {presentPromptEntityNames(wirePreview.prompt || "", project)}
-              </div>
-            </div>
-          </details>
         )}
         {(creation.type === "t2v" || creation.type === "i2v") &&
           creation.video_prompt && (

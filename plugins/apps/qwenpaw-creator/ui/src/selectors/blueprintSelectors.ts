@@ -7,10 +7,10 @@ import type {
   TimelineElementDocument,
   VisualEntityDocument,
 } from "@/contracts/creator";
-import { storyboardTierForElement } from "@/lib/storyboardTier";
 import {
   orderedTimelineElements,
   selectLiveTimelineIds,
+  selectNarrativeShape,
   timelineEndTick,
 } from "./timelineElementSelectors";
 
@@ -92,7 +92,8 @@ export function selectTimelineRenderSlot(
   if (!project || !timelineId) return null;
   const direct =
     project.assets.artifact_slots_by_id[`timeline:${timelineId}:render`];
-  if (direct) return resolveSlot(project, direct);
+  if (direct?.kind === "timeline_render" || direct?.kind === "final_video")
+    return resolveSlot(project, direct);
   const scanned = Object.values(project.assets.artifact_slots_by_id).find(
     (slot) =>
       (slot.kind === "timeline_render" || slot.kind === "final_video") &&
@@ -102,14 +103,10 @@ export function selectTimelineRenderSlot(
 }
 
 /**
- * The whole film the UI may promise as 整片/成片.
+ * A project that already has a single whole-film artifact.
  *
- * Composes are per-timeline artifacts (`timeline:{id}:render`), so a whole
- * film only exists when the project has exactly ONE live timeline — and
- * only the version the user currently has selected on that slot, while it
- * is still fresh. Multi-episode projects return null: a single episode's
- * final render must never masquerade as the whole project, and a stale or
- * unselected newer version must never shadow the user's active choice.
+ * For a single timeline, its fresh selected render is the entire film.
+ * Multi-episode exports join the selected masters in narrative order.
  */
 export function selectFinalFilmVersionId(
   project: ProjectDocument | null | undefined,
@@ -133,6 +130,19 @@ export function selectTimelineFilmVersionId(
   const file = project.assets.files_by_id[selected.file_id];
   if (!file?.media_type?.startsWith("video/")) return null;
   return selected.version_id;
+}
+
+/** Ordered episode masters for the on-demand, linear whole-film export. */
+export function selectWholeFilmEpisodeVersions(
+  project: ProjectDocument,
+): string[] | null {
+  if (selectNarrativeShape(project) !== "linear") return null;
+  const versions = selectLiveTimelineIds(project).map((id) =>
+    selectTimelineFilmVersionId(project, id),
+  );
+  return versions.every((version): version is string => !!version)
+    ? versions
+    : null;
 }
 
 const VIDEO_CREATION_TYPES = new Set([
@@ -180,7 +190,7 @@ export function isVoiceOnlyVisualEntity(
   );
 }
 
-export type RoughCutSource = "final" | "storyboard" | "anchor" | "none";
+export type RoughCutSource = "final" | "storyboard" | "none";
 
 /** Media namespace of RoughCutFrame.versionId: generated artifact vs uploaded/recorded source asset. */
 export type RoughCutVersionKind = "artifact" | "source";
@@ -314,19 +324,6 @@ export function roughCutFrameForElement(
       versionKind: "artifact",
       mediaKind: "image",
       source: "storyboard",
-    };
-  }
-  // Storyboard tiers: an anchored simple continuation never waits for a
-  // storyboard, so the strip must not label it 待分镜.
-  if (
-    element.creation.type === "r2v" &&
-    storyboardTierForElement(project, element.element_id) === "none"
-  ) {
-    return {
-      versionId: null,
-      versionKind: null,
-      mediaKind: null,
-      source: "anchor",
     };
   }
   return {
