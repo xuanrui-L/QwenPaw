@@ -8,6 +8,7 @@ import asyncio
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import shutil
 import subprocess
 from types import SimpleNamespace
 from urllib.parse import unquote, urlsplit
@@ -334,6 +335,59 @@ def test_bgm_reference_budget_matrix(
     assert resolve(with_bgm, bgm_tl, voice_count=0) == ""
 
 
+@pytest.mark.skipif(
+    not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
+    reason="ffmpeg and ffprobe are required",
+)
+def test_extension_trims_at_video_end_when_audio_runs_longer(
+    tmp_path, monkeypatch,
+):
+    from services.media_files.extension_trim import trim_extension_prefix
+    from services.media_files.secure_video_stream import MaterializedVideo
+
+    project, timeline, _, second = _two_segment_project("prev-v1")
+    second.creation.generation_plan = R2VGenerationPlan(
+        method="video_extend",
+        use_storyboard=False,
+        predecessor_element_id="e1",
+    )
+    _bind_bgm_config(monkeypatch, "wan3.0-video-prime")
+    source = tmp_path / "assets/artifacts/file-prev-v1"
+    source.parent.mkdir(parents=True)
+    response = tmp_path / "provider.mp4"
+    for path, video_seconds, audio_seconds in (
+        (source, 4, 4.037),
+        (response, 5, 5),
+    ):
+        subprocess.run(
+            [
+                "ffmpeg", "-v", "error", "-nostdin",
+                "-f", "lavfi", "-i", f"color=s=64x64:r=30:d={video_seconds}",
+                "-f", "lavfi", "-i", f"sine=duration={audio_seconds}",
+                "-c:v", "libx264", "-c:a", "aac", "-f", "mp4", str(path),
+            ],
+            check=True,
+            timeout=15,
+        )
+
+    plan = rx._build_task_plan(
+        project, tmp_path, timeline, second, base_mode="r2v",
+        duration_seconds=2, ratio="16:9",
+    )
+    assert plan.material_duration_seconds > 4.033
+    assert plan.submit_duration_seconds == 7
+    assert plan.trim_offset_seconds == 4
+    trimmed = trim_extension_prefix(
+        MaterializedVideo(
+            path=response, media_type="video/mp4", container="mp4",
+            size_bytes=response.stat().st_size, sha256="",
+            source_kind="remote",
+        ),
+        plan.trim_offset_seconds,
+    )
+    assert sc._probe_video_end_offset(trimmed.path, "ffprobe") == 1
+
+
 def test_over_budget_extension_cannot_fall_back_to_an_anchor(
     tmp_path, monkeypatch
 ):
@@ -579,6 +633,7 @@ def test_extension_authorization_uses_the_same_inputs_as_submission(
     source.touch()
     monkeypatch.setattr(sc, "_resolve_prev_video_path", lambda *args: source)
     monkeypatch.setattr(sc, "_probe_duration", lambda *args: 4.0)
+    monkeypatch.setattr(sc, "_probe_video_end_offset", lambda *args: 4.0)
     graph = derive_work_graph(project, ffmpeg_ready=True)
     snapshot = SimpleNamespace(project=project)
     request = requested_work_node(snapshot, graph.by_id["video:e2"])

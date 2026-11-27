@@ -69,7 +69,9 @@ class VideoTaskPlan:
 
     ``predecessor_version_id``/``material_duration_seconds``/
     ``trim_offset_seconds`` are only meaningful for VIDEO_EXTEND (the
-    material is the predecessor's whole published video). ``ratio``
+    material is the predecessor's whole published video). The material
+    duration is used for the provider budget, and the video track's end
+    determines the trim offset. ``ratio``
     overrides the project ratio when the kind must follow the material
     (extension) instead of the plan. ``submit_duration_seconds`` is the
     provider duration (extension semantics: material + new); the

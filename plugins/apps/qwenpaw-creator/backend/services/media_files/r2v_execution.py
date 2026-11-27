@@ -2126,6 +2126,7 @@ def _build_task_plan(
     from services.file_agent_runtime.work_graph import probe_ffmpeg_ready
     from services.media_files.segment_continuity import (
         _probe_duration,
+        _probe_video_end_offset,
         _resolve_prev_video_path,
     )
     from services.runtime_files.runtime_dependencies import (
@@ -2188,7 +2189,7 @@ def _build_task_plan(
         material_duration_seconds=material_seconds,
         ratio="adaptive",
         submit_duration_seconds=math.ceil(material_seconds + duration_seconds),
-        trim_offset_seconds=material_seconds,
+        trim_offset_seconds=_probe_video_end_offset(source, ffprobe),
     )
 
 

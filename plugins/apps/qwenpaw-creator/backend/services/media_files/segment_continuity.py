@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from collections import OrderedDict
 from dataclasses import dataclass
+from fractions import Fraction
 import hashlib
 import json
 import os
@@ -383,6 +384,65 @@ def _probe_duration(source: Path, ffprobe_path: str) -> float:
         return float(result.stdout.strip())
     except ValueError:
         return 0.0
+
+
+def _probe_video_end_offset(source: Path, ffprobe_path: str) -> float:
+    """Return the end of the first video stream relative to the input start."""
+    command = [ffprobe_path, "-v", "error", "-select_streams", "v:0"]
+
+    def probe(*entries: str) -> dict:
+        result = _run(
+            [*command, *entries, "-of", "json", os.fspath(source)],
+            timeout=_FFPROBE_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            raise ValueError(result.stderr.strip()[:400])
+        return json.loads(result.stdout)
+
+    try:
+        metadata = probe(
+            "-show_entries",
+            "stream=start_pts,duration_ts,time_base,start_time"
+            ":format=start_time",
+        )
+        stream = metadata["streams"][0]
+        time_base = Fraction(stream["time_base"])
+        duration_ticks = int(stream.get("duration_ts", 0))
+        if duration_ticks > 0:
+            start = (
+                int(stream["start_pts"]) * time_base
+                if "start_pts" in stream
+                else Fraction(stream.get("start_time", "0"))
+            )
+            end = start + duration_ticks * time_base
+        else:
+            # Matroska and fragmented media can omit the stream duration.
+            # Use the final presentation timestamp, independent of decode order.
+            packets = probe(
+                "-show_packets", "-show_entries", "packet=pts,duration",
+            )
+            last = max(
+                (packet for packet in packets["packets"] if "pts" in packet),
+                key=lambda packet: int(packet["pts"]),
+            )
+            duration_ticks = int(last["duration"])
+            if duration_ticks <= 0:
+                raise ValueError("the final video packet has no duration")
+            end = (int(last["pts"]) + duration_ticks) * time_base
+
+        # FFmpeg's input seek is relative to the container start. Round
+        # down to its microsecond precision so we never seek past the cut.
+        origin = Fraction(metadata.get("format", {}).get("start_time", "0"))
+        offset_us = (end - origin) * 1_000_000 // 1
+        if offset_us <= 0:
+            raise ValueError("the video stream has no positive end offset")
+        return offset_us / 1_000_000
+    except (
+        RuntimeError, ValueError, KeyError, IndexError, ZeroDivisionError,
+    ) as error:
+        raise ValidationError(
+            "无法读取延长素材的视频轨结束时间；请检查前段视频",
+        ) from error
 
 
 def _sha256(path: Path) -> str:
