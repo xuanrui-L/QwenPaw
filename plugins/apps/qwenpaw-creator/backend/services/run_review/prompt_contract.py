@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 import re
 from typing import Any
 
+from models.reference_markers import canonical_marker_indices
 from models import config as model_config
 from models.reference_markers import CANONICAL_MARKER_PATTERN
 from models.video_capabilities import (
@@ -168,6 +169,27 @@ def _expected_reference_roles(
     a slot whose owner cannot be resolved stays ``None`` and is never gated,
     because a false block on a paid call is worse than a missed label.
     """
+
+    if creation.get("generation_plan") is not None:
+        project = load_project()
+        if project is None:
+            return []
+        from services.media_files.visual_reference_resolution import (
+            preview_r2v_reference_order,
+        )
+
+        rows = preview_r2v_reference_order(project, element_id)["references"]
+        entity_roles = _bound_entity_roles(creation)
+        owners = _version_owner_entities(project_json)
+        return [
+            (
+                "storyboard"
+                if row["kind"] == "storyboard"
+                else entity_roles.get(owners.get(row["versionId"]))
+            )
+            for row in rows
+            if row["imageIndex"] is not None
+        ]
 
     explicit = list(
         dict.fromkeys(
@@ -381,8 +403,13 @@ def check_changed_r2v_prompt_contracts(
             video_pointer = f"{base}/creation/video_prompt"
             reviewed_pointers.extend([storyboard_pointer, video_pointer])
 
+            generation_plan = creation.get("generation_plan")
+            include_storyboard = (
+                not isinstance(generation_plan, Mapping)
+                or generation_plan.get("use_storyboard") is True
+            )
             storyboard_prompt = str(creation.get("storyboard_prompt") or "")
-            if not storyboard_prompt.strip():
+            if include_storyboard and not storyboard_prompt.strip():
                 findings.append(
                     _finding(
                         code="STORYBOARD_PROMPT_EMPTY",
@@ -392,7 +419,7 @@ def check_changed_r2v_prompt_contracts(
                         suggestion="直接编写制作级分镜 Prompt，不得使用一句话兜底。",
                     ),
                 )
-            else:
+            elif include_storyboard:
                 if not _ratio_is_declared(storyboard_prompt, aspect_ratio):
                     findings.append(
                         _finding(
@@ -418,7 +445,10 @@ def check_changed_r2v_prompt_contracts(
                             code="STORYBOARD_PANEL_COUNT_MISSING",
                             pointer=storyboard_pointer,
                             element_id=str(element_id),
-                            message=("分镜图未明确写清关键帧数量或网格排布，" "或数量说明互相矛盾。"),
+                            message=(
+                                "分镜图未明确写清关键帧数量或网格排布，"
+                                "或数量说明互相矛盾。"
+                            ),
                             suggestion=(
                                 "写明实际画布比例、关键帧数量、几列几行和阅读顺序；"
                                 "数量由动作推进与衔接需要决定，不必等于视频镜头数。"
@@ -473,14 +503,22 @@ def check_changed_r2v_prompt_contracts(
                             suggestion="将已写明的台词原文、说话者和声音方式保留在视频提示词中。",
                         ),
                     )
-                reference_violation = (
-                    video_prompt_storyboard_reference_violation(
-                        video_prompt,
-                        video_model,
-                        video_backend,
-                        language=language,
+                reference_violation = None
+                if not isinstance(generation_plan, Mapping):
+                    reference_violation = (
+                        video_prompt_storyboard_reference_violation(
+                            video_prompt,
+                            video_model,
+                            video_backend,
+                            language=language,
+                        )
                     )
-                )
+                elif generation_plan.get(
+                    "method"
+                ) == "video_extend" and canonical_marker_indices(video_prompt):
+                    reference_violation = (
+                        "视频延长只接收所选前段视频，不能在正文引用图片。"
+                    )
                 if reference_violation:
                     findings.append(
                         _finding(

@@ -94,24 +94,16 @@ def _references(project: Project, element_id: str) -> dict:
         image_model_name=model_config.get_image_model_name(),
     )
     video = preview_r2v_reference_order(project, element_id, stage="video")
-    video_rows = video["references"]
-    if not any(row.get("kind") == "storyboard" for row in video_rows):
-        # Reserve the actual target's future storyboard role, never invent a
-        # version ID or silently use a character image as the first storyboard.
-        video_rows = [
-            {
-                "index": 1,
-                "kind": "storyboard",
-                "name": "本镜头的分镜图（尚未生成）",
-            },
-            *[{**row, "index": row["index"] + 1} for row in video_rows],
-        ]
+    include_storyboard = any(
+        row["kind"] == "storyboard" for row in video["references"]
+    )
     return {
-        "storyboard": storyboard["references"],
-        "video": video_rows,
-        "storyboardBudgetDroppedVersionIds": storyboard[
-            "budgetDroppedVersionIds"
-        ],
+        "storyboard": storyboard["references"] if include_storyboard else [],
+        "video": video["references"],
+        "useStoryboard": include_storyboard,
+        "storyboardBudgetDroppedVersionIds": (
+            storyboard["budgetDroppedVersionIds"] if include_storyboard else []
+        ),
         "storyboardReferenceLimit": storyboard["referenceLimit"],
     }
 
@@ -157,8 +149,8 @@ def _validate_proposal_references(references: dict, *, stage=None) -> None:
         row.get("available") is False
         and not (
             reference_stage == "video"
-            and row.get("kind") == "storyboard"
-            and not row.get("versionId")
+            and row.get("kind") in {"storyboard", "continuity"}
+            and (row.get("kind") == "continuity" or not row.get("versionId"))
         )
         for reference_stage in ((stage,) if stage else ("storyboard", "video"))
         for row in references[reference_stage]
@@ -173,8 +165,8 @@ def _complete_reference_mentions(prompt: str, references: list[dict]) -> str:
     cited = set(canonical_marker_indices(prompt))
     additions = []
     for row in references:
-        index = row["index"]
-        if index in cited:
+        index = row.get("imageIndex", row["index"])
+        if index is None or index in cited:
             continue
         name = re.sub(r"[（(]default[）)]", "", row["name"])
         usage = (
@@ -230,16 +222,20 @@ def _validate_prompts(
             details={"findings": findings},
         )
     for reference_stage in (stage,) if stage else ("storyboard", "video"):
+        if reference_stage == "storyboard" and not references.get(
+            "useStoryboard", True
+        ):
+            continue
         text = creation[f"{reference_stage}_prompt"]
         indexes = canonical_marker_indices(text)
-        if any(
-            index < 1 or index > len(references[reference_stage])
-            for index in indexes
-        ):
+        image_ordinals = {
+            row.get("imageIndex", row["index"])
+            for row in references[reference_stage]
+            if row.get("imageIndex", row["index"]) is not None
+        }
+        if any(index not in image_ordinals for index in indexes):
             raise ValidationError("提示词引用了当前镜头没有的参考图")
-        if proposal and set(indexes) != set(
-            range(1, len(references[reference_stage]) + 1),
-        ):
+        if proposal and set(indexes) != image_ordinals:
             raise ValidationError(
                 ("分镜图" if reference_stage == "storyboard" else "视频")
                 + "提示词缺少部分已绑定参考图片，请补充引用后重新生成",
@@ -259,7 +255,7 @@ def _validate_plan(document: dict, timeline_id: str, element_id: str) -> None:
         raise ValidationError("请先填写片段内容，或从已有提示词同步内容")
 
 
-def _parse_proposal_result(text: str) -> dict:
+def _parse_proposal_result(text: str, *, use_storyboard: bool = True) -> dict:
     if text.startswith("```json") and text.endswith("```"):
         text = text[7:-3].strip()
     try:
@@ -276,12 +272,13 @@ def _parse_proposal_result(text: str) -> dict:
         not isinstance(result, dict)
         or set(result) != {"narrative", "storyboardPrompt", "videoPrompt"}
         or not all(
-            isinstance(value, str) and value.strip() and len(value) <= 24000
-            for value in (
-                result.get("narrative"),
-                result.get("storyboardPrompt"),
-                result.get("videoPrompt"),
+            isinstance(result[key], str)
+            and len(result[key]) <= 24000
+            and (
+                bool(result[key].strip())
+                or (key == "storyboardPrompt" and not use_storyboard)
             )
+            for key in ("narrative", "storyboardPrompt", "videoPrompt")
         )
     ):
         raise ValidationError("模型返回的提示词格式不完整")
@@ -388,7 +385,9 @@ class PromptSyncService:
         if source != "mixed" and not set(sync["changedSources"]).issubset(
             {source},
         ):
-            raise ValidationError("同步来源与本次修改不一致，请使用最新修改的内容同步")
+            raise ValidationError(
+                "同步来源与本次修改不一致，请使用最新修改的内容同步"
+            )
         if source == "currentPlan" or (
             source == "mixed" and "currentPlan" in sync["changedSources"]
         ):
@@ -410,7 +409,7 @@ class PromptSyncService:
 
         system = (
             "你是片段内容和生成提示词编辑。只返回JSON对象，恰好包含narrative、storyboardPrompt、"
-            "videoPrompt三个非空字符串。"
+            "videoPrompt三个字符串。narrative 与 videoPrompt 必须非空；选用分镜时 storyboardPrompt 也必须非空。"
             "narrative是这个生成单元的完整叙述，自然写清起止状态、动作顺序、运镜景别、节奏、衔接、对白、旁白及其他声音意图。"
             "narrative聚焦发生什么、如何呈现、声音和衔接，"
             "不复制分辨率、画幅、分镜网格、参考编号或提示词格式禁令；这些保留在对应提示词中。"
@@ -437,6 +436,8 @@ class PromptSyncService:
                 model_config.get_video_backend(),
             )
         )
+        if not references["useStoryboard"]:
+            system += " 当前生成方案不使用分镜；storyboardPrompt 返回空字符串，视频只引用 referenceOrder 中真实的图片序号。"
         plan = plan_input(document, timeline_id, element_id)
         inputs = {
             "currentPlan": creation["narrative"],
@@ -452,7 +453,8 @@ class PromptSyncService:
             key: inputs[key] for key in authoritative_sources
         }
         if (
-            "storyboardPrompt" in authoritative_sources
+            references["useStoryboard"]
+            and "storyboardPrompt" in authoritative_sources
             and declared_storyboard_panel_count(creation["storyboard_prompt"])
             is None
         ):
@@ -540,7 +542,9 @@ class PromptSyncService:
                 tools=[],
             )
             text = (turn.content or "").strip()
-        result = _parse_proposal_result(text)
+        result = _parse_proposal_result(
+            text, use_storyboard=references["useStoryboard"]
+        )
         storyboard_prompt = media_prompt_entity_names(
             result["storyboardPrompt"].strip(),
             snapshot.project,
@@ -649,7 +653,9 @@ class PromptSyncService:
         except RecordNotFoundError as error:
             raise NotFoundError("提示词草稿不存在") from error
         except ModelValidationError as error:
-            raise ConflictError("该草稿已过期，请基于当前片段内容重新同步") from error
+            raise ConflictError(
+                "该草稿已过期，请基于当前片段内容重新同步"
+            ) from error
         if (
             proposal.project_id,
             proposal.timeline_id,

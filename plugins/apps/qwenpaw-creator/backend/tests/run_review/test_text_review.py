@@ -498,7 +498,9 @@ def test_empty_r2v_prompt_is_reported_without_calling_review_model(
         {
             "type": "r2v",
             "narrative": "我们出发。",
-            "storyboard_prompt": ("16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"),
+            "storyboard_prompt": (
+                "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
+            ),
             "video_prompt": "",
         },
         enabled=True,
@@ -546,8 +548,12 @@ def test_clean_r2v_prompt_repair_releases_contract_blocker(
         {
             "type": "r2v",
             "narrative": "我们出发。",
-            "storyboard_prompt": ("16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"),
-            "video_prompt": ("[Image 1] 仅提供分镜动作顺序。" "角色坚定地说：‘我们出发。’"),
+            "storyboard_prompt": (
+                "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
+            ),
+            "video_prompt": (
+                "[Image 1] 仅提供分镜动作顺序。" "角色坚定地说：‘我们出发。’"
+            ),
         },
         enabled=True,
         timeline_id="timeline:main",
@@ -600,7 +606,8 @@ def test_happyhorse_explicit_reference_roles_follow_runtime_order(
                                 "prop_refs": ["prop:lamp"],
                                 "narrative": "",
                                 "storyboard_prompt": (
-                                    "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
+                                    "16:9 故事板，1 个分镜格；"
+                                    "每一个分镜格内部均为 16:9。"
                                 ),
                                 "video_prompt": (
                                     "[Image 1] is the storyboard. "
@@ -1155,7 +1162,9 @@ def test_panel_count_requires_an_explicit_panel_noun(monkeypatch) -> None:
     )
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
     project = _r2v_contract_project(
-        storyboard_prompt=("16:9 故事板，3 格角色造型研究；" "每一个分镜格内部均为 16:9。"),
+        storyboard_prompt=(
+            "16:9 故事板，3 格角色造型研究；" "每一个分镜格内部均为 16:9。"
+        ),
         video_prompt="[Image 1] 仅提供分镜动作顺序。",
         dialogues=("", "", ""),
     )
@@ -1236,12 +1245,16 @@ def test_keyframe_count_is_independent_of_shots(monkeypatch) -> None:
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
     dialogues = ("",)  # one continuous shot can have many reference frames
     declared = _r2v_contract_project(
-        storyboard_prompt=("16:9 故事板，九宫格布局；" "每一个分镜格内部均为 16:9。"),
+        storyboard_prompt=(
+            "16:9 故事板，九宫格布局；" "每一个分镜格内部均为 16:9。"
+        ),
         video_prompt="[Image 1] 仅提供分镜动作顺序。",
         dialogues=dialogues,
     )
     more_keyframes = _r2v_contract_project(
-        storyboard_prompt=("16:9 故事板，十六宫格布局；" "每一个分镜格内部均为 16:9。"),
+        storyboard_prompt=(
+            "16:9 故事板，十六宫格布局；" "每一个分镜格内部均为 16:9。"
+        ),
         video_prompt="[Image 1] 仅提供分镜动作顺序。",
         dialogues=dialogues,
     )
@@ -1269,9 +1282,13 @@ def test_happyhorse_role_scan_uses_the_full_reference_segment(
     )
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
     project = _r2v_contract_project(
-        storyboard_prompt=("16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"),
+        storyboard_prompt=(
+            "16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"
+        ),
         video_prompt=(
-            "[Image 1] " + ("中性视觉说明。" * 100) + "This is the scene environment."
+            "[Image 1] "
+            + ("中性视觉说明。" * 100)
+            + "This is the scene environment."
         ),
     )
 
@@ -1323,7 +1340,8 @@ def test_happyhorse_role_scan_uses_the_full_reference_segment(
             "kling/kling-v3-omni-video-generation",
             "kling",
             "zh-CN",
-            "<<<image_1>>> 为分镜。<<<image_2>>> 为场景环境。" + "<<<image_3>>> 为角色人物。",
+            "<<<image_1>>> 为分镜。<<<image_2>>> 为场景环境。"
+            + "<<<image_3>>> 为角色人物。",
         ),
         (
             "vidu/viduq3-mix_reference2video",
@@ -1343,7 +1361,9 @@ def test_positional_provider_reference_roles_follow_runtime_order(
     monkeypatch.setattr(model_config, "get_video_model_name", lambda: model)
     monkeypatch.setattr(model_config, "get_video_backend", lambda: backend)
     project = _r2v_contract_project(
-        storyboard_prompt=("16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"),
+        storyboard_prompt=(
+            "16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"
+        ),
         video_prompt=prompt,
         character_refs=("char:hero",),
         scene_ref="scene:room",
@@ -1358,4 +1378,28 @@ def test_positional_provider_reference_roles_follow_runtime_order(
     assert [item["code"] for item in report["findings"]] == [
         "VIDEO_REFERENCE_ROLE_MISMATCH",
         "VIDEO_REFERENCE_ROLE_MISMATCH",
+    ]
+
+
+def test_extension_prompt_contract_checks_only_media_that_the_plan_sends():
+    pointer = "/timelines/items/t/elements_by_id/e/creation"
+    project = _r2v_contract_project(
+        storyboard_prompt="",
+        video_prompt="延长所选视频，保持人物动作。",
+    )
+    creation = project["timelines"]["items"]["t"]["elements_by_id"]["e"][
+        "creation"
+    ]
+    creation["generation_plan"] = {
+        "method": "video_extend",
+        "use_storyboard": False,
+        "predecessor_element_id": "earlier",
+    }
+    assert check_changed_r2v_prompt_contracts(project, [pointer])["passed"]
+    creation["video_prompt"] += "同时参照 [Image 1]。"
+    findings = check_changed_r2v_prompt_contracts(project, [pointer])[
+        "findings"
+    ]
+    assert [item["code"] for item in findings] == [
+        "VIDEO_REFERENCE_SYNTAX_INVALID"
     ]
