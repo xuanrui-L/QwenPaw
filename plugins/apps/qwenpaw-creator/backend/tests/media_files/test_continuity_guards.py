@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -464,7 +465,9 @@ def test_legacy_project_keeps_its_mode_and_can_resume_a_frozen_anchor():
 
 
 @pytest.mark.parametrize("legacy", [True, False])
-def test_frozen_extension_checks_material_without_requiring_a_storyboard(legacy):
+def test_frozen_extension_checks_material_without_requiring_a_storyboard(
+    legacy,
+):
     project, _, first, second = _two_segment_project("prev-v1")
     if legacy:
         second.creation.generation_plan = None
@@ -500,11 +503,76 @@ def test_reference_preview_marks_a_disabled_predecessor_unavailable(method):
         )
 
     def available():
-        return preview_r2v_reference_order(project, "e2")["references"][0]["available"]
+        return preview_r2v_reference_order(project, "e2")["references"][0][
+            "available"
+        ]
 
     assert available()
     first.enabled = False
     assert not available()
+
+
+def test_extension_authorization_uses_the_same_inputs_as_submission(
+    tmp_path, monkeypatch
+):
+    from services.file_agent_runtime.driver import (
+        _authorization_summary,
+        billing_arguments_for,
+    )
+    from services.file_agent_runtime.workgraph_execution import (
+        requested_work_node,
+    )
+
+    project, _, first, second = _two_segment_project("prev-v1")
+    second.creation.generation_plan = R2VGenerationPlan(
+        method="video_extend",
+        use_storyboard=False,
+        predecessor_element_id="e1",
+    )
+    _bind_bgm_config(monkeypatch, "wan3.0-video-prime")
+    _mock_ffmpeg_paths(monkeypatch)
+    source = tmp_path / "prev.mp4"
+    source.touch()
+    monkeypatch.setattr(sc, "_resolve_prev_video_path", lambda *args: source)
+    monkeypatch.setattr(sc, "_probe_duration", lambda *args: 4.0)
+    graph = derive_work_graph(project, ffmpeg_ready=True)
+    snapshot = SimpleNamespace(project=project)
+    request = requested_work_node(snapshot, graph.by_id["video:e2"])
+    services = SimpleNamespace(
+        projects=SimpleNamespace(
+            read=lambda _: snapshot,
+            project_root=lambda _: tmp_path,
+        )
+    )
+
+    def terms():
+        return asyncio.run(
+            billing_arguments_for(
+                services,
+                project_id=project.project_id,
+                spec=request.spec,
+                tool_arguments=request.parameters,
+            )
+        )
+
+    assert request.parameters["mode"] == "video_extend"
+    approved = terms()
+    assert approved["extensionMaterialVersionId"] == "prev-v1"
+    assert approved["timelineDurationSeconds"] == 4
+    assert approved["durationSeconds"] == 8
+    assert approved["ratio"] == "adaptive"
+    summary = _authorization_summary(
+        request.spec,
+        target_ref="element:e2",
+        provider="wan",
+        model="wan3.0-video-prime",
+        tool_arguments=approved,
+    )
+    assert "新增 4 秒" in summary and "提交 8 秒" in summary
+
+    _publish_artifact(project, first, "prev-v2")
+    with pytest.raises(ValidationError, match="续写前段版本已修改"):
+        terms()
 
 
 def test_extend_rejects_a_prompt_referencing_an_unsent_image(tmp_path):

@@ -394,6 +394,7 @@ def preview_r2v_reference_order(
         version_ids = video_reference_plan(project, element)
     references: list[dict[str, Any]] = []
     plan = creation.generation_plan if stage == "video" else None
+    supports_plan = True
     if plan is not None and plan.predecessor_element_id is not None:
         from models.video_task_plans import planned_predecessor
         from services.media_files.segment_continuity import (
@@ -430,6 +431,12 @@ def preview_r2v_reference_order(
             }
         )
         if extending:
+            from models.config import get_video_backend, get_video_model_name
+            from models.video_capabilities import supports_video_continuation
+
+            supports_plan = supports_video_continuation(
+                get_video_model_name(), get_video_backend()
+            )
             version_ids = ()
     if (
         stage == "video"
@@ -533,7 +540,8 @@ def preview_r2v_reference_order(
         "budgetDroppedVersionIds": list(dropped),
         "invalidMarkerIndices": invalid_indices,
         "ready": (
-            all(item["available"] for item in references)
+            supports_plan
+            and all(item["available"] for item in references)
             and not invalid_indices
             and (
                 stage != "storyboard"

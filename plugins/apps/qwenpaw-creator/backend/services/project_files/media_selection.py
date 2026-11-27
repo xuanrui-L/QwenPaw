@@ -16,9 +16,18 @@ from .models import ArtifactVersion, Project, TimelineElement
 def video_selection_fingerprint(
     element: TimelineElement,
     storyboard_version_id: str | None,
+    *,
+    legacy_continuity_fields: bool = False,
 ) -> str:
+    creation = element.creation.model_dump(mode="json")
+    if legacy_continuity_fields:
+        # v11 receipts predate these optional fields. Keep genuine new
+        # values in the comparison so an authored plan expires the receipt.
+        for field in ("generation_plan", "predecessor_element_id"):
+            if creation.get(field) is None:
+                creation.pop(field, None)
     payload = {
-        "creation": element.creation.model_dump(mode="json"),
+        "creation": creation,
         "duration_tick": element.span.duration_tick,
         "storyboard_version_id": storyboard_version_id,
     }
@@ -68,7 +77,13 @@ def accepted_video_selection_is_current(
     storyboard = project.assets.artifact_slots_by_id.get(
         f"element:{element_id}:storyboard",
     )
-    return acceptance.get("inputFingerprint") == video_selection_fingerprint(
+    version_id = storyboard.selected_version_id if storyboard else None
+    fingerprint = acceptance.get("inputFingerprint")
+    return fingerprint == video_selection_fingerprint(
         element,
-        storyboard.selected_version_id if storyboard else None,
+        version_id,
+    ) or fingerprint == video_selection_fingerprint(
+        element,
+        version_id,
+        legacy_continuity_fields=True,
     )

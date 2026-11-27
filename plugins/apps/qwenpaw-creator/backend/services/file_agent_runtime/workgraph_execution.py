@@ -557,6 +557,19 @@ def requested_work_node(snapshot: Any, node: WorkNode) -> RequestedWorkNode:
                 parameters["durationSeconds"] = (
                     element.span.duration_tick / timeline.ticks_per_second
                 )
+                plan = getattr(element.creation, "generation_plan", None)
+                if plan is not None and plan.method == "video_extend":
+                    from services.media_files.r2v_execution import (
+                        _extension_material_version,
+                    )
+
+                    parameters.update(
+                        mode="video_extend",
+                        extensionElementId=element.element_id,
+                        extensionMaterialVersionId=_extension_material_version(
+                            project, timeline, element
+                        ),
+                    )
                 break
     if node.regeneration_of:
         authored_inputs["regenerationOf"] = node.regeneration_of
