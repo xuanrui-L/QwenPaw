@@ -463,6 +463,50 @@ def test_legacy_project_keeps_its_mode_and_can_resume_a_frozen_anchor():
     )
 
 
+@pytest.mark.parametrize("legacy", [True, False])
+def test_frozen_extension_checks_material_without_requiring_a_storyboard(legacy):
+    project, _, first, second = _two_segment_project("prev-v1")
+    if legacy:
+        second.creation.generation_plan = None
+        second.creation.transition_intent = "one_take"
+        snapshot = {}
+    else:
+        plan = R2VGenerationPlan(
+            method="video_extend",
+            use_storyboard=False,
+            predecessor_element_id="e1",
+        )
+        second.creation.generation_plan = plan
+        snapshot = {"generationPlan": plan.model_dump(mode="json")}
+
+    task = _frozen_task("prev-v1", mode="video_extend", **snapshot)
+    project.name = "无关的项目重命名"
+    assert _inputs_current(project, task)
+
+    _publish_artifact(project, first, "prev-v2")
+    assert not _inputs_current(project, task)
+
+
+@pytest.mark.parametrize("method", ["r2v_last_frame", "video_extend"])
+def test_reference_preview_marks_a_disabled_predecessor_unavailable(method):
+    from services.media_files.visual_reference_resolution import (
+        preview_r2v_reference_order,
+    )
+
+    project, _, first, second = _two_segment_project("prev-v1")
+    if method == "video_extend":
+        second.creation.generation_plan = R2VGenerationPlan(
+            method=method, use_storyboard=False, predecessor_element_id="e1"
+        )
+
+    def available():
+        return preview_r2v_reference_order(project, "e2")["references"][0]["available"]
+
+    assert available()
+    first.enabled = False
+    assert not available()
+
+
 def test_extend_rejects_a_prompt_referencing_an_unsent_image(tmp_path):
     project, _timeline, _first, second = _two_segment_project("prev-v")
     with pytest.raises(ValidationError, match="不能引用未发送的图片"):

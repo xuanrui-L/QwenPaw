@@ -1374,6 +1374,24 @@ def _render_reference_markers(prompt: str) -> str:
     )
 
 
+def _extension_material_version(
+    project: Project,
+    timeline: Timeline,
+    element: TimelineElement,
+    *,
+    legacy: bool = False,
+) -> str | None:
+    # Only already-frozen v11 tasks have an implicit predecessor.
+    predecessor = (
+        find_predecessor_video_element(timeline, element)
+        if legacy
+        else planned_predecessor(timeline, element)
+    )
+    if predecessor is None:
+        return None
+    return resolve_predecessor_video_version(project, predecessor)
+
+
 def _reference_ids_with_continuity(
     project: Project,
     timeline: Timeline,
@@ -1385,12 +1403,7 @@ def _reference_ids_with_continuity(
 
     creation = element.creation
     if mode == "video_extend":
-        predecessor = planned_predecessor(timeline, element)
-        version = (
-            resolve_predecessor_video_version(project, predecessor)
-            if predecessor is not None
-            else None
-        )
+        version = _extension_material_version(project, timeline, element)
         return (version,) if version else ()
     if isinstance(creation, R2VCreation):
         base = video_reference_plan(project, element)
@@ -1608,11 +1621,8 @@ def _legacy_submission_references(
         return ()
     base = video_reference_plan(project, element)
     if mode == "video_extend":
-        predecessor = find_predecessor_video_element(timeline, element)
-        version = (
-            resolve_predecessor_video_version(project, predecessor)
-            if predecessor is not None
-            else None
+        version = _extension_material_version(
+            project, timeline, element, legacy=True
         )
         if version and (version,) == tuple(payload_refs):
             return (base, (version,))
@@ -6092,6 +6102,21 @@ class FileR2VExecutionService:
                 != raw["generationPlan"]
             ):
                 return False
+            mode = str(raw.get("mode") or "r2v")
+            if mode == "video_extend":
+                legacy = "generationPlan" not in raw
+                plan = creation.generation_plan
+                if legacy != (plan is None):
+                    return False
+                if plan is not None and plan.method != "video_extend":
+                    return False
+                try:
+                    material = _extension_material_version(
+                        project, timeline, element, legacy=legacy
+                    )
+                except ValidationError:
+                    return False
+                return material is not None and frozen_refs == [material]
             selected = selected_element_output(project, element, "storyboard")
             storyboard_id = selected[1] if selected is not None else None
             if not storyboard_id:
@@ -6114,15 +6139,13 @@ class FileR2VExecutionService:
                         project,
                         timeline,
                         element,
-                        mode=str(raw.get("mode") or "r2v"),
+                        mode=mode,
                     ),
                 )
             except ValidationError:
                 return False
             if current_refs == [str(item) for item in frozen_refs]:
                 return True
-            if "generationPlan" in raw and raw.get("mode") == "video_extend":
-                return False
             # Already-paid requests retain their original exact inputs,
             # including the historical explicit-storyboard duplication.
             # This comparison never recompiles or resubmits that request;
