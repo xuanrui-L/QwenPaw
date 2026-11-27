@@ -843,6 +843,55 @@ def test_explicit_reference_order_still_catches_a_real_swap(
     assert "实际是 prop" in report["findings"][0]["message"]
 
 
+@pytest.mark.parametrize("swap_roles", [False, True])
+def test_pending_implicit_scene_keeps_its_reference_position(
+    tmp_path, monkeypatch, swap_roles,
+):
+    monkeypatch.setattr(
+        model_config, "get_video_model_name", lambda: "wan3.0-video-prime",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    first, second = ("prop", "scene") if swap_roles else ("scene", "prop")
+    project = _explicit_order_project(
+        f"[Image 1] is the storyboard. [Image 2] is the character. "
+        f"[Image 3] is the {first}. [Image 4] is the {second}.",
+    )
+    element = project["timelines"]["items"]["t"]["elements_by_id"]["e"]
+    element["creation"].update(
+        generation_plan={"method": "r2v", "use_storyboard": True},
+        video_reference_version_ids=[],
+    )
+    scene = project["visual"]["entities"]["items"]["scene:room"]["variants"][
+        "items"
+    ]["default"]
+    scene["selected_artifact_version_id"] = None
+    pointer = "/timelines/items/t/elements_by_id/e/creation/video_prompt"
+    assert check_changed_r2v_prompt_contracts(
+        project, [pointer],
+    )["passed"] is not swap_roles
+
+    # Model a role-only advisory written before the selection was available.
+    reports_root = tmp_path / "run-review"
+    admission.hold_sync_blocker(
+        reports_root,
+        project_id=project["project_id"],
+        pointer_group="generation_content",
+        reviewed_pointers=[pointer],
+        round_number=1,
+        reference_order_generation=project["generation"],
+    )
+    assert text_review.active_sync_review_gates(
+        reports_root, Project.model_validate(project),
+    )
+
+    scene["selected_artifact_version_id"] = "artifact-version-scene"
+    project["generation"] += 1
+    gates = text_review.active_sync_review_gates(
+        reports_root, Project.model_validate(project),
+    )
+    assert bool(gates) is swap_roles
+
+
 @pytest.mark.parametrize("storyboard_state", ["absent", "unselected"])
 @pytest.mark.parametrize(
     "roles",

@@ -174,12 +174,49 @@ def _expected_reference_roles(
         project = load_project()
         if project is None:
             return []
+        from services.media_files.element_adapter import find_timeline_element
         from services.media_files.visual_reference_resolution import (
+            implicit_r2v_visual_slots,
             preview_r2v_reference_order,
+            project_ref_media_kind,
         )
 
         rows = preview_r2v_reference_order(project, element_id)["references"]
         entity_roles = _bound_entity_roles(creation)
+        plan = creation["generation_plan"]
+        if (
+            plan["method"] != "video_extend"
+            and not creation.get("video_reference_version_ids")
+        ):
+            _, live_element = find_timeline_element(project, element_id)
+            slots = tuple(
+                implicit_r2v_visual_slots(project, live_element.creation),
+            )
+            if any(version_id is None for _, version_id in slots):
+                # The preview only sends published references. Keep pending
+                # authored slots in the review sequence so their later
+                # publication does not turn a valid prompt into a false swap.
+                roles = [
+                    "storyboard" if row["kind"] == "storyboard" else None
+                    for row in rows
+                    if row["kind"] in {"storyboard", "continuity"}
+                ]
+                seen = {
+                    row["versionId"]
+                    for row in rows
+                    if row["kind"] == "storyboard"
+                }
+                for owner, version_id in slots:
+                    if version_id is not None:
+                        if version_id in seen:
+                            continue
+                        seen.add(version_id)
+                        if (
+                            project_ref_media_kind(project, version_id) == "video"
+                        ):
+                            continue
+                    roles.append(entity_roles.get(owner))
+                return roles
         owners = _version_owner_entities(project_json)
         return [
             (

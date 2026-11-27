@@ -3827,6 +3827,60 @@ def test_yolo_does_not_resume_while_scheduler_owns_remaining_work(
     assert services.sessions.list_messages(PROJECT_ID, SESSION_ID) == before
 
 
+def test_automatic_goal_completes_only_after_the_render(
+    tmp_path, monkeypatch,
+):
+    status = WorkNodeStatus.RUNNING
+
+    async def callback(_messages, _tools):
+        return AgentModelTurn(content="方案已保存")
+
+    def derive(_project, **_kwargs):
+        return WorkGraph(
+            nodes=(
+                WorkNode(
+                    node_id="compose:timeline:main",
+                    kind="compose",
+                    label="成片",
+                    status=status,
+                ),
+            ),
+            generation=1,
+        )
+
+    async def scenario():
+        nonlocal status
+        services, _ = _create_project(tmp_path, initial_goal="生成并导出成片")
+        driver = _driver(services, callback)
+        monkeypatch.setattr(driver_module, "derive_work_graph", derive)
+        monkeypatch.setattr(
+            driver_module, "get_media_review_mode", lambda: "auto_approve",
+        )
+        monkeypatch.setattr(driver.work_scheduler, "enabled", lambda: True)
+        monkeypatch.setattr(driver.work_scheduler, "wake", lambda _: None)
+        await _run_to_idle(driver, services)
+        try:
+            assert services.sessions.get_goal(
+                PROJECT_ID, GOAL_ID,
+            ).status.value == "ACTIVE"
+
+            status = WorkNodeStatus.DONE
+            session = services.sessions.get_project_session_snapshot(
+                PROJECT_ID,
+            )
+            await driver._maybe_wake_for_unfinished_work(PROJECT_ID, session)
+            assert services.sessions.get_goal(
+                PROJECT_ID, GOAL_ID,
+            ).status.value == "COMPLETED"
+            assert services.sessions.get_project_session_snapshot(
+                PROJECT_ID,
+            ).active_goal_id == GOAL_ID
+        finally:
+            await driver.stop()
+
+    asyncio.run(scenario())
+
+
 def test_idle_session_flushes_parked_notification_and_consumes_it(
     tmp_path,
     monkeypatch,
